@@ -18,6 +18,7 @@
 #include "ngx_media_registry.h"
 #include "ngx_media_route.h"
 #include "ngx_media_runtime.h"
+#include "ngx_media_destination.h"
 #include "ngx_media_srt_output.h"
 
 /*
@@ -122,6 +123,12 @@ static char *ngx_media_srt_backend_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static void ngx_media_srt_output_sink(void *ctx, ngx_media_stream_t *stream,
     ngx_media_buf_t *burst, size_t len, ngx_uint_t keyframe);
+
+/* runtime destinations (normative revision): the core model calls these */
+static ngx_int_t ngx_media_srt_destination_add(ngx_media_stream_t *stream,
+    ngx_media_destination_t *destination, ngx_log_t *log);
+static void ngx_media_srt_destination_remove(ngx_media_stream_t *stream,
+    ngx_media_destination_t *destination);
 static void ngx_media_srt_output_handler(ngx_event_t *ev);
 static ngx_uint_t ngx_media_srt_priority(const ngx_str_t *id);
 static void ngx_media_srt_stream_policy(ngx_media_stream_t *stream);
@@ -889,7 +896,68 @@ ngx_media_srt_output_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     return NGX_CONF_OK;
 }
 
-/* the program runtime hands every prepared burst here */
+/*
+ * Runtime destinations (normative revision).  The core owns the destination
+ * model; this is the backend that starts and stops the actual SRT caller.
+ * The slot index lives in destination->impl so removal need not search.
+ */
+static ngx_int_t
+ngx_media_srt_destination_add(ngx_media_stream_t *stream,
+    ngx_media_destination_t *destination, ngx_log_t *log)
+{
+    ngx_media_srt_output_conf_t  conf;
+    ngx_uint_t                   index = 0;
+
+    if (ngx_media_srt_outputs == NULL || destination->host.data == NULL
+        || destination->port == 0)
+    {
+        return NGX_ERROR;
+    }
+
+    ngx_memzero(&conf, sizeof(conf));
+
+    conf.application = stream->application;
+    conf.stream = stream->name;
+    conf.host = destination->host;
+    conf.port = destination->port;
+    conf.streamid = destination->streamid;
+    conf.max_units = 256;
+    conf.max_bytes = 8 * 1024 * 1024;
+    conf.connect_timeout = 2000;
+    conf.send_timeout = 2000;
+
+    if (ngx_media_srt_outputs_add(ngx_media_srt_outputs, &conf, &index, log)
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    destination->impl = (void *) (uintptr_t) (index + 1);
+
+    ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                  "media: srt destination %V started for %V/%V -> %V:%ui",
+                  &destination->id, &stream->application, &stream->name,
+                  &destination->host, destination->port);
+
+    return NGX_OK;
+}
+
+static void
+ngx_media_srt_destination_remove(ngx_media_stream_t *stream,
+    ngx_media_destination_t *destination)
+{
+    uintptr_t  slot = (uintptr_t) destination->impl;
+
+    (void) stream;
+
+    if (ngx_media_srt_outputs == NULL || slot == 0) {
+        return;
+    }
+
+    ngx_media_srt_outputs_remove(ngx_media_srt_outputs,
+                                 (ngx_uint_t) slot - 1);
+}
+
 static void
 ngx_media_srt_output_sink(void *ctx, ngx_media_stream_t *stream,
     ngx_media_buf_t *burst, size_t len, ngx_uint_t keyframe)
@@ -1197,8 +1265,12 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     ngx_media_srt_connection = c;
     ngx_media_srt_started = 1;
 
-    /* SRT destinations consume the shared preparation of the program runtime */
-    if (mcf->noutputs > 0) {
+    /*
+     * The SRT destination subsystem is started even with nothing declared:
+     * destinations can be added through the control API at runtime, and they
+     * need the sender pool to exist first.
+     */
+    {
         ngx_media_srt_outputs_t  *outs;
         ngx_uint_t                i;
 
@@ -1228,6 +1300,16 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
                               : (mcf->outputs[i].params
                                      == &mcf->crypto_params
                                  ? "global" : "stream"));
+        }
+
+        {
+            static ngx_media_destination_ops_t  srt_destination_ops = {
+                NGX_MEDIA_DEST_SRT,
+                ngx_media_srt_destination_add,
+                ngx_media_srt_destination_remove
+            };
+
+            (void) ngx_media_destination_register(&srt_destination_ops);
         }
 
         if (ngx_media_srt_outputs_start(&outs, mcf->outputs, mcf->noutputs,

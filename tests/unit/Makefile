@@ -12,6 +12,7 @@ CORE := ../../src/core/ngx_media_buffer.c \
         ../../src/core/ngx_media_track.c \
         ../../src/core/ngx_media_timeline.c \
         ../../src/core/ngx_media_source.c \
+        ../../src/core/ngx_media_destination.c \
         ../../src/core/ngx_media_stream.c \
         ../../src/core/ngx_media_policy.c \
         ../../src/core/ngx_media_health.c \

@@ -78,6 +78,7 @@ ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
     ngx_queue_init(&stream->sources);
     ngx_queue_init(&stream->consumers);
 
+    ngx_queue_init(&stream->destinations);
     ngx_media_timeline_init(&stream->timeline);
 
     if (ngx_media_feed_init(&stream->program_feed, feed_conf, log) != NGX_OK) {

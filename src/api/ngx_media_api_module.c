@@ -15,6 +15,7 @@
 
 #include "ngx_media_platform.h"
 #include "ngx_media_registry.h"
+#include "ngx_media_destination.h"
 #include "ngx_media_selector.h"
 
 #include <ngx_http.h>
@@ -33,6 +34,8 @@ static ngx_int_t ngx_media_api_init(ngx_conf_t *cf);
 static ngx_int_t ngx_media_api_handler(ngx_http_request_t *r);
 static void ngx_media_api_body_ready(ngx_http_request_t *r);
 static ngx_int_t ngx_media_api_sources(ngx_http_request_t *r,
+    ngx_media_stream_t *stream, ngx_str_t *action, u_char **last, u_char *end);
+static ngx_int_t ngx_media_api_destinations(ngx_http_request_t *r,
     ngx_media_stream_t *stream, ngx_str_t *action, u_char **last, u_char *end);
 static ngx_int_t ngx_media_api_stream_create(ngx_http_request_t *r,
     ngx_media_registry_t *registry, u_char **last, u_char *end);
@@ -1026,12 +1029,294 @@ ngx_media_api_sources(ngx_http_request_t *r, ngx_media_stream_t *stream,
     return NGX_DECLINED;
 }
 
+/* --- destination CRUD --------------------------------------------------- */
+
+static ngx_uint_t
+ngx_media_api_dest_type(const ngx_str_t *text)
+{
+    if (text->len == sizeof("srt") - 1
+        && ngx_strncasecmp(text->data, (u_char *) "srt", 3) == 0)
+    {
+        return NGX_MEDIA_DEST_SRT;
+    }
+
+    if (text->len == sizeof("rtmp") - 1
+        && ngx_strncasecmp(text->data, (u_char *) "rtmp", 4) == 0)
+    {
+        return NGX_MEDIA_DEST_RTMP;
+    }
+
+    if (text->len == sizeof("hls_push") - 1
+        && ngx_strncasecmp(text->data, (u_char *) "hls_push", 8) == 0)
+    {
+        return NGX_MEDIA_DEST_HLS_PUSH;
+    }
+
+    if (text->len == sizeof("record") - 1
+        && ngx_strncasecmp(text->data, (u_char *) "record", 6) == 0)
+    {
+        return NGX_MEDIA_DEST_RECORD;
+    }
+
+    return 0;
+}
+
+static ngx_int_t
+ngx_media_api_destination_json(ngx_media_destination_t *destination,
+    u_char **last, u_char *end, ngx_int_t created)
+{
+    u_char  *tail = (u_char *) "";
+
+    if (created >= 0) {
+        tail = (u_char *) (created ? ",\"created\":true}"
+                                   : ",\"created\":false}");
+    }
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "{\"id\":\"%V\",\"type\":%ui,\"host\":\"%V\","
+                         "\"port\":%ui,\"enabled\":%s,"
+                         "\"revision\":%uL%s",
+                         &destination->id, destination->type,
+                         &destination->host, destination->port,
+                         destination->enabled ? "true" : "false",
+                         destination->revision, tail);
+
+    return NGX_OK;
+}
+
+/*
+ * POST /media/api/v1/streams/{application}/{name}/destinations
+ *
+ * Body: {"id":"out1","type":"srt","host":"127.0.0.1","port":9100}.  A
+ * destination starts as soon as it is created, so adding one while the
+ * program is live is the normal case.  Replaying the request returns the
+ * existing object.
+ */
+static ngx_int_t
+ngx_media_api_destination_create(ngx_http_request_t *r,
+    ngx_media_stream_t *stream, u_char **last, u_char *end)
+{
+    ngx_str_t                body, id, type_text, host, port_text, streamid;
+    ngx_media_destination_t *destination;
+    ngx_uint_t               type = 0, port = 0;
+    ngx_int_t                n;
+    ngx_str_t               *copy;
+
+    if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"body_too_large\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    if (ngx_media_api_json_field(&body, "id", &id) != NGX_OK || id.len == 0) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"id_required\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    if (ngx_media_api_json_field(&body, "type", &type_text) != NGX_OK) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"type_required\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    type = ngx_media_api_dest_type(&type_text);
+
+    if (type == 0) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"unknown_destination_type\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    if (ngx_media_api_json_field(&body, "host", &host) != NGX_OK
+        || host.len == 0)
+    {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"host_required\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    if (ngx_media_api_json_field(&body, "port", &port_text) != NGX_OK) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"port_required\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    n = ngx_atoi(port_text.data, port_text.len);
+
+    if (n < 1 || n > 65535) {
+        *last = ngx_snprintf(*last, end - *last, "{\"error\":\"bad_port\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    port = (ngx_uint_t) n;
+
+    destination = ngx_media_destination_find(stream, &id);
+
+    if (destination != NULL) {
+        (void) ngx_media_api_destination_json(destination, last, end, 0);
+        return NGX_HTTP_OK;
+    }
+
+    destination = ngx_media_destination_add(stream, &id, type,
+                                            r->connection->log);
+
+    if (destination == NULL) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"destination_create_failed\"}");
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    copy = ngx_media_destination_strdup(stream->pool, &host);
+    if (copy == NULL) {
+        ngx_media_destination_remove(stream, destination);
+        *last = ngx_snprintf(*last, end - *last, "{\"error\":\"out_of_memory\"}");
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    destination->host = *copy;
+    destination->port = port;
+
+    if (ngx_media_api_json_field(&body, "streamid", &streamid) == NGX_OK) {
+        copy = ngx_media_destination_strdup(stream->pool, &streamid);
+
+        if (copy != NULL) {
+            destination->streamid = *copy;
+        }
+    }
+
+    if (ngx_media_destination_start(stream, destination,
+                                    r->connection->log) != NGX_OK)
+    {
+        ngx_media_destination_remove(stream, destination);
+
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"destination_start_failed\"}");
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    ngx_media_destination_touch(destination);
+
+    (void) ngx_media_api_destination_json(destination, last, end, 1);
+
+    return NGX_HTTP_CREATED;
+}
+
+static ngx_int_t
+ngx_media_api_destination_delete(ngx_media_stream_t *stream,
+    ngx_str_t *id, u_char **last, u_char *end)
+{
+    ngx_media_destination_t  *destination;
+
+    destination = ngx_media_destination_find(stream, id);
+
+    if (destination == NULL) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"id\":\"%V\",\"deleted\":false,"
+                             "\"reason\":\"absent\"}", id);
+        return NGX_HTTP_OK;
+    }
+
+    ngx_media_destination_remove(stream, destination);
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "{\"id\":\"%V\",\"deleted\":true}", id);
+
+    return NGX_HTTP_OK;
+}
+
+static ngx_int_t
+ngx_media_api_destinations(ngx_http_request_t *r, ngx_media_stream_t *stream,
+    ngx_str_t *action, u_char **last, u_char *end)
+{
+    ngx_str_t                rest, id;
+    ngx_queue_t             *q;
+    ngx_media_destination_t *destination;
+    ngx_uint_t               first = 1;
+
+    if (action->len < sizeof("destinations") - 1
+        || ngx_strncmp(action->data, "destinations",
+                       sizeof("destinations") - 1) != 0)
+    {
+        return NGX_DECLINED;
+    }
+
+    rest.data = action->data + sizeof("destinations") - 1;
+    rest.len = action->len - (sizeof("destinations") - 1);
+
+    if (rest.len == 0) {
+
+        if (r->method == NGX_HTTP_POST) {
+            return ngx_media_api_destination_create(r, stream, last, end);
+        }
+
+        if (r->method != NGX_HTTP_GET) {
+            return NGX_DECLINED;
+        }
+
+        *last = ngx_snprintf(*last, end - *last, "{\"destinations\":[");
+
+        for (q = ngx_queue_head(&stream->destinations);
+             q != (ngx_queue_t *) &stream->destinations;
+             q = q->next)
+        {
+            destination = ngx_queue_data(q, ngx_media_destination_t, queue);
+
+            *last = ngx_snprintf(*last, end - *last, "%s",
+                                 first ? "" : ",");
+            first = 0;
+
+            (void) ngx_media_api_destination_json(destination, last, end, -1);
+        }
+
+        *last = ngx_snprintf(*last, end - *last, "],\"count\":%ui}",
+                             ngx_media_destination_count(stream));
+
+        return NGX_HTTP_OK;
+    }
+
+    if (rest.data[0] != '/') {
+        return NGX_DECLINED;
+    }
+
+    id.data = rest.data + 1;
+    id.len = rest.len - 1;
+
+    if (id.len == 0) {
+        return NGX_DECLINED;
+    }
+
+    destination = ngx_media_destination_find(stream, &id);
+
+    /* DELETE is answered even when the object is gone, as for streams */
+    if (destination == NULL && r->method != NGX_HTTP_DELETE) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"destination_not_found\"}");
+        return NGX_HTTP_NOT_FOUND;
+    }
+
+    if (r->method == NGX_HTTP_DELETE) {
+        return ngx_media_api_destination_delete(stream, &id, last, end);
+    }
+
+    if (r->method == NGX_HTTP_GET) {
+        (void) ngx_media_api_destination_json(destination, last, end, -1);
+        return NGX_HTTP_OK;
+    }
+
+    return NGX_DECLINED;
+}
+
 static ngx_int_t
 ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
     u_char **last, u_char *end)
 {
-    ngx_str_t           application, name, action, source_id;
+    ngx_str_t           application = ngx_null_string;
+    ngx_str_t           name = ngx_null_string;
+    ngx_str_t           action = ngx_null_string;
+    ngx_str_t           source_id;
     ngx_media_stream_t *stream;
+
     ngx_media_source_t *source;
     ngx_queue_t        *q;
     ngx_media_registry_entry_t  *entry;
@@ -1128,6 +1413,18 @@ ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
         }
 
         return NGX_HTTP_OK;
+    }
+
+    if (action.len >= sizeof("destinations") - 1
+        && ngx_memcmp(action.data, "destinations",
+                      sizeof("destinations") - 1) == 0)
+    {
+        ngx_int_t  drc = ngx_media_api_destinations(r, stream, &action, last,
+                                                    end);
+
+        if (drc != NGX_DECLINED) {
+            return drc;
+        }
     }
 
     if (action.len >= sizeof("sources") - 1

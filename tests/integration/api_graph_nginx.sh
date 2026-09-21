@@ -315,6 +315,99 @@ echo "   active source deleted, transport closed, standby came on air"
 kill -KILL "$P1" "$P2" "$P3" "$P4" 2>/dev/null
 wait "$P1" "$P2" "$P3" "$P4" 2>/dev/null
 
+echo "== a destination is added at runtime and carries the program"
+SINK_PORT=24641
+mkdir -p "$RUN/sink/conf" "$RUN/sink/logs" "$RUN/sink/hls"
+
+cat > "$RUN/sink/conf/nginx.conf" <<EOF
+worker_processes 1;
+daemon on;
+error_log logs/error.log info;
+pid logs/nginx.pid;
+
+events {
+    worker_connections 64;
+}
+
+media_hls $RUN/sink/hls;
+media_srt_listen 127.0.0.1:$SINK_PORT;
+media_srt_source_priority runtime-out 100;
+EOF
+
+"$NGINX" -p "$RUN/sink" -c conf/nginx.conf
+
+for _ in $(seq 1 100); do
+    grep -q 'srt listener ready' "$RUN/sink/logs/error.log" 2>/dev/null && break
+    sleep 0.1
+done
+
+# the publisher has to be live for the destination to carry anything
+PD="$(publish encoder-d 20)"
+sleep 2
+
+STATUS="$(curl -sS -o "$RUN/dest.json" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d "{\"id\":\"sink1\",\"type\":\"srt\",\"host\":\"127.0.0.1\",\"port\":$SINK_PORT,\"streamid\":\"#!::r=live/news,m=publish,s=runtime-out\"}" \
+    "$API/streams/live/news/destinations")"
+
+cat "$RUN/dest.json"; echo
+
+[ "$STATUS" = "201" ] || { echo "expected 201, got $STATUS" >&2; exit 1; }
+
+curl -fsS "$API/streams/live/news/destinations" \
+    | grep -q '"id":"sink1"' \
+    || { echo "the destination is not listed" >&2; exit 1; }
+
+for _ in $(seq 1 150); do
+    grep -q 'srt source open.*source=runtime-out' "$RUN/sink/logs/error.log" \
+        2>/dev/null && break
+    sleep 0.1
+done
+
+grep -q 'srt source open.*source=runtime-out' "$RUN/sink/logs/error.log" \
+    || { echo "the runtime destination carried no media" >&2
+         tail -3 "$RUN/sink/logs/error.log" >&2; exit 1; }
+
+echo "   destination added at runtime, media reached the sink"
+
+echo "== removing it stops the push and leaves the program running"
+STATUS="$(curl -sS -o "$RUN/destdel.json" -w '%{http_code}' \
+    -X DELETE "$API/streams/live/news/destinations/sink1")"
+
+cat "$RUN/destdel.json"; echo
+
+[ "$STATUS" = "200" ] || { echo "expected 200, got $STATUS" >&2; exit 1; }
+
+grep -q '"deleted":true' "$RUN/destdel.json" \
+    || { echo "the destination was not removed" >&2; exit 1; }
+
+curl -fsS "$API/streams/live/news/destinations" \
+    | grep -q '"count":0' \
+    || { echo "the destination list is not empty" >&2; exit 1; }
+
+# deleting again is idempotent
+curl -fsS -X DELETE "$API/streams/live/news/destinations/sink1" \
+    | grep -q '"deleted":false' \
+    || { echo "the second delete should report absence" >&2; exit 1; }
+
+sleep 1
+
+# the program's frame counter is monotonic, so it proves the program kept
+# running without depending on which source happens to be on air
+FRAMES="$(curl -fsS "$API/streams/live/news" \
+    | grep -o '"program_frames":[0-9]*' | cut -d: -f2)"
+
+[ "${FRAMES:-0}" -gt 0 ] \
+    || { echo "the program did not survive destination removal" >&2
+         curl -fsS "$API/streams/live/news" >&2; exit 1; }
+
+echo "   program still running ($FRAMES frames)"
+
+kill -KILL "$PD" 2>/dev/null
+wait "$PD" 2>/dev/null
+
+echo "   destination removed, program undisturbed"
+
 echo "== delete is ordered and idempotent"
 STATUS="$(curl -sS -o "$RUN/delete.json" -w '%{http_code}' \
     -X DELETE "$API/streams/live/news")"

@@ -111,6 +111,7 @@ struct ngx_media_stream_s {
     ngx_str_t               name;
     ngx_queue_t             sources;
     ngx_media_source_t     *active;
+    ngx_queue_t             destinations;   /* ngx_media_destination_t */
     ngx_queue_t             consumers;
     ngx_media_timeline_t    timeline;
     ngx_media_selector_t    selector;

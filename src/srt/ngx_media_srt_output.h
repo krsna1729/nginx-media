@@ -66,6 +66,17 @@ ngx_int_t ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
 void ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs);
 
 /*
+ * Runtime destinations (normative revision).  add() takes a free slot and the
+ * existing sender pool picks it up; remove() stops the slot and releases it.
+ * *index, when given, receives the slot so the caller can remove it later.
+ */
+ngx_int_t ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
+    const ngx_media_srt_output_conf_t *conf, ngx_uint_t *index,
+    ngx_log_t *log);
+void ngx_media_srt_outputs_remove(ngx_media_srt_outputs_t *outs,
+    ngx_uint_t index);
+
+/*
  * Offers one prepared burst to every destination bound to application/stream.
  * The burst is referenced, never copied and never owned by the destination.
  */
