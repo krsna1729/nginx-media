@@ -275,6 +275,10 @@ ngx_media_hls_pull_thread(void *data)
                                &playlist_len, pull->log) != NGX_OK)
         {
             pull->failures++;
+
+            ngx_log_error(NGX_LOG_INFO, pull->log, 0,
+                          "media: hls pull %V could not fetch the playlist "
+                          "(failures=%ui)", &pull->source->id, pull->failures);
             (void) ngx_media_health_transport(&pull->source->health, 0,
                                               ngx_current_msec);
             ngx_media_hls_pull_idle(pull);
@@ -341,6 +345,11 @@ ngx_media_hls_pull_thread(void *data)
                                        &segment_len, pull->log) != NGX_OK)
                 {
                     pull->failures++;
+
+                    ngx_log_error(NGX_LOG_INFO, pull->log, 0,
+                                  "media: hls pull %V could not fetch %V "
+                                  "(failures=%ui)", &pull->source->id,
+                                  &segment_url, pull->failures);
                     continue;
                 }
 
@@ -355,6 +364,11 @@ ngx_media_hls_pull_thread(void *data)
 
                 pull->segments++;
                 fetched++;
+
+                ngx_log_error(NGX_LOG_INFO, pull->log, 0,
+                              "media: hls pull %V fetched segment %ui (%uz "
+                              "bytes)", &pull->source->id, pull->segments,
+                              segment_len);
             }
         }
 
@@ -385,7 +399,7 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
 {
     ngx_media_hls_pull_t  *pull;
     ngx_media_ts_sink_t    sink;
-    ngx_str_t             *copy;
+    ngx_str_t             *copy, *ca_copy;
     u_char                *slash;
 
     if (stream == NULL || id == NULL || id->len == 0 || url == NULL
@@ -428,23 +442,29 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
      * alive and then read whatever the body's memory had become.
      */
     if (ca_file != NULL && ca_file->len > 0) {
-        copy = ngx_pcalloc(stream->pool, sizeof(ngx_str_t));
+        /*
+         * A separate variable on purpose: `copy` is still the URL's copy and
+         * the base below is computed from it.  Reusing the name here made the
+         * base come out of the certificate path, so every relative segment
+         * resolved to a directory on this machine instead of the origin's.
+         */
+        ca_copy = ngx_pcalloc(stream->pool, sizeof(ngx_str_t));
 
-        if (copy == NULL) {
+        if (ca_copy == NULL) {
             return NULL;
         }
 
-        copy->data = ngx_pnalloc(stream->pool, ca_file->len + 1);
+        ca_copy->data = ngx_pnalloc(stream->pool, ca_file->len + 1);
 
-        if (copy->data == NULL) {
+        if (ca_copy->data == NULL) {
             return NULL;
         }
 
-        ngx_memcpy(copy->data, ca_file->data, ca_file->len);
-        copy->data[ca_file->len] = '\0';
-        copy->len = ca_file->len;
+        ngx_memcpy(ca_copy->data, ca_file->data, ca_file->len);
+        ca_copy->data[ca_file->len] = '\0';
+        ca_copy->len = ca_file->len;
 
-        pull->ca_file = *copy;
+        pull->ca_file = *ca_copy;
     }
 
     /* relative playlist entries resolve against the playlist's directory */
