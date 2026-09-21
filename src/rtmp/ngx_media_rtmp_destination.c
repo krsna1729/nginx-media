@@ -784,9 +784,9 @@ ngx_media_rtmp_dest_on_command(ngx_media_rtmp_dest_t *d, ngx_media_buf_t *payloa
 
             ngx_log_error(NGX_LOG_NOTICE, d->log, 0,
                           "media: rtmp destination %V published %V/%V to "
-                          "%V:%ui",
+                          "%V:%ui (attempts=%uL)",
                           &d->id, &d->application, &d->stream_name, &d->host,
-                          d->port);
+                          d->port, d->reconnects);
 
             return;
         }

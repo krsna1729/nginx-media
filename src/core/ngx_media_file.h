@@ -32,6 +32,13 @@ typedef struct ngx_media_file_source_s {
     uint64_t                 frames;
     ngx_uint_t               finished;
 
+    /*
+     * One read buffer for the life of the reader.  Allocating it per advance
+     * meant a 64 KiB block from the never-reclaimed worker pool every 100 ms
+     * tick, so reading a 2 GB file left 2 GB of pool behind.
+     */
+    u_char                  *chunk;
+
     /* the runtime tick advances every open file source */
     struct ngx_media_file_source_s  *next;
 } ngx_media_file_source_t;
@@ -60,6 +67,10 @@ void ngx_media_file_close(ngx_media_file_source_t *source);
  * Advances every open file source by one bounded chunk.  Called from the
  * runtime tick: pacing is the tick, never a sleep, so a slow or large file
  * cannot stall a worker.
+ *
+ * A source removed through the control API is found here, because this is
+ * where the reader runs: it is taken off the registry and closed, so a delete
+ * stops the file instead of leaving it advanced by every later tick.
  */
 void ngx_media_file_advance_all(ngx_log_t *log);
 

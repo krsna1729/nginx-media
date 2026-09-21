@@ -30,8 +30,19 @@ typedef struct {
     uint64_t                     sent_bursts;
     uint64_t                     reconnects;
 
-    pthread_t                    thread;
-    ngx_uint_t                   thread_started;
+    /*
+     * Set while the sender is outside the lock in a transport call.  The
+     * cursor is not advanced until the unit is delivered, so without the mark
+     * a second sender would pick the same unit up and interleave the session.
+     */
+    ngx_uint_t                   sending;
+
+    /*
+     * Bumped whenever the slot changes owner.  A sender that is outside the
+     * lock cannot see add() hand its slot to another destination, and the
+     * sequence it carries then belongs to a queue that no longer exists.
+     */
+    uint64_t                     epoch;
 
     /* a runtime destination occupies a slot; removed ones are reusable */
     ngx_uint_t                   used;
@@ -40,6 +51,15 @@ typedef struct {
 struct ngx_media_srt_outputs_s {
     ngx_media_srt_output_t  *destinations;
     ngx_uint_t               count;
+
+    /*
+     * The sender pool.  The handles live here and not in a destination: a
+     * slot is added, removed and reused at runtime, while a thread belongs to
+     * the pool that walks the whole table, so nothing that touches a slot may
+     * touch a handle.
+     */
+    pthread_t                threads[NGX_MEDIA_SRT_MAX_OUTPUTS];
+    ngx_uint_t               nthreads;
 
     ngx_media_srt_out_event_t *events;
     ngx_uint_t                events_capacity;
@@ -154,6 +174,11 @@ ngx_media_srt_out_thread(void *data)
     ngx_media_srt_outputs_t  *outs = data;
     ngx_media_srt_output_t   *dest;
     const ngx_media_srt_unit_t  *unit;
+    ngx_media_srt_session_t  *session;
+    ngx_media_buf_t          *burst;
+    ngx_msec_t                timeout;
+    uint64_t                  epoch, sequence;
+    size_t                    len, off;
     ngx_uint_t                i;
     ngx_int_t                 rc;
 
@@ -178,7 +203,7 @@ ngx_media_srt_out_thread(void *data)
 
             (void) pthread_mutex_lock(&dest->mutex);
 
-            if (!dest->running) {
+            if (!dest->running || dest->sending) {
                 (void) pthread_mutex_unlock(&dest->mutex);
                 continue;
             }
@@ -251,35 +276,69 @@ ngx_media_srt_out_thread(void *data)
             }
 
             /*
+             * The transport call runs with no lock held.  It blocks for as
+             * long as the send timeout, and every other user of this mutex
+             * (the runtime tick's push, the control API's remove) runs on the
+             * event loop thread: a stalled receiver must not stop the worker
+             * from ticking, reading ingest or answering HTTP.
+             *
+             * The burst is referenced because the queue stays free to evict
+             * the unit while the send is in flight.
+             */
+            burst = ngx_media_buf_ref(unit->burst);
+            len = unit->len;
+            sequence = unit->sequence;
+            session = dest->session;
+            timeout = dest->conf.send_timeout;
+            epoch = dest->epoch;
+
+            dest->sending = 1;
+
+            (void) pthread_mutex_unlock(&dest->mutex);
+
+            /*
              * A live SRT sender hands the transport payload-sized pieces: one
              * 256 KB burst would exceed the transport's message budget.
              */
-            {
-                size_t  off = 0;
+            rc = 1;
+            off = 0;
 
-                rc = 1;
+            while (off < len) {
+                size_t  take = len - off;
 
-                while (off < unit->len) {
-                    size_t  take = unit->len - off;
-
-                    if (take > NGX_MEDIA_SRT_SEND_CHUNK) {
-                        take = NGX_MEDIA_SRT_SEND_CHUNK;
-                    }
-
-                    rc = ngx_media_srt_session_send(
-                        dest->session, ngx_media_buf_data(unit->burst) + off,
-                        take, dest->conf.send_timeout);
-
-                    if (rc <= 0) {
-                        break;
-                    }
-
-                    off += take;
+                if (take > NGX_MEDIA_SRT_SEND_CHUNK) {
+                    take = NGX_MEDIA_SRT_SEND_CHUNK;
                 }
 
-                if (rc > 0) {
-                    rc = (ngx_int_t) off;
+                rc = ngx_media_srt_session_send(session,
+                                                ngx_media_buf_data(burst) + off,
+                                                take, timeout);
+
+                if (rc <= 0) {
+                    break;
                 }
+
+                off += take;
+            }
+
+            if (rc > 0) {
+                rc = (ngx_int_t) off;
+            }
+
+            ngx_media_buf_unref(burst);
+
+            (void) pthread_mutex_lock(&dest->mutex);
+
+            dest->sending = 0;
+
+            if (dest->epoch != epoch) {
+                /*
+                 * The slot was handed to another destination while the send
+                 * was in flight: the cursor, the session and the counters
+                 * below all belong to the queue that was replaced.
+                 */
+                (void) pthread_mutex_unlock(&dest->mutex);
+                continue;
             }
 
             if (rc == 0) {
@@ -304,8 +363,11 @@ ngx_media_srt_out_thread(void *data)
             }
 
             if (rc < 0) {
-                ngx_media_srt_session_close(dest->session);
-                dest->session = NULL;
+                if (dest->session != NULL) {
+                    ngx_media_srt_session_close(dest->session);
+                    dest->session = NULL;
+                }
+
                 dest->reconnects++;
 
                 /* the next connection resumes at a sync boundary */
@@ -319,7 +381,7 @@ ngx_media_srt_out_thread(void *data)
             }
 
             ngx_media_srt_queue_advance(&dest->queue, &dest->cursor,
-                                        unit->sequence);
+                                        sequence);
 
             dest->sent_bytes += (uint64_t) rc;
             dest->sent_bursts++;
@@ -385,8 +447,20 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
     ngx_memzero(outs->destinations, NGX_MEDIA_SRT_MAX_OUTPUTS
                                     * sizeof(ngx_media_srt_output_t));
 
-    for (i = 0; i < declared; i++) {
+    /*
+     * Every slot is initialised, not only the declared ones.  add() takes any
+     * free slot at runtime, and a mutex and a condition made once, here, are
+     * never re-initialised underneath a sender that still refers to them.
+     */
+    for (i = 0; i < NGX_MEDIA_SRT_MAX_OUTPUTS; i++) {
         ngx_media_srt_output_t  *dest = &outs->destinations[i];
+
+        (void) pthread_mutex_init(&dest->mutex, NULL);
+        (void) pthread_cond_init(&dest->cond, NULL);
+
+        if (i >= declared) {
+            continue;
+        }
 
         dest->conf = confs[i];
         dest->running = 1;
@@ -394,9 +468,6 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
 
         ngx_media_srt_queue_init(&dest->queue, dest->conf.max_units,
                                  dest->conf.max_bytes);
-
-        (void) pthread_mutex_init(&dest->mutex, NULL);
-        (void) pthread_cond_init(&dest->cond, NULL);
     }
 
     outs->notify_fd = eventfd(0, EFD_NONBLOCK);
@@ -417,13 +488,13 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
 
     for (i = 0; i < count; i++) {
 
-        if (pthread_create(&outs->destinations[i].thread, NULL,
+        if (pthread_create(&outs->threads[outs->nthreads], NULL,
                            ngx_media_srt_out_thread, outs) != 0)
         {
             goto failed;
         }
 
-        outs->destinations[i].thread_started = 1;
+        outs->nthreads++;
     }
 
     *out = outs;
@@ -468,6 +539,18 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
         return NGX_ERROR;
     }
 
+    /*
+     * The slot may be coming back from a destination that was removed while
+     * its queue still held referenced bursts: re-initialising the queue drops
+     * every one of those references without releasing it, so the queue is
+     * destroyed first.  The mutex and the condition are made once in start()
+     * and stay valid for the life of the table.
+     */
+    (void) pthread_mutex_lock(&dest->mutex);
+
+    ngx_media_srt_queue_destroy(&dest->queue);
+    ngx_media_srt_queue_init(&dest->queue, conf->max_units, conf->max_bytes);
+
     dest->conf = *conf;
     dest->running = 1;
     dest->used = 1;
@@ -475,17 +558,14 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
     dest->sent_bytes = 0;
     dest->sent_bursts = 0;
     dest->reconnects = 0;
-    dest->thread_started = 0;
+    dest->epoch++;
 
-    ngx_media_srt_queue_init(&dest->queue, dest->conf.max_units,
-                             dest->conf.max_bytes);
-
-    (void) pthread_mutex_init(&dest->mutex, NULL);
-    (void) pthread_cond_init(&dest->cond, NULL);
+    (void) pthread_mutex_unlock(&dest->mutex);
 
     /*
      * No thread is created here.  The senders are a pool that walks the whole
-     * table, so a new slot is picked up by threads that already exist; giving
+     * table, so a new slot is picked up by threads that already exist, and
+     * their handles belong to the pool: add/remove never touch them.  Giving
      * a runtime destination its own thread would mean a thread whose exit
      * condition is another destination's, which cannot be joined cleanly.
      */
@@ -501,9 +581,9 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
 }
 
 /*
- * Removes a destination: the sender thread is told to stop and joined before
- * the slot is released, so it is never left writing into an object that no
- * longer exists.
+ * Removes a destination: the slot is stopped and its queue released, and the
+ * pool skips it from then on, so nothing is left writing into an object that
+ * no longer exists.
  */
 void
 ngx_media_srt_outputs_remove(ngx_media_srt_outputs_t *outs, ngx_uint_t index)
@@ -524,9 +604,18 @@ ngx_media_srt_outputs_remove(ngx_media_srt_outputs_t *outs, ngx_uint_t index)
      * Stopping the slot is enough: the pool skips it, and closing the session
      * makes any in-flight transport call return.  There is no thread to join
      * because the slot never had one of its own.
+     *
+     * The queue goes with it.  A removed slot keeps whatever the sender did
+     * not deliver yet, and nothing drains it again: left in place it would
+     * hold one reference per burst forever, and the next add() would
+     * re-initialise it and drop them all unreleased.
      */
     (void) pthread_mutex_lock(&dest->mutex);
+
     dest->running = 0;
+    dest->used = 0;
+    dest->epoch++;
+
     (void) pthread_cond_broadcast(&dest->cond);
 
     if (dest->session != NULL) {
@@ -534,9 +623,9 @@ ngx_media_srt_outputs_remove(ngx_media_srt_outputs_t *outs, ngx_uint_t index)
         dest->session = NULL;
     }
 
-    (void) pthread_mutex_unlock(&dest->mutex);
+    ngx_media_srt_queue_destroy(&dest->queue);
 
-    dest->used = 0;
+    (void) pthread_mutex_unlock(&dest->mutex);
 
     if (outs->count > 0) {
         outs->count--;
@@ -557,33 +646,37 @@ ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
     for (i = 0; i < NGX_MEDIA_SRT_MAX_OUTPUTS; i++) {
         ngx_media_srt_output_t  *dest = &outs->destinations[i];
 
-        if (!dest->thread_started) {
-            continue;
-        }
+        (void) pthread_mutex_lock(&dest->mutex);
+
+        dest->running = 0;
+        (void) pthread_cond_broadcast(&dest->cond);
 
         /*
-         * The sender may hold the mutex inside a blocking transport call:
-         * closing the session first makes that call return immediately, so
-         * the join below cannot wait on a transport timeout.
+         * A sender is inside a transport call, not waiting on the mutex:
+         * closing the session is what makes that call return, so the join
+         * below cannot wait for a send timeout.
          */
         if (dest->session != NULL) {
             ngx_media_srt_session_close(dest->session);
             dest->session = NULL;
         }
 
-        (void) pthread_mutex_lock(&dest->mutex);
-        dest->running = 0;
-        (void) pthread_cond_broadcast(&dest->cond);
         (void) pthread_mutex_unlock(&dest->mutex);
     }
 
+    /*
+     * Every handle the pool holds is joined.  The threads are not owned by
+     * the slots they walk, so a configuration with no declared destination -
+     * whose single sender belongs to no slot at all - is joined here too.
+     */
+    for (i = 0; i < outs->nthreads; i++) {
+        (void) pthread_join(outs->threads[i], NULL);
+    }
+
+    outs->nthreads = 0;
+
     for (i = 0; i < NGX_MEDIA_SRT_MAX_OUTPUTS; i++) {
         ngx_media_srt_output_t  *dest = &outs->destinations[i];
-
-        if (dest->thread_started) {
-            (void) pthread_join(dest->thread, NULL);
-            dest->thread_started = 0;
-        }
 
         if (dest->session != NULL) {
             ngx_media_srt_session_close(dest->session);
@@ -613,6 +706,24 @@ ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
     ngx_free(outs);
 }
 
+/*
+ * Whether a slot is the destination a burst is offered to.  The caller uses
+ * it once without the lock, as a gate that keeps a sender which is inside a
+ * transport call out of the event loop's way, and again with the lock, where
+ * the answer decides.
+ */
+static ngx_uint_t
+ngx_media_srt_out_slot_matches(const ngx_media_srt_output_t *dest,
+    const ngx_str_t *application, const ngx_str_t *stream)
+{
+    return dest->conf.application.len == application->len
+           && dest->conf.stream.len == stream->len
+           && ngx_memcmp(dest->conf.application.data, application->data,
+                         application->len) == 0
+           && ngx_memcmp(dest->conf.stream.data, stream->data,
+                         stream->len) == 0;
+}
+
 ngx_int_t
 ngx_media_srt_outputs_push(ngx_media_srt_outputs_t *outs,
     const ngx_str_t *application, const ngx_str_t *stream,
@@ -629,19 +740,29 @@ ngx_media_srt_outputs_push(ngx_media_srt_outputs_t *outs,
     for (i = 0; i < NGX_MEDIA_SRT_MAX_OUTPUTS; i++) {
         ngx_media_srt_output_t  *dest = &outs->destinations[i];
 
-        if (dest->conf.application.len != application->len
-            || dest->conf.stream.len != stream->len
-            || ngx_memcmp(dest->conf.application.data, application->data,
-                          application->len) != 0
-            || ngx_memcmp(dest->conf.stream.data, stream->data,
-                          stream->len) != 0)
+        /* the unlocked gate: a slot that cannot match costs no lock */
+        if (!dest->used
+            || !ngx_media_srt_out_slot_matches(dest, application, stream))
         {
+            continue;
+        }
+
+        /*
+         * The locked check decides.  A removed slot keeps the application and
+         * stream of the destination it used to hold, and a burst offered to it
+         * would land in a queue that no longer exists.
+         */
+        (void) pthread_mutex_lock(&dest->mutex);
+
+        if (!dest->used
+            || !ngx_media_srt_out_slot_matches(dest, application, stream))
+        {
+            (void) pthread_mutex_unlock(&dest->mutex);
             continue;
         }
 
         matched++;
 
-        (void) pthread_mutex_lock(&dest->mutex);
         (void) ngx_media_srt_queue_push(&dest->queue, burst, len, keyframe);
         (void) pthread_cond_broadcast(&dest->cond);
         (void) pthread_mutex_unlock(&dest->mutex);

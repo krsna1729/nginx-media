@@ -21,11 +21,30 @@
 #define NGX_MEDIA_HLS_PUSH_PATH_MAX  512
 #define NGX_MEDIA_HLS_PUSH_SCAN_MAX  256
 
+/* a segment name can be at most NAME_MAX (255) bytes, plus slack */
+#define NGX_MEDIA_HLS_PUSH_NAME_MAX  256
+
 typedef struct {
     u_char    path[NGX_MEDIA_HLS_PUSH_PATH_MAX];
     size_t    len;
     off_t     size;
 } ngx_media_hls_push_item_t;
+
+/*
+ * The last thing offered for one name.  A segment is immutable, so its name
+ * is its identity; the playlist is rewritten in place under a constant name,
+ * so its identity is the version - mtime and size - and a rewrite has to be
+ * offered again.  Version comparison is also what keeps the table honest: a
+ * version equal to the one already uploaded is never offered twice, while a
+ * rewritten index differs in mtime at nanosecond resolution even when the
+ * byte count happens to be the same.
+ */
+typedef struct {
+    u_char           name[NGX_MEDIA_HLS_PUSH_NAME_MAX];
+    size_t           len;
+    struct timespec  mtime;
+    off_t            size;
+} ngx_media_hls_push_seen_t;
 
 struct ngx_media_hls_push_t {
     ngx_str_t                directory;    /* watched output directory */
@@ -42,9 +61,14 @@ struct ngx_media_hls_push_t {
     pthread_cond_t           cond;
     ngx_uint_t               stopping;
 
-    /* names already offered, so a scan does not enqueue the same file twice */
-    u_char                   seen[NGX_MEDIA_HLS_PUSH_SCAN_MAX][64];
-    ngx_uint_t               nseen;
+    /*
+     * Names already offered, so a scan does not enqueue the same file twice.
+     * A ring, not a list: when it fills, the oldest entry gives way, because
+     * refusing to store a name means offering it again on every tick.
+     */
+    ngx_media_hls_push_seen_t  seen[NGX_MEDIA_HLS_PUSH_SCAN_MAX];
+    ngx_uint_t                 nseen;      /* slots in use, up to SCAN_MAX */
+    ngx_uint_t                 seen_next;  /* the ring: oldest slot first */
 
     uint64_t                 uploaded;
     uint64_t                 dropped;
@@ -323,34 +347,75 @@ ngx_media_hls_push_stop(void)
 
 /* --- scanning ------------------------------------------------------------ */
 
+/*
+ * Has this name already been offered in this version?
+ *
+ * A segment is immutable, so a name offered once is never offered again.  The
+ * playlist is not: the segmenter rewrites it in place under a constant name,
+ * so it is compared by version and re-offered whenever either half of that
+ * version changes.  A miss takes the oldest slot when the ring is full - the
+ * segmenter deletes segments from the front of its window long before 256
+ * newer names have been offered, and an immutable segment re-offered after a
+ * wrap carries the same bytes to the same remote name, so the repeat is
+ * harmless where a forgotten live name would not be.
+ */
 static ngx_uint_t
 ngx_media_hls_push_seen(ngx_media_hls_push_t *push, const u_char *name,
-    size_t len)
+    size_t len, const struct stat *st)
 {
-    ngx_uint_t  i;
+    ngx_media_hls_push_seen_t  *entry;
+    ngx_uint_t                  i, playlist;
+
+    playlist = (len > 5
+                && ngx_memcmp(name + len - 5, (u_char *) ".m3u8", 5) == 0);
 
     for (i = 0; i < push->nseen; i++) {
 
-        if (strlen((char *) push->seen[i]) == len
-            && ngx_memcmp(push->seen[i], name, len) == 0)
-        {
+        entry = &push->seen[i];
+
+        if (entry->len != len || ngx_memcmp(entry->name, name, len) != 0) {
+            continue;
+        }
+
+        if (!playlist) {
             return 1;
         }
+
+        if (entry->mtime.tv_sec == st->st_mtim.tv_sec
+            && entry->mtime.tv_nsec == st->st_mtim.tv_nsec
+            && entry->size == st->st_size)
+        {
+            /* the version already uploaded: there is nothing new to publish */
+            return 1;
+        }
+
+        /* a rewritten index: offer it, and remember this version instead */
+        entry->mtime = st->st_mtim;
+        entry->size = st->st_size;
+
+        return 0;
     }
 
-    if (push->nseen < NGX_MEDIA_HLS_PUSH_SCAN_MAX && len < 64) {
-        ngx_memcpy(push->seen[push->nseen], name, len);
-        push->seen[push->nseen][len] = '\0';
-        push->nseen++;
+    if (push->nseen < NGX_MEDIA_HLS_PUSH_SCAN_MAX) {
+        entry = &push->seen[push->nseen++];
+
+    } else {
+        entry = &push->seen[push->seen_next];
+        push->seen_next = (push->seen_next + 1) % NGX_MEDIA_HLS_PUSH_SCAN_MAX;
     }
+
+    ngx_memcpy(entry->name, name, len);
+    entry->len = len;
+    entry->mtime = st->st_mtim;
+    entry->size = st->st_size;
 
     return 0;
 }
 
 /*
- * Called from the runtime tick.  It stats the directory and offers anything
- * it has not offered before; the upload itself happens on the pool, so this
- * never blocks the worker.
+ * Called from the runtime tick.  It stats the directory and offers every file
+ * it has not offered in this version before; the upload itself happens on the
+ * pool, so this never blocks the worker.
  */
 void
 ngx_media_hls_push_scan(const ngx_str_t *directory, ngx_log_t *log)
@@ -418,7 +483,7 @@ ngx_media_hls_push_scan(const ngx_str_t *directory, ngx_log_t *log)
             }
 
             if (ngx_media_hls_push_seen(push, (u_char *) de->d_name,
-                                        name_len))
+                                        name_len, &st))
             {
                 continue;
             }

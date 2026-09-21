@@ -21,7 +21,7 @@ drives from a deployment that declares no streams at all.
 |---|---|---|
 | GET | `/media/api/v1/streams` | every registered program |
 | POST | `/media/api/v1/streams` | create a stream |
-| GET | `/media/api/v1/streams/{application}/{name}` | one program, with its sources |
+| GET | `/media/api/v1/streams/{application}/{name}` | one program, with its sources and destinations |
 | PATCH | `/media/api/v1/streams/{application}/{name}` | change the program's selector timeouts |
 | DELETE | `/media/api/v1/streams/{application}/{name}` | tear the stream down |
 | GET | `/media/api/v1/streams/{application}/{name}/sources` | the source list for one program |
@@ -109,6 +109,14 @@ returns `201` with `{"application":"live","name":"news","revision":1,
 object exists before anything publishes to it and a source can be attached
 first.  Creating one that already exists returns `200` with `"created":false`
 and the object's current revision.
+
+`GET /media/api/v1/streams/{application}/{name}` reports the program with
+both of the lists it owns: `sources` in the shape the collection route uses,
+and `destinations` in the shape the destination routes use.  A destination is
+part of what a program is attached to, so reading a stream and then reading
+its destinations separately should not be the only way to see the second half
+of the answer.  `GET .../destinations` remains the place to address one list
+directly.
 
 `PATCH` changes the program's selector timeouts:
 
@@ -227,9 +235,13 @@ output directory it watches; there is no port:
 A destination is answered as `{"id","type","host","port","enabled","revision"}`
 with the type numbers `srt` 1, `rtmp` 2, `hls_push` 3, `record` 4, and
 `GET .../destinations` wraps the list in `{"destinations":[...],"count":N}`.
-A port is required for every type except `hls_push`.  Only `srt` and
-`hls_push` have a backend in this build: the other type names are accepted by
-the API and then fail to start with `500`, because nothing here can carry them.
+A port is required for every type except `hls_push`.  `srt`, `rtmp` and
+`hls_push` have a backend in this build; the remaining type names are accepted
+by the API and then fail to start with `500`, because nothing here can carry
+them.  An `rtmp` destination is an RTMP client: it connects out, publishes the
+program as `streamid` (or the stream name when none is given) and carries the
+same FLV messages the RTMP players get, so an H.265 program keeps the
+enhanced-RTMP signalling it arrived with.
 
 Uploads run on a bounded pool, and each destination has a bounded queue: a
 stalled remote drops its oldest queued segment and counts it rather than

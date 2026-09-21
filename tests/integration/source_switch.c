@@ -201,7 +201,7 @@ main(int argc, char **argv)
         ngx_uint_t         count;
         ngx_uint_t         status;
 
-        status = ngx_media_feed_read(&stream.program_feed, &pre_cursor, 8, 0,
+        status = ngx_media_feed_read(&stream.program_feed, &pre_cursor, 8, 0, 1000,
                                      out, &count);
 
         if (status == NGX_MEDIA_FEED_GENERATION_MISMATCH) {
@@ -246,7 +246,7 @@ main(int argc, char **argv)
         cursor.next_sequence = ngx_media_feed_tail(&stream.program_feed);
 
         for ( ;; ) {
-            status = ngx_media_feed_read(&stream.program_feed, &cursor, 64, 0,
+            status = ngx_media_feed_read(&stream.program_feed, &cursor, 64, 0, 1000,
                                          out, &count);
 
             if (status != NGX_MEDIA_FEED_BATCH) {

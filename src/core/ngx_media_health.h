@@ -39,6 +39,18 @@
                                     | NGX_MEDIA_HEALTH_TIMESTAMPS_ADVANCING\
                                     | NGX_MEDIA_HEALTH_MEDIA_VALID)
 
+/*
+ * A file, pull or ingest source is bursty rather than continuous: an HLS
+ * segment arrives, its frames are published at once, and then there is
+ * nothing until the next segment.  The selector's failure timeout is tuned
+ * for a live encoder that delivers every few milliseconds, and the
+ * time-based evidence layers are derived from it, so applying that timeout
+ * here would mark a healthy source unhealthy between segments.  Ten seconds
+ * covers a segment cadence with room to spare, and a source that has really
+ * stopped is still failed within it.
+ */
+#define NGX_MEDIA_BURSTY_FAILURE_TIMEOUT  10000
+
 /* the health state lives in ngx_media.h with the rest of the model */
 
 void ngx_media_health_init(ngx_media_health_t *health,

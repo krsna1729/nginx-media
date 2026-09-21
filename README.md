@@ -279,6 +279,21 @@ Phase 6 - RTMP ingest and output (complete):
 - players share payloads: the program is converted to FLV once per stream and
   every connection adds only its own chunk headers, referencing the shared
   media in place (goal doc 12.1)
+- `src/rtmp/ngx_media_rtmp_destination.c`: an `rtmp` destination is an RTMP
+  client.  It connects out, runs the publish sequence (`connect`,
+  `releaseStream`, `FCPublish`, `createStream`, `publish`), sends
+  `@setDataFrame`/`onMetaData` from the program's own track contract and then
+  carries the same shared FLV preparation the players read, so a destination
+  adds chunk headers and one reference per message rather than a copy.  The
+  connection is non-blocking, the outbound queue is bounded (past it the
+  destination lets the fanout evict ahead instead of growing) and every
+  protocol stage has a deadline, so a stalled or unreachable remote retries on
+  its own without holding up the program (goal doc 16)
+- `make churn` carries the program to HLS, an SRT destination and an RTMP
+  destination while streams, sources and destinations are added and removed
+  every 250ms: the destinations survive, the fanout deadline holds at p99
+  128ms against a 500ms budget, and the program is still carrying media when
+  the churn stops
 - `src/core/ngx_media_runtime.*`: one owning-worker timer drives the selection
   tick, the per-stream outputs and the FLV preparation for every transport
 - `make rtmp` proves the exit criteria through nginx: an ffmpeg publisher
@@ -398,6 +413,7 @@ Phase 8 - multi-worker ownership (complete):
     make hls               # HLS playlist, discontinuity, recordings over nginx
     make rtmp              # RTMP publish and play of the same logical stream
     make srt-output        # SRT destinations fed from the shared preparation
+    make churn             # HLS, SRT and RTMP destinations under graph churn
     make multi-worker      # two workers: owner routing across the IPC transport
 
 Requires `cc`, `make`, `curl`, `tar`, `ffmpeg` and (for the SRT targets)

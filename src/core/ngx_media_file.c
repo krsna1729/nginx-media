@@ -117,8 +117,24 @@ ngx_media_file_open(ngx_media_stream_t *stream, const ngx_str_t *id,
         return NULL;
     }
 
+    /*
+     * Health has to be initialised before the first transport report.  A
+     * zeroed health struct has required == 0 and recovery_timeout == 0, so
+     * evaluate() marks the source healthy and eligible on its first pass and
+     * a hard failure survives less than one tick - the selector would never
+     * fail over away from a source that is plainly dead.
+     */
+    ngx_media_health_init(&source->source->health, &stream->selector, ngx_current_msec);
+    source->source->health.failure_timeout = NGX_MEDIA_BURSTY_FAILURE_TIMEOUT;
     ngx_media_health_transport(&source->source->health, 1, ngx_current_msec);
     ngx_media_source_touch(source->source);
+
+    source->chunk = ngx_pnalloc(stream->pool, NGX_MEDIA_FILE_CHUNK);
+
+    if (source->chunk == NULL) {
+        ngx_media_file_close(source);
+        return NULL;
+    }
 
     (void) pthread_mutex_lock(&ngx_media_file_mutex);
     source->next = ngx_media_file_all;
@@ -146,7 +162,8 @@ ngx_media_file_advance(ngx_media_file_source_t *source, ngx_log_t *log)
         return NGX_DONE;
     }
 
-    buf = ngx_pnalloc(source->stream->pool, NGX_MEDIA_FILE_CHUNK);
+    buf = source->chunk;
+
     if (buf == NULL) {
         return NGX_ERROR;
     }
@@ -196,6 +213,28 @@ ngx_media_file_advance(ngx_media_file_source_t *source, ngx_log_t *log)
     return NGX_OK;
 }
 
+/*
+ * Whether the source behind this reader was removed through the control API.
+ * ngx_media_stream_source_remove() detaches it from the stream, or only flags
+ * it when a writer is in flight, so both are checked: either way the reader
+ * has nothing left to publish into - publish() drops a frame whose source is
+ * no longer attached - and has to stop.  The reader's own pointer is only
+ * cleared by close(), which is what keeps this true until the teardown runs.
+ */
+static ngx_uint_t
+ngx_media_file_removed(ngx_media_file_source_t *source)
+{
+    return (source->source == NULL
+            || source->source->stream == NULL
+            || source->source->pending_remove);
+}
+
+/*
+ * Ordered teardown, and safe to repeat: the unlink finds nothing the second
+ * time, the descriptor is NGX_INVALID_FILE after the first close, the demux
+ * is zeroed by destroy() and the source pointer is NULLed here, so closing a
+ * reader that has already finished - or already been closed - is a no-op.
+ */
 void
 ngx_media_file_close(ngx_media_file_source_t *source)
 {
@@ -235,18 +274,56 @@ ngx_media_file_close(ngx_media_file_source_t *source)
 void
 ngx_media_file_advance_all(ngx_log_t *log)
 {
-    ngx_media_file_source_t  *source;
+    ngx_media_file_source_t **link;
+    ngx_media_file_source_t  *source, *removed, *next;
+
+    removed = NULL;
 
     (void) pthread_mutex_lock(&ngx_media_file_mutex);
 
-    for (source = ngx_media_file_all; source != NULL; source = source->next) {
+    for (link = &ngx_media_file_all; *link != NULL; ) {
+        source = *link;
+
+        if (ngx_media_file_removed(source)) {
+            /*
+             * Splice the reader off the registry for teardown below:
+             * close() takes this mutex and would deadlock here, and a source
+             * being destroyed must not be walked by the next tick.  The link
+             * is reused for the local list, which nothing else sees.
+             */
+            *link = source->next;
+            source->next = removed;
+            removed = source;
+            continue;
+        }
 
         if (!source->finished) {
             (void) ngx_media_file_advance(source, log);
         }
+
+        link = &source->next;
     }
 
     (void) pthread_mutex_unlock(&ngx_media_file_mutex);
+
+    /*
+     * The reader is already off the registry, so this is the ordered teardown
+     * of a stopped reader: close() releases the descriptor, the demuxer and
+     * the source itself.  Without it a deleted file source stayed linked and
+     * was still advanced by every tick, reading a file no one owns.
+     */
+    while (removed != NULL) {
+        source = removed;
+        next = removed->next;
+
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: file source %V removed, closing its reader",
+                      &source->path);
+
+        ngx_media_file_close(source);
+
+        removed = next;
+    }
 }
 
 ngx_uint_t

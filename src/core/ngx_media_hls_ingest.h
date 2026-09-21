@@ -32,7 +32,15 @@ ngx_media_hls_ingest_source_t *ngx_media_hls_ingest_open(
     ngx_media_stream_t *stream, const ngx_str_t *id, const ngx_str_t *directory,
     ngx_log_t *log);
 
+/* stops the reader, joins it, and removes the source; safe to repeat */
 void ngx_media_hls_ingest_close(ngx_media_hls_ingest_source_t *source);
+
+/*
+ * Closes the readers whose source was removed through the control API and
+ * whose thread has already stopped.  Called from the runtime tick: a delete
+ * has to take the reader with it, and the reader holds a thread.
+ */
+void ngx_media_hls_ingest_reap(ngx_log_t *log);
 
 /* stops and joins every reader; called at shutdown */
 void ngx_media_hls_ingest_stop_all(void);

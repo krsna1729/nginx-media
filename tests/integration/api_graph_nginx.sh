@@ -524,11 +524,13 @@ COUNT="$(curl -fsS "$API/desired" \
 echo "   reconciled after reload without duplicates"
 
 echo "== create/delete cycles with media do not exhaust the runtime"
-# The per-stream runtime output is a fixed table, and a slot is only taken
-# when a stream actually carries media - so a churn of empty streams proves
-# nothing.  These cycles each carry a short publish, which is what would fill
-# the table if ordered teardown failed to release the slot.  Ten cycles
-# against a table of eight: without the release the later ones get no outputs.
+# The per-stream runtime output is a fixed table, and a slot is taken for
+# every owned stream that has an output configured - whether or not it is
+# carrying media, because the slot is what carries it.  These cycles each
+# carry a short publish so that a leaked slot would be visible as a stream
+# with no output rather than only as a missing number.  Ten cycles against a
+# table of eight: without the release on delete, the later ones get no
+# outputs.
 CYCLE=0
 for i in $(seq 1 10); do
     curl -fsS -X POST -H 'Content-Type: application/json' \

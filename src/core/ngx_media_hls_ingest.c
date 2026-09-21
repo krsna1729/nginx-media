@@ -25,6 +25,17 @@ struct ngx_media_hls_ingest_source_s {
     ngx_uint_t               stopping;
 
     /*
+     * Set by the reader thread as its last act, after the loop and before it
+     * returns, so the reaper knows the thread has stopped touching this
+     * reader and joining it cannot block.  Without it a reap could park on a
+     * thread that is still asleep between directory scans.  An atomic flag
+     * read by the reaper is the same idiom the SRT session uses for
+     * close_requested: the join that follows is what actually publishes the
+     * reader's writes.
+     */
+    ngx_atomic_t             exited;
+
+    /*
      * Names already read.  A directory is not ordered by arrival, so what
      * matters is that each name is read exactly once, not that the reader
      * keeps up with the uploader.
@@ -81,6 +92,14 @@ ngx_media_hls_ingest_frame(void *ctx, const ngx_media_frame_t *frame)
     ingest->frames++;
 }
 
+/*
+ * Whether this name has already been read.  Read-only on purpose.
+ *
+ * It used to record the name it was asked about, which made it a filter that
+ * consumed what it filtered: a scan of the directory marked every name it
+ * examined as read and returned only the lowest, so everything else was
+ * skipped for good.  Recording happens where a name is actually chosen.
+ */
 static ngx_uint_t
 ngx_media_hls_ingest_seen(ngx_media_hls_ingest_source_t *ingest,
     const u_char *name, size_t len)
@@ -96,6 +115,14 @@ ngx_media_hls_ingest_seen(ngx_media_hls_ingest_source_t *ingest,
         }
     }
 
+    return 0;
+}
+
+/* records a name as read; called only for the segment that is returned */
+static void
+ngx_media_hls_ingest_record(ngx_media_hls_ingest_source_t *ingest,
+    const u_char *name, size_t len)
+{
     if (ingest->nseen < NGX_MEDIA_HLS_INGEST_SEEN
         && len < NGX_MEDIA_HLS_INGEST_NAME_MAX)
     {
@@ -103,8 +130,6 @@ ngx_media_hls_ingest_seen(ngx_media_hls_ingest_source_t *ingest,
         ingest->seen[ingest->nseen][len] = '\0';
         ingest->nseen++;
     }
-
-    return 0;
 }
 
 /*
@@ -143,7 +168,7 @@ ngx_media_hls_ingest_next(ngx_media_hls_ingest_source_t *ingest, u_char *out,
             continue;
         }
 
-        /* remember it as read, then take the lowest remaining name */
+        /* take the lowest remaining name; recording happens below, once */
         if (!found || strcmp(de->d_name, (char *) best) < 0) {
             ngx_memcpy(best, de->d_name, len + 1);
             found = 1;
@@ -158,9 +183,24 @@ ngx_media_hls_ingest_next(ngx_media_hls_ingest_source_t *ingest, u_char *out,
 
     strcpy((char *) out, (char *) best);
 
-    (void) ngx_media_hls_ingest_seen(ingest, out, strlen((char *) out));
+    ngx_media_hls_ingest_record(ingest, out, strlen((char *) out));
 
     return NGX_OK;
+}
+
+/*
+ * Whether the source behind this reader was removed through the control API.
+ * source_remove() detaches it, or only flags it when a writer is in flight,
+ * so both are checked.  This is the reader's own pointer, which only close()
+ * clears, and close() cannot run while this thread is using the reader - it
+ * joins the thread first.
+ */
+static ngx_uint_t
+ngx_media_hls_ingest_removed(ngx_media_hls_ingest_source_t *ingest)
+{
+    return (ingest->source == NULL
+            || ingest->source->stream == NULL
+            || ingest->source->pending_remove);
 }
 
 static void *
@@ -177,10 +217,22 @@ ngx_media_hls_ingest_thread(void *data)
                           NGX_MEDIA_HLS_INGEST_SEGMENT_MAX);
 
     if (segment == NULL) {
+        /* nothing is left running to touch the reader; the reaper may join */
+        (void) ngx_atomic_cmp_set(&ingest->exited, 0, 1);
         return NULL;
     }
 
     while (!ingest->stopping) {
+
+        if (ngx_media_hls_ingest_removed(ingest)) {
+            /*
+             * The source was removed through the control API, so there is
+             * nothing left to publish into.  Leave the loop: the tick reaps
+             * exited readers, and it cannot destroy this one while it is
+             * still reading.
+             */
+            break;
+        }
 
         if (ngx_media_hls_ingest_next(ingest, name, sizeof(name))
             != NGX_OK)
@@ -227,6 +279,16 @@ ngx_media_hls_ingest_thread(void *data)
         (void) ngx_media_health_transport(&ingest->source->health, 1,
                                           ngx_current_msec);
     }
+
+    /*
+     * The loop has left the reader alone: nothing below touches the demux,
+     * the source or the segment buffer.  Marking that here is what lets the
+     * reaper join this thread from the tick without waiting on a directory
+     * scan - the source was removed through the control API, so its reader
+     * has to go with it instead of holding a thread and a directory
+     * registration for the life of the worker.
+     */
+    (void) ngx_atomic_cmp_set(&ingest->exited, 0, 1);
 
     return NULL;
 }
@@ -306,6 +368,15 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
         return NULL;
     }
 
+    /*
+     * Health has to be initialised before the first transport report.  A
+     * zeroed health struct has required == 0 and recovery_timeout == 0, so
+     * evaluate() marks the source healthy and eligible on its first pass and
+     * a hard failure survives less than one tick - the selector would never
+     * fail over away from a source that is plainly dead.
+     */
+    ngx_media_health_init(&ingest->source->health, &stream->selector, ngx_current_msec);
+    ingest->source->health.failure_timeout = NGX_MEDIA_BURSTY_FAILURE_TIMEOUT;
     ngx_media_health_transport(&ingest->source->health, 1, ngx_current_msec);
     ngx_media_source_touch(ingest->source);
 
@@ -331,6 +402,13 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     return ingest;
 }
 
+/*
+ * Ordered teardown: stop the reader, join it, unlink it, release it.  Safe to
+ * call more than once and safe on a reader that has already finished - the
+ * join is guarded by thread_started, the unlink finds nothing the second
+ * time, the demux is zeroed by destroy() and the source pointer is NULLed
+ * here, so a repeated close is a no-op rather than a double free.
+ */
 void
 ngx_media_hls_ingest_close(ngx_media_hls_ingest_source_t *ingest)
 {
@@ -365,6 +443,51 @@ ngx_media_hls_ingest_close(ngx_media_hls_ingest_source_t *ingest)
     if (ingest->stream != NULL && ingest->source != NULL) {
         ngx_media_stream_source_remove(ingest->stream, ingest->source);
         ingest->source = NULL;
+    }
+}
+
+/*
+ * Closes every ingest reader whose source was removed through the control API
+ * and whose thread has already left its loop.  Called from the runtime tick.
+ *
+ * A removed source has to take its reader with it: the reader holds a thread,
+ * a demuxer and an 8 MiB segment buffer, and frames it publishes are dropped
+ * once the source is detached, so leaving it running leaks all of that once
+ * per create/delete cycle.  The reader notices the removal in its own loop and
+ * exits; this collects it.  Only exited readers are closed, so the join in
+ * close() cannot block the tick on a slow directory scan.
+ */
+void
+ngx_media_hls_ingest_reap(ngx_log_t *log)
+{
+    ngx_media_hls_ingest_source_t  *ingest;
+
+    for ( ;; ) {
+        ingest = NULL;
+
+        (void) pthread_mutex_lock(&ngx_media_hls_ingest_mutex);
+
+        for (ingest = ngx_media_hls_ingest_all; ingest != NULL;
+             ingest = ingest->next)
+        {
+            if (ingest->exited && ngx_media_hls_ingest_removed(ingest)) {
+                break;
+            }
+        }
+
+        (void) pthread_mutex_unlock(&ngx_media_hls_ingest_mutex);
+
+        if (ingest == NULL) {
+            return;
+        }
+
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: hls ingest source %V removed, closing its reader",
+                      ingest->source != NULL ? &ingest->source->id
+                                             : &ingest->directory);
+
+        /* unlinks the reader, so the next pass cannot see it again */
+        ngx_media_hls_ingest_close(ingest);
     }
 }
 

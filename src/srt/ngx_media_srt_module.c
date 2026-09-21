@@ -147,6 +147,13 @@ static ngx_media_srt_slot_t *ngx_media_srt_slot_alloc(void);
 static ngx_media_srt_ingest_t   ngx_media_srt_ingest;
 static ngx_connection_t        *ngx_media_srt_connection;
 static ngx_uint_t               ngx_media_srt_started;
+/*
+ * The program runtime is armed in every worker, before the worker-0 checks,
+ * and the destination block runs without the listener: teardown is gated on
+ * what was actually started, not on the listener, or an instance with SRT
+ * destinations and no listener never stops them.
+ */
+static ngx_uint_t               ngx_media_srt_runtime_started;
 static uint64_t                 ngx_media_srt_drained_bytes;
 static uint64_t                 ngx_media_srt_drained_chunks;
 static ngx_msec_t               ngx_media_srt_last_summary;
@@ -1211,6 +1218,8 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
 
     (void) ngx_media_runtime_arm(cycle, cycle->log);
 
+    ngx_media_srt_runtime_started = 1;
+
     if (mcf == NULL) {
         return NGX_OK;
     }
@@ -1562,19 +1571,32 @@ static void
 ngx_media_srt_exit_process(ngx_cycle_t *cycle)
 {
     ngx_uint_t  i;
+    ngx_uint_t  ingest;
 
-    (void) cycle;
-
-    if (!ngx_media_srt_started) {
+    /*
+     * Ordered teardown, gated on what this process actually started.  The
+     * runtime is armed in every worker, and the listener is optional: an
+     * instance whose destinations all point outward starts the sender pool,
+     * the notify fd and the runtime sink without ever creating one.  Gating
+     * all of this on the listener flag left those sender threads running
+     * while the worker destroyed the pool they use.
+     */
+    if (!ngx_media_srt_runtime_started) {
         return;
     }
 
+    ngx_media_srt_runtime_started = 0;
+
+    /* the ingest side, up only when a listener was configured */
+    ingest = ngx_media_srt_started;
     ngx_media_srt_started = 0;
 
-    for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
-        if (ngx_media_srt_slots[i].demux_ready) {
-            ngx_media_ts_demux_destroy(&ngx_media_srt_slots[i].demux);
-            ngx_media_srt_slots[i].demux_ready = 0;
+    if (ingest) {
+        for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
+            if (ngx_media_srt_slots[i].demux_ready) {
+                ngx_media_ts_demux_destroy(&ngx_media_srt_slots[i].demux);
+                ngx_media_srt_slots[i].demux_ready = 0;
+            }
         }
     }
 
@@ -1605,8 +1627,13 @@ ngx_media_srt_exit_process(ngx_cycle_t *cycle)
         ngx_media_srt_connection = NULL;
     }
 
-    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "media: stopping SRT ingest");
-    ngx_media_srt_ingest_stop(&ngx_media_srt_ingest);
-    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "media: SRT ingest stopped");
+    if (ingest) {
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                      "media: stopping SRT ingest");
+        ngx_media_srt_ingest_stop(&ngx_media_srt_ingest);
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                      "media: SRT ingest stopped");
+    }
+
     ngx_media_srt_shutdown();
 }

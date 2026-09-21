@@ -123,10 +123,15 @@ timeout 60 ffmpeg -hide_banner -loglevel error -re \
 PUB=$!
 
 echo "== the origin publishes hls"
-timeout 90 ffmpeg -hide_banner -loglevel error -re \
+# The origin has to outlast the test, not just the assertion.  A pull source
+# takes its media from the origin's playlist, so once the origin stops there
+# is nothing new to fetch and nothing for the program to switch to - and this
+# test spends most of its time waiting for a source to become healthy, for a
+# switch to land on a keyframe, and for the relay to segment.
+timeout 180 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=640x360:rate=25" \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
-    -t 30 -f mpegts \
+    -t 120 -f mpegts \
     "srt://127.0.0.1:$ORIGIN_SRT?mode=caller&streamid=%23!::r%3Dlive%2Forigin%2Cm%3Dpublish%2Cs%3Dorigin-encoder" \
     >"$RUN/pub-origin.log" 2>&1 &
 ORIGIN_PUB=$!
@@ -175,10 +180,24 @@ cat "$RUN/switch.json"; echo
 
 [ "$STATUS" = "200" ] || { echo "promotion failed: $STATUS" >&2; exit 1; }
 
-grep -q '"active":"origin-hls"' "$RUN/switch.json" \
-    || { echo "the pull source was not promoted" >&2; exit 1; }
+# A switch is not instantaneous and is not meant to be: the selector takes it
+# at the incoming source's next keyframe, so the request is acknowledged
+# before the program is actually carrying the new source.  Wait for the
+# program to say it has switched rather than reading the acknowledgement.
+for _ in $(seq 1 400); do
+    curl -fsS "$API/streams/live/relay" \
+        | grep -q '"active":"origin-hls"' && break
+    sleep 0.1
+done
 
-echo "   promoted: $(grep -o '"active":"[a-z-]*"' "$RUN/switch.json")"
+ACTIVE="$(curl -fsS "$API/streams/live/relay" \
+    | grep -o '"active":"[a-z-]*"' | head -1)"
+
+echo "   promoted: $ACTIVE"
+
+[ "$ACTIVE" = '"active":"origin-hls"' ] \
+    || { echo "the pull source was not promoted" >&2
+         curl -fsS "$API/streams/live/relay" >&2; exit 1; }
 
 for _ in $(seq 1 300); do
     [ -f "$RUN/puller/hls/index.m3u8" ] && break

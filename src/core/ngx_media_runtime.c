@@ -64,10 +64,12 @@ static ngx_media_owner_dir_t     *ngx_media_runtime_owners;
 #define NGX_MEDIA_RUNTIME_MAX_ROUTED 32
 
 typedef struct {
-    ngx_uint_t          used;
-    uint32_t            hash;
-    ngx_media_stream_t *stream;
-    ngx_media_source_t *source;
+    ngx_uint_t              used;
+    uint32_t                hash;
+    ngx_media_stream_t     *stream;
+    ngx_media_source_t     *source;
+    /* reassembly of one publisher's chunked frames, one per routed endpoint */
+    ngx_media_ipc_frame_t   frame;
 } ngx_media_runtime_routed_t;
 
 static ngx_media_runtime_routed_t ngx_media_runtime_routed[
@@ -586,6 +588,29 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
             (void) ngx_media_stream_promote(stream, source);
         }
 
+        /*
+         * One slot per hash.  Frame lookups resolve to the oldest match, so a
+         * repeated OPEN that took a second slot would leave every frame of
+         * the new publisher pointed at the old, dead source for the life of
+         * its session.  The source this OPEN replaces was already removed
+         * above, so the slot is dropped without touching it.
+         */
+        {
+            ngx_uint_t  i;
+
+            for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
+
+                if (ngx_media_runtime_routed[i].used
+                    && ngx_media_runtime_routed[i].hash == hash)
+                {
+                    ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
+                    ngx_memzero(&ngx_media_runtime_routed[i],
+                                sizeof(ngx_media_runtime_routed_t));
+                    break;
+                }
+            }
+        }
+
         /* remember the routed source so its frames have a destination */
         {
             ngx_uint_t  i;
@@ -732,6 +757,8 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
                     ngx_media_runtime_routed[i].stream,
                     ngx_media_runtime_routed[i].source);
 
+                ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
+
                 ngx_memzero(&ngx_media_runtime_routed[i],
                             sizeof(ngx_media_runtime_routed_t));
                 break;
@@ -755,7 +782,10 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
      * were published to it.
      */
     {
-        ngx_uint_t  i;
+        ngx_media_ipc_message_t  message;
+        ngx_media_buf_t         *assembled;
+        ngx_uint_t               i;
+        ngx_int_t                status;
 
         for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
 
@@ -777,6 +807,31 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
             return NGX_OK;
         }
 
+        /*
+         * A frame larger than one datagram arrives as a run of chunks, each
+         * carrying its own offset and the MORE flag.  Publishing a chunk would
+         * put a truncated access unit into the program, so the run is
+         * reassembled per endpoint first and only a complete frame is handed
+         * on (the 4 MB ceiling is enforced by the reassembler).
+         */
+        message.header = *header;
+        message.payload = payload;
+        message.offset = 0;
+        message.length = ngx_media_buf_size(payload);
+
+        status = ngx_media_ipc_frame_feed(&ngx_media_runtime_routed[i].frame,
+                                          &message);
+
+        if (status == NGX_AGAIN) {
+            return NGX_OK;   /* more chunks follow for this frame */
+        }
+
+        if (status != NGX_OK) {
+            return NGX_ERROR;   /* inconsistent run: the frame was dropped */
+        }
+
+        assembled = ngx_media_runtime_routed[i].frame.payload;
+
         ngx_media_frame_init(&frame);
 
         frame.media_type = header->media_type;
@@ -789,11 +844,13 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
         frame.config = header->config ? 1 : 0;
 
         /*
-         * adopt() takes over the reference it is given, and the IPC message
-         * still owns its own: take a reference for the frame so releasing the
-         * message cannot free a buffer the program is still reading.
+         * adopt() takes over the reference it is given, and the reassembly
+         * still owns its own: take a reference for the frame so resetting the
+         * reassembly cannot free a buffer the program is still reading.
          */
-        ngx_media_frame_adopt(&frame, ngx_media_buf_ref(payload));
+        ngx_media_frame_adopt(&frame, ngx_media_buf_ref(assembled));
+
+        ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
 
         source = ngx_media_runtime_routed[i].source;
         stream = ngx_media_runtime_routed[i].stream;
@@ -995,6 +1052,27 @@ ngx_media_runtime_tick(ngx_log_t *log)
         return;
     }
 
+    /*
+     * File sources (goal doc 21) are paced by the tick: one bounded chunk
+     * each, so a large file cannot stall a worker and the frames enter the
+     * program through the normal source gate.  This walks every file source,
+     * so it belongs to the tick, not to the per-stream body below -- running
+     * it inside the loop advanced every reader once per owned stream.
+     */
+    ngx_media_file_advance_all(log);
+
+    /*
+     * A source removed through the control API has to take its reader with
+     * it, and the pull and ingest readers own threads.  They notice the
+     * removal in their own loop and leave it; these collect the ones that
+     * have.  Reaping is a join on a reader that has already stopped touching
+     * itself, so it never waits on an origin or a directory - which is why it
+     * belongs to the tick and not to the delete itself, where it would block
+     * the event loop.
+     */
+    ngx_media_hls_pull_reap(log);
+    ngx_media_hls_ingest_reap(log);
+
     for (q = ngx_queue_head(&registry->entries);
          q != (ngx_queue_t *) &registry->entries;
          q = q->next)
@@ -1008,6 +1086,27 @@ ngx_media_runtime_tick(ngx_log_t *log)
                                                            &stream->name)))
         {
             continue;
+        }
+
+        /*
+         * Refresh our claim on the stream.  Ownership is recorded in a shared
+         * directory with a heartbeat, and a record whose heartbeat has gone
+         * stale is reclaimable by another worker - so a worker that claims a
+         * program and never heartbeats loses it to whoever asks next.  The
+         * tick is the right place: it runs once per interval on every program
+         * this worker owns, which is exactly the liveness the record is meant
+         * to describe.
+         */
+        if (ngx_media_runtime_owners != NULL) {
+            uint32_t  hash = ngx_media_owner_hash(&stream->application,
+                                                  &stream->name);
+
+            (void) ngx_media_owner_dir_heartbeat(
+                ngx_media_runtime_owners, hash,
+                ngx_media_owner_dir_slot(ngx_media_runtime_owners, hash,
+                                         (ngx_uint_t) ngx_process_slot),
+                stream->generation, stream->program_frames,
+                ngx_media_stream_source_count(stream));
         }
 
         before = stream->switches;
@@ -1024,13 +1123,6 @@ ngx_media_runtime_tick(ngx_log_t *log)
                            res.active_eligible, res.best != NULL,
                            res.emergency != NULL);
         }
-
-        /*
-         * File sources (goal doc 21) are paced by this tick: one bounded
-         * chunk each, so a large file cannot stall a worker and the frames
-         * enter the program through the normal source gate.
-         */
-        ngx_media_file_advance_all(log);
 
         /*
          * Push destinations watch the HLS directory rather than tapping the
@@ -1227,6 +1319,14 @@ ngx_media_runtime_stop(void)
  * the playlist and any recording part, and free the slot.  Called from ordered
  * teardown, before the stream's feed goes away, because the flush reads from
  * it.  Without this a create/delete cycle leaks an output slot every time.
+ *
+ * The stream's player preparation goes with it.  It reads the same feed and
+ * holds the FLV conversion of the program, so it has to be dropped at this
+ * same point in ordered teardown; releasing it only at worker exit would leak
+ * a prepare slot, and the program payload pinned behind its ring, on every
+ * create/delete cycle -- after NGX_MEDIA_RUNTIME_MAX_PREPARE cycles the next
+ * stream's prepare() returns NULL and its RTMP players and destinations
+ * silently receive nothing.
  */
 /* how many runtime output slots are in use: a leak shows up here */
 ngx_uint_t
@@ -1256,7 +1356,20 @@ ngx_media_runtime_outputs_release(ngx_media_stream_t *stream)
             && ngx_media_runtime_outputs[i].stream == stream)
         {
             ngx_media_runtime_outputs_stop(&ngx_media_runtime_outputs[i]);
-            return;
+            break;
+        }
+    }
+
+    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_PREPARE; i++) {
+
+        if (ngx_media_runtime_prepares[i].used
+            && ngx_media_runtime_prepares[i].stream == stream)
+        {
+            ngx_media_rtmp_prepare_destroy(
+                &ngx_media_runtime_prepares[i].prepare);
+            ngx_memzero(&ngx_media_runtime_prepares[i],
+                        sizeof(ngx_media_runtime_prepare_t));
+            break;
         }
     }
 }

@@ -65,6 +65,9 @@ static ngx_int_t ngx_media_api_sources(ngx_http_request_t *r,
     ngx_media_stream_t *stream, ngx_str_t *action, u_char **last, u_char *end);
 static ngx_int_t ngx_media_api_destinations(ngx_http_request_t *r,
     ngx_media_stream_t *stream, ngx_str_t *action, u_char **last, u_char *end);
+static ngx_int_t ngx_media_api_destination_json(
+    ngx_media_destination_t *destination, u_char **last, u_char *end,
+    ngx_int_t created);
 static ngx_int_t ngx_media_api_stream_create(ngx_http_request_t *r,
     ngx_media_registry_t *registry, u_char **last, u_char *end);
 static ngx_int_t ngx_media_api_stream_delete(ngx_http_request_t *r,
@@ -427,6 +430,36 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
     if (ngx_media_api_sources_json(last, end, stream) != NGX_OK) {
         return NGX_ERROR;
     }
+
+    /*
+     * A program's destinations belong to the same read as its sources: they
+     * are the other half of "what is this stream attached to", and the
+     * collection route has always reported them.  The endpoint is redacted
+     * exactly as everywhere else -- a destination host may carry a credential.
+     */
+    *last = ngx_snprintf(*last, end - *last, ",\"destinations\":[");
+
+    {
+        ngx_queue_t              *q;
+        ngx_media_destination_t  *destination;
+        ngx_uint_t                first = 1;
+
+        for (q = ngx_queue_head(&stream->destinations);
+             q != (ngx_queue_t *) &stream->destinations;
+             q = q->next)
+        {
+            destination = ngx_queue_data(q, ngx_media_destination_t, queue);
+
+            if (!first) {
+                *last = ngx_snprintf(*last, end - *last, ",");
+            }
+
+            first = 0;
+            (void) ngx_media_api_destination_json(destination, last, end, -1);
+        }
+    }
+
+    *last = ngx_snprintf(*last, end - *last, "]");
 
     /*
      * fanout_delay percentiles (goal doc 32): how long a unit of media waits
@@ -1455,7 +1488,7 @@ static ngx_int_t
 ngx_media_api_destination_json(ngx_media_destination_t *destination,
     u_char **last, u_char *end, ngx_int_t created)
 {
-    u_char     *tail = (u_char *) "";
+    u_char     *tail = (u_char *) "}";
     u_char      safe[512];
     ngx_str_t   host;
 
@@ -1620,6 +1653,15 @@ ngx_media_api_destination_create(ngx_http_request_t *r,
         profile = ngx_media_hls_profile_find(&profile_name);
 
         if (profile == NULL) {
+            /*
+             * The object is already linked into the stream by now, so an
+             * error return has to take it back out: otherwise a 400 leaves a
+             * destination that is listed, that the replay contract treats as
+             * created, and that can never carry media because its impl is
+             * NULL.
+             */
+            ngx_media_destination_remove(stream, destination);
+
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"unknown_profile\"}");
             return NGX_HTTP_BAD_REQUEST;
@@ -1648,6 +1690,8 @@ ngx_media_api_destination_create(ngx_http_request_t *r,
         if (ngx_media_hls_profile_apply(profile, &host, &duration, &window,
                                         &post, &why) != NGX_OK)
         {
+            ngx_media_destination_remove(stream, destination);
+
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"profile_violation\","
                                  "\"detail\":\"%s\"}", why);
