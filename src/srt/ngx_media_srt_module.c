@@ -1395,6 +1395,25 @@ ngx_media_srt_handler(ngx_event_t *ev)
 
             session = ngx_media_srt_slot_find(chunks[i].session_id);
 
+            if (session != NULL && session->source != NULL
+                && (session->source->stream == NULL
+                    || session->source->pending_remove))
+            {
+                /*
+                 * The source was removed through the control API.  Ordered
+                 * teardown means its transport goes too: without this the
+                 * publisher is still attached and re-creates the source on
+                 * its next event, so a delete looks like it did nothing.
+                 */
+                ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
+                              "media: srt source %V removed, closing its "
+                              "session", &session->source->id);
+
+                (void) ngx_media_srt_ingest_close_session(&ngx_media_srt_ingest,
+                                                          session->id);
+                continue;
+            }
+
             if (session != NULL && session->demux_ready) {
                 (void) ngx_media_ts_demux_feed(&session->demux, chunks[i].data,
                                                chunks[i].len);

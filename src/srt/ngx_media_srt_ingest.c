@@ -277,6 +277,12 @@ ngx_media_srt_thread(void *data)
                 continue;
             }
 
+            if (state->close_requested) {
+                ngx_media_srt_poll_remove_session(poll, state->session);
+                ngx_media_srt_session_finish(ingest, state, &notify);
+                continue;
+            }
+
             n = ngx_media_srt_session_recv(state->session, buf, sizeof(buf),
                                            200);
 
@@ -312,6 +318,30 @@ ngx_media_srt_thread(void *data)
     ngx_media_srt_listen_close(listener);
 
     return NULL;
+}
+
+ngx_int_t
+ngx_media_srt_ingest_close_session(ngx_media_srt_ingest_t *ingest,
+    uint64_t session_id)
+{
+    ngx_uint_t  i;
+
+    if (ingest == NULL) {
+        return NGX_ERROR;
+    }
+
+    for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
+
+        if (ingest->sessions[i].session != NULL
+            && ingest->sessions[i].id == session_id)
+        {
+            (void) ngx_atomic_cmp_set(&ingest->sessions[i].close_requested,
+                                      0, 1);
+            return NGX_OK;
+        }
+    }
+
+    return NGX_DECLINED;
 }
 
 ngx_int_t

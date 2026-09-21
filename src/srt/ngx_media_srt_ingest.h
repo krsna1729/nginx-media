@@ -67,6 +67,15 @@ typedef struct {
     uint64_t                  id;
     uint64_t                  bytes;
     uint64_t                  chunks;
+
+    /*
+     * Set by the worker when the source behind this session is removed
+     * through the control API.  The session belongs to the ingest thread, so
+     * the worker cannot close it; it asks, and the ingest loop acts.  Without
+     * this the publisher stays attached and re-creates the source, so a
+     * delete looks like it did nothing.
+     */
+    ngx_atomic_t              close_requested;
 } ngx_media_srt_session_state_t;
 
 typedef struct {
@@ -96,6 +105,13 @@ typedef struct {
     ngx_atomic_t                 sessions_dropped;
     ngx_atomic_t                 events_dropped;
 } ngx_media_srt_ingest_t;
+
+/*
+ * Asks the ingest thread to close a session, by session id.  Returns NGX_OK
+ * when the request was recorded, NGX_DECLINED when no such session exists.
+ */
+ngx_int_t ngx_media_srt_ingest_close_session(ngx_media_srt_ingest_t *ingest,
+    uint64_t session_id);
 
 ngx_int_t ngx_media_srt_ingest_start(ngx_media_srt_ingest_t *ingest,
     const ngx_media_srt_ingest_conf_t *conf, ngx_log_t *log);
