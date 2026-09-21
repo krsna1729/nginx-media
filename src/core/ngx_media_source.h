@@ -45,4 +45,12 @@ ngx_uint_t ngx_media_source_preroll_ready(const ngx_media_source_t *source);
 void ngx_media_source_lease_begin(ngx_media_source_t *source);
 void ngx_media_source_lease_end(ngx_media_source_t *source);
 
+/*
+ * Stores the source's track contract (a copy) so the selector can classify
+ * compatibility against the program.  Replaces any previous contract.
+ */
+ngx_int_t ngx_media_source_tracks_set(ngx_media_source_t *source,
+    const ngx_media_trackset_t *tracks, ngx_log_t *log);
+void ngx_media_source_tracks_destroy(ngx_media_source_t *source);
+
 #endif /* NGX_MEDIA_SOURCE_H */

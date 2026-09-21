@@ -83,6 +83,27 @@ typedef struct {
     unsigned            have_boundary:1;
 } ngx_media_preroll_t;
 
+/*
+ * Source health (goal doc 8).  Layered evidence, never a blended score; the
+ * behaviour lives in ngx_media_health.h.
+ */
+typedef struct {
+    ngx_uint_t   evidence;             /* bits currently satisfied */
+    ngx_uint_t   required;             /* bits the policy requires */
+    ngx_msec_t   failure_timeout;
+    ngx_msec_t   recovery_timeout;
+    ngx_msec_t   last_media;
+    ngx_msec_t   last_ts_progress;
+    ngx_msec_t   last_container_error;
+    ngx_msec_t   unhealthy_since;
+    ngx_msec_t   healthy_since;
+    int64_t      last_dts;
+    uint64_t     container_errors;     /* cumulative, from the demuxer */
+    uint64_t     transitions;
+    unsigned     healthy:1;
+    unsigned     eligible:1;
+} ngx_media_health_t;
+
 /* logical stream (goal doc 4.3) */
 struct ngx_media_stream_s {
     ngx_pool_t             *pool;
@@ -96,6 +117,7 @@ struct ngx_media_stream_s {
     ngx_media_feed_t        program_feed;
     ngx_uint_t              generation;
     uint64_t                switches;
+    uint64_t                emergency_switches;
     uint64_t                program_frames;
     unsigned                running:1;
 };
@@ -115,6 +137,8 @@ struct ngx_media_source_s {
     void                   *input_ctx;
     ngx_queue_t             queue;     /* link in the stream's source queue */
     ngx_media_preroll_t     preroll;
+    ngx_media_health_t      health;
+    ngx_uint_t              compat;    /* vs the program track contract */
     ngx_uint_t              writers;   /* outstanding write leases */
     uint64_t                frames_in;
     uint64_t                frames_out;

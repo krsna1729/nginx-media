@@ -16,14 +16,24 @@
 
 #include "ngx_media_platform.h"
 #include "ngx_media_registry.h"
+#include "ngx_media_selector.h"
 #include "ngx_media_srt_ingest.h"
 #include "ngx_media_ts_demux.h"
 
 #include <ngx_event.h>
 
+#define NGX_MEDIA_SRT_MAX_PRIORITIES 16
+
 typedef struct {
-    ngx_str_t   listen;
-    unsigned    listen_set:1;
+    ngx_str_t   id;        /* publisher identity from the stream id */
+    ngx_uint_t  priority;  /* trusted operator configuration */
+} ngx_media_srt_priority_t;
+
+typedef struct {
+    ngx_str_t                listen;
+    unsigned                 listen_set:1;
+    ngx_media_srt_priority_t priorities[NGX_MEDIA_SRT_MAX_PRIORITIES];
+    ngx_uint_t               npriorities;
 } ngx_media_srt_main_conf_t;
 
 typedef struct {
@@ -48,6 +58,13 @@ static void ngx_media_srt_handler(ngx_event_t *ev);
 static ngx_int_t ngx_media_srt_parse_endpoint(ngx_pool_t *pool,
     const ngx_str_t *endpoint, ngx_str_t *host, ngx_uint_t *port);
 
+static char *ngx_media_srt_priority_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static void ngx_media_srt_timer_handler(ngx_event_t *ev);
+static ngx_uint_t ngx_media_srt_priority(const ngx_str_t *id);
+static void ngx_media_srt_stream_policy(ngx_media_stream_t *stream);
+static uint64_t ngx_media_srt_demux_errors(
+    const ngx_media_ts_demux_stats_t *stats);
 static void ngx_media_srt_sink_frame(void *ctx,
     const ngx_media_frame_t *frame);
 static void ngx_media_srt_sink_tracks(void *ctx,
@@ -68,6 +85,13 @@ static ngx_msec_t               ngx_media_srt_last_summary;
 static ngx_media_srt_slot_t  ngx_media_srt_slots[
     NGX_MEDIA_SRT_MAX_SESSIONS];
 
+/* selection ticks: failover and switchback decisions */
+#define NGX_MEDIA_SRT_SELECTOR_INTERVAL 100
+
+static ngx_event_t              ngx_media_srt_selector_timer;
+static ngx_uint_t               ngx_media_srt_selector_armed;
+static ngx_msec_t               ngx_media_srt_last_idle_log;
+
 static ngx_media_feed_conf_t    ngx_media_srt_feed_conf = {
     2048, 32 * 1024 * 1024, 10000
 };
@@ -77,6 +101,13 @@ static ngx_command_t ngx_media_srt_commands[] = {
     { ngx_string("media_srt_listen"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
       ngx_media_srt_listen_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_srt_source_priority"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2,
+      ngx_media_srt_priority_cmd,
       0,
       0,
       NULL },
@@ -149,6 +180,9 @@ ngx_media_srt_sink_frame(void *ctx, const ngx_media_frame_t *frame)
     }
 
     if (session->stream != NULL && session->source != NULL) {
+        ngx_media_health_media(&session->source->health, frame->dts,
+                               ngx_current_msec);
+
         (void) ngx_media_stream_publish(session->stream, session->source,
                                         frame, ngx_current_msec);
     }
@@ -175,6 +209,11 @@ ngx_media_srt_sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
 {
     ngx_media_srt_slot_t  *session = ctx;
     ngx_uint_t                i;
+
+    if (session != NULL && session->source != NULL) {
+        (void) ngx_media_source_tracks_set(session->source, tracks,
+                                           ngx_cycle->log);
+    }
 
     for (i = 0; i < tracks->count; i++) {
 
@@ -273,10 +312,11 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
         source = NULL;
     }
 
-    /* priority comes from trusted configuration (goal doc 8); the phase 4
-     * selector assigns real values from the configuration model */
+    /* priority comes from trusted configuration, never from the encoder */
     source = ngx_media_stream_source_add(stream, &id->source,
-                                         NGX_MEDIA_SOURCE_SRT, 0, log);
+                                         NGX_MEDIA_SOURCE_SRT,
+                                         ngx_media_srt_priority(&id->source),
+                                         log);
 
     if (source == NULL) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
@@ -285,8 +325,14 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
         return;
     }
 
+    ngx_media_srt_stream_policy(stream);
+
     session->stream = stream;
     session->source = source;
+
+    ngx_media_health_init(&source->health, &stream->selector,
+                          ngx_current_msec);
+    ngx_media_health_transport(&source->health, 1, ngx_current_msec);
 
     /*
      * Bootstrap: the first source of a stream is promoted through the normal
@@ -356,6 +402,11 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
 
     stream = session->stream;
 
+    if (session->source != NULL) {
+        ngx_media_health_transport(&session->source->health, 0,
+                                   ngx_current_msec);
+    }
+
     if (stream != NULL && session->source != NULL) {
         ngx_media_stream_source_remove(stream, session->source);
         session->source = NULL;
@@ -386,6 +437,159 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
     }
 
     ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
+}
+
+static ngx_str_t  ngx_media_srt_none = ngx_string("none");
+
+extern ngx_module_t  ngx_media_core_module;
+
+static void
+ngx_media_srt_stream_policy(ngx_media_stream_t *stream)
+{
+    ngx_media_policy_t  *policy;
+
+    policy = (ngx_media_policy_t *)
+                 ((ngx_cycle_t *) ngx_cycle)
+                     ->conf_ctx[ngx_media_core_module.index];
+
+    if (policy == NULL) {
+        policy = ngx_media_policy_get((ngx_cycle_t *) ngx_cycle);
+    }
+
+    if (policy != NULL) {
+        ngx_media_stream_set_policy(stream, policy);
+    }
+}
+
+static uint64_t
+ngx_media_srt_demux_errors(const ngx_media_ts_demux_stats_t *stats)
+{
+    return stats->sync_errors + stats->transport_errors
+           + stats->continuity_errors + stats->psi_errors
+           + stats->crc_errors + stats->pes_errors;
+}
+
+static ngx_uint_t
+ngx_media_srt_priority(const ngx_str_t *id)
+{
+    ngx_media_srt_main_conf_t  *mcf;
+    ngx_uint_t                  i;
+
+    mcf = (ngx_media_srt_main_conf_t *)
+              ((ngx_cycle_t *) ngx_cycle)
+                  ->conf_ctx[ngx_media_srt_module.index];
+
+    if (mcf == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < mcf->npriorities; i++) {
+        if (mcf->priorities[i].id.len == id->len
+            && ngx_memcmp(mcf->priorities[i].id.data, id->data, id->len) == 0)
+        {
+            return mcf->priorities[i].priority;
+        }
+    }
+
+    return 0;
+}
+
+static void
+ngx_media_srt_timer_handler(ngx_event_t *ev)
+{
+    ngx_media_registry_t        *registry;
+    ngx_media_registry_entry_t  *entry;
+    ngx_media_selector_result_t  res;
+    ngx_media_stream_t          *stream;
+    ngx_queue_t                 *q;
+    uint64_t                     before;
+    ngx_msec_t                   now;
+
+    now = ngx_current_msec;
+
+    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+
+    if (registry != NULL) {
+
+        for (q = ngx_queue_head(&registry->entries);
+             q != (ngx_queue_t *) &registry->entries;
+             q = q->next)
+        {
+            entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
+            stream = &entry->stream;
+
+            before = stream->switches;
+
+            (void) ngx_media_selector_run(stream, now, &res);
+
+            if (now - ngx_media_srt_last_idle_log >= 1000) {
+                ngx_log_debug6(NGX_LOG_DEBUG_EVENT, ev->log, 0,
+                               "media: selector tick stream=%V/%V active=%V "
+                               "active_healthy=%ui best=%ui emergency=%ui",
+                               &stream->application, &stream->name,
+                               stream->active != NULL ? &stream->active->id
+                                                      : &ngx_media_srt_none,
+                               res.active_eligible, res.best != NULL,
+                               res.emergency != NULL);
+            }
+
+            if (stream->switches != before) {
+                ngx_log_error(NGX_LOG_NOTICE, ev->log, 0,
+                              "media: selector switched stream=%V/%V "
+                              "active=%V generation=%ui switches=%uL "
+                              "emergency=%uL",
+                              &stream->application, &stream->name,
+                              stream->active != NULL ? &stream->active->id
+                                                     : &ngx_media_srt_none,
+                              stream->generation, stream->switches,
+                              stream->emergency_switches);
+            }
+
+            if (stream->active != NULL && !res.active_eligible
+                && res.best == NULL && res.emergency == NULL
+                && now - ngx_media_srt_last_idle_log >= 1000)
+            {
+                ngx_log_error(NGX_LOG_WARN, ev->log, 0,
+                              "media: selector stream=%V/%V has no eligible "
+                              "source; the program is idle on %V",
+                              &stream->application, &stream->name,
+                              &stream->active->id);
+
+                ngx_media_srt_last_idle_log = now;
+            }
+        }
+    }
+
+    if (!ngx_exiting && ngx_media_srt_selector_armed) {
+        ngx_add_timer(ev, NGX_MEDIA_SRT_SELECTOR_INTERVAL);
+    }
+}
+
+static char *
+ngx_media_srt_priority_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_media_srt_main_conf_t  *mcf = conf;
+    ngx_str_t                  *value;
+    ngx_int_t                   priority;
+
+    (void) cmd;
+
+    value = cf->args->elts;
+
+    if (mcf->npriorities >= NGX_MEDIA_SRT_MAX_PRIORITIES) {
+        return "too many media_srt_source_priority directives";
+    }
+
+    priority = ngx_atoi(value[2].data, value[2].len);
+    if (priority == NGX_ERROR || priority < 0 || priority > 65535) {
+        return "invalid priority";
+    }
+
+    mcf->priorities[mcf->npriorities].id = value[1];
+    mcf->priorities[mcf->npriorities].priority = (ngx_uint_t) priority;
+    mcf->npriorities++;
+
+    return NGX_CONF_OK;
 }
 
 static void *
@@ -523,6 +727,16 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     ngx_media_srt_connection = c;
     ngx_media_srt_started = 1;
 
+    ngx_memzero(&ngx_media_srt_selector_timer, sizeof(ngx_event_t));
+
+    ngx_media_srt_selector_timer.handler = ngx_media_srt_timer_handler;
+    ngx_media_srt_selector_timer.log = cycle->log;
+    ngx_media_srt_selector_timer.data = cycle;
+    ngx_media_srt_selector_armed = 1;
+
+    ngx_add_timer(&ngx_media_srt_selector_timer,
+                  NGX_MEDIA_SRT_SELECTOR_INTERVAL);
+
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
                   "media: SRT ingest runtime started for %V", &mcf->listen);
 
@@ -537,6 +751,7 @@ ngx_media_srt_handler(ngx_event_t *ev)
     ngx_media_srt_event_t        events[16];
     ngx_media_ts_ingest_chunk_t  chunks[16];
     ngx_media_ts_ingest_stats_t  stats;
+    ngx_media_ts_demux_stats_t   demux_stats;
     ngx_media_srt_streamid_t     id;
     ngx_media_srt_slot_t     *session;
     ngx_uint_t                   n, i, count;
@@ -659,6 +874,22 @@ ngx_media_srt_handler(ngx_event_t *ev)
 
     if (bytes > 0) {
         ngx_media_srt_drained_bytes += bytes;
+
+        for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
+            session = &ngx_media_srt_slots[i];
+
+            if (!session->used || !session->demux_ready
+                || session->source == NULL)
+            {
+                continue;
+            }
+
+            ngx_media_ts_demux_stats(&session->demux, &demux_stats);
+
+            ngx_media_health_container(&session->source->health,
+                                       ngx_media_srt_demux_errors(&demux_stats),
+                                       ngx_current_msec);
+        }
     }
 
     if (bytes > 0 || force_summary) {
@@ -693,6 +924,12 @@ ngx_media_srt_exit_process(ngx_cycle_t *cycle)
     }
 
     ngx_media_srt_started = 0;
+
+    ngx_media_srt_selector_armed = 0;
+
+    if (ngx_media_srt_selector_timer.timer_set) {
+        ngx_del_timer(&ngx_media_srt_selector_timer);
+    }
 
     for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
         if (ngx_media_srt_slots[i].demux_ready) {

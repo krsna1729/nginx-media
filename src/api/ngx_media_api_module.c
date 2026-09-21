@@ -15,10 +15,13 @@
 
 #include "ngx_media_platform.h"
 #include "ngx_media_registry.h"
+#include "ngx_media_selector.h"
 
 #include <ngx_http.h>
 
 #define NGX_MEDIA_API_BUF_SIZE  (64 * 1024)
+
+static ngx_str_t  ngx_media_api_none = ngx_string("none");
 
 static char *ngx_media_api_set(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
@@ -140,7 +143,10 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
         *last = ngx_snprintf(*last, end - *last,
                              "%s{\"id\":\"%V\",\"type\":%ui,\"state\":\"%s\","
                              "\"priority\":%ui,\"healthy\":%s,\"eligible\":%s,"
-                             "\"active\":%s,\"frames_in\":%uL,"
+                             "\"active\":%s,\"compat\":\"%s\","
+                             "\"evidence\":%ui,\"health_transitions\":%uL,"
+                             "\"container_errors\":%uL,"
+                             "\"frames_in\":%uL,"
                              "\"frames_out\":%uL,\"writers\":%ui,"
                              "\"preroll_units\":%ui,\"preroll_bytes\":%uz,"
                              "\"preroll_overflows\":%uL}",
@@ -149,9 +155,13 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
                              source->type,
                              ngx_media_api_state_name(source->state),
                              source->priority,
-                             source->healthy ? "true" : "false",
-                             source->eligible ? "true" : "false",
+                             source->health.healthy ? "true" : "false",
+                             source->health.eligible ? "true" : "false",
                              source->active ? "true" : "false",
+                             ngx_media_compat_name(source->compat),
+                             source->health.evidence,
+                             source->health.transitions,
+                             source->health.container_errors,
                              source->frames_in,
                              source->frames_out,
                              source->writers,
@@ -177,9 +187,17 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
     *last = ngx_snprintf(*last, end - *last,
                          "{\"application\":\"%V\",\"name\":\"%V\","
                          "\"generation\":%ui,\"switches\":%uL,"
+                         "\"emergency_switches\":%uL,"
+                         "\"failure_timeout_ms\":%ui,"
+                         "\"recovery_timeout_ms\":%ui,"
+                         "\"switchback\":%ui,"
                          "\"program_frames\":%uL,\"active\":",
                          &stream->application, &stream->name,
                          stream->generation, stream->switches,
+                         stream->emergency_switches,
+                         stream->selector.failure_timeout,
+                         stream->selector.recovery_timeout,
+                         stream->selector.switchback,
                          stream->program_frames);
 
     if (stream->active != NULL) {
@@ -423,11 +441,53 @@ ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
     if (action.len == sizeof("switchback") - 1
         && ngx_memcmp(action.data, "switchback", sizeof("switchback") - 1) == 0)
     {
+        ngx_int_t  rc;
+
+        if (r->method != NGX_HTTP_POST) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"method_not_allowed\"}");
+            return NGX_HTTP_NOT_ALLOWED;
+        }
+
+        rc = ngx_media_selector_switchback(stream, ngx_current_msec);
+
+        if (rc == NGX_DECLINED) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"no_better_source\","
+                                 "\"switchback\":%ui}",
+                                 stream->selector.switchback);
+            return NGX_HTTP_CONFLICT;
+        }
+
+        if (rc != NGX_OK) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"switchback_failed\"}");
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0,
+                      "media: api switchback stream=%V/%V active=%V",
+                      &application, &name,
+                      stream->active != NULL ? &stream->active->id
+                                             : &ngx_media_api_none);
+
         *last = ngx_snprintf(*last, end - *last,
-                             "{\"error\":\"not_implemented\","
-                             "\"detail\":\"switchback policy arrives with "
-                             "automatic failover\"}");
-        return NGX_HTTP_NOT_IMPLEMENTED;
+                             "{\"stream\":\"%V/%V\",\"active\":", &application,
+                             &name);
+
+        if (stream->active != NULL) {
+            *last = ngx_snprintf(*last, end - *last, "\"%V\"",
+                                 &stream->active->id);
+
+        } else {
+            *last = ngx_snprintf(*last, end - *last, "null");
+        }
+
+        *last = ngx_snprintf(*last, end - *last,
+                             ",\"generation\":%ui,\"switches\":%uL}",
+                             stream->generation, stream->switches);
+
+        return NGX_HTTP_OK;
     }
 
     *last = ngx_snprintf(*last, end - *last, "{\"error\":\"unknown_action\"}");

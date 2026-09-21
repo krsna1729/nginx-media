@@ -2,6 +2,7 @@
 #define NGX_MEDIA_STREAM_H
 
 #include "ngx_media.h"
+#include "ngx_media_policy.h"
 #include "ngx_media_source.h"
 
 /*
@@ -20,6 +21,10 @@
  *
  * The timeline maps source timestamps to monotonic program timestamps.
  */
+
+/* applies a selection policy (defaults are applied at init) */
+void ngx_media_stream_set_policy(ngx_media_stream_t *stream,
+    const ngx_media_policy_t *policy);
 
 ngx_int_t ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
     ngx_log_t *log, const ngx_str_t *application, const ngx_str_t *name,

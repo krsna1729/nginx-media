@@ -14,6 +14,20 @@ static ngx_int_t ngx_media_stream_switch_now(ngx_media_stream_t *stream,
 static ngx_int_t ngx_media_stream_replay_frame(void *ctx,
     const ngx_media_frame_t *frame);
 
+void
+ngx_media_stream_set_policy(ngx_media_stream_t *stream,
+    const ngx_media_policy_t *policy)
+{
+    if (stream == NULL || policy == NULL) {
+        return;
+    }
+
+    stream->selector.failure_timeout = policy->failure_timeout;
+    stream->selector.recovery_timeout = policy->recovery_timeout;
+    stream->selector.switch_keyframe = policy->switch_keyframe;
+    stream->selector.switchback = policy->switchback;
+}
+
 ngx_int_t
 ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
     ngx_log_t *log, const ngx_str_t *application, const ngx_str_t *name,
@@ -23,7 +37,12 @@ ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
         return NGX_ERROR;
     }
 
+    ngx_media_policy_t  defaults;
+
     ngx_memzero(stream, sizeof(ngx_media_stream_t));
+
+    ngx_media_policy_init(&defaults);
+    ngx_media_stream_set_policy(stream, &defaults);
 
     stream->pool = pool;
 
@@ -76,8 +95,14 @@ ngx_media_stream_destroy(ngx_media_stream_t *stream)
          q = next)
     {
         next = q->next;
-        ngx_media_source_preroll_destroy(
-            ngx_queue_data(q, ngx_media_source_t, queue));
+
+        {
+            ngx_media_source_t  *source
+                = ngx_queue_data(q, ngx_media_source_t, queue);
+
+            ngx_media_source_preroll_destroy(source);
+            ngx_media_source_tracks_destroy(source);
+        }
     }
 
     ngx_queue_init(&stream->sources);
@@ -209,6 +234,7 @@ ngx_media_stream_source_remove(ngx_media_stream_t *stream,
     }
 
     ngx_media_source_preroll_destroy(source);
+    ngx_media_source_tracks_destroy(source);
 
     ngx_queue_remove(&source->queue);
 

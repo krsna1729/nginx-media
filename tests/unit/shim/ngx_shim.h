@@ -27,6 +27,12 @@ typedef struct {
 
 typedef struct ngx_pool_s  ngx_pool_t;
 typedef struct ngx_log_s   ngx_log_t;
+
+/* the small part of the nginx cycle the portable core can rely on */
+typedef struct ngx_cycle_s {
+    ngx_pool_t  *pool;
+    ngx_log_t   *log;
+} ngx_cycle_t;
 typedef struct ngx_queue_s ngx_queue_t;
 
 struct ngx_queue_s {

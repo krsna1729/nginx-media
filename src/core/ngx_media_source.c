@@ -212,3 +212,53 @@ ngx_media_source_lease_end(ngx_media_source_t *source)
         source->writers--;
     }
 }
+
+ngx_int_t
+ngx_media_source_tracks_set(ngx_media_source_t *source,
+    const ngx_media_trackset_t *tracks, ngx_log_t *log)
+{
+    ngx_media_trackset_t  *copy;
+    ngx_uint_t             i;
+
+    if (source == NULL || tracks == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_media_source_tracks_destroy(source);
+
+    copy = ngx_alloc(sizeof(ngx_media_trackset_t), log);
+    if (copy == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (ngx_media_trackset_init(copy, tracks->count ? tracks->count : 1, log)
+        != NGX_OK)
+    {
+        ngx_free(copy);
+        return NGX_ERROR;
+    }
+
+    for (i = 0; i < tracks->count; i++) {
+        if (ngx_media_trackset_add(copy, &tracks->tracks[i]) < 0) {
+            ngx_media_trackset_destroy(copy);
+            ngx_free(copy);
+            return NGX_ERROR;
+        }
+    }
+
+    source->tracks = copy;
+
+    return NGX_OK;
+}
+
+void
+ngx_media_source_tracks_destroy(ngx_media_source_t *source)
+{
+    if (source == NULL || source->tracks == NULL) {
+        return;
+    }
+
+    ngx_media_trackset_destroy(source->tracks);
+    ngx_free(source->tracks);
+    source->tracks = NULL;
+}

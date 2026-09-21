@@ -103,7 +103,39 @@ Phase 3 — logical streams and redundant sources (complete):
   lists both, reports encoder-a active and encoder-b standby with a bounded
   GOP cache, switches to encoder-b (generation 1 → 2, switches 1), and rejects
   unknown sources (404), wrong methods (405) and unknown streams (404)
-- next phase: health, eligibility, priority selection and automatic failover
+Phase 4 — health, eligibility and automatic failover (complete):
+
+- `src/core/ngx_media_health.*`: layered evidence (transport up, data flowing,
+  container valid, timestamps advancing, media valid, tracks compatible) — no
+  blended score.  A closed transport fails immediately; a silent or frozen
+  source (connected but no progress) fails after `failure_timeout`; a failed
+  source needs `recovery_timeout` of good evidence again (hysteresis)
+- `src/core/ngx_media_compat.*`: READY / DEGRADED / INCOMPATIBLE classification
+  against the program's track contract.  Codec and media type are hard
+  requirements; resolution, profile/level, audio parameters and payload
+  representation changes are degradations
+- `src/core/ngx_media_selector.*`: `eligible = health policy passes`,
+  `winner = highest-priority eligible source`.  Failover when the active
+  source loses eligibility, switchback per policy (auto / manual / never), and
+  an emergency switch when only an incompatible source remains — counted and
+  surfaced through the generation change
+- configuration: `media_failover_failure_timeout` and
+  `media_failover_recovery_timeout` (bare values are milliseconds, `700ms` and
+  `2s` are accepted), `media_failover_switch_keyframe`,
+  `media_failover_switchback`, and `media_srt_source_priority <identity> <n>`
+  (priority comes from operator configuration, never from the Stream ID)
+- the control API exposes per-source `healthy`, `eligible`, `compat`,
+  `evidence`, `health_transitions` and `container_errors`, stream
+  `emergency_switches` and the active policy, and implements
+  `POST .../switchback`
+- `make failover` proves the exit criteria with two prioritized publishers:
+  killing the active one fails over to the standby (generation 2), the
+  returning primary is switched back to automatically, a frozen publisher
+  (SIGSTOP) fails after the failure timeout and recovers on thaw, and a
+  garbage publisher registering as the primary is reported unhealthy
+  (evidence level 37 of 63) while the program keeps flowing on the standby
+- next phase: HLS and recording
+
 
 ## Layout
 
@@ -127,6 +159,7 @@ Phase 3 — logical streams and redundant sources (complete):
     make ts-fixture       # demux ffmpeg-generated H.264/H.265 MPEG-TS files
     make source-switch    # two hot sources, manual switch, timeline checks
     make api-switch       # control API: listing and manual switch via nginx
+    make failover         # kill / freeze / corrupt failover and switchback
 
 Requires `cc`, `make`, `curl`, `tar`, `ffmpeg` and (for the SRT targets)
 `libsrt`. `make nginx` builds nginx 1.30.5 with `--add-module` into `.build/`;
