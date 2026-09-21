@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch failover hls rtmp clean
+.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch failover hls rtmp srt-output clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -34,6 +34,9 @@ hls:
 
 rtmp:
 	tests/integration/rtmp_nginx.sh
+
+srt-output:
+	tests/integration/srt_output_nginx.sh
 
 clean:
 	$(MAKE) -C tests/unit clean

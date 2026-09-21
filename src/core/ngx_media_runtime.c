@@ -53,6 +53,9 @@ static ngx_media_runtime_prepare_t
 static ngx_media_record_t   ngx_media_runtime_raw;
 static ngx_uint_t           ngx_media_runtime_raw_started;
 
+static ngx_media_runtime_sink_pt  ngx_media_runtime_sink;
+static void                      *ngx_media_runtime_sink_ctx;
+
 static ngx_event_t          ngx_media_runtime_timer;
 static ngx_uint_t           ngx_media_runtime_armed;
 static ngx_msec_t           ngx_media_runtime_last_idle_log;
@@ -184,6 +187,31 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
     return out;
 }
 
+void
+ngx_media_runtime_set_sink(ngx_media_runtime_sink_pt cb, void *ctx)
+{
+    ngx_media_runtime_sink = cb;
+    ngx_media_runtime_sink_ctx = ctx;
+}
+
+/* does this burst carry a video sync point a receiver may resume at? */
+static ngx_uint_t
+ngx_media_runtime_burst_keyframe(const ngx_media_ts_burst_t *burst)
+{
+    ngx_uint_t  i;
+
+    for (i = 0; i < burst->nslices; i++) {
+
+        if (burst->slices[i].media_type == NGX_MEDIA_TYPE_VIDEO
+            && burst->slices[i].keyframe)
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static void
 ngx_media_runtime_outputs_flush(ngx_media_runtime_outputs_t *out)
 {
@@ -205,6 +233,13 @@ ngx_media_runtime_outputs_flush(ngx_media_runtime_outputs_t *out)
             if (out->program_ready) {
                 (void) ngx_media_record_append(&out->program,
                                                out->burst.backing, 0, len);
+            }
+
+            if (ngx_media_runtime_sink != NULL) {
+                ngx_media_runtime_sink(ngx_media_runtime_sink_ctx,
+                                       out->stream, out->burst.backing, len,
+                                       ngx_media_runtime_burst_keyframe(
+                                           &out->burst));
             }
         }
 

@@ -5,6 +5,7 @@
  * see only ngx_media_srt_* and never an SRTSOCKET.
  */
 
+#include "ngx_media_srt_streamid.h"
 #include "ngx_media_srt_transport.h"
 
 #include <arpa/inet.h>
@@ -22,6 +23,7 @@ struct ngx_media_srt_session_s {
     SRTSOCKET                 sock;
     ngx_media_srt_listener_t *listener;
     ngx_media_srt_session_t  *next;
+    ngx_log_t                *log;
 };
 
 struct ngx_media_srt_poll_s {
@@ -29,7 +31,36 @@ struct ngx_media_srt_poll_s {
 };
 
 static ngx_media_srt_listener_t *ngx_media_srt_listeners;
+static ngx_media_srt_session_t  *ngx_media_srt_callers;
 static ngx_uint_t                ngx_media_srt_started;
+
+/* the last failure, for the caller's own diagnostics */
+static char  ngx_media_srt_error[256];
+
+static void
+ngx_media_srt_note_error(const char *detail)
+{
+    size_t  len;
+
+    if (detail == NULL) {
+        detail = "unknown error";
+    }
+
+    len = strlen(detail);
+
+    if (len >= sizeof(ngx_media_srt_error)) {
+        len = sizeof(ngx_media_srt_error) - 1;
+    }
+
+    memcpy(ngx_media_srt_error, detail, len);
+    ngx_media_srt_error[len] = '\0';
+}
+
+static const char *
+ngx_media_srt_haivision_last_error(void)
+{
+    return ngx_media_srt_error;
+}
 
 static ngx_media_srt_listener_t *ngx_media_srt_haivision_listen(
     const u_char *host, ngx_uint_t port, ngx_log_t *log);
@@ -46,6 +77,12 @@ static ngx_int_t ngx_media_srt_haivision_streamid(
     ngx_media_srt_session_t *session, u_char *buf, size_t cap);
 static ngx_int_t ngx_media_srt_haivision_recv(
     ngx_media_srt_session_t *session, u_char *buf, size_t cap,
+    ngx_msec_t timeout_ms);
+static ngx_media_srt_session_t *ngx_media_srt_haivision_connect(
+    const u_char *host, ngx_uint_t port, const u_char *streamid,
+    size_t streamid_len, ngx_msec_t timeout_ms, ngx_log_t *log);
+static ngx_int_t ngx_media_srt_haivision_send(
+    ngx_media_srt_session_t *session, const u_char *buf, size_t len,
     ngx_msec_t timeout_ms);
 static void ngx_media_srt_haivision_stats(ngx_media_srt_session_t *session,
     ngx_media_srt_stats_t *out);
@@ -76,6 +113,8 @@ ngx_media_srt_ops_t ngx_media_srt_haivision_ops = {
     ngx_media_srt_haivision_accept_ready,
     ngx_media_srt_haivision_streamid,
     ngx_media_srt_haivision_recv,
+    ngx_media_srt_haivision_connect,
+    ngx_media_srt_haivision_send,
     ngx_media_srt_haivision_stats,
     ngx_media_srt_haivision_session_close,
     ngx_media_srt_haivision_poll_create,
@@ -84,6 +123,7 @@ ngx_media_srt_ops_t ngx_media_srt_haivision_ops = {
     ngx_media_srt_haivision_poll_add_session,
     ngx_media_srt_haivision_poll_remove_session,
     ngx_media_srt_haivision_poll_wait,
+    ngx_media_srt_haivision_last_error,
     ngx_media_srt_haivision_shutdown
 };
 
@@ -266,8 +306,17 @@ ngx_media_srt_session_wrap(ngx_media_srt_listener_t *listener, SRTSOCKET sock,
 
     session->sock = sock;
     session->listener = listener;
-    session->next = listener->sessions;
-    listener->sessions = session;
+    session->log = log;
+
+    /* a caller session belongs to no listener and lives on its own list */
+    if (listener != NULL) {
+        session->next = listener->sessions;
+        listener->sessions = session;
+
+    } else {
+        session->next = ngx_media_srt_callers;
+        ngx_media_srt_callers = session;
+    }
 
     return session;
 }
@@ -291,6 +340,148 @@ ngx_media_srt_haivision_streamid(ngx_media_srt_session_t *session, u_char *buf,
     }
 
     return (ngx_int_t) len;
+}
+
+/*
+ * Caller side: connect to a destination and announce an optional stream id.
+ * The session is a normal session (sending instead of receiving), so the
+ * caller's lifecycle code is the same as for an accepted publisher.
+ */
+static ngx_media_srt_session_t *
+ngx_media_srt_haivision_connect(const u_char *host, ngx_uint_t port,
+    const u_char *streamid, size_t streamid_len, ngx_msec_t timeout_ms,
+    ngx_log_t *log)
+{
+    ngx_media_srt_session_t  *session;
+    struct sockaddr_in        addr;
+    SRTSOCKET                 sock;
+    int                       transtype, timeout;
+
+    if (host == NULL || host[0] == '\0' || port == 0 || port > 65535) {
+        ngx_media_srt_note_error("invalid destination");
+        return NULL;
+    }
+
+    if (!ngx_media_srt_started) {
+        if (srt_startup() == SRT_ERROR) {
+            ngx_media_srt_note_error(srt_getlasterror_str());
+            return NULL;
+        }
+
+        ngx_media_srt_started = 1;
+    }
+
+    sock = srt_create_socket();
+    if (sock == SRT_INVALID_SOCK) {
+        ngx_media_srt_note_error(srt_getlasterror_str());
+        return NULL;
+    }
+
+    transtype = SRTT_LIVE;
+    timeout = (timeout_ms > (ngx_msec_t) INT_MAX) ? INT_MAX
+                                                  : (int) timeout_ms;
+
+    if (srt_setsockopt(sock, 0, SRTO_TRANSTYPE, &transtype,
+                       sizeof(transtype)) == SRT_ERROR
+        || srt_setsockopt(sock, 0, SRTO_CONNTIMEO, &timeout,
+                          sizeof(timeout)) == SRT_ERROR
+        || srt_setsockopt(sock, 0, SRTO_SNDTIMEO, &timeout,
+                          sizeof(timeout)) == SRT_ERROR)
+    {
+        ngx_media_srt_note_error(srt_getlasterror_str());
+        (void) srt_close(sock);
+        return NULL;
+    }
+
+    {
+        int  sndbuf = 4 * 1024 * 1024;
+
+        (void) srt_setsockopt(sock, 0, SRTO_SNDBUF, &sndbuf, sizeof(sndbuf));
+    }
+
+    if (streamid != NULL && streamid_len > 0) {
+        u_char  id[NGX_MEDIA_SRT_STREAMID_MAX + 1];
+
+        if (streamid_len > NGX_MEDIA_SRT_STREAMID_MAX) {
+            (void) srt_close(sock);
+            return NULL;
+        }
+
+        ngx_memcpy(id, streamid, streamid_len);
+        id[streamid_len] = '\0';
+
+        if (srt_setsockopt(sock, 0, SRTO_STREAMID, id,
+                           (int) streamid_len + 1) == SRT_ERROR)
+        {
+            ngx_media_srt_note_error(srt_getlasterror_str());
+            (void) srt_close(sock);
+            return NULL;
+        }
+    }
+
+    ngx_memzero(&addr, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t) port);
+
+    if (inet_pton(AF_INET, (const char *) host, &addr.sin_addr) != 1) {
+        ngx_media_srt_note_error("bad address");
+        (void) srt_close(sock);
+        return NULL;
+    }
+
+    if (srt_connect(sock, (struct sockaddr *) &addr, sizeof(addr))
+        == SRT_ERROR)
+    {
+        ngx_media_srt_note_error(srt_getlasterror_str());
+        (void) srt_close(sock);
+        return NULL;
+    }
+
+    /* a caller session belongs to no listener */
+    session = ngx_media_srt_session_wrap(NULL, sock, log);
+
+    if (session == NULL) {
+        (void) srt_close(sock);
+        return NULL;
+    }
+
+    return session;
+}
+
+static ngx_int_t
+ngx_media_srt_haivision_send(ngx_media_srt_session_t *session,
+    const u_char *buf, size_t len, ngx_msec_t timeout_ms)
+{
+    int  sent;
+    int  err;
+
+    if (session == NULL || buf == NULL || len == 0) {
+        return NGX_ERROR;
+    }
+
+    sent = srt_sendmsg(session->sock, (const char *) buf, (int) len, -1,
+                       (timeout_ms > 0) ? 1 : 0);
+
+    if (sent != SRT_ERROR) {
+        return sent;
+    }
+
+    /*
+     * A live sender that outruns the link gets a timeout or a full send
+     * queue: that is backpressure, not a broken session, so the caller keeps
+     * the buffer and tries again.
+     */
+    err = srt_getlasterror(NULL);
+
+    if (err == SRT_ETIMEOUT || err == SRT_EASYNCSND
+        || err == SRT_ESECFAIL)
+    {
+        return 0;
+    }
+
+    ngx_media_srt_note_error(srt_getlasterror_str());
+
+    return NGX_ERROR;
 }
 
 static ngx_int_t
@@ -362,14 +553,13 @@ ngx_media_srt_haivision_session_close(ngx_media_srt_session_t *session)
 
     (void) srt_close(session->sock);
 
-    if (session->listener != NULL) {
-        for (pp = &session->listener->sessions; *pp != NULL;
-             pp = &(*pp)->next)
-        {
-            if (*pp == session) {
-                *pp = session->next;
-                break;
-            }
+    for (pp = (session->listener != NULL) ? &session->listener->sessions
+                                          : &ngx_media_srt_callers;
+         *pp != NULL; pp = &(*pp)->next)
+    {
+        if (*pp == session) {
+            *pp = session->next;
+            break;
         }
     }
 
@@ -381,6 +571,10 @@ ngx_media_srt_haivision_shutdown(void)
 {
     while (ngx_media_srt_listeners != NULL) {
         ngx_media_srt_haivision_listen_close(ngx_media_srt_listeners);
+    }
+
+    while (ngx_media_srt_callers != NULL) {
+        ngx_media_srt_haivision_session_close(ngx_media_srt_callers);
     }
 
     if (ngx_media_srt_started) {
@@ -408,6 +602,14 @@ ngx_media_srt_session_by_socket(SRTSOCKET sock)
             if (session->sock == sock) {
                 return session;
             }
+        }
+    }
+
+    for (session = ngx_media_srt_callers; session != NULL;
+         session = session->next)
+    {
+        if (session->sock == sock) {
+            return session;
         }
     }
 

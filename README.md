@@ -198,7 +198,29 @@ Phase 6 - RTMP ingest and output (complete):
   appears in the control API with its configured priority, the program reaches
   HLS, and a second ffmpeg plays the program back over RTMP and decodes H.264
   and AAC video/audio packets
-- next phase: SRT output and fanout
+Phase 7 - SRT output and fanout (complete):
+
+- `media_srt_output <application/stream> <host:port> [streamid]` adds an SRT
+  destination: a caller session that announces a stream id, so the receiving
+  side registers it as a normal source
+- destinations consume the transport bursts the program runtime already
+  prepares for HLS and recording, so one preparation feeds every consumer and
+  a destination costs one reference per burst, never a copy (goal doc 16)
+- `src/srt/ngx_media_srt_output_queue.*`: a bounded subscriber queue with hard
+  unit and byte ceilings; a slow receiver drops whole bursts and resumes at the
+  next sync boundary, so it never starts mid-GOP (goal doc 34 items 11, 12)
+- `src/srt/ngx_media_srt_output.*`: one sender thread per destination, so a
+  stalled receiver cannot delay another output; sends are payload sized, and
+  transport backpressure (a timeout or a full send queue) is retried instead of
+  dropping media
+- the SRT transport gained the caller side (`connect`/`send`) and reports the
+  last failure as a string, so the adapter itself never logs
+- `make srt-output` proves the exit criteria with two nginx instances: A
+  ingests an SRT publisher, prepares the program once and pushes it to two
+  destinations; B receives one of them, registers the announced source and
+  produces its own decodable HLS output while A's HLS shows the shared
+  preparation
+- next phase: multi-worker ownership
 
 
 ## Layout
@@ -229,6 +251,7 @@ Phase 6 - RTMP ingest and output (complete):
     make failover         # kill / freeze / corrupt failover and switchback
     make hls               # HLS playlist, discontinuity, recordings over nginx
     make rtmp              # RTMP publish and play of the same logical stream
+    make srt-output        # SRT destinations fed from the shared preparation
 
 Requires `cc`, `make`, `curl`, `tar`, `ffmpeg` and (for the SRT targets)
 `libsrt`. `make nginx` builds nginx 1.30.5 with `--add-module` into `.build/`;

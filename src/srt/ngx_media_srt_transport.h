@@ -63,6 +63,23 @@ typedef struct {
     ngx_int_t (*recv)(ngx_media_srt_session_t *session, u_char *buf,
         size_t cap, ngx_msec_t timeout_ms);
 
+    /*
+     * Caller side (goal doc 11, SRT output): connects to a destination and
+     * sends already prepared transport bytes.  The adapter never prepares or
+     * fans out media itself.
+     */
+    ngx_media_srt_session_t *(*connect)(const u_char *host, ngx_uint_t port,
+        const u_char *streamid, size_t streamid_len, ngx_msec_t timeout_ms,
+        ngx_log_t *log);
+
+    /*
+     * > 0 bytes sent; 0 when the transport could not take the buffer yet
+     * (a timeout or a full send queue: the caller keeps the buffer and
+     * retries); -1 when the session is broken and must be reopened.
+     */
+    ngx_int_t (*send)(ngx_media_srt_session_t *session, const u_char *buf,
+        size_t len, ngx_msec_t timeout_ms);
+
     void (*stats)(ngx_media_srt_session_t *session,
         ngx_media_srt_stats_t *out);
 
@@ -83,6 +100,12 @@ typedef struct {
         ngx_media_srt_session_t *session);
     ngx_int_t (*poll_wait)(ngx_media_srt_poll_t *poll, ngx_msec_t timeout_ms,
         ngx_media_srt_poll_event_t *events, ngx_uint_t max, ngx_uint_t *count);
+
+    /*
+     * The last transport failure as a printable string.  The adapter never
+     * logs: the caller reports the detail through its own logger.
+     */
+    const char *(*last_error)(void);
 
     /* releases backend-global state once no listener remains */
     void (*shutdown)(void);
@@ -107,6 +130,13 @@ ngx_int_t ngx_media_srt_session_streamid(ngx_media_srt_session_t *session,
     u_char *buf, size_t cap);
 ngx_int_t ngx_media_srt_session_recv(ngx_media_srt_session_t *session,
     u_char *buf, size_t cap, ngx_msec_t timeout_ms);
+
+/* caller side: connects to a destination, optionally announcing a stream id */
+ngx_media_srt_session_t *ngx_media_srt_connect(const u_char *host,
+    ngx_uint_t port, const u_char *streamid, size_t streamid_len,
+    ngx_msec_t timeout_ms, ngx_log_t *log);
+ngx_int_t ngx_media_srt_session_send(ngx_media_srt_session_t *session,
+    const u_char *buf, size_t len, ngx_msec_t timeout_ms);
 void ngx_media_srt_session_stats(ngx_media_srt_session_t *session,
     ngx_media_srt_stats_t *out);
 void ngx_media_srt_session_close(ngx_media_srt_session_t *session);
@@ -122,6 +152,9 @@ void ngx_media_srt_poll_remove_session(ngx_media_srt_poll_t *poll,
 ngx_int_t ngx_media_srt_poll_wait(ngx_media_srt_poll_t *poll,
     ngx_msec_t timeout_ms, ngx_media_srt_poll_event_t *events,
     ngx_uint_t max, ngx_uint_t *count);
+
+/* the detail of the last transport failure, or "" when there is none */
+const char *ngx_media_srt_last_error(void);
 
 /* closes every listener and session and releases backend-global state */
 void ngx_media_srt_shutdown(void);

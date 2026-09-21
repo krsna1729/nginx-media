@@ -17,6 +17,7 @@
 #include "ngx_media_platform.h"
 #include "ngx_media_registry.h"
 #include "ngx_media_runtime.h"
+#include "ngx_media_srt_output.h"
 #include "ngx_media_selector.h"
 #include "ngx_media_srt_ingest.h"
 #include "ngx_media_ts_demux.h"
@@ -35,6 +36,10 @@ typedef struct {
     unsigned                 listen_set:1;
     ngx_media_srt_priority_t priorities[NGX_MEDIA_SRT_MAX_PRIORITIES];
     ngx_uint_t               npriorities;
+
+    /* SRT destinations fed from the shared program preparation */
+    ngx_media_srt_output_conf_t  outputs[NGX_MEDIA_SRT_MAX_OUTPUTS];
+    ngx_uint_t                   noutputs;
 } ngx_media_srt_main_conf_t;
 
 typedef struct {
@@ -61,6 +66,11 @@ static ngx_int_t ngx_media_srt_parse_endpoint(ngx_pool_t *pool,
 
 static char *ngx_media_srt_priority_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_media_srt_output_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static void ngx_media_srt_output_sink(void *ctx, ngx_media_stream_t *stream,
+    ngx_media_buf_t *burst, size_t len, ngx_uint_t keyframe);
+static void ngx_media_srt_output_handler(ngx_event_t *ev);
 static ngx_uint_t ngx_media_srt_priority(const ngx_str_t *id);
 static void ngx_media_srt_stream_policy(ngx_media_stream_t *stream);
 static uint64_t ngx_media_srt_demux_errors(
@@ -85,6 +95,10 @@ static ngx_msec_t               ngx_media_srt_last_summary;
 static ngx_media_srt_slot_t  ngx_media_srt_slots[
     NGX_MEDIA_SRT_MAX_SESSIONS];
 
+/* SRT destinations fed from the shared program preparation */
+static ngx_media_srt_outputs_t  *ngx_media_srt_outputs;
+static ngx_connection_t         *ngx_media_srt_output_connection;
+
 static ngx_media_feed_conf_t    ngx_media_srt_feed_conf = {
     2048, 32 * 1024 * 1024, 10000
 };
@@ -101,6 +115,13 @@ static ngx_command_t ngx_media_srt_commands[] = {
     { ngx_string("media_srt_source_priority"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2,
       ngx_media_srt_priority_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_srt_output"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2|NGX_CONF_TAKE3,
+      ngx_media_srt_output_cmd,
       0,
       0,
       NULL },
@@ -437,6 +458,166 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
 
 extern ngx_module_t  ngx_media_core_module;
 
+/*
+ * media_srt_output <application/stream> <host:port> [streamid]
+ *
+ * The destination consumes the transport bursts the program runtime already
+ * prepares for HLS and recording, so SRT output adds no second preparation
+ * and no per-receiver copy (goal doc 16, 34 item 11).
+ */
+static char *
+ngx_media_srt_output_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_media_srt_main_conf_t    *mcf = conf;
+    ngx_media_srt_output_conf_t  *out;
+    ngx_str_t                    *value = cf->args->elts;
+    u_char                       *colon;
+    ngx_str_t                     resource;
+    ngx_int_t                     port;
+
+    (void) cmd;
+
+    if (mcf->noutputs >= NGX_MEDIA_SRT_MAX_OUTPUTS) {
+        return "too many media_srt_output destinations";
+    }
+
+    resource = value[1];
+
+    if (resource.len == 0) {
+        return "destination stream must not be empty";
+    }
+
+    out = &mcf->outputs[mcf->noutputs];
+
+    ngx_memzero(out, sizeof(ngx_media_srt_output_conf_t));
+
+    colon = ngx_strlchr(resource.data, resource.data + resource.len, '/');
+
+    if (colon == NULL) {
+        return "destination stream must be application/stream";
+    }
+
+    out->application.data = resource.data;
+    out->application.len = (size_t) (colon - resource.data);
+    out->stream.data = colon + 1;
+    out->stream.len = resource.len - out->application.len - 1;
+
+    if (out->application.len == 0 || out->stream.len == 0) {
+        return "destination stream must be application/stream";
+    }
+
+    colon = ngx_strlchr(value[2].data, value[2].data + value[2].len, ':');
+
+    if (colon == NULL) {
+        return "destination address must be host:port";
+    }
+
+    out->host.len = (size_t) (colon - value[2].data);
+
+    port = ngx_atoi(colon + 1, value[2].len - out->host.len - 1);
+
+    if (out->host.len == 0 || port < 1 || port > 65535) {
+        return "destination address must be host:port";
+    }
+
+    /*
+     * The transport layer takes a C string, and the configuration value is a
+     * slice of "host:port": keep a terminated copy of the host.
+     */
+    out->host.data = ngx_pnalloc(cf->pool, out->host.len + 1);
+
+    if (out->host.data == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    ngx_memcpy(out->host.data, value[2].data, out->host.len);
+    out->host.data[out->host.len] = '\0';
+
+    out->port = (ngx_uint_t) port;
+
+    if (cf->args->nelts == 4) {
+
+        if (value[3].len == 0
+            || value[3].len > NGX_MEDIA_SRT_STREAMID_MAX)
+        {
+            return "stream id is too long";
+        }
+
+        out->streamid = value[3];
+    }
+
+    out->max_units = 256;
+    out->max_bytes = 8 * 1024 * 1024;
+    /* short timeouts keep shutdown and reconnect latency bounded */
+    out->connect_timeout = 2000;
+    out->send_timeout = 1000;
+
+    mcf->noutputs++;
+
+    return NGX_CONF_OK;
+}
+
+/* the program runtime hands every prepared burst here */
+static void
+ngx_media_srt_output_sink(void *ctx, ngx_media_stream_t *stream,
+    ngx_media_buf_t *burst, size_t len, ngx_uint_t keyframe)
+{
+    ngx_media_srt_outputs_t  *outs = ctx;
+
+    if (outs == NULL || stream == NULL) {
+        return;
+    }
+
+    (void) ngx_media_srt_outputs_push(outs, &stream->application,
+                                      &stream->name, burst, len, keyframe);
+}
+
+/* destination status changes arrive on their own eventfd */
+static void
+ngx_media_srt_output_handler(ngx_event_t *ev)
+{
+    ngx_connection_t           *c = ev->data;
+    ngx_media_srt_outputs_t    *outs = c->data;
+    ngx_media_srt_out_event_t   events[8];
+    ngx_uint_t                  n, i;
+    u_char                      evbuf[8];
+    ssize_t                     r;
+
+    r = read(outs != NULL ? ngx_media_srt_outputs_notify_fd(outs) : -1, evbuf,
+             sizeof(evbuf));
+    (void) r;
+
+    if (outs == NULL) {
+        return;
+    }
+
+    for ( ;; ) {
+        n = ngx_media_srt_outputs_event_read(outs, events, 8);
+
+        if (n == 0) {
+            break;
+        }
+
+        for (i = 0; i < n; i++) {
+
+            if (events[i].type == NGX_MEDIA_SRT_OUT_EVENT_CONNECTED) {
+                ngx_log_error(NGX_LOG_NOTICE, ev->log, 0,
+                              "media: srt output %ui connected (bursts=%uL "
+                              "bytes=%uL dropped=%uL)",
+                              events[i].index, events[i].sent_bursts,
+                              events[i].sent_bytes, events[i].dropped);
+
+            } else {
+                ngx_log_error(NGX_LOG_WARN, ev->log, 0,
+                              "media: srt output %ui not connected "
+                              "(attempts=%uL dropped=%uL)",
+                              events[i].index, events[i].reconnects,
+                              events[i].dropped);
+            }
+        }
+    }
+}
+
 static void
 ngx_media_srt_stream_policy(ngx_media_stream_t *stream)
 {
@@ -650,6 +831,43 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     ngx_media_srt_connection = c;
     ngx_media_srt_started = 1;
 
+    /* SRT destinations consume the shared preparation of the program runtime */
+    if (mcf->noutputs > 0) {
+        ngx_media_srt_outputs_t  *outs;
+
+        if (ngx_media_srt_outputs_start(&outs, mcf->outputs, mcf->noutputs,
+                                        NGX_MEDIA_SRT_OUT_MAX_EVENTS,
+                                        cycle->log) != NGX_OK)
+        {
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                          "media: could not start the SRT outputs");
+            return NGX_ERROR;
+        }
+
+        ngx_media_srt_outputs = outs;
+
+        c = ngx_get_connection(ngx_media_srt_outputs_notify_fd(outs),
+                               cycle->log);
+
+        if (c != NULL) {
+            c->data = outs;
+            c->read->handler = ngx_media_srt_output_handler;
+            c->read->log = cycle->log;
+
+            if (ngx_add_event(c->read, NGX_READ_EVENT, 0) == NGX_OK) {
+                ngx_media_srt_output_connection = c;
+
+            } else {
+                ngx_free_connection(c);
+            }
+        }
+
+        ngx_media_runtime_set_sink(ngx_media_srt_output_sink, outs);
+
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                      "media: %ui SRT destination(s) started", mcf->noutputs);
+    }
+
     /* the shared runtime owns selection, outputs and recording taps */
     (void) ngx_media_runtime_arm(cycle, cycle->log);
 
@@ -854,15 +1072,35 @@ ngx_media_srt_exit_process(ngx_cycle_t *cycle)
         }
     }
 
+    if (ngx_media_srt_output_connection != NULL) {
+        (void) ngx_del_event(ngx_media_srt_output_connection->read,
+                             NGX_READ_EVENT, 0);
+        ngx_media_srt_output_connection->fd = (ngx_socket_t) -1;
+        ngx_free_connection(ngx_media_srt_output_connection);
+        ngx_media_srt_output_connection = NULL;
+    }
+
+    if (ngx_media_srt_outputs != NULL) {
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                      "media: stopping SRT destinations");
+        ngx_media_runtime_set_sink(NULL, NULL);
+        ngx_media_srt_outputs_stop(ngx_media_srt_outputs);
+        ngx_media_srt_outputs = NULL;
+    }
+
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "media: stopping program runtime");
     ngx_media_runtime_shutdown(cycle->log);
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "media: program runtime stopped");
 
     if (ngx_media_srt_connection != NULL) {
         (void) ngx_del_event(ngx_media_srt_connection->read, NGX_READ_EVENT, 0);
-        ngx_free_connection(ngx_media_srt_connection);
         ngx_media_srt_connection->fd = (ngx_socket_t) -1;
+        ngx_free_connection(ngx_media_srt_connection);
         ngx_media_srt_connection = NULL;
     }
 
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "media: stopping SRT ingest");
     ngx_media_srt_ingest_stop(&ngx_media_srt_ingest);
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "media: SRT ingest stopped");
     ngx_media_srt_shutdown();
 }

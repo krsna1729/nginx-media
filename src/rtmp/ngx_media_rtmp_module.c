@@ -1688,8 +1688,9 @@ ngx_media_rtmp_exit_process(ngx_cycle_t *cycle)
 
     if (ngx_media_rtmp_listener != NULL) {
         (void) ngx_del_event(ngx_media_rtmp_listener->read, NGX_READ_EVENT, 0);
-        ngx_free_connection(ngx_media_rtmp_listener);
+        (void) ngx_close_socket(ngx_media_rtmp_listener->fd);
         ngx_media_rtmp_listener->fd = (ngx_socket_t) -1;
+        ngx_free_connection(ngx_media_rtmp_listener);
         ngx_media_rtmp_listener = NULL;
     }
 
