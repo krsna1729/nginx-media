@@ -165,25 +165,18 @@ ngx_media_srt_haivision_accept(ngx_media_srt_listener_t *listener,
     ngx_msec_t timeout_ms, ngx_log_t *log)
 {
     ngx_media_srt_session_t  *session;
-    struct sockaddr_storage   addr;
     SRTSOCKET                 sock;
-    int                       addrlen, timeout;
 
     if (listener == NULL || timeout_ms > (ngx_msec_t) INT_MAX) {
         return NULL;
     }
 
-    timeout = (int) timeout_ms;
-
-    if (srt_setsockopt(listener->sock, 0, SRTO_RCVTIMEO, &timeout,
-                       sizeof(timeout)) == SRT_ERROR)
-    {
-        return NULL;
-    }
-
-    addrlen = sizeof(addr);
-
-    sock = srt_accept(listener->sock, (struct sockaddr *) &addr, &addrlen);
+    /*
+     * srt_accept() ignores SRTO_RCVTIMEO and blocks forever, which would pin
+     * the helper thread (and the worker shutdown that joins it);
+     * srt_accept_bond() accepts with a real timeout.
+     */
+    sock = srt_accept_bond(&listener->sock, 1, (int64_t) timeout_ms);
     if (sock == SRT_INVALID_SOCK) {
         return NULL;
     }

@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke srt-ingest clean
+.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -13,6 +13,9 @@ smoke:
 
 srt-ingest:
 	tests/integration/srt_ingest.sh
+
+srt-ingest-nginx:
+	tests/integration/srt_ingest_nginx.sh
 
 clean:
 	$(MAKE) -C tests/unit clean

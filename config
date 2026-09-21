@@ -1,8 +1,35 @@
 ngx_addon_name=ngx_media
 
-NGX_ADDON_SRCS="$NGX_ADDON_SRCS \
-                  $ngx_addon_dir/src/core/ngx_media_core_module.c \
-                  $ngx_addon_dir/src/core/ngx_media_buffer.c \
-                  $ngx_addon_dir/src/core/ngx_media_frame.c \
-                  $ngx_addon_dir/src/core/ngx_media_feed.c \
-                  $ngx_addon_dir/src/core/ngx_media_track.c"
+media_srt_libs=`pkg-config --libs srt 2>/dev/null`
+
+if [ -z "$media_srt_libs" ]; then
+    echo "nginx-media: libsrt not found (pkg-config --libs srt)" >&2
+    exit 1
+fi
+
+# The worker hook registers an external eventfd in the event loop, which is
+# only possible after ngx_event_core_module has run ngx_event_process_init.
+# Both modules declare type NGX_CORE_MODULE in their ngx_module_t; declaring
+# them as EVENT here positions them after ngx_event_core_module in the module
+# list, which is what orders their init_process hooks correctly.
+ngx_module_type=EVENT
+ngx_module_name="ngx_media_core_module ngx_media_srt_module"
+ngx_module_deps=
+ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
+                 $ngx_addon_dir/src/core/ngx_media_buffer.c \
+                 $ngx_addon_dir/src/core/ngx_media_frame.c \
+                 $ngx_addon_dir/src/core/ngx_media_feed.c \
+                 $ngx_addon_dir/src/core/ngx_media_track.c \
+                 $ngx_addon_dir/src/mpegts/ngx_media_ts_ingest.c \
+                 $ngx_addon_dir/src/srt/ngx_media_srt_streamid.c \
+                 $ngx_addon_dir/src/srt/ngx_media_srt_transport.c \
+                 $ngx_addon_dir/src/srt/ngx_media_srt_haivision.c \
+                 $ngx_addon_dir/src/srt/ngx_media_srt_ingest.c \
+                 $ngx_addon_dir/src/srt/ngx_media_srt_module.c"
+ngx_module_libs="$media_srt_libs -lpthread"
+ngx_module_order=
+
+CORE_INCS="$CORE_INCS $ngx_addon_dir/src/core $ngx_addon_dir/src/mpegts \
+                     $ngx_addon_dir/src/srt"
+
+. auto/module

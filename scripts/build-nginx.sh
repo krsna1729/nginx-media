@@ -22,7 +22,7 @@ fi
 
 cd "$SRC"
 
-if [ ! -f objs/Makefile ]; then
+if [ ! -f objs/Makefile ] || [ "$ROOT/config" -nt objs/Makefile ]; then
     echo "== configuring nginx $VERSION with the nginx-media module"
     if ! ./configure \
             --prefix="$PREFIX" \

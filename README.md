@@ -26,19 +26,27 @@ Phase 0 — skeleton and invariants (complete):
   `GENERATION_MISMATCH`, with O(1) keyframe resynchronization
 - unit tests (ASan/UBSan clean) and nginx module build integration
 
-Phase 1 — SRT ingest bootstrap (transport path complete):
+Phase 1 — SRT ingest bootstrap (complete):
 
 - Haivision libsrt backend behind the protocol-neutral transport adapter
   (`src/srt/ngx_media_srt_transport.h`), Stream ID parsing for
   `#!::r=live/news,m=publish,s=encoder-a`
 - bounded, spinlock-protected raw-TS handoff queue between transport and
   worker (`src/mpegts/ngx_media_ts_ingest.*`); drop-and-count, never blocks
-- `make srt-ingest` proves the path end to end: ffmpeg publishes MPEG-TS over
-  SRT; the harness parses the Stream ID, the queue carries every byte with
-  zero drops, the consumer drains all of it, and live backend stats report
-  bytes/packets/loss/RTT
-- remaining for phase exit: wiring the listener into the nginx worker
-  (eventfd bridge, source registration) instead of the standalone harness
+- SRT ingest inside nginx: `media_srt_listen host:port;`, worker 0 owns the
+  listener (goal doc 22); a transport helper thread accepts publishers and
+  wakes the worker through an eventfd with compact events (raw Stream ID) and
+  payload chunks; the worker parses/validates the Stream ID, registers the
+  publisher and drains the bounded queue
+- `make srt-ingest` (transport) and `make srt-ingest-nginx` (in-nginx) prove
+  it deterministically with ffmpeg as publisher: parsed source identity,
+  session and drain byte counts agree, zero drops, clean worker shutdown
+- next: phase 2 attaches the MPEG-TS demuxer to the drained chunks
+
+Configuration (phase 1 spelling; the goal document's `media {}` block arrives
+with the stream database):
+
+    media_srt_listen 127.0.0.1:9000;
 
 ## Layout
 
@@ -52,11 +60,12 @@ Phase 1 — SRT ingest bootstrap (transport path complete):
 
 ## Build and test
 
-    make unit        # unit tests, ASan/UBSan; no nginx required
-    make nginx       # fetch pinned nginx source, build it with this module
-    make smoke       # start the built nginx, serve a request, stop it
-    make srt-ingest  # deterministic ffmpeg-over-SRT ingest test (needs libsrt)
+    make unit             # unit tests, ASan/UBSan; no nginx required
+    make nginx            # fetch pinned nginx source, build it with this module
+    make smoke            # start the built nginx, serve a request, stop it
+    make srt-ingest       # transport-level ffmpeg-over-SRT ingest test
+    make srt-ingest-nginx # same publisher, but through nginx + the worker
 
-Requires `cc`, `make`, `curl`, `tar` and, for `make srt-ingest`, `libsrt` and
+Requires `cc`, `make`, `curl`, `tar` and, for the SRT targets, `libsrt` and
 `ffmpeg`. `make nginx` builds nginx 1.30.5 with `--add-module` into `.build/`;
 `clean` removes `.build/`.
