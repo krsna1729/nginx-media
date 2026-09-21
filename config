@@ -98,7 +98,14 @@ esac
 # list, which is what orders their init_process hooks correctly.
 ngx_module_type=EVENT
 ngx_module_name="ngx_media_core_module ngx_media_srt_module ngx_media_rtmp_module"
-ngx_module_deps=
+
+# nginx's generated Makefile does not track an addon's own headers, so editing
+# one rebuilds only the objects whose .c files changed - and an object built
+# against an older struct layout disagrees with its neighbours about offsets.
+# That produced a segfault in ngx_media_destination_find that survived every
+# incremental build and vanished on a clean one.  Declaring the headers here
+# makes any change to them rebuild the module.
+ngx_module_deps=`ls $ngx_addon_dir/src/*/*.h 2>/dev/null | tr '\n' ' '`
 ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/core/ngx_media_runtime.c \
                  $ngx_addon_dir/src/core/ngx_media_owner.c \

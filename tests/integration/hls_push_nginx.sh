@@ -25,21 +25,35 @@ mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/hls" "$RUN/received"
 
 PUB=0
 SINK=0
+TLS_SINK=0
 cleanup() {
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null
     [ "$SINK" != "0" ] && kill -KILL "$SINK" 2>/dev/null
+    [ "$TLS_SINK" != "0" ] && kill -KILL "$TLS_SINK" 2>/dev/null
     pkill -KILL -f 'nginx: ' 2>/dev/null
     return 0
 }
 trap cleanup EXIT
 
-# the sink: accepts PUT, writes to $RUN/received, and can be told to stall
+# a certificate, so the same sink can also speak TLS: the destination has to
+# work over plain and TLS rather than blocking on either
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -keyout "$RUN/key.pem" -out "$RUN/cert.pem" \
+    -subj "/CN=localhost" -addext "subjectAltName=IP:127.0.0.1" \
+    >"$RUN/openssl.log" 2>&1 \
+    || { echo "certificate generation failed" >&2; exit 1; }
+
+# the sink: accepts PUT, writes to $RUN/received, and can be told to stall.
+# Pass tls as a fourth argument, plus cert and key, to serve https.
 cat > "$RUN/sink.py" <<'PYEOF'
-import http.server, os, sys, time
+import http.server, os, ssl, sys, time
 
 root = sys.argv[1]
 mode_file = sys.argv[2]
 port = int(sys.argv[3])
+use_tls = len(sys.argv) > 4 and sys.argv[4] == "tls"
+cert = sys.argv[5] if len(sys.argv) > 5 else None
+key = sys.argv[6] if len(sys.argv) > 6 else None
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_PUT(self):
@@ -62,7 +76,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+
+if use_tls:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert, key)
+    server.socket = ctx.wrap_socket(server.socket, server_side=True)
+
+server.serve_forever()
 PYEOF
 
 python3 "$RUN/sink.py" "$RUN/received" "$RUN/mode" "$SINK_PORT" &
@@ -160,6 +181,46 @@ echo "   program frames: $BEFORE -> $AFTER while the remote is stalled"
 
 [ "${AFTER:-0}" -gt "${BEFORE:-0}" ] \
     || { echo "the program stalled with the remote" >&2; exit 1; }
+
+echo "== the same destination over tls"
+# the capability has to hold in both directions, not only when fetching
+TLS_SINK_PORT=18492
+mkdir -p "$RUN/received-tls"
+
+python3 "$RUN/sink.py" "$RUN/received-tls" "$RUN/mode" "$TLS_SINK_PORT" tls \
+    "$RUN/cert.pem" "$RUN/key.pem" &
+TLS_SINK=$!
+sleep 0.5
+
+STATUS="$(curl -sS -o "$RUN/dest-tls.json" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d "{\"id\":\"cdn-tls\",\"type\":\"hls_push\",\"host\":\"https://127.0.0.1:$TLS_SINK_PORT/\",\"path\":\"$RUN/hls\",\"ca_file\":\"$RUN/cert.pem\"}" \
+    "$API/streams/live/push/destinations")"
+
+cat "$RUN/dest-tls.json"; echo
+
+[ "$STATUS" = "201" ] || { echo "expected 201, got $STATUS" >&2; exit 1; }
+
+for _ in $(seq 1 300); do
+    [ "$(ls "$RUN/received-tls" 2>/dev/null | wc -l)" -ge 1 ] && break
+    sleep 0.1
+done
+
+TLS_RECEIVED="$(ls "$RUN/received-tls" 2>/dev/null | wc -l)"
+
+echo "   the https sink received $TLS_RECEIVED files"
+
+[ "$TLS_RECEIVED" -ge 1 ] \
+    || { echo "nothing was pushed over tls" >&2
+         grep -a 'upload\|TLS\|ktls' "$RUN/logs/error.log" | tail -4 >&2
+         exit 1; }
+
+grep -a 'upload used kTLS sendfile\|userspace TLS' "$RUN/logs/error.log" \
+    | tail -1
+
+curl -fsS -X DELETE "$API/streams/live/push/destinations/cdn-tls" >/dev/null
+kill -KILL "$TLS_SINK" 2>/dev/null
+TLS_SINK=0
 
 echo "== deleting it with uploads in flight"
 rm -f "$RUN/mode"
