@@ -17,6 +17,7 @@
 #include "ngx_media_registry.h"
 #include "ngx_media_destination.h"
 #include "ngx_media_file.h"
+#include "ngx_media_hls_ingest.h"
 #include "ngx_media_hls_pull.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_selector.h"
@@ -885,6 +886,27 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
 
         source = ngx_media_stream_source_find(stream, &id);
 
+    } else if (type == NGX_MEDIA_SOURCE_HLS_PUSH) {
+        ngx_str_t  directory;
+
+        if (ngx_media_api_json_field(&body, "path", &directory) != NGX_OK
+            || directory.len == 0)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"path_required_for_hls_push\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        if (ngx_media_hls_ingest_open(stream, &id, &directory,
+                                      r->connection->log) == NULL)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"hls_ingest_failed\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        source = ngx_media_stream_source_find(stream, &id);
+
     } else if (type == NGX_MEDIA_SOURCE_HLS_PULL) {
         ngx_str_t  url;
 
@@ -896,7 +918,13 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
             return NGX_HTTP_BAD_REQUEST;
         }
 
-        if (ngx_media_hls_pull_open(stream, &id, &url,
+        ngx_str_t  ca_file;
+
+        if (ngx_media_api_json_field(&body, "ca_file", &ca_file) != NGX_OK) {
+            ngx_str_null(&ca_file);
+        }
+
+        if (ngx_media_hls_pull_open(stream, &id, &url, &ca_file,
                                     r->connection->log) == NULL)
         {
             *last = ngx_snprintf(*last, end - *last,
@@ -1262,6 +1290,14 @@ ngx_media_api_destination_create(ngx_http_request_t *r,
 
         if (copy != NULL) {
             destination->path = *copy;
+        }
+    }
+
+    if (ngx_media_api_json_field(&body, "ca_file", &streamid) == NGX_OK) {
+        copy = ngx_media_destination_strdup(stream->pool, &streamid);
+
+        if (copy != NULL) {
+            destination->ca_file = *copy;
         }
     }
 

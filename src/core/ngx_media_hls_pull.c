@@ -20,6 +20,9 @@ typedef struct ngx_media_hls_pull_s {
 
     ngx_str_t                url;         /* the playlist */
     ngx_str_t                base;        /* everything up to the last / */
+    ngx_str_t                ca_file;     /* TLS trust anchor, empty for the
+                                           * system store */
+    ngx_log_t               *log;
 
     pthread_t                thread;
     ngx_uint_t               thread_started;
@@ -163,9 +166,9 @@ ngx_media_hls_pull_thread(void *data)
 
     while (!pull->stopping) {
 
-        if (ngx_media_http_get(&pull->url, playlist,
+        if (ngx_media_http_get(&pull->url, &pull->ca_file, playlist,
                                NGX_MEDIA_HLS_PULL_PLAYLIST_MAX,
-                               &playlist_len, NULL) != NGX_OK)
+                               &playlist_len, pull->log) != NGX_OK)
         {
             pull->failures++;
             (void) ngx_media_health_transport(&pull->source->health, 0,
@@ -220,9 +223,9 @@ ngx_media_hls_pull_thread(void *data)
                     continue;
                 }
 
-                if (ngx_media_http_get(&segment_url, segment,
+                if (ngx_media_http_get(&segment_url, &pull->ca_file, segment,
                                        NGX_MEDIA_HLS_PULL_SEGMENT_MAX,
-                                       &segment_len, NULL) != NGX_OK)
+                                       &segment_len, pull->log) != NGX_OK)
                 {
                     pull->failures++;
                     continue;
@@ -253,7 +256,7 @@ ngx_media_hls_pull_thread(void *data)
 
 ngx_media_hls_pull_t *
 ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
-    const ngx_str_t *url, ngx_log_t *log)
+    const ngx_str_t *url, const ngx_str_t *ca_file, ngx_log_t *log)
 {
     ngx_media_hls_pull_t  *pull;
     ngx_media_ts_sink_t    sink;
@@ -290,6 +293,11 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
 
     pull->url = *copy;
     pull->stream = stream;
+    pull->log = log;
+
+    if (ca_file != NULL && ca_file->len > 0) {
+        pull->ca_file = *ca_file;
+    }
 
     /* relative playlist entries resolve against the playlist's directory */
     slash = (u_char *) strrchr((char *) copy->data, '/');

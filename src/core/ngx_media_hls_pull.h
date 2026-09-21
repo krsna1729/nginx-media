@@ -26,7 +26,8 @@ typedef struct ngx_media_hls_pull_s ngx_media_hls_pull_t;
 
 /* opens url as a source on stream, and starts its reader */
 ngx_media_hls_pull_t *ngx_media_hls_pull_open(ngx_media_stream_t *stream,
-    const ngx_str_t *id, const ngx_str_t *url, ngx_log_t *log);
+    const ngx_str_t *id, const ngx_str_t *url, const ngx_str_t *ca_file,
+    ngx_log_t *log);
 
 /* stops the reader, joins it, and removes the source */
 void ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull);

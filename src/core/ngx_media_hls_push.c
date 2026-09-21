@@ -29,6 +29,8 @@ typedef struct {
 struct ngx_media_hls_push_t {
     ngx_str_t                directory;    /* watched output directory */
     ngx_str_t                url;          /* remote endpoint, with trailing / */
+    ngx_str_t                ca_file;      /* TLS trust anchor, empty for the
+                                            * system store */
     ngx_media_stream_t      *stream;
     ngx_media_destination_t *destination;  /* owner, for teardown */
 
@@ -150,9 +152,10 @@ ngx_media_hls_push_thread(void *data)
 
         for (i = 0; i < nwork; i++) {
 
-            if (ngx_media_http_put_file(&work_push[i]->url, work_item[i].path,
-                                       work_item[i].size,
-                                       ngx_media_hls_push_log) == NGX_OK)
+            if (ngx_media_http_put_file(&work_push[i]->url,
+                                        &work_push[i]->ca_file,
+                                        work_item[i].path, work_item[i].size,
+                                        ngx_media_hls_push_log) == NGX_OK)
             {
                 work_push[i]->uploaded++;
 
@@ -196,6 +199,7 @@ ngx_media_hls_push_add(ngx_media_stream_t *stream,
 
     push->directory = destination->path;
     push->url = destination->host;    /* the endpoint URL */
+    push->ca_file = destination->ca_file;
     push->stream = stream;
     push->destination = destination;
 

@@ -1,5 +1,6 @@
 #include "ngx_media_runtime.h"
 #include "ngx_media_file.h"
+#include "ngx_media_hls_ingest.h"
 #include "ngx_media_hls_pull.h"
 #include "ngx_media_hls_push.h"
 
@@ -1195,6 +1196,7 @@ ngx_media_runtime_shutdown(ngx_log_t *log)
 {
     ngx_media_hls_push_stop();
     ngx_media_hls_pull_stop_all();
+    ngx_media_hls_ingest_stop_all();
 
     ngx_uint_t  i;
 

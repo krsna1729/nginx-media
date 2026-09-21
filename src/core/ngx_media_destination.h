@@ -32,6 +32,7 @@ typedef struct ngx_media_destination_s {
     ngx_uint_t              port;
     ngx_str_t               streamid;   /* optional publish stream id */
     ngx_str_t               path;       /* filesystem destinations */
+    ngx_str_t               ca_file;    /* TLS endpoints: trust anchor */
 
     uint64_t                revision;   /* bumped by every mutation */
     unsigned                enabled:1;  /* desired state */

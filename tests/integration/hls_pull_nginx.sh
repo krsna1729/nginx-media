@@ -45,12 +45,25 @@ media_srt_source_priority origin-encoder 100;
 
 http {
     access_log off;
+
+    # the origin serves TLS, so the pull source has to speak https and trust
+    # a private CA: this is the capability the module must not block on
     server {
-        listen 127.0.0.1:$ORIGIN_HTTP;
+        listen 127.0.0.1:$ORIGIN_HTTP ssl;
+        ssl_certificate $RUN/cert.pem;
+        ssl_certificate_key $RUN/key.pem;
+        ssl_conf_command Options KTLS;
         location /hls/ { alias $RUN/origin/hls/; }
     }
 }
 EOF
+
+echo "== generating a certificate for the origin"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -keyout "$RUN/key.pem" -out "$RUN/cert.pem" \
+    -subj "/CN=localhost" -addext "subjectAltName=IP:127.0.0.1" \
+    >"$RUN/openssl.log" 2>&1 \
+    || { echo "certificate generation failed" >&2; exit 1; }
 
 cat > "$RUN/puller/conf/nginx.conf" <<EOF
 worker_processes 1;
@@ -83,12 +96,23 @@ sleep 0.5
 API="http://127.0.0.1:$PULL_HTTP/media/api/v1"
 
 echo "== the puller starts with a live source of its own"
-curl -fsS -X POST -H 'Content-Type: application/json' \
-    -d '{"application":"live","name":"relay"}' "$API/streams" >/dev/null
+CREATE="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d '{"application":"live","name":"relay"}' "$API/streams")"
 
-curl -fsS -X POST -H 'Content-Type: application/json' \
+echo "   stream create: $CREATE"
+
+[ "$CREATE" = "201" ] || { echo "could not create the stream" >&2
+                           tail -3 "$RUN/puller/logs/error.log" >&2; exit 1; }
+
+SRC="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
     -d '{"id":"live-encoder","type":"srt","priority":200}' \
-    "$API/streams/live/relay/sources" >/dev/null
+    "$API/streams/live/relay/sources")"
+
+echo "   source create: $SRC"
+
+[ "$SRC" = "201" ] || { echo "could not create the source" >&2; exit 1; }
 
 timeout 60 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
@@ -120,7 +144,7 @@ echo "   origin playlist is up"
 echo "== an hls pull source is added at runtime"
 STATUS="$(curl -sS -o "$RUN/pull.json" -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' \
-    -d "{\"id\":\"origin-hls\",\"type\":\"hls_pull\",\"path\":\"http://127.0.0.1:$ORIGIN_HTTP/hls/index.m3u8\"}" \
+    -d "{\"id\":\"origin-hls\",\"type\":\"hls_pull\",\"path\":\"https://127.0.0.1:$ORIGIN_HTTP/hls/index.m3u8\",\"ca_file\":\"$RUN/cert.pem\"}" \
     "$API/streams/live/relay/sources")"
 
 cat "$RUN/pull.json"; echo
