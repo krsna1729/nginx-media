@@ -5,6 +5,8 @@
 size_t ngx_media_test_allocs;
 size_t ngx_media_test_frees;
 
+int ngx_media_test_fail_alloc;
+
 /*
  * When NGX_MEDIA_TEST_POISON is set, allocations are 0xAA filled and carry a
  * poisoned tail: a buffer handed to a syscall without a terminator then reads
@@ -19,6 +21,10 @@ ngx_media_test_alloc(size_t size, ngx_log_t *log)
     void  *p;
 
     (void) log;
+
+    if (ngx_media_test_fail_alloc) {
+        return NULL;
+    }
 
     if (ngx_media_test_poison < 0) {
         const char  *env = getenv("NGX_MEDIA_TEST_POISON");

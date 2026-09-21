@@ -79,6 +79,9 @@ struct ngx_queue_s {
 extern size_t ngx_media_test_allocs;
 extern size_t ngx_media_test_frees;
 
+/* set to 1 to make every allocation fail, for NULL handling tests */
+extern int ngx_media_test_fail_alloc;
+
 void *ngx_media_test_alloc(size_t size, ngx_log_t *log);
 void ngx_media_test_free(void *ptr);
 
