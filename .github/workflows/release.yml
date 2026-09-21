@@ -49,6 +49,7 @@ jobs:
           make ts-fixture
           make source-switch
           make api-switch
+          make api-graph
           make failover
           make hls
           make rtmp

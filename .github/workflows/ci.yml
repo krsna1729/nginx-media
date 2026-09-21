@@ -50,6 +50,8 @@ jobs:
       - name: Integration - selection and outputs
         run: |
           make source-switch
+          make api-switch
+          make api-graph
           make failover
           make hls
           make rtmp

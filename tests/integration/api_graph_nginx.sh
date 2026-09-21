@@ -146,39 +146,6 @@ grep -q '"failure_timeout_ms":2500' <(curl -fsS "$API/streams/live/news") \
 
 echo "   refused with 409, newer state intact"
 
-echo "== a publisher lands on the api-created stream"
-timeout 40 ffmpeg -hide_banner -loglevel error -re \
-    -f lavfi -i "testsrc2=size=320x240:rate=25" \
-    -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
-    -t 12 -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3Dencoder-a" \
-    >"$RUN/pub.log" 2>&1 &
-PUB=$!
-
-for _ in $(seq 1 100); do
-    grep -q 'srt source open app=live stream=news' "$RUN/logs/error.log" \
-        2>/dev/null && break
-    sleep 0.1
-done
-
-grep -q 'srt source open app=live stream=news' "$RUN/logs/error.log" \
-    || { cat "$RUN/pub.log"; echo "the publisher did not attach" >&2; exit 1; }
-
-# the playlist only appears once a segment closes, so this is checked while
-# the publisher is still running
-for _ in $(seq 1 200); do
-    [ -f "$RUN/hls/index.m3u8" ] \
-        && [ "$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" || true)" -ge 1 ] \
-        && break
-    sleep 0.1
-done
-
-kill -KILL "$PUB" 2>/dev/null
-wait "$PUB" 2>/dev/null
-PUB=0
-
-echo "   the publisher attached to the api-created stream"
-
 echo "== sources are runtime objects too"
 STATUS="$(curl -sS -o "$RUN/src1.json" -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' \
@@ -234,6 +201,39 @@ printf '%s' "$SOURCES" | grep -q '"id":"encoder-b"' \
     || { echo "the backup source was not registered" >&2; exit 1; }
 
 echo "   both sources live, the original still on air"
+
+echo "== a publisher lands on the api-created stream"
+timeout 40 ffmpeg -hide_banner -loglevel error -re \
+    -f lavfi -i "testsrc2=size=320x240:rate=25" \
+    -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
+    -t 12 -f mpegts \
+    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3Dencoder-a" \
+    >"$RUN/pub.log" 2>&1 &
+PUB=$!
+
+for _ in $(seq 1 100); do
+    grep -q 'srt source open app=live stream=news' "$RUN/logs/error.log" \
+        2>/dev/null && break
+    sleep 0.1
+done
+
+grep -q 'srt source open app=live stream=news' "$RUN/logs/error.log" \
+    || { cat "$RUN/pub.log"; echo "the publisher did not attach" >&2; exit 1; }
+
+# the playlist only appears once a segment closes, so this is checked while
+# the publisher is still running
+for _ in $(seq 1 200); do
+    [ -f "$RUN/hls/index.m3u8" ] \
+        && [ "$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" || true)" -ge 1 ] \
+        && break
+    sleep 0.1
+done
+
+kill -KILL "$PUB" 2>/dev/null
+wait "$PUB" 2>/dev/null
+PUB=0
+
+echo "   the publisher attached to the api-created stream"
 
 echo "== disabling a source takes it out of selection"
 curl -fsS -X POST "$API/streams/live/news/sources/encoder-b/disable" >/dev/null
