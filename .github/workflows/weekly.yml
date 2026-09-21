@@ -44,6 +44,9 @@ jobs:
       - name: Fault injection
         run: make fault
 
+      - name: Single-host impairment (network namespaces and netem)
+        run: make netns
+
       - name: Transport backend qualification (both backends)
         run: make srt-qualify
 
