@@ -7,6 +7,9 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -70,10 +73,9 @@ ngx_media_hls_push_put(const ngx_str_t *url, const u_char *path,
     ngx_int_t   port = 80;
     ngx_int_t   fd;
     struct sockaddr_in  addr;
-    FILE       *file;
-    u_char      buf[16384];
-    size_t      n;
-    off_t       sent = 0;
+    ngx_int_t   file_fd;
+    off_t       sent = 0, offset = 0;
+    ssize_t     n;
     u_char      header[1024];
     int         header_len;
     u_char      response[512];
@@ -179,8 +181,8 @@ ngx_media_hls_push_put(const ngx_str_t *url, const u_char *path,
         return NGX_ERROR;
     }
 
-    file = fopen((char *) path, "rb");
-    if (file == NULL) {
+    file_fd = open((char *) path, O_RDONLY);
+    if (file_fd < 0) {
         (void) close(fd);
         return NGX_ERROR;
     }
@@ -196,32 +198,46 @@ ngx_media_hls_push_put(const ngx_str_t *url, const u_char *path,
                           (long long) size);
 
     if (write(fd, header, (size_t) header_len) != header_len) {
-        fclose(file);
+        (void) close(file_fd);
         (void) close(fd);
         return NGX_ERROR;
     }
 
-    while ((n = fread(buf, 1, sizeof(buf), file)) > 0) {
+    /*
+     * The body goes out with sendfile: the page cache hands its pages
+     * straight to the socket, with no user-space bounce.  sendfile is not a
+     * server-side privilege - it works on any socket, including this client
+     * connection - so an upload costs one kernel-side copy per destination
+     * instead of two.  It is also why the body is not buffered here: a
+     * fread/write loop would undo exactly the saving this is for.
+     */
+    while (sent < size) {
 
-        if (write(fd, buf, n) != (ssize_t) n) {
-            fclose(file);
-            (void) close(fd);
-            return NGX_ERROR;
+        n = sendfile(fd, file_fd, &offset, (size_t) (size - sent));
+
+        if (n > 0) {
+            sent += n;
+            continue;
         }
 
-        sent += (off_t) n;
+        if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
+            continue;
+        }
+
+        break;
     }
 
-    /* a short read would upload a truncated segment: fail rather than lie */
+    /* a short transfer would publish a truncated segment: fail rather than lie */
     if (sent != size) {
         ngx_log_error(NGX_LOG_WARN, log, 0,
-                      "media: hls push read %O of %O bytes from %s",
+                      "media: hls push sent %O of %O bytes from %s",
                       sent, size, path);
-        fclose(file);
+        (void) close(file_fd);
+        (void) close(fd);
         return NGX_ERROR;
     }
 
-    fclose(file);
+    (void) close(file_fd);
 
     rn = read(fd, response, sizeof(response) - 1);
     (void) close(fd);
@@ -282,23 +298,36 @@ ngx_media_hls_push_enqueue(ngx_media_hls_push_t *push, const u_char *path,
     return NGX_OK;
 }
 
-/* one uploader: drains every destination's queue, so the pool is shared */
+/*
+ * One uploader: dequeues under the locks, then uploads with none held.
+ *
+ * The separation is load-bearing.  An upload can block for as long as the
+ * remote takes - that is the whole point of the bounded queue - so doing it
+ * while holding the destination list would block the runtime tick's scan,
+ * which takes the same lock, and the worker would stop serving.  That is
+ * exactly what happened when the first version uploaded inside the loop.
+ */
 static void *
 ngx_media_hls_push_thread(void *data)
 {
-    ngx_media_hls_push_item_t  item;
     ngx_media_hls_push_t      *push;
-    ngx_uint_t                 got;
+    ngx_media_hls_push_t      *work_push[NGX_MEDIA_HLS_PUSH_POOL * 2];
+    ngx_media_hls_push_item_t  work_item[NGX_MEDIA_HLS_PUSH_POOL * 2];
+    ngx_uint_t                 nwork, i, got;
 
     (void) data;
 
     for ( ;; ) {
 
-        got = 0;
+        nwork = 0;
 
         (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
 
         for (push = ngx_media_hls_push_all; push != NULL; push = push->next) {
+
+            if (nwork >= NGX_MEDIA_HLS_PUSH_POOL * 2) {
+                break;
+            }
 
             (void) pthread_mutex_lock(&push->mutex);
 
@@ -307,26 +336,34 @@ ngx_media_hls_push_thread(void *data)
                 continue;
             }
 
-            item = push->queue[push->head];
+            work_item[nwork] = push->queue[push->head];
+            work_push[nwork] = push;
+            nwork++;
+
             push->head = (push->head + 1) % NGX_MEDIA_HLS_PUSH_QUEUE;
             push->count--;
-            got = 1;
 
             (void) pthread_mutex_unlock(&push->mutex);
-
-            if (ngx_media_hls_push_put(&push->url, item.path, item.size,
-                                       ngx_media_hls_push_log) == NGX_OK)
-            {
-                push->uploaded++;
-
-            } else {
-                push->failed++;
-            }
         }
 
         (void) pthread_mutex_unlock(&ngx_media_hls_push_all_mutex);
 
-        if (!got) {
+        got = nwork;
+
+        for (i = 0; i < nwork; i++) {
+
+            if (ngx_media_hls_push_put(&work_push[i]->url, work_item[i].path,
+                                       work_item[i].size,
+                                       ngx_media_hls_push_log) == NGX_OK)
+            {
+                work_push[i]->uploaded++;
+
+            } else {
+                work_push[i]->failed++;
+            }
+        }
+
+        if (got == 0) {
 
             if (ngx_media_hls_push_stopping) {
                 return NULL;

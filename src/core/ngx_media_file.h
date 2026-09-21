@@ -19,7 +19,7 @@
 #define NGX_MEDIA_FILE_ONCE    0
 #define NGX_MEDIA_FILE_LOOP    1
 
-typedef struct {
+typedef struct ngx_media_file_source_s {
     ngx_media_stream_t      *stream;
     ngx_media_source_t      *source;
     ngx_media_ts_demux_t     demux;
@@ -31,6 +31,9 @@ typedef struct {
     uint64_t                 bytes_read;
     uint64_t                 frames;
     ngx_uint_t               finished;
+
+    /* the runtime tick advances every open file source */
+    struct ngx_media_file_source_s  *next;
 } ngx_media_file_source_t;
 
 /*
@@ -52,5 +55,15 @@ ngx_int_t ngx_media_file_advance(ngx_media_file_source_t *source,
     ngx_log_t *log);
 
 void ngx_media_file_close(ngx_media_file_source_t *source);
+
+/*
+ * Advances every open file source by one bounded chunk.  Called from the
+ * runtime tick: pacing is the tick, never a sleep, so a slow or large file
+ * cannot stall a worker.
+ */
+void ngx_media_file_advance_all(ngx_log_t *log);
+
+/* open file sources, for diagnostics */
+ngx_uint_t ngx_media_file_count(void);
 
 #endif /* NGX_MEDIA_FILE_H */

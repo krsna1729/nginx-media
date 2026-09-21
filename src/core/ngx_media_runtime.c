@@ -1,4 +1,5 @@
 #include "ngx_media_runtime.h"
+#include "ngx_media_file.h"
 #include "ngx_media_hls_push.h"
 
 #include <ngx_event.h>
@@ -982,6 +983,13 @@ ngx_media_runtime_tick(ngx_log_t *log)
                            res.active_eligible, res.best != NULL,
                            res.emergency != NULL);
         }
+
+        /*
+         * File sources (goal doc 21) are paced by this tick: one bounded
+         * chunk each, so a large file cannot stall a worker and the frames
+         * enter the program through the normal source gate.
+         */
+        ngx_media_file_advance_all(log);
 
         /*
          * Push destinations watch the HLS directory rather than tapping the

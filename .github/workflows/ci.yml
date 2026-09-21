@@ -55,6 +55,7 @@ jobs:
           make failover
           make hls
           make hls-push
+          make file-source
           make rtmp
           make srt-output
 

@@ -4,9 +4,13 @@
 #include "ngx_media_stream.h"
 
 #include <fcntl.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #define NGX_MEDIA_FILE_CHUNK  65536
+
+static ngx_media_file_source_t  *ngx_media_file_all;
+static pthread_mutex_t           ngx_media_file_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void
 ngx_media_file_sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
@@ -116,6 +120,11 @@ ngx_media_file_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     ngx_media_health_transport(&source->source->health, 1, ngx_current_msec);
     ngx_media_source_touch(source->source);
 
+    (void) pthread_mutex_lock(&ngx_media_file_mutex);
+    source->next = ngx_media_file_all;
+    ngx_media_file_all = source;
+    (void) pthread_mutex_unlock(&ngx_media_file_mutex);
+
     ngx_log_error(NGX_LOG_NOTICE, log, 0,
                   "media: file source %V opened for %V/%V from %V", id,
                   &stream->application, &stream->name, &source->path);
@@ -190,9 +199,23 @@ ngx_media_file_advance(ngx_media_file_source_t *source, ngx_log_t *log)
 void
 ngx_media_file_close(ngx_media_file_source_t *source)
 {
+    ngx_media_file_source_t **link;
+
     if (source == NULL) {
         return;
     }
+
+    (void) pthread_mutex_lock(&ngx_media_file_mutex);
+
+    for (link = &ngx_media_file_all; *link != NULL; link = &(*link)->next) {
+
+        if (*link == source) {
+            *link = source->next;
+            break;
+        }
+    }
+
+    (void) pthread_mutex_unlock(&ngx_media_file_mutex);
 
     if (source->file.fd != NGX_INVALID_FILE) {
         (void) ngx_close_file(source->file.fd);
@@ -207,4 +230,38 @@ ngx_media_file_close(ngx_media_file_source_t *source)
     }
 
     source->finished = 1;
+}
+
+void
+ngx_media_file_advance_all(ngx_log_t *log)
+{
+    ngx_media_file_source_t  *source;
+
+    (void) pthread_mutex_lock(&ngx_media_file_mutex);
+
+    for (source = ngx_media_file_all; source != NULL; source = source->next) {
+
+        if (!source->finished) {
+            (void) ngx_media_file_advance(source, log);
+        }
+    }
+
+    (void) pthread_mutex_unlock(&ngx_media_file_mutex);
+}
+
+ngx_uint_t
+ngx_media_file_count(void)
+{
+    ngx_media_file_source_t  *source;
+    ngx_uint_t                count = 0;
+
+    (void) pthread_mutex_lock(&ngx_media_file_mutex);
+
+    for (source = ngx_media_file_all; source != NULL; source = source->next) {
+        count++;
+    }
+
+    (void) pthread_mutex_unlock(&ngx_media_file_mutex);
+
+    return count;
 }

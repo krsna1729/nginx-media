@@ -16,6 +16,7 @@
 #include "ngx_media_platform.h"
 #include "ngx_media_registry.h"
 #include "ngx_media_destination.h"
+#include "ngx_media_file.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_selector.h"
 
@@ -857,8 +858,36 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
         return NGX_HTTP_OK;
     }
 
-    source = ngx_media_stream_source_add(stream, &id, type, priority,
-                                         r->connection->log);
+    /*
+     * A file source has to be opened, not merely registered: it owns a reader
+     * that the runtime tick advances.  Everything else is a label a
+     * transport attaches to later.
+     */
+    if (type == NGX_MEDIA_SOURCE_FILE) {
+        ngx_str_t  path;
+
+        if (ngx_media_api_json_field(&body, "path", &path) != NGX_OK
+            || path.len == 0)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"path_required_for_file_source\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        if (ngx_media_file_open(stream, &id, &path, NGX_MEDIA_FILE_ONCE,
+                                r->connection->log) == NULL)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"file_open_failed\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        source = ngx_media_stream_source_find(stream, &id);
+
+    } else {
+        source = ngx_media_stream_source_add(stream, &id, type, priority,
+                                             r->connection->log);
+    }
 
     if (source == NULL) {
         *last = ngx_snprintf(*last, end - *last,
