@@ -1,6 +1,6 @@
 # nginx-media
 
-Documentation: [architecture](docs/architecture.md) | [configuration](docs/configuration.md) | [control API](docs/api.md).
+Documentation: [architecture](docs/architecture.md) | [configuration](docs/configuration.md) | [control API](docs/api.md) | [Zig analysis](docs/zig-analysis.md).
 
 Production-grade media subsystem for NGINX: redundant live and file inputs,
 one logical program, and bounded fanout to SRT, RTMP, HLS and recording.
