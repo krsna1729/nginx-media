@@ -1,0 +1,8 @@
+ngx_addon_name=ngx_media
+
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS \
+                  $ngx_addon_dir/src/core/ngx_media_core_module.c \
+                  $ngx_addon_dir/src/core/ngx_media_buffer.c \
+                  $ngx_addon_dir/src/core/ngx_media_frame.c \
+                  $ngx_addon_dir/src/core/ngx_media_feed.c \
+                  $ngx_addon_dir/src/core/ngx_media_track.c"

@@ -1,0 +1,99 @@
+#ifndef NGX_MEDIA_FEED_H
+#define NGX_MEDIA_FEED_H
+
+#include "ngx_media_platform.h"
+#include "ngx_media_frame.h"
+
+/*
+ * Bounded program feed (goal doc 13).
+ *
+ * A feed is a single-producer ring of frame descriptors with hard retention
+ * ceilings.  Payloads are shared by reference: publishing and reading never
+ * copy payload bytes.  Consumers hold a cursor, never a private media queue.
+ *
+ *   cursor = { generation, next_sequence }
+ *
+ * read(feed, cursor, max_units, max_bytes) returns one of
+ *   BATCH                - descriptors copied to the output, payload refs held
+ *   EMPTY                - the consumer has caught up
+ *   OVERRUN              - the consumer fell behind the retained tail
+ *   GENERATION_MISMATCH  - cursor belongs to another generation or ring
+ *
+ * OVERRUN and GENERATION_MISMATCH leave the cursor untouched; the consumer
+ * recovers with ngx_media_feed_resync().  read() guarantees progress: the
+ * first available unit is always returned even when it alone exceeds
+ * max_bytes, so a budget smaller than one frame cannot livelock a consumer.
+ *
+ * Retained media is bounded by units, bytes and media age.  Age is measured
+ * from the publish time of the newest unit, which the producer supplies, so
+ * the feed itself never reads a wall clock.
+ */
+
+#define NGX_MEDIA_FEED_ERROR               0
+#define NGX_MEDIA_FEED_BATCH               1
+#define NGX_MEDIA_FEED_EMPTY               2
+#define NGX_MEDIA_FEED_OVERRUN             3
+#define NGX_MEDIA_FEED_GENERATION_MISMATCH 4
+
+#define NGX_MEDIA_FEED_RESYNC_LATEST       0
+#define NGX_MEDIA_FEED_RESYNC_KEYFRAME     1
+
+#define NGX_MEDIA_FEED_NO_KEYFRAME         ((uint64_t) -1)
+
+typedef struct {
+    uint64_t  generation;
+    uint64_t  next_sequence;
+} ngx_media_cursor_t;
+
+typedef struct {
+    ngx_uint_t  max_units;  /* hard retained-unit ceiling, > 0 */
+    size_t      max_bytes;  /* hard retained-byte ceiling, 0 = unbounded */
+    ngx_msec_t  max_age;    /* retained media age, 0 = unbounded */
+} ngx_media_feed_conf_t;
+
+typedef struct {
+    ngx_media_frame_t  frame;
+    ngx_msec_t         publish_time;
+} ngx_media_feed_slot_t;
+
+typedef struct {
+    ngx_media_feed_slot_t  *slots;
+    ngx_uint_t              capacity;   /* power of two, >= max_units */
+    ngx_uint_t              max_units;
+    size_t                  max_bytes;
+    ngx_msec_t              max_age;
+    uint64_t                generation; /* starts at 1; 0 is never valid */
+    uint64_t                head;       /* next publish sequence */
+    uint64_t                tail;       /* oldest retained sequence */
+    uint64_t                last_keyframe;
+    size_t                  bytes;      /* retained payload bytes */
+    unsigned                has_keyframe:1;
+} ngx_media_feed_t;
+
+ngx_int_t ngx_media_feed_init(ngx_media_feed_t *feed,
+    const ngx_media_feed_conf_t *conf, ngx_log_t *log);
+void ngx_media_feed_destroy(ngx_media_feed_t *feed);
+
+ngx_int_t ngx_media_feed_publish(ngx_media_feed_t *feed,
+    const ngx_media_frame_t *frame, ngx_msec_t now);
+
+ngx_uint_t ngx_media_feed_read(const ngx_media_feed_t *feed,
+    ngx_media_cursor_t *cursor, ngx_uint_t max_units, size_t max_bytes,
+    ngx_media_frame_t *out, ngx_uint_t *out_count);
+
+void ngx_media_feed_release(ngx_media_frame_t *frames, ngx_uint_t count);
+
+void ngx_media_feed_discontinuity(ngx_media_feed_t *feed);
+void ngx_media_feed_cursor_init(const ngx_media_feed_t *feed,
+    ngx_media_cursor_t *cursor);
+ngx_int_t ngx_media_feed_resync(const ngx_media_feed_t *feed,
+    ngx_media_cursor_t *cursor, ngx_uint_t mode);
+
+uint64_t ngx_media_feed_generation(const ngx_media_feed_t *feed);
+uint64_t ngx_media_feed_head(const ngx_media_feed_t *feed);
+uint64_t ngx_media_feed_tail(const ngx_media_feed_t *feed);
+ngx_uint_t ngx_media_feed_units(const ngx_media_feed_t *feed);
+size_t ngx_media_feed_bytes(const ngx_media_feed_t *feed);
+uint64_t ngx_media_feed_last_keyframe(const ngx_media_feed_t *feed);
+
+#endif /* NGX_MEDIA_FEED_H */
