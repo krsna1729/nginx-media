@@ -68,6 +68,27 @@ Phase 2 — MPEG-TS normalization (complete):
   errors; `make srt-ingest-nginx`: 3 s of H.264+AAC over SRT yields 65 video
   and 110 audio frames, 3 keyframes and zero errors inside nginx
 
+Phase 3 — logical streams and redundant sources (core complete):
+
+- `src/core/ngx_media_stream.*`: logical stream with a source registry, the
+  program feed and the single write path into it; a stream has one active
+  source, any number of hot standbys
+- `src/core/ngx_media_source.*`: complete-GOP standby cache (starts at a video
+  keyframe, replaced wholesale by a newer keyframe, cleared — never kept
+  partial — when a ceiling is hit) plus short-lived write leases
+- `src/core/ngx_media_timeline.*`: program time stays monotonic across
+  switches (`offset = last_program_dts + 1 - first_new_source_dts`), preserves
+  the composition offset, and re-anchors instead of regressing on source clock
+  discontinuities and 33-bit timestamp wrap
+- a promotion completes only at a decodable boundary and only after the
+  demoted source's leases drain; a real switch bumps the generation and
+  invalidates readers' cursors (the initial activation is not a switch)
+- `make source-switch`: two live sources demuxed from real H.264+AAC fixtures,
+  both hot; one manual promotion at frame 41 → generation 2, 0 DTS regressions
+  over 475 program frames, the switch starts on a keyframe, the demoted source
+  stops writing but keeps a hot 77-unit GOP cache
+- next: wiring streams/sources into the SRT worker and the control API
+
 ## Layout
 
     config                nginx add-on config
@@ -87,6 +108,7 @@ Phase 2 — MPEG-TS normalization (complete):
     make srt-ingest       # transport-level ffmpeg-over-SRT ingest test
     make srt-ingest-nginx # SRT ingest through nginx, demuxed into frames
     make ts-fixture       # demux ffmpeg-generated H.264/H.265 MPEG-TS files
+    make source-switch    # two hot sources, manual switch, timeline checks
 
 Requires `cc`, `make`, `curl`, `tar`, `ffmpeg` and (for the SRT targets)
 `libsrt`. `make nginx` builds nginx 1.30.5 with `--add-module` into `.build/`;

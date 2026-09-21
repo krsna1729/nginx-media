@@ -47,23 +47,6 @@ typedef struct ngx_media_stream_s ngx_media_stream_t;
 typedef struct ngx_media_source_s ngx_media_source_t;
 typedef struct ngx_media_source_ops_s ngx_media_source_ops_t;
 
-/*
- * Timeline object (goal doc 7).  Program time must remain monotonic across
- * source switches:
- *
- *   offset = last_program_dts + 1 - first_new_source_dts
- *   program_dts = source_dts + offset
- *
- * and program_pts - program_dts == source_pts - source_dts must be preserved.
- * The timeline belongs to the logical stream, never to an input protocol.
- */
-typedef struct {
-    int64_t   offset;
-    int64_t   last_program_dts;
-    int64_t   last_program_pts;
-    uint64_t  switches;
-} ngx_media_timeline_t;
-
 /* selection policy (goal doc 8) */
 typedef struct {
     ngx_msec_t  failure_timeout;
@@ -71,6 +54,34 @@ typedef struct {
     ngx_uint_t  switch_keyframe;
     ngx_uint_t  switchback;        /* NGX_MEDIA_SWITCHBACK_* */
 } ngx_media_selector_t;
+
+/* timeline (goal doc 7): program time must stay monotonic across switches */
+typedef struct {
+    int64_t   offset;            /* program_dts = source_dts + offset */
+    int64_t   last_program_dts;
+    int64_t   last_program_pts;
+    uint64_t  switches;
+    uint64_t  resyncs;           /* re-anchors caused by source discontinuities */
+    unsigned  anchored:1;
+    unsigned  has_program:1;
+} ngx_media_timeline_t;
+
+/*
+ * Complete-GOP standby cache (goal doc 6).  It starts at a video keyframe, is
+ * replaced wholesale by a newer keyframe, and is cleared (never kept partial)
+ * when a hard ceiling is reached.
+ */
+typedef struct {
+    ngx_media_frame_t  *units;
+    ngx_uint_t          capacity;    /* power of two */
+    ngx_uint_t          max_units;
+    size_t              max_bytes;
+    uint64_t            head;
+    uint64_t            tail;
+    size_t              bytes;
+    uint64_t            overflows;   /* resets caused by the ceilings */
+    unsigned            have_boundary:1;
+} ngx_media_preroll_t;
 
 /* logical stream (goal doc 4.3) */
 struct ngx_media_stream_s {
@@ -84,6 +95,8 @@ struct ngx_media_stream_s {
     ngx_media_selector_t    selector;
     ngx_media_feed_t        program_feed;
     ngx_uint_t              generation;
+    uint64_t                switches;
+    uint64_t                program_frames;
     unsigned                running:1;
 };
 
@@ -100,9 +113,17 @@ struct ngx_media_source_s {
     ngx_media_trackset_t   *tracks;
     ngx_media_source_ops_t *ops;
     void                   *input_ctx;
+    ngx_queue_t             queue;     /* link in the stream's source queue */
+    ngx_media_preroll_t     preroll;
+    ngx_uint_t              writers;   /* outstanding write leases */
+    uint64_t                frames_in;
+    uint64_t                frames_out;
     unsigned                healthy:1;
     unsigned                eligible:1;
     unsigned                active:1;
+    unsigned                has_video:1;
+    unsigned                pending_switch:1;
+    unsigned                pending_remove:1;
 };
 
 /* application: runtime graph root (normative revision) */

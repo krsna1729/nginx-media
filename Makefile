@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture clean
+.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -19,6 +19,9 @@ srt-ingest-nginx:
 
 ts-fixture:
 	tests/integration/ts_fixture.sh
+
+source-switch:
+	tests/integration/source_switch.sh
 
 clean:
 	$(MAKE) -C tests/unit clean
