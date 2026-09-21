@@ -17,7 +17,11 @@
 #include "ngx_media_registry.h"
 #include "ngx_media_destination.h"
 #include "ngx_media_file.h"
+#include "ngx_media_compat.h"
 #include "ngx_media_hls_ingest.h"
+
+#include <fcntl.h>
+#include <unistd.h>
 #include "ngx_media_hls_pull.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_selector.h"
@@ -32,8 +36,19 @@
 
 static ngx_str_t  ngx_media_api_none = ngx_string("none");
 
+typedef struct {
+    ngx_str_t   ingest_dir;    /* where media_hls_ingest stores segments */
+} ngx_media_api_loc_conf_t;
+
+static void *ngx_media_api_create_loc_conf(ngx_conf_t *cf);
+static char *ngx_media_api_merge_loc_conf(ngx_conf_t *cf, void *parent,
+    void *child);
 static char *ngx_media_api_set(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_media_hls_ingest_set(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static ngx_int_t ngx_media_hls_ingest_handler(ngx_http_request_t *r);
+static void ngx_media_hls_ingest_ready(ngx_http_request_t *r);
 static ngx_int_t ngx_media_api_init(ngx_conf_t *cf);
 static ngx_int_t ngx_media_api_handler(ngx_http_request_t *r);
 static void ngx_media_api_body_ready(ngx_http_request_t *r);
@@ -78,6 +93,21 @@ static ngx_command_t ngx_media_api_commands[] = {
       0,
       NULL },
 
+    /*
+     * media_hls_ingest <directory>;
+     *
+     * Accepts HLS segments pushed to us - someone else's encoder PUTs them -
+     * and stores them where a source of type hls_push is watching.  The two
+     * halves stay separate on purpose: this endpoint does not know what reads
+     * the directory, so an upload arriving by any other means works too.
+     */
+    { ngx_string("media_hls_ingest"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_media_hls_ingest_set,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+
       ngx_null_command
 };
 
@@ -91,8 +121,8 @@ static ngx_http_module_t ngx_media_api_module_ctx = {
     NULL,                          /* create server configuration */
     NULL,                          /* merge server configuration */
 
-    NULL,                          /* create location configuration */
-    NULL                           /* merge location configuration */
+    ngx_media_api_create_loc_conf, /* create location configuration */
+    ngx_media_api_merge_loc_conf   /* merge location configuration */
 };
 
 ngx_module_t ngx_media_api_module = {
@@ -122,6 +152,160 @@ ngx_media_api_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     clcf->handler = ngx_media_api_handler;
 
     return NGX_CONF_OK;
+}
+
+static void *
+ngx_media_api_create_loc_conf(ngx_conf_t *cf)
+{
+    ngx_media_api_loc_conf_t  *conf;
+
+    conf = ngx_pcalloc(cf->pool, sizeof(ngx_media_api_loc_conf_t));
+
+    if (conf == NULL) {
+        return NULL;
+    }
+
+    ngx_str_null(&conf->ingest_dir);
+
+    return conf;
+}
+
+static char *
+ngx_media_api_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
+{
+    ngx_media_api_loc_conf_t  *prev = parent;
+    ngx_media_api_loc_conf_t  *conf = child;
+
+    (void) cf;
+
+    if (conf->ingest_dir.len == 0) {
+        conf->ingest_dir = prev->ingest_dir;
+    }
+
+    return NGX_CONF_OK;
+}
+
+/* --- HLS ingest endpoint ------------------------------------------------- */
+
+static char *
+ngx_media_hls_ingest_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_media_api_loc_conf_t  *mlcf = conf;
+    ngx_http_core_loc_conf_t  *clcf;
+    ngx_str_t                 *value = cf->args->elts;
+
+    (void) cmd;
+
+    if (mlcf->ingest_dir.len != 0) {
+        return "duplicate media_hls_ingest";
+    }
+
+    mlcf->ingest_dir = value[1];
+
+    clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+    clcf->handler = ngx_media_hls_ingest_handler;
+
+    /*
+     * The body is written to a file by nginx's own machinery rather than read
+     * into memory: a segment is megabytes, and taking it as a temp file means
+     * this handler never holds one.  It also lets the upload be linked into
+     * place whole, so a reader never sees a partial segment.
+     */
+    clcf->client_body_in_file_only = 1;
+
+    return NGX_CONF_OK;
+}
+
+/*
+ * PUT /segment.ts -> the body lands in the watched directory.
+ *
+ * The name comes from the request URI, so an uploader names its segments the
+ * way the reader expects, and the file appears atomically: the temp file is
+ * linked into place, so a reader either sees a whole segment or none of it.
+ */
+static void
+ngx_media_hls_ingest_ready(ngx_http_request_t *r)
+{
+    ngx_media_api_loc_conf_t  *mlcf;
+    ngx_str_t                  name, target;
+    u_char                    *slash;
+    ngx_int_t                  stored;   /* not `rc`: something in the include
+                                          * chain defines that name */
+
+    if (r->request_body == NULL || r->request_body->temp_file == NULL) {
+        ngx_http_finalize_request(r, NGX_HTTP_BAD_REQUEST);
+        return;
+    }
+
+    mlcf = ngx_http_get_module_loc_conf(r, ngx_media_api_module);
+
+    if (mlcf == NULL || mlcf->ingest_dir.len == 0) {
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
+
+    /* bounded reverse search: r->uri is a slice and is not NUL-terminated */
+    slash = ngx_media_strrlchr(r->uri.data, r->uri.data + r->uri.len, '/');
+    name.data = (slash != NULL) ? slash + 1 : r->uri.data;
+    name.len = r->uri.len - (size_t) (name.data - r->uri.data);
+
+    if (name.len == 0) {
+        ngx_http_finalize_request(r, NGX_HTTP_BAD_REQUEST);
+        return;
+    }
+
+    target.len = mlcf->ingest_dir.len + 1 + name.len;
+    target.data = ngx_pnalloc(r->pool, target.len + 1);
+
+    if (target.data == NULL) {
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
+
+    ngx_snprintf(target.data, target.len, "%V/%V", &mlcf->ingest_dir, &name);
+    target.data[target.len] = '\0';
+
+    /*
+     * Renamed into place, so a reader either sees a whole segment or none of
+     * it.  nginx writes the body to client_body_temp_path, which therefore
+     * has to be on the same filesystem as the ingest directory - the same
+     * requirement any nginx upload-to-final-location setup has, and the
+     * reason that directive exists.
+     */
+    stored = ngx_rename_file(r->request_body->temp_file->file.name.data,
+                             target.data);
+
+    if (stored == NGX_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
+                      "media: could not store uploaded segment as %V", &target);
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
+
+    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                  "media: hls ingest stored name=%V dir=%V len=%uz (%O bytes)",
+                  &name, &mlcf->ingest_dir, target.len,
+                  r->request_body->temp_file->file.offset);
+
+    ngx_http_finalize_request(r, NGX_HTTP_CREATED);
+}
+
+static ngx_int_t
+ngx_media_hls_ingest_handler(ngx_http_request_t *r)
+{
+    ngx_int_t  rc;
+
+    if (!(r->method & (NGX_HTTP_PUT|NGX_HTTP_POST))) {
+        return NGX_HTTP_NOT_ALLOWED;
+    }
+
+    rc = ngx_http_read_client_request_body(r, ngx_media_hls_ingest_ready);
+
+    if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+        return rc;
+    }
+
+    return NGX_DONE;
 }
 
 static ngx_int_t

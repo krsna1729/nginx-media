@@ -31,4 +31,29 @@ ngx_uint_t ngx_media_compat_classify(const ngx_media_trackset_t *program,
     const ngx_media_trackset_t *candidate);
 const char *ngx_media_compat_name(ngx_uint_t compat);
 
+/*
+ * Bounded reverse search, the mirror of ngx_strlchr().
+ *
+ * nginx has no reverse counterpart, and reaching for strrchr() on an ngx_str_t
+ * is a trap: the data is a slice of something larger and is not
+ * NUL-terminated, so strrchr() reads past it.  That mistake has been made
+ * three times in this codebase - the SRT listener host, an opendir() call, and
+ * a request URI - each time failing in a way that looked like something else
+ * entirely.  Use this instead.
+ */
+static ngx_inline u_char *
+ngx_media_strrlchr(u_char *line, u_char *last, u_char ch)
+{
+    while (last > line) {
+
+        if (*(last - 1) == ch) {
+            return last - 1;
+        }
+
+        last--;
+    }
+
+    return NULL;
+}
+
 #endif /* NGX_MEDIA_COMPAT_H */

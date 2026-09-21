@@ -246,17 +246,12 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
         return NULL;
     }
 
-    d = opendir((char *) directory->data);
-
-    if (d == NULL) {
-        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
-                      "media: hls ingest directory \"%V\" is not readable",
-                      directory);
-        return NULL;
-    }
-
-    closedir(d);
-
+    /*
+     * The directory is copied and NUL-terminated before anything opens it:
+     * the caller's ngx_str_t is a slice of a request body, and opendir() needs
+     * a C string.  Reading past it gives ENOENT for a directory that plainly
+     * exists, which is how this was found.
+     */
     ingest = ngx_pcalloc(stream->pool,
                          sizeof(ngx_media_hls_ingest_source_t));
 
@@ -282,6 +277,17 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
 
     ingest->directory = *copy;
     ingest->stream = stream;
+
+    d = opendir((char *) copy->data);
+
+    if (d == NULL) {
+        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                      "media: hls ingest directory \"%V\" is not readable",
+                      directory);
+        return NULL;
+    }
+
+    closedir(d);
 
     ingest->source = ngx_media_stream_source_add(stream, id,
                                                  NGX_MEDIA_SOURCE_HLS_PUSH, 0,
