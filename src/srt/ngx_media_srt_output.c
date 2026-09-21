@@ -56,9 +56,24 @@ static void
 ngx_media_srt_out_notify(ngx_media_srt_outputs_t *outs)
 {
     uint64_t  one = 1;
+    ssize_t   n;
 
-    if (outs->notify_fd >= 0) {
-        (void) write(outs->notify_fd, &one, sizeof(one));
+    if (outs->notify_fd < 0) {
+        return;
+    }
+
+    /*
+     * A wakeup for the event loop.  A full pipe means the loop has not run
+     * yet and is about to see the event anyway, so EAGAIN is success here -
+     * but the result has to be read: glibc marks write() as warn_unused_result
+     * and a build with -Werror rejects discarding it, which is how this was
+     * found (GCC 13 on Ubuntu 24.04, the same toolchain CI uses).
+     */
+    n = write(outs->notify_fd, &one, sizeof(one));
+
+    if (n < 0 && errno != EAGAIN && errno != EINTR && outs->log != NULL) {
+        ngx_log_error(NGX_LOG_WARN, outs->log, ngx_errno,
+                      "media: srt output wakeup failed");
     }
 }
 

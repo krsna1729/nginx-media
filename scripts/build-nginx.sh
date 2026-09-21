@@ -9,7 +9,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${NGINX_VERSION:-1.30.5}"
 BUILD="${BUILD_DIR:-$ROOT/.build}"
 SRC="$BUILD/nginx-$VERSION"
-PREFIX="$BUILD/nginx-install"
+# The prefix is compiled into the binary: nginx resolves its temp paths, its
+# default error log and its prefix-relative directories against it at run
+# time.  A container needs a real installed layout rather than a path inside
+# the build tree, so this is overridable.
+PREFIX="${NGINX_PREFIX:-$BUILD/nginx-install}"
 
 mkdir -p "$BUILD"
 
