@@ -243,6 +243,11 @@ Hardening measurements recorded so far:
   two configuration reloads in the middle and measures the worker: no crash, no
   abort, memory flat (4712 kB -> 4540 kB across the run), HLS and recording
   still produced, clean shutdown
+- `make fault` injects mid-stream faults: a publisher is stalled (SIGSTOP) and
+  the program fails over through the normal path, a publisher whose transport
+  bytes are corrupted on the wire is ignored while the program keeps serving
+  from the other source, and the remaining source is killed outright; through
+  all of it the worker stays up, HLS keeps producing and shutdown is clean
 
 Phase 8 - multi-worker ownership (complete):
 

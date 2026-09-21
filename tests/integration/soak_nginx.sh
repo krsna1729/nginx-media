@@ -66,7 +66,8 @@ EOF
 }
 
 worker_pid() {
-    pgrep -f "nginx: worker process" | head -1
+    # pipefail would report pgrep's SIGPIPE instead of the worker pid
+    pgrep -f "nginx: worker process" 2>/dev/null | head -1 || true
 }
 
 rss_kb() {
