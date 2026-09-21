@@ -52,6 +52,7 @@ jobs:
           make api-graph
           make failover
           make hls
+          make hls-push
           make rtmp
           make rtmp-hevc
           make rtmps

@@ -1,4 +1,5 @@
 #include "ngx_media_runtime.h"
+#include "ngx_media_hls_push.h"
 
 #include <ngx_event.h>
 
@@ -982,6 +983,15 @@ ngx_media_runtime_tick(ngx_log_t *log)
                            res.emergency != NULL);
         }
 
+        /*
+         * Push destinations watch the HLS directory rather than tapping the
+         * segmenter: offering new files here costs a stat per name, and the
+         * upload itself happens on the push pool.
+         */
+        if (policy != NULL && policy->hls_path.len > 0) {
+            ngx_media_hls_push_scan(&policy->hls_path, log);
+        }
+
         if (policy != NULL
             && (policy->hls_path.len > 0
                 || policy->record_program_path.len > 0
@@ -1038,6 +1048,15 @@ ngx_media_runtime_init(ngx_cycle_t *cycle, ngx_log_t *log)
 {
     if (ngx_media_runtime_owners != NULL) {
         return NGX_OK;
+    }
+
+    /*
+     * The push backend owns a small upload pool; starting it here means a
+     * destination can be added through the control API at any time.
+     */
+    if (ngx_media_hls_push_register(log) != NGX_OK) {
+        ngx_log_error(NGX_LOG_WARN, log, 0,
+                      "media: hls push pool could not be started");
     }
 
     ngx_media_runtime_owners = ngx_media_owner_dir_attach(cycle, log);
@@ -1165,6 +1184,8 @@ ngx_media_runtime_outputs_release(ngx_media_stream_t *stream)
 void
 ngx_media_runtime_shutdown(ngx_log_t *log)
 {
+    ngx_media_hls_push_stop();
+
     ngx_uint_t  i;
 
     (void) log;

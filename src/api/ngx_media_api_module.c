@@ -1150,20 +1150,27 @@ ngx_media_api_destination_create(ngx_http_request_t *r,
         return NGX_HTTP_BAD_REQUEST;
     }
 
-    if (ngx_media_api_json_field(&body, "port", &port_text) != NGX_OK) {
+    /*
+     * A port belongs to a socket destination.  An HLS push destination is
+     * given an endpoint URL in host and a watched directory in path, so a
+     * port is neither required nor meaningful there.
+     */
+    if (ngx_media_api_json_field(&body, "port", &port_text) == NGX_OK) {
+        n = ngx_atoi(port_text.data, port_text.len);
+
+        if (n < 1 || n > 65535) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"bad_port\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        port = (ngx_uint_t) n;
+
+    } else if (type != NGX_MEDIA_DEST_HLS_PUSH) {
         *last = ngx_snprintf(*last, end - *last,
                              "{\"error\":\"port_required\"}");
         return NGX_HTTP_BAD_REQUEST;
     }
-
-    n = ngx_atoi(port_text.data, port_text.len);
-
-    if (n < 1 || n > 65535) {
-        *last = ngx_snprintf(*last, end - *last, "{\"error\":\"bad_port\"}");
-        return NGX_HTTP_BAD_REQUEST;
-    }
-
-    port = (ngx_uint_t) n;
 
     destination = ngx_media_destination_find(stream, &id);
 
@@ -1196,6 +1203,14 @@ ngx_media_api_destination_create(ngx_http_request_t *r,
 
         if (copy != NULL) {
             destination->streamid = *copy;
+        }
+    }
+
+    if (ngx_media_api_json_field(&body, "path", &streamid) == NGX_OK) {
+        copy = ngx_media_destination_strdup(stream->pool, &streamid);
+
+        if (copy != NULL) {
+            destination->path = *copy;
         }
     }
 

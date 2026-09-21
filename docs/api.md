@@ -77,6 +77,41 @@ could not act on it.
 `POST .../switchback` returns the program to the configured winner, or `409`
 when it is already there or the policy is `never`.
 
+## Destinations
+
+```
+POST   /media/api/v1/streams/{app}/{name}/destinations
+GET    /media/api/v1/streams/{app}/{name}/destinations
+GET    .../destinations/{id}
+DELETE .../destinations/{id}
+```
+
+A destination is a runtime object with a stable id, and it starts as soon as
+it is created, so adding one while a program is live is the normal case.
+Creating an existing one returns it, and deleting an absent one succeeds:
+replay and retry are both safe.
+
+For a socket destination (`srt`, `rtmp`):
+
+```json
+{"id":"sink1","type":"srt","host":"127.0.0.1","port":9100,
+ "streamid":"#!::r=live/news,m=publish,s=out"}
+```
+
+For an HLS push destination, `host` is the endpoint URL and `path` is the
+output directory it watches; there is no port:
+
+```json
+{"id":"cdn","type":"hls_push",
+ "host":"http://origin.example/live/news/",
+ "path":"/var/lib/nginx/media/hls"}
+```
+
+Uploads run on a bounded pool, and each destination has a bounded queue: a
+stalled remote drops its oldest queued segment and counts it rather than
+stalling the program or its neighbours.  Deleting one stops it and unlinks it
+first, so nothing it queued outlives it.
+
 ## Metrics
 
 `GET /media/api/v1/metrics` is Prometheus text format.  Every value is already
