@@ -101,6 +101,33 @@ queue.  A slow destination is dropped from, never allowed to stall the program.
   recording part cleanly instead of transferring a live descriptor.
 - Nothing in the media path allocates per packet or blocks a worker.
 
+## Serving HLS: what the measurements say
+
+`make bench-hls` serves the same segment many times over each candidate
+configuration.  On this machine (400 requests of a 3.3 MiB segment):
+
+| Variant | Throughput | Per request |
+|---|---|---|
+| disk, `sendfile` off | 690 MiB/s | 4.69 ms |
+| disk, `sendfile on` + `tcp_nopush` | 686 MiB/s | 4.71 ms |
+| tmpfs, `sendfile on` | 678 MiB/s | 4.77 ms |
+| tmpfs, HTTPS with kTLS | 429 MiB/s | 7.55 ms |
+| disk, cold page cache | 648 MiB/s | 4.99 ms |
+
+- **A memory filesystem does not help.**  Segments served from disk come out
+  of the page cache at the same speed; tmpfs measured *slower* here, within
+  noise.  It is not worth the operational cost of a RAM-backed directory that
+  fills up and disappears on reboot.
+- **`sendfile` is free but not decisive** for this working set: the segments
+  are cached, so it is within noise of read+write.  It costs nothing and helps
+  when the cache is cold or the files are larger, so enable it — just do not
+  expect it to be the lever.
+- **TLS is the lever.**  It costs about 38% against plain HTTP even with kTLS,
+  because the crypto runs in software and this NIC has no offload.  kTLS still
+  buys about 9% over userspace OpenSSL, and needs the `tls` kernel module
+  loaded (`modprobe tls`) — without it nginx silently falls back and the cost
+  is higher.
+
 ## Transport backends
 
 The SRT transport is a contract (`ngx_media_srt_ops_t` in

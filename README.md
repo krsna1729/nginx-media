@@ -109,17 +109,30 @@ AES-CTR.  `make srt-crypto` covers all of it against a real publisher:
 matching passphrase carries media, a wrong one is rejected with nothing
 registered, and `gcm` either works or says why it cannot.
 
-TLS and kTLS (phase 11):
+TLS and kTLS (phase 11), measured rather than assumed:
 
-nginx base already carries kTLS — `src/event/ngx_event_openssl.c` calls
-`BIO_get_ktls_send` — and enables it automatically when OpenSSL and the kernel
-both support it, with `ssl_conf_command Options KTLS` as the control.  There is
-no configure flag and nothing for this module to implement: the surfaces that
-terminate TLS (HLS preview over HTTPS, and RTMPS once it lands) go through
-`ngx_ssl_*`, so they inherit kernel TLS for free.  What phase 11 has to do is
-keep it that way and say so, rather than hand-rolling a TLS path that would
-bypass it.  On this machine: OpenSSL 3.6.4, `linux/tls.h` with
-`TLS_TX`/`SOL_TLS`, so kTLS is available.
+nginx base carries kTLS — `src/event/ngx_event_openssl.c` calls
+`BIO_get_ktls_send` — with `ssl_conf_command Options KTLS` as the control and
+no configure flag.  The surfaces that terminate TLS (HLS over HTTPS, RTMPS) go
+through `ngx_ssl_*`, so they inherit it; nothing in this module implements a
+TLS path of its own.
+
+What the measurements on this machine add:
+
+- **kTLS needs the `tls` kernel module loaded.**  The module exists
+  (`/lib/modules/$(uname -r)/kernel/net/tls/tls.ko.zst`, `CONFIG_TLS` set) but
+  is not loaded by default, and until it is, `/proc/net/tls_stat` does not
+  exist and nginx silently falls back to userspace OpenSSL.  `modprobe tls`
+  enables it.  That is a deployment requirement, not something the module can
+  arrange.
+- Once loaded it engages: `/proc/net/tls_stat` counts every request
+  (`TlsTxSw`), in **software** mode — `TlsTxDevice` stays 0, because the NIC
+  here has no TLS offload.
+- It is worth having: serving the same HLS segment over HTTPS went from
+  394 MiB/s to 429 MiB/s (+9%) with kTLS, but TLS still costs about 38%
+  against plain HTTP (429 vs 690 MiB/s), since the crypto is in software.
+
+`make bench-hls` reproduces all of it; see `tests/bench/hls_serve.sh`.
 
 Phase 2 — MPEG-TS normalization (complete):
 
