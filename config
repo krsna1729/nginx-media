@@ -35,6 +35,8 @@ ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/mpegts/ngx_media_ts_mux.c \
                  $ngx_addon_dir/src/hls/ngx_media_hls_segmenter.c \
                  $ngx_addon_dir/src/record/ngx_media_record.c \
+                 $ngx_addon_dir/src/rtmp/ngx_media_rtmp_wire.c \
+                 $ngx_addon_dir/src/rtmp/ngx_media_rtmp_adapter.c \
                  $ngx_addon_dir/src/mpegts/ngx_media_ts_ingest.c \
                  $ngx_addon_dir/src/srt/ngx_media_srt_streamid.c \
                  $ngx_addon_dir/src/srt/ngx_media_srt_transport.c \
@@ -47,6 +49,7 @@ ngx_module_order=
 CORE_INCS="$CORE_INCS $ngx_addon_dir/src/core $ngx_addon_dir/src/codec \
                      $ngx_addon_dir/src/mpegts $ngx_addon_dir/src/srt \
                      $ngx_addon_dir/src/hls $ngx_addon_dir/src/record \
+                     $ngx_addon_dir/src/rtmp \
                      $ngx_addon_dir/src/api"
 
 . auto/module

@@ -37,6 +37,7 @@ ngx_int_t ngx_media_trackset_init(ngx_media_trackset_t *set,
     ngx_uint_t capacity, ngx_log_t *log);
 void ngx_media_trackset_destroy(ngx_media_trackset_t *set);
 
+/* returns the index of the added track, or a negative value on error */
 ngx_int_t ngx_media_trackset_add(ngx_media_trackset_t *set,
     const ngx_media_track_t *track);
 const ngx_media_track_t *ngx_media_trackset_get(

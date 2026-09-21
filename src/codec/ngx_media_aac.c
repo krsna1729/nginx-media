@@ -95,3 +95,46 @@ ngx_media_adts_audio_specific_config(const ngx_media_adts_t *adts, u_char *buf,
 
     return NGX_OK;
 }
+
+ngx_int_t
+ngx_media_adts_write(const ngx_media_adts_t *adts, u_char *buf, size_t cap,
+    size_t *out_len)
+{
+    ngx_uint_t  index, i;
+
+    if (adts == NULL || buf == NULL || cap < NGX_MEDIA_ADTS_HEADER_MIN
+        || adts->frame_len > 0x1FFF || adts->object_type < 1
+        || adts->object_type > 4 || adts->channels < 1
+        || adts->channels > 7)
+    {
+        return NGX_ERROR;
+    }
+
+    index = NGX_MEDIA_AAC_SAMPLE_RATES;
+
+    for (i = 0; i < NGX_MEDIA_AAC_SAMPLE_RATES; i++) {
+        if (ngx_media_aac_sample_rates[i] == adts->sample_rate) {
+            index = i;
+            break;
+        }
+    }
+
+    if (index == NGX_MEDIA_AAC_SAMPLE_RATES) {
+        return NGX_ERROR;
+    }
+
+    /* syncword, MPEG-4, layer 0, no CRC */
+    buf[0] = 0xFF;
+    buf[1] = 0xF1;
+    buf[2] = (u_char) (((adts->object_type - 1) << 6) | (index << 2)
+                       | ((adts->channels >> 2) & 0x01));
+    buf[3] = (u_char) (((adts->channels & 0x03) << 6)
+                       | ((adts->frame_len >> 11) & 0x03));
+    buf[4] = (u_char) ((adts->frame_len >> 3) & 0xFF);
+    buf[5] = (u_char) (((adts->frame_len & 0x07) << 5) | 0x1F);
+    buf[6] = 0xFC;   /* buffer fullness low bits, one raw data block */
+
+    *out_len = NGX_MEDIA_ADTS_HEADER_MIN;
+
+    return NGX_OK;
+}

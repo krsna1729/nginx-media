@@ -31,4 +31,12 @@ ngx_int_t ngx_media_adts_parse(const u_char *p, size_t len,
 ngx_int_t ngx_media_adts_audio_specific_config(const ngx_media_adts_t *adts,
     u_char *buf, size_t cap, size_t *out_len);
 
+/*
+ * Writes a 7-byte ADTS header in front of a raw AAC frame: the RTMP adapter
+ * turns FLV raw AAC payloads into the ADTS framing the core carries, which is
+ * the inverse of what the TS demuxer does.
+ */
+ngx_int_t ngx_media_adts_write(const ngx_media_adts_t *adts, u_char *buf,
+    size_t cap, size_t *out_len);
+
 #endif /* NGX_MEDIA_AAC_H */
