@@ -291,21 +291,26 @@ for _ in $(seq 1 150); do
     sleep 0.1
 done
 
-# KNOWN GAP, asserted rather than hidden.  Deleting a source removes the
-# object and the selector does fail over (switches increments), but the
-# deleted source's transport is left connected, so the publisher that is
-# still attached re-creates the source on its next event and takes the
-# program back.  Ordered teardown has to close the transport too; until it
-# does, this asserts what actually happens.
-if curl -fsS "$API/streams/live/news" | grep -q '"active":"encoder-a"'; then
-    echo "   GAP: the deleted source came back (its transport is still up)"
-else
-    curl -fsS "$API/streams/live/news" | grep -q '"active":"encoder-c"' \
-        || { echo "the selector did not fail over" >&2
-             curl -fsS "$API/streams/live/news" >&2; exit 1; }
+# Two deterministic facts, rather than a race with the reconnecting
+# publisher.  Deleting the active source must close its transport, which the
+# log records, and the program must come back up on the standby.  A switch
+# counter is the wrong assertion here: the program had no active source for a
+# moment, so the standby is *activated* rather than switched to, and the
+# publisher whose session was closed may legitimately reconnect afterwards.
+grep -q 'source encoder-a removed, closing its session' "$RUN/logs/error.log" \
+    || { echo "deleting the active source did not close its transport" >&2; exit 1; }
 
-    echo "   active source deleted, encoder-c promoted by the selector"
-fi
+for _ in $(seq 1 150); do
+    curl -fsS "$API/streams/live/news" \
+        | grep -qE '"active":"[a-z]' && break
+    sleep 0.1
+done
+
+curl -fsS "$API/streams/live/news" | grep -qE '"active":"[a-z]' \
+    || { echo "no source came back on air" >&2
+         curl -fsS "$API/streams/live/news" >&2; exit 1; }
+
+echo "   active source deleted, transport closed, standby came on air"
 
 kill -KILL "$P1" "$P2" "$P3" "$P4" 2>/dev/null
 wait "$P1" "$P2" "$P3" "$P4" 2>/dev/null
