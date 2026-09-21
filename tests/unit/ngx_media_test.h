@@ -80,9 +80,10 @@ static int ngx_media_test_checks;
 #define TEST_LEAKS()                                                          \
     do {                                                                      \
         ngx_media_test_checks++;                                              \
-        if (ngx_media_test_allocs != ngx_media_test_frees) {                  \
-            TEST_FAIL("leak: %zu allocations, %zu frees",                     \
-                      ngx_media_test_allocs, ngx_media_test_frees);           \
+        size_t a_ = __atomic_load_n(&ngx_media_test_allocs, __ATOMIC_SEQ_CST);\
+        size_t f_ = __atomic_load_n(&ngx_media_test_frees, __ATOMIC_SEQ_CST); \
+        if (a_ != f_) {                                                       \
+            TEST_FAIL("leak: %zu allocations, %zu frees", a_, f_);            \
         }                                                                     \
     } while (0)
 

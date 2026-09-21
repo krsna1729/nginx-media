@@ -134,7 +134,28 @@ Phase 4 — health, eligibility and automatic failover (complete):
   (SIGSTOP) fails after the failure timeout and recovers on thaw, and a
   garbage publisher registering as the primary is reported unhealthy
   (evidence level 37 of 63) while the program keeps flowing on the standby
-- next phase: HLS and recording
+Phase 5 — HLS and recording (core complete):
+
+- `src/mpegts/ngx_media_ts_mux.*`: PAT/PMT, PES packetization with PTS/DTS,
+  adaptation-field padding and PCR, continuity counters, and batched bursts
+  that own one backing allocation (goal doc 10); a frame that does not fit is
+  rejected cleanly, rolling the burst back to the previous frame boundary
+- `src/hls/ngx_media_hls_segmenter.*`: segments begin only at a video sync
+  boundary, cut on a keyframe after `min_duration`, and are bounded by
+  `max_duration` and `max_segment_bytes`; the playlist window (count and bytes)
+  evicts segments and removes their files; a generation change closes the
+  segment and the next one is announced with `#EXT-X-DISCONTINUITY`; a segment
+  that starts mid-burst repeats the PAT/PMT prefix so it stays decodable
+- `src/record/ngx_media_record.*`: RAW / ISO / PROGRAM taps with a bounded job
+  queue and a writer thread, so recording I/O never blocks the event loop;
+  parts roll at a hard byte ceiling and are closed cleanly
+- `make unit` covers the muxer round trip, segment boundaries, playlist and
+  discontinuity handling, segment decodability (segments are read back through
+  the demuxer), retention eviction and the recorder's bounded queue, part
+  rolling and written content
+- `make ts-fixture` also remuxes the real fixtures (demux -> mux -> demux) and
+  requires every frame to match exactly
+- next phase: RTMP ingest/output
 
 
 ## Layout
@@ -142,6 +163,8 @@ Phase 4 — health, eligibility and automatic failover (complete):
     config                nginx add-on config
     src/api/              control API (HTTP location handler)
     src/core/             portable media core (goal doc section 3)
+    src/hls/              MPEG-TS HLS segmenter
+    src/record/           RAW / ISO / PROGRAM recording taps
     src/codec/            Annex B NAL and ADTS framing helpers
     src/srt/              SRT transport adapter and Stream ID parsing
     src/mpegts/           MPEG-TS demux and ingest path

@@ -15,7 +15,8 @@ ngx_media_test_alloc(size_t size, ngx_log_t *log)
     p = malloc(size);
 
     if (p != NULL) {
-        ngx_media_test_allocs++;
+        /* counters are read and written from test threads too */
+        (void) __atomic_fetch_add(&ngx_media_test_allocs, 1, __ATOMIC_SEQ_CST);
     }
 
     return p;
@@ -25,7 +26,7 @@ void
 ngx_media_test_free(void *ptr)
 {
     if (ptr != NULL) {
-        ngx_media_test_frees++;
+        (void) __atomic_fetch_add(&ngx_media_test_frees, 1, __ATOMIC_SEQ_CST);
     }
 
     free(ptr);

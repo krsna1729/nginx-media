@@ -392,6 +392,9 @@ ngx_media_ts_mux_burst_init(ngx_media_ts_mux_t *mux, ngx_media_ts_burst_t *burst
 
         ngx_media_ts_mux_section(mux, burst, mux->conf.pmt_pid, &mux->cc_pmt,
                                  section, ngx_media_ts_mux_pmt(mux, section));
+
+        burst->psi_len = (size_t) (burst->cursor
+                                   - ngx_media_buf_data(burst->backing));
     }
 
     return NGX_OK;

@@ -42,6 +42,9 @@ typedef struct {
     ngx_media_buf_t       *backing;   /* one allocation for the whole burst */
     u_char                *cursor;
     size_t                 capacity;
+    size_t                 psi_len;   /* PAT+PMT prefix: a segment or a
+                                         recording part that starts mid-burst
+                                         repeats these bytes first */
     ngx_media_ts_slice_t   slices[NGX_MEDIA_TS_MUX_MAX_SLICES];
     ngx_uint_t             nslices;
 } ngx_media_ts_burst_t;
