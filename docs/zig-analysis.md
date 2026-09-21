@@ -114,3 +114,52 @@ libghostty exposes a C API to its own consumers.  Those files already compile
 against the unit shim with no nginx headers, so the boundary is real rather
 than aspirational.  That is the Ghostty/Superlogical split applied here:
 library core, thin native integration.
+
+## What the runtime graph and the benchmarks added
+
+Written after the runtime graph, the profiles and the benchmarks were built,
+so these are observations rather than predictions.
+
+**The strongest new evidence is a bug that happened three times.**  `ngx_str_t`
+is a pointer and a length; its data is a slice of something larger and is not
+NUL-terminated.  Reaching for a string function on it reads past the end.  It
+happened on the SRT listener host (worked only when the next byte happened to
+be NUL), on an `opendir()` call (reported ENOENT for a directory that plainly
+existed), and on a request URI (produced a segment name of `"1.1"`).  Each one
+failed pointing somewhere else, and each took real time to find.  Zig's slices
+do not have this failure mode at all: a slice carries its length, and the
+string functions take one.  Of everything studied, this is the clearest case
+where the language would have prevented a defect class rather than reshaped
+the code around it.
+
+**A type accepted by an API with no implementation behind it.**  The control
+API accepted `"type":"rtmp"` for a destination, and no backend registered the
+type, so every create failed at start.  In C the backend table and the type
+enum are two independent lists and nothing connects them.  A `comptime` table
+indexed by the enum would make a missing entry a compile error, which is the
+comptime-data-table pattern applied to a case where its value is not speed but
+exhaustiveness.
+
+**Cleanup on a path that did not exist when the code was written.**  The
+runtime graph creates and deletes streams, sources and destinations while
+media is flowing, so every acquisition now has an error path and a teardown
+path, and the teardown order matters (stop the transport before dropping the
+object).  This is `errdefer`'s exact shape, and it is now the largest single
+piece of manual discipline in the codebase.
+
+**The benchmarks argued against the rewrite, not for it.**  The push fanout
+benchmark measures worker CPU per uploaded segment and finds the difference
+between a sendfile path and a read/write loop — one copy per destination
+instead of two.  The program's `fanout_delay` is under two milliseconds with a
+file source on an idle machine, and it is bounded by the feed's window rather
+than by anything the language could change.  A rewrite buys nothing here: the
+hot path is already allocation-free and copy-free, and the algorithm is the
+algorithm.
+
+**One portability bug had nothing to do with either.**  `(void) write(...)`
+does not compile under `-Werror` on GCC 13, because glibc marks `write`
+`warn_unused_result`.  Arch's GCC accepts it, so every local build passed and
+CI on Ubuntu would have failed on its first run.  Zig would not have this
+specific problem — `try` makes the result impossible to discard — but the
+lesson is about building on the same toolchain as CI, which no language fixes.
+
