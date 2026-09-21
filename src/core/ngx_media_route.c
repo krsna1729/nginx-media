@@ -108,17 +108,10 @@ ngx_media_route_read_handler(ngx_event_t *ev)
         }
 
         if (rc != NGX_OK) {
-            fprintf(stderr, "route: worker %d recv rc=%d\n",
-                    (int) ngx_process_slot, (int) rc);
-
             /* the peer is gone: nothing sensible to do but stop reading */
             (void) ngx_del_event(c->read, NGX_READ_EVENT, 0);
             return;
         }
-
-        fprintf(stderr, "route: worker %d received type %d len %u\n",
-                (int) ngx_process_slot, (int) message.header.type,
-                (unsigned) message.header.length);
 
         if (ngx_media_route_sink != NULL) {
             (void) ngx_media_route_sink(ngx_media_route_sink_ctx,
@@ -245,7 +238,8 @@ ngx_media_route_open(ngx_cycle_t *cycle, uint32_t hash,
         return NGX_ERROR;
     }
 
-    len = application->len + stream->len + source_id->len + 3;
+    /* "application/stream/source": exactly two separators */
+    len = application->len + stream->len + source_id->len + 2;
 
     payload = ngx_media_buf_alloc(len);
 

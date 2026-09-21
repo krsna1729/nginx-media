@@ -220,7 +220,37 @@ Phase 7 - SRT output and fanout (complete):
   destinations; B receives one of them, registers the announced source and
   produces its own decodable HLS output while A's HLS shows the shared
   preparation
-- next phase: multi-worker ownership
+Phase 8 - multi-worker ownership (complete):
+
+- `src/core/ngx_media_owner.*`: ownership is FNV-1a over `application/stream`,
+  so every worker computes the same owner without coordination and across
+  restarts; the worker count comes from nginx's core configuration
+- `src/core/ngx_media_owner_dir.*`: a shared metadata directory holding only
+  small bookkeeping - owner slot and pid, generation, source count, frames and
+  a heartbeat - allocated by the master before workers fork; a stale owner is
+  reclaimable, so a crashed worker cannot pin a stream (goal doc 22)
+- `src/core/ngx_media_ipc.*`: the bounded inter-worker transport, versioned and
+  typed over a Unix domain `SOCK_SEQPACKET` pair; frames larger than one
+  datagram are chunked with a continuation flag and reassembled or rejected
+  deterministically, and backpressure is reported instead of queueing without
+  bound (goal doc 23)
+- `src/core/ngx_media_route.*`: routing pairs are created in the master, adopted
+  per worker and registered with the worker's event loop; OPEN, TRACKS, CLOSE
+  and frames travel to the owner, which rebuilds the source locally and feeds it
+  through the normal path - the selector, feed, HLS and recordings only ever see
+  local state
+- the runtime timer now runs in every worker and drives only the programs that
+  worker owns; transports keep accepting on worker 0, so transport socket
+  ownership differs from program ownership exactly as the goal doc describes
+- `make multi-worker` proves the exit criteria with two workers: the publisher
+  is routed to the worker its hash selects, the owner receives the source, its
+  track contract and every frame, and produces a decodable HLS output
+- bugs found by the pass: the IPC datagram bound omitted the header (truncated
+  datagrams), the routed sink dropped frames while the source was still awaiting
+  its first keyframe (the gate could never open), a double unref at the IPC
+  boundary corrupted the heap until malloc aborted the worker, and the OPEN
+  payload was sized one byte too large
+- next phase: scale hardening
 
 
 ## Layout
@@ -252,6 +282,7 @@ Phase 7 - SRT output and fanout (complete):
     make hls               # HLS playlist, discontinuity, recordings over nginx
     make rtmp              # RTMP publish and play of the same logical stream
     make srt-output        # SRT destinations fed from the shared preparation
+    make multi-worker      # two workers: owner routing across the IPC transport
 
 Requires `cc`, `make`, `curl`, `tar`, `ffmpeg` and (for the SRT targets)
 `libsrt`. `make nginx` builds nginx 1.30.5 with `--add-module` into `.build/`;

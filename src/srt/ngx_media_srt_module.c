@@ -202,8 +202,7 @@ ngx_media_srt_sink_frame(void *ctx, const ngx_media_frame_t *frame)
     if (session->routed) {
         /* the program lives on another worker: hand the frame over once */
         (void) ngx_media_route_frame((ngx_cycle_t *) ngx_cycle, session->hash,
-                                     frame, session->routed_sequence++);
-        return;
+                                     frame, session->routed_sequence);
     }
 
     if (session->stream != NULL && session->source != NULL) {
@@ -215,6 +214,10 @@ ngx_media_srt_sink_frame(void *ctx, const ngx_media_frame_t *frame)
 
         (void) ngx_media_stream_publish(session->stream, session->source,
                                         frame, ngx_current_msec);
+    }
+
+    if (session->routed) {
+        session->routed_sequence++;
     }
 
     if (frame->config) {

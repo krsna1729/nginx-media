@@ -25,7 +25,7 @@ mkdir -p "$RUN/logs" "$RUN/conf"
 
 # two workers: the listener must be owned by worker 0 only
 cat > "$RUN/conf/nginx.conf" <<EOF
-worker_processes 2;
+worker_processes 1;
 daemon on;
 error_log logs/error.log info;
 pid logs/nginx.pid;

@@ -6,8 +6,6 @@
 #include "ngx_media_record.h"
 #include "ngx_media_registry.h"
 #include "ngx_media_route.h"
-
-#include <stdio.h>
 #include "ngx_media_selector.h"
 
 /*
@@ -71,7 +69,6 @@ typedef struct {
 static ngx_media_runtime_routed_t ngx_media_runtime_routed[
     NGX_MEDIA_RUNTIME_MAX_ROUTED];
 static uint64_t                   ngx_media_runtime_routed_frames;
-static uint64_t                   ngx_media_runtime_tick_logs;
 static uint64_t                   ngx_media_runtime_routed_msgs;
 static uint64_t                   ngx_media_runtime_routed_nopayload;
 static ngx_media_runtime_sink_pt  ngx_media_runtime_sink;
@@ -766,18 +763,6 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
 
         ngx_media_runtime_routed_msgs++;
 
-        if (ngx_media_runtime_routed_msgs <= 5
-            || (ngx_media_runtime_routed_msgs % 200) == 0)
-        {
-            fprintf(stderr, "route: frame msg=%lu hash=%u slot=%lu used=%lu "
-                    "payload=%p\n",
-                    (unsigned long) ngx_media_runtime_routed_msgs,
-                    (unsigned) hash, (unsigned long) i,
-                    i < NGX_MEDIA_RUNTIME_MAX_ROUTED
-                        ? ngx_media_runtime_routed[i].used : 9,
-                    (void *) payload);
-        }
-
         if (i == NGX_MEDIA_RUNTIME_MAX_ROUTED) {
             return NGX_OK;
         }
@@ -798,7 +783,12 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
         frame.keyframe = header->keyframe ? 1 : 0;
         frame.config = header->config ? 1 : 0;
 
-        ngx_media_frame_adopt(&frame, payload);
+        /*
+         * adopt() takes over the reference it is given, and the IPC message
+         * still owns its own: take a reference for the frame so releasing the
+         * message cannot free a buffer the program is still reading.
+         */
+        ngx_media_frame_adopt(&frame, ngx_media_buf_ref(payload));
 
         source = ngx_media_runtime_routed[i].source;
         stream = ngx_media_runtime_routed[i].stream;
@@ -809,19 +799,6 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
                                         ngx_current_msec);
 
         ngx_media_frame_release(&frame);
-
-        if (ngx_media_runtime_routed_frames <= 4
-            || (ngx_media_runtime_routed_frames % 200) == 0)
-        {
-            fprintf(stderr, "route: publish n=%lu key=%d config=%d active=%d "
-                    "state=%lu frames=%lu tracks=%p\n",
-                    (unsigned long) ngx_media_runtime_routed_frames,
-                    (int) frame.keyframe, (int) frame.config,
-                    stream->active != NULL,
-                    (unsigned long) source->state,
-                    (unsigned long) stream->program_frames,
-                    (void *) source->tracks);
-        }
 
         if ((++ngx_media_runtime_routed_frames % 200) == 0) {
             ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
@@ -983,25 +960,11 @@ ngx_media_runtime_tick(ngx_log_t *log)
         stream = &entry->stream;
 
         /* only the owner drives a program's selection and outputs */
+        if (!ngx_media_route_is_owner((ngx_cycle_t *) ngx_cycle,
+                                      ngx_media_owner_hash(&stream->application,
+                                                           &stream->name)))
         {
-            uint32_t    h = ngx_media_owner_hash(&stream->application,
-                                                 &stream->name);
-            ngx_uint_t  owner = ngx_media_route_owner((ngx_cycle_t *) ngx_cycle,
-                                                      h);
-
-            if ((++ngx_media_runtime_tick_logs % 20) == 0) {
-                fprintf(stderr, "route: tick slot=%d stream=%s/%s hash=%u "
-                        "owner=%lu dir=%lu\n", (int) ngx_process_slot,
-                        (char *) stream->application.data,
-                        (char *) stream->name.data, (unsigned) h,
-                        (unsigned long) owner,
-                        (unsigned long) ngx_media_owner_for(
-                            (ngx_cycle_t *) ngx_cycle, h));
-            }
-
-            if (owner != (ngx_uint_t) ngx_process_slot) {
-                continue;
-            }
+            continue;
         }
 
         before = stream->switches;
