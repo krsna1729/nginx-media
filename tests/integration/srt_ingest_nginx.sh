@@ -71,11 +71,12 @@ fi
 # #!::r=live/news,m=publish,s=encoder-a, URL-encoded
 STREAMID='%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3Dencoder-a'
 
-echo "== pushing 3s of MPEG-TS over SRT"
+echo "== pushing 3s of MPEG-TS (H.264 + AAC) over SRT"
 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i testsrc=size=320x240:rate=25 \
-    -f lavfi -i sine=frequency=440:sample_rate=48000 \
-    -c:v mpeg2video -q:v 6 -c:a mp2 -b:a 128k \
+    -f lavfi -i sine=frequency=440:sample_rate=48000 -ac 2 \
+    -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
+    -c:a aac -b:a 96k \
     -t 3 -f mpegts "srt://127.0.0.1:$PORT?mode=caller&streamid=$STREAMID"
 
 for _ in $(seq 1 200); do
@@ -117,6 +118,39 @@ if [ "$DRAINED_BYTES" != "$SESSION_BYTES" ]; then
     echo "drained $DRAINED_BYTES bytes but the session carried $SESSION_BYTES" >&2
     exit 1
 fi
+
+# phase 2: the worker demuxes the ingested MPEG-TS into encoded frames
+DEMUX_LINE="$(grep 'srt demux video=' "$LOG" | tail -1 || true)"
+
+if [ -z "$DEMUX_LINE" ]; then
+    echo "no demux summary in the worker log" >&2
+    exit 1
+fi
+
+VIDEO_FRAMES="$(printf '%s' "$DEMUX_LINE" | sed -n 's/.*video=\([0-9]*\).*/\1/p')"
+AUDIO_FRAMES="$(printf '%s' "$DEMUX_LINE" | sed -n 's/.*audio=\([0-9]*\).*/\1/p')"
+KEYFRAMES="$(printf '%s' "$DEMUX_LINE" | sed -n 's/.*keyframes=\([0-9]*\).*/\1/p')"
+
+[ "$VIDEO_FRAMES" -ge 20 ] \
+    || { echo "too few video frames: '$DEMUX_LINE'" >&2; exit 1; }
+[ "$AUDIO_FRAMES" -ge 20 ] \
+    || { echo "too few audio frames: '$DEMUX_LINE'" >&2; exit 1; }
+[ "$KEYFRAMES" -ge 1 ] \
+    || { echo "no keyframes: '$DEMUX_LINE'" >&2; exit 1; }
+
+for counter in sync_errors continuity_errors psi_errors crc_errors \
+               pes_errors au_overflows; do
+    printf '%s' "$DEMUX_LINE" | grep -q "$counter=0" \
+        || { echo "$counter is not zero: '$DEMUX_LINE'" >&2; exit 1; }
+done
+
+grep -q 'srt track 0 media=1 codec=1' "$LOG" \
+    || { echo "H.264 video track not registered" >&2; exit 1; }
+
+grep -q 'srt track 1 media=2 codec=3 format=3 rate=48000 channels=2 config=yes' "$LOG" \
+    || { echo "AAC audio track not registered correctly" >&2; exit 1; }
+
+echo "== demuxed video=$VIDEO_FRAMES audio=$AUDIO_FRAMES keyframes=$KEYFRAMES"
 
 echo "== stopping nginx"
 "$NGINX" -p "$RUN" -c conf/nginx.conf -s quit

@@ -48,14 +48,35 @@ with the stream database):
 
     media_srt_listen 127.0.0.1:9000;
 
+Phase 2 — MPEG-TS normalization (complete):
+
+- `src/mpegts/ngx_media_ts_demux.*`: packet layer (sync/resync, transport
+  errors, continuity counters, adaptation fields, PCR), PSI (PAT/PMT with
+  CRC-32 validation), PES assembly bounded by `PES_packet_length`, and
+  access-unit emission
+- `src/codec/ngx_media_nal.*`: Annex B NAL iteration and classification for
+  H.264 and H.265 (configuration NALs, VCL, IDR/IRAP sync points);
+  `src/codec/ngx_media_aac.*`: ADTS framing and AudioSpecificConfig synthesis
+- output is the common encoded-media representation: `ngx_media_frame_t` with
+  explicit payload formats (Annex B video, ADTS audio, raw config), track sets
+  carrying codec configuration, and raw 33-bit PTS/DTS (unwrapping belongs to
+  the stream timeline)
+- the SRT worker drains ingested chunks directly into the demuxer and reports
+  per-session frame, keyframe and error counters
+- `make ts-fixture`: ffmpeg-generated H.264+AAC and H.265+AAC MPEG-TS demux to
+  100/189 and 50/95 frames with zero transport, continuity, PSI, CRC and PES
+  errors; `make srt-ingest-nginx`: 3 s of H.264+AAC over SRT yields 65 video
+  and 110 audio frames, 3 keyframes and zero errors inside nginx
+
 ## Layout
 
     config                nginx add-on config
     src/core/             portable media core (goal doc section 3)
+    src/codec/            Annex B NAL and ADTS framing helpers
     src/srt/              SRT transport adapter and Stream ID parsing
-    src/mpegts/           MPEG-TS ingest path
+    src/mpegts/           MPEG-TS demux and ingest path
     tests/unit/           unit tests and the test-only nginx shim
-    tests/integration/    integration, smoke and ingest harnesses
+    tests/integration/    integration, smoke, ingest and fixture harnesses
     scripts/              developer helper scripts
 
 ## Build and test
@@ -64,8 +85,9 @@ with the stream database):
     make nginx            # fetch pinned nginx source, build it with this module
     make smoke            # start the built nginx, serve a request, stop it
     make srt-ingest       # transport-level ffmpeg-over-SRT ingest test
-    make srt-ingest-nginx # same publisher, but through nginx + the worker
+    make srt-ingest-nginx # SRT ingest through nginx, demuxed into frames
+    make ts-fixture       # demux ffmpeg-generated H.264/H.265 MPEG-TS files
 
-Requires `cc`, `make`, `curl`, `tar` and, for the SRT targets, `libsrt` and
-`ffmpeg`. `make nginx` builds nginx 1.30.5 with `--add-module` into `.build/`;
+Requires `cc`, `make`, `curl`, `tar`, `ffmpeg` and (for the SRT targets)
+`libsrt`. `make nginx` builds nginx 1.30.5 with `--add-module` into `.build/`;
 `clean` removes `.build/`.
