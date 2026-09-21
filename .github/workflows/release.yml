@@ -52,6 +52,8 @@ jobs:
           make failover
           make hls
           make rtmp
+          make rtmp-hevc
+          make rtmps
           make srt-output
           make srt-crypto
           make multi-worker

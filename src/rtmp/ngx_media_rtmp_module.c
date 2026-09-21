@@ -47,6 +47,9 @@ struct ngx_media_rtmp_session_s {
     ngx_uint_t                    state;
     ngx_connection_t             *connection;
 
+    ngx_ssl_connection_t         *ssl;         /* set when the peer is RTMPS */
+    unsigned                       ssl_ready:1;
+
     ngx_media_rtmp_handshake_t    handshake;
     unsigned                      reply_sent:1;
     ngx_media_rtmp_reader_t       reader;
@@ -93,11 +96,26 @@ typedef struct {
     ngx_str_t                  listen;
     ngx_uint_t                 listen_set;
     ngx_array_t               *priorities;   /* ngx_media_rtmp_priority_t */
+
+    /*
+     * RTMPS: the same RTMP protocol inside a TLS session.  The listener is
+     * our own socket rather than an http one, so the handshake is driven
+     * here, through the same ngx_ssl_* API the http server uses.
+     */
+    ngx_ssl_t                  ssl;
+    ngx_flag_t                 ssl_enabled;
+    ngx_str_t                  ssl_certificate;
+    ngx_str_t                  ssl_certificate_key;
 } ngx_media_rtmp_main_conf_t;
 
 static void *ngx_media_rtmp_create_conf(ngx_cycle_t *cycle);
 static char *ngx_media_rtmp_listen_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_media_rtmp_ssl_certificate_cmd(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static ngx_uint_t ngx_media_rtmp_ssl_enabled(void);
+static ngx_int_t ngx_media_rtmp_ssl_start(ngx_media_rtmp_session_t *session);
+static void ngx_media_rtmp_ssl_ready(ngx_connection_t *c);
 static char *ngx_media_rtmp_priority_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static void ngx_media_rtmp_play_timer(ngx_event_t *ev);
@@ -118,6 +136,27 @@ static ngx_command_t ngx_media_rtmp_commands[] = {
     { ngx_string("media_rtmp_listen"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
       ngx_media_rtmp_listen_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_rtmp_ssl"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      0,
+      offsetof(ngx_media_rtmp_main_conf_t, ssl_enabled),
+      NULL },
+
+    { ngx_string("media_rtmp_ssl_certificate"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_rtmp_ssl_certificate_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_rtmp_ssl_certificate_key"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_rtmp_ssl_certificate_cmd,
       0,
       0,
       NULL },
@@ -173,7 +212,66 @@ ngx_media_rtmp_create_conf(ngx_cycle_t *cycle)
         return NULL;
     }
 
+    /*
+     * ngx_conf_set_flag_slot refuses a slot that is not UNSET, and pcalloc
+     * leaves it zero.  Seeding it with the default instead would make the
+     * directive report "duplicate" on its first and only legal use, which is
+     * exactly what it did.
+     */
+    mcf->ssl_enabled = NGX_CONF_UNSET;
+
     return mcf;
+}
+
+/*
+ * media_rtmp_ssl_certificate <file>;
+ * media_rtmp_ssl_certificate_key <file>;
+ *
+ * The TLS context is created on the second of the pair, when both paths are
+ * known: ngx_ssl_certificate() needs them together, and creating it twice
+ * would leak a context.
+ */
+static char *
+ngx_media_rtmp_ssl_certificate_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf)
+{
+    ngx_media_rtmp_main_conf_t  *mcf = conf;
+    ngx_str_t                   *value = cf->args->elts;
+
+    (void) cmd;
+
+    if (ngx_strcmp(value[0].data, "media_rtmp_ssl_certificate_key") == 0) {
+        if (mcf->ssl_certificate_key.len != 0) {
+            return "duplicate media_rtmp_ssl_certificate_key";
+        }
+
+        mcf->ssl_certificate_key = value[1];
+
+    } else {
+        if (mcf->ssl_certificate.len != 0) {
+            return "duplicate media_rtmp_ssl_certificate";
+        }
+
+        mcf->ssl_certificate = value[1];
+    }
+
+    if (mcf->ssl_certificate.len == 0 || mcf->ssl_certificate_key.len == 0) {
+        return NGX_CONF_OK;
+    }
+
+    if (ngx_ssl_create(&mcf->ssl, NGX_SSL_TLSv1_2, NULL) != NGX_OK) {
+        return NGX_CONF_ERROR;
+    }
+
+    if (ngx_ssl_certificate(cf, &mcf->ssl, &mcf->ssl_certificate,
+                            &mcf->ssl_certificate_key, NULL) != NGX_OK)
+    {
+        return NGX_CONF_ERROR;
+    }
+
+    mcf->ssl_enabled = 1;
+
+    return NGX_CONF_OK;
 }
 
 static char *
@@ -1408,6 +1506,11 @@ ngx_media_rtmp_read_handler(ngx_event_t *ev)
         return;
     }
 
+    if (session->ssl != NULL && !session->ssl_ready) {
+        /* ngx_ssl_handshake_handler() owns the connection until it finishes */
+        return;
+    }
+
     for ( ;; ) {
         take = sizeof(session->read_buffer) - session->pending_len;
 
@@ -1420,6 +1523,7 @@ ngx_media_rtmp_read_handler(ngx_event_t *ev)
         }
 
         n = c->recv(c, session->read_buffer + session->pending_len, take);
+
 
         if (n == NGX_AGAIN) {
             break;
@@ -1614,8 +1718,154 @@ ngx_media_rtmp_accept_handler(ngx_event_t *ev)
             continue;
         }
 
+        if (ngx_media_rtmp_ssl_enabled()) {
+            /*
+             * RTMPS: the peer speaks RTMP inside TLS.  The handshake is
+             * non-blocking, so it is driven from the connection handlers and
+             * nothing else runs until it completes.
+             */
+            if (ngx_media_rtmp_ssl_start(session) != NGX_OK) {
+                ngx_log_error(NGX_LOG_WARN, nc->log, 0,
+                              "media: rtmps session could not be started");
+                ngx_media_rtmp_close_session(session);
+                continue;
+            }
+
+            ngx_log_error(NGX_LOG_INFO, nc->log, 0,
+                          "media: rtmps handshake started");
+        }
+
         ngx_log_debug0(NGX_LOG_DEBUG_EVENT, c->log, 0,
                        "media: rtmp connection accepted");
+    }
+}
+
+/* --- rtmps --------------------------------------------------------------- */
+
+static ngx_media_rtmp_main_conf_t *
+ngx_media_rtmp_conf(void)
+{
+    return (ngx_media_rtmp_main_conf_t *)
+               ((ngx_cycle_t *) ngx_cycle)
+                   ->conf_ctx[ngx_media_rtmp_module.index];
+}
+
+static ngx_uint_t
+ngx_media_rtmp_ssl_enabled(void)
+{
+    ngx_media_rtmp_main_conf_t  *mcf = ngx_media_rtmp_conf();
+
+    if (mcf == NULL) {
+        return 0;
+    }
+
+    /*
+     * The slot starts UNSET so ngx_conf_set_flag_slot can own it, and
+     * configuration has been parsed by the time anyone asks.  Returning the
+     * raw value would make the default -1, which is truthy: every plain RTMP
+     * listener would then try to speak TLS.
+     */
+    if (mcf->ssl_enabled == NGX_CONF_UNSET) {
+        mcf->ssl_enabled = 0;
+    }
+
+    return (ngx_uint_t) mcf->ssl_enabled;
+}
+
+/*
+ * Called by nginx when the TLS handshake finishes.  The RTMP handshake is
+ * already waiting in the SSL buffer, so the read path has to be restarted:
+ * nothing else will wake it.
+ */
+static void
+ngx_media_rtmp_ssl_ready(ngx_connection_t *c)
+{
+    ngx_media_rtmp_session_t  *session = c->data;
+
+    if (session == NULL) {
+        ngx_close_connection(c);
+        return;
+    }
+
+    if (session->ssl_ready) {
+        /* the first pass and the event callback can both get here */
+        return;
+    }
+
+    session->ssl_ready = 1;
+
+    ngx_log_error(NGX_LOG_INFO, c->log, 0, "media: rtmps handshake complete");
+
+    if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
+        ngx_media_rtmp_close_session(session);
+        return;
+    }
+
+    /*
+     * ngx_ssl_create_connection() installed ngx_ssl_handshake_handler() as the
+     * connection handlers, so they have to be put back: otherwise every later
+     * event dispatches into the handshake handler again, which calls this
+     * callback again and reads nothing.
+     */
+    c->read->handler = ngx_media_rtmp_read_handler;
+    c->write->handler = ngx_media_rtmp_write_handler;
+
+    /*
+     * The peer's RTMP handshake may already be in the SSL buffer, in which
+     * case the socket will not become readable again.  Mark the event ready
+     * and run the read path directly, as nginx's own SSL handler does.
+     */
+    c->read->ready = 1;
+    ngx_media_rtmp_read_handler(c->read);
+}
+
+static ngx_int_t
+ngx_media_rtmp_ssl_start(ngx_media_rtmp_session_t *session)
+{
+    ngx_media_rtmp_main_conf_t  *mcf = ngx_media_rtmp_conf();
+
+    if (mcf == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (ngx_ssl_create_connection(&mcf->ssl, session->connection,
+                                  NGX_SSL_BUFFER) != NGX_OK)
+    {
+        ngx_log_error(NGX_LOG_WARN, session->connection->log, 0,
+                      "media: rtmps: ngx_ssl_create_connection failed "
+                      "(ssl ctx=%p)", mcf->ssl.ctx);
+        return NGX_ERROR;
+    }
+
+    /*
+     * ngx_ssl_create_connection() installs ngx_ssl_handshake_handler() as the
+     * connection handlers and leaves this callback to the caller.  Leaving it
+     * unset is a call through a NULL pointer the moment the handshake
+     * completes, which is exactly how this crashed.
+     */
+    session->connection->ssl->handler = ngx_media_rtmp_ssl_ready;
+    session->ssl = session->connection->ssl;
+
+    /*
+     * ngx_ssl_create_connection() installs ngx_ssl_handshake_handler() so the
+     * handshake can be *continued* on events, but something has to start it.
+     * nginx's http path calls ngx_ssl_handshake() at this point for exactly
+     * that reason; without it the handler never runs and both peers wait.
+     */
+    switch (ngx_ssl_handshake(session->connection)) {
+
+    case NGX_OK:
+        /* finished in one pass: the handler is not called back */
+        ngx_media_rtmp_ssl_ready(session->connection);
+        return NGX_OK;
+
+    case NGX_AGAIN:
+        return NGX_OK;
+
+    default:
+        ngx_log_error(NGX_LOG_WARN, session->connection->log, 0,
+                      "media: rtmps handshake failed to start");
+        return NGX_ERROR;
     }
 }
 

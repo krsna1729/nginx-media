@@ -59,6 +59,7 @@ jobs:
         run: |
           make srt-crypto
           make rtmp-hevc
+          make rtmps
 
       - name: Upload logs on failure
         if: failure()

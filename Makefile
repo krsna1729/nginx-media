@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch failover hls rtmp rtmp-hevc srt-output srt-crypto multi-worker soak fault srt-qualify clean
+.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch failover hls rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault srt-qualify clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -37,6 +37,9 @@ rtmp:
 
 rtmp-hevc:
 	tests/integration/rtmp_hevc_nginx.sh
+
+rtmps:
+	tests/integration/rtmps_nginx.sh
 
 srt-output:
 	tests/integration/srt_output_nginx.sh
