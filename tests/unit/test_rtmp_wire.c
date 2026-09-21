@@ -161,6 +161,32 @@ test_handshake(void)
     c0c1[7] = 0x7C;
     c0c1[8] = 0x02;
 
+    /* imprint C1 with the client digest, as a real client does */
+    {
+        static const u_char  player_key[68] = {
+            'G','e','n','u','i','n','e',' ','A','d','o','b','e',' ','F','l',
+            'a','s','h',' ','P','l','a','y','e','r',' ','0','0','1',
+            0xF0,0xEE,0xC2,0x4A,0x80,0x68,0xBE,0xE8,0x2E,0x00,0xD0,0xD1,
+            0x02,0x9E,0x7E,0x57,0x6E,0xEC,0x5D,0x2D,0x29,0x80,0x6F,0xAB,
+            0x93,0xB8,0xE6,0x36,0xCF,0xEB,0x31,0xAE
+        };
+        u_char      c1[NGX_MEDIA_RTMP_HANDSHAKE_SIZE];
+        u_char      covered[NGX_MEDIA_RTMP_HANDSHAKE_SIZE - 32];
+        u_char      digest[32];
+        ngx_uint_t  offset = 12 + (ngx_uint_t) (c0c1[9] + c0c1[10] + c0c1[11]
+                                                + c0c1[12]) % 728;
+
+        memcpy(c1, c0c1 + 1, sizeof(c1));
+
+        memcpy(covered, c1, offset);
+        memcpy(covered + offset, c1 + offset + 32, sizeof(covered) - offset);
+
+        ngx_media_hmac_sha256(player_key, 30, covered, sizeof(covered), digest);
+        memcpy(c1 + offset, digest, 32);
+
+        memcpy(c0c1 + 1, c1, sizeof(c1));
+    }
+
     ngx_media_rtmp_handshake_init(&hs);
 
     CHECK(ngx_media_rtmp_handshake_feed(&hs, c0c1, sizeof(c0c1), &consumed)
@@ -195,31 +221,47 @@ test_handshake(void)
             memcpy(covered + offset, s1 + offset + 32,
                    sizeof(covered) - offset);
 
-            ngx_media_hmac_sha256(key, sizeof(key), covered, sizeof(covered),
-                                  digest);
+            /* only the printable part of the key signs the packet */
+            ngx_media_hmac_sha256(key, 36, covered, sizeof(covered), digest);
         }
 
         CHECK(memcmp(s1 + offset, digest, 32) == 0,
-              "S1 carries a valid FMS-key digest at offset %lu", offset);
+              "S1 carries a valid server-key digest at offset %lu", offset);
         CHECK(offset >= 12 && offset < 728 + 12, "digest offset in range");
 
-        /* S2: digest over the first 1504 bytes, keyed with the player key */
+        /*
+         * S2 as a validating client recomputes it: the body repeats C1's
+         * random and the trailing digest is keyed by a digest of the client's
+         * own digest field.
+         */
         {
-            static const u_char  key[68] = {
+            static const u_char  server_key[68] = {
                 'G','e','n','u','i','n','e',' ','A','d','o','b','e',' ','F',
-                'l','a','s','h',' ','P','l','a','y','e','r',' ','0','0','1',
+                'l','a','s','h',' ','M','e','d','i','a',' ','S','e','r','v',
+                'e','r',' ','0','0','1',
                 0xF0,0xEE,0xC2,0x4A,0x80,0x68,0xBE,0xE8,0x2E,0x00,0xD0,0xD1,
                 0x02,0x9E,0x7E,0x57,0x6E,0xEC,0x5D,0x2D,0x29,0x80,0x6F,0xAB,
                 0x93,0xB8,0xE6,0x36,0xCF,0xEB,0x31,0xAE
             };
+            u_char  key[32], expect[32];
 
-            u_char  expect[32];
+            /* the client's digest field, located the way the server does */
+            {
+                ngx_uint_t  client_offset = 12
+                    + (ngx_uint_t) (c0c1[1 + 8] + c0c1[1 + 9] + c0c1[1 + 10]
+                                    + c0c1[1 + 11]) % 728;
 
-            ngx_media_hmac_sha256(key, sizeof(key), s2,
+                ngx_media_hmac_sha256(server_key, sizeof(server_key),
+                                      c0c1 + 1 + client_offset, 32, key);
+            }
+
+            ngx_media_hmac_sha256(key, 32, s2,
                                   NGX_MEDIA_RTMP_HANDSHAKE_SIZE - 32, expect);
 
             CHECK(memcmp(s2 + NGX_MEDIA_RTMP_HANDSHAKE_SIZE - 32, expect, 32)
-                  == 0, "S2 carries a valid player-key digest");
+                  == 0, "S2 carries the derived digest");
+            CHECK(memcmp(s2, c0c1 + 1, NGX_MEDIA_RTMP_HANDSHAKE_SIZE - 32)
+                  == 0, "S2 repeats the client's random");
         }
     }
 
@@ -549,6 +591,271 @@ test_chunks(void)
     ngx_media_buf_unref(payload);
 }
 
+/*
+ * An independent parser written straight from the specification: it must
+ * accept everything the writer produces, which catches framing bugs a
+ * round trip through our own reader would hide.
+ */
+typedef struct {
+    ngx_uint_t  type;
+    ngx_uint_t  stream_id;
+    uint32_t    timestamp;
+    size_t      length;
+    size_t      got;
+    u_char      digest[16];
+} strict_message_t;
+
+static size_t
+strict_parse(const u_char *p, size_t len, ngx_uint_t chunk_size,
+    strict_message_t *out, ngx_uint_t max_messages)
+{
+    struct {
+        uint32_t    timestamp;
+        size_t      length;
+        size_t      got;
+        ngx_uint_t  type;
+        ngx_uint_t  stream_id;
+        unsigned    used;
+        unsigned    extended;
+    } cs[8];
+
+    size_t      pos = 0, count = 0;
+    ngx_uint_t  i;
+
+    memset(cs, 0, sizeof(cs));
+
+    while (pos < len && count < max_messages) {
+        ngx_uint_t  csid, mh, new_message = 0, chunk_fmt;
+        uint32_t    ts_field;
+
+        if (p[pos] == 0x00 || p[pos] == 0x01) {
+            printf("  strict: unexpected csid byte %02x at %lu\n", p[pos], pos);
+            return 0;
+        }
+
+        chunk_fmt = (ngx_uint_t) (p[pos] >> 6);
+        csid = (ngx_uint_t) (p[pos] & 0x3F);
+
+        if (csid >= 8) {
+            printf("  strict: csid %lu at %lu\n", csid, pos);
+            return 0;
+        }
+
+        pos++;
+
+        if (chunk_fmt == 0 || chunk_fmt == 1 || chunk_fmt == 2) {
+            mh = (chunk_fmt == 0) ? 11 : ((chunk_fmt == 1) ? 7 : 3);
+
+            if (pos + mh > len) {
+                printf("  strict: short header at %lu\n", pos);
+                return 0;
+            }
+
+            ts_field = ((uint32_t) p[pos] << 16) | ((uint32_t) p[pos + 1] << 8)
+                       | p[pos + 2];
+            pos += 3;
+
+            if (chunk_fmt != 2) {
+                cs[csid].length = ((size_t) p[pos] << 16)
+                                  | ((size_t) p[pos + 1] << 8) | p[pos + 2];
+                cs[csid].type = p[pos + 3];
+                pos += 4;
+
+                if (chunk_fmt == 0) {
+                    cs[csid].stream_id = ((ngx_uint_t) p[pos] << 24)
+                                         | ((ngx_uint_t) p[pos + 1] << 16)
+                                         | ((ngx_uint_t) p[pos + 2] << 8)
+                                         | p[pos + 3];
+                    pos += 4;
+                }
+            }
+
+            cs[csid].extended = (ts_field == 0xFFFFFF);
+            new_message = 1;
+
+            if (cs[csid].extended) {
+                if (pos + 4 > len) {
+                    return 0;
+                }
+
+                ts_field = ((uint32_t) p[pos] << 24) | ((uint32_t) p[pos + 1] << 16)
+                           | ((uint32_t) p[pos + 2] << 8) | p[pos + 3];
+                pos += 4;
+            }
+
+            if (chunk_fmt == 0) {
+                cs[csid].timestamp = ts_field;
+
+            } else {
+                cs[csid].timestamp += ts_field;
+            }
+
+            cs[csid].got = 0;
+            cs[csid].used = 1;
+
+        } else {
+            if (!cs[csid].used) {
+                printf("  strict: continuation without header csid %lu at %lu\n",
+                       csid, pos);
+                return 0;
+            }
+
+            if (cs[csid].extended) {
+                if (pos + 4 > len) {
+                    return 0;
+                }
+
+                pos += 4;
+            }
+
+            if (cs[csid].got >= cs[csid].length) {
+                new_message = 1;
+                cs[csid].got = 0;
+            }
+        }
+
+        if (new_message) {
+            out[count].type = cs[csid].type;
+            out[count].stream_id = cs[csid].stream_id;
+            out[count].timestamp = cs[csid].timestamp;
+            out[count].length = cs[csid].length;
+            out[count].got = 0;
+            count++;
+        }
+
+        {
+            size_t  take = cs[csid].length - cs[csid].got;
+            size_t  room = chunk_size - (cs[csid].got % chunk_size);
+
+            /* a chunk never carries more than the agreed chunk size */
+            if (room == 0) {
+                room = chunk_size;
+            }
+
+            if (take > room) {
+                take = room;
+            }
+
+            if (take > 0 && take > len - pos) {
+                take = len - pos;
+            }
+
+            /* the writer never splits a chunk below its chunk size */
+            if (take > 0) {
+                memcpy(out[count - 1].digest, p + pos,
+                       take < sizeof(out[count - 1].digest)
+                           ? take : sizeof(out[count - 1].digest));
+            }
+
+            pos += take;
+            cs[csid].got += take;
+            out[count - 1].got = cs[csid].got;
+        }
+    }
+
+    for (i = 0; i < 8; i++) {
+        if (cs[i].used && cs[i].got != cs[i].length) {
+            printf("  strict: csid %lu incomplete %lu of %lu\n", i, cs[i].got,
+                   cs[i].length);
+            return 0;
+        }
+    }
+
+    return count;
+}
+
+static void
+test_writer_against_spec(void)
+{
+    ngx_media_rtmp_writer_t   w;
+    ngx_media_rtmp_packet_t   pkt;
+    ngx_media_buf_t          *payload;
+    u_char                    wire[65536];
+    size_t                    total = 0, count;
+    strict_message_t          messages[16];
+    ngx_uint_t                i;
+
+    TEST_CASE("writer output parsed by an independent implementation");
+
+    payload = ngx_media_buf_alloc(8192);
+    CHECK(payload != NULL, "payload allocated");
+
+    for (i = 0; i < 8192; i++) {
+        ngx_media_buf_data(payload)[i] = (u_char) (i & 0xFF);
+    }
+
+    (void) ngx_media_buf_freeze(payload, 8192);
+
+    /* small chunk size forces multi chunk messages, as the wire does */
+    ngx_media_rtmp_writer_init(&w, 64, NGX_MEDIA_RTMP_MAX_MESSAGE);
+
+    {
+        struct {
+            ngx_uint_t  csid;
+            ngx_uint_t  type;
+            ngx_uint_t  stream_id;
+            uint32_t    ts;
+            size_t      offset;
+            size_t      len;
+        } sequence[] = {
+            /* a player's traffic: config, audio, a large video message, more */
+            { 4, NGX_MEDIA_RTMP_MSG_VIDEO, 1, 0, 0, 42 },
+            { 4, NGX_MEDIA_RTMP_MSG_AUDIO, 1, 0, 0, 7 },
+            { 4, NGX_MEDIA_RTMP_MSG_AUDIO, 1, 3200, 0, 261 },
+            { 4, NGX_MEDIA_RTMP_MSG_VIDEO, 1, 3221, 100, 4188 },
+            { 4, NGX_MEDIA_RTMP_MSG_AUDIO, 1, 3221, 0, 268 },
+            { 4, NGX_MEDIA_RTMP_MSG_VIDEO, 1, 3242, 200, 5000 },
+            { 3, NGX_MEDIA_RTMP_MSG_COMMAND_AMF0, 0, 0, 0, 20 },
+            { 2, NGX_MEDIA_RTMP_MSG_CHUNK_SIZE, 0, 0, 0, 4 },
+            { 4, NGX_MEDIA_RTMP_MSG_AUDIO, 1, 3264, 0, 249 },
+            { 4, NGX_MEDIA_RTMP_MSG_VIDEO, 1, 3285, 300, 3000 },
+        };
+
+        for (i = 0; i < sizeof(sequence) / sizeof(sequence[0]); i++) {
+            size_t  part;
+
+            ngx_media_rtmp_packet_init(&pkt);
+
+            CHECK(ngx_media_rtmp_writer_message(&w, &pkt, sequence[i].csid,
+                                                sequence[i].type,
+                                                sequence[i].stream_id,
+                                                sequence[i].ts, payload,
+                                                sequence[i].offset,
+                                                sequence[i].len) == NGX_OK,
+                  "message %lu written", i);
+
+            part = flatten(&pkt, wire + total, sizeof(wire) - total);
+            CHECK(part > 0, "message %lu serialized", i);
+            total += part;
+
+            ngx_media_rtmp_packet_destroy(&pkt);
+        }
+
+        count = strict_parse(wire, total, 64, messages, 16);
+
+        CHECK(count == sizeof(sequence) / sizeof(sequence[0]),
+              "independent parser found %lu of %lu messages", count,
+              sizeof(sequence) / sizeof(sequence[0]));
+
+        if (count == sizeof(sequence) / sizeof(sequence[0])) {
+            for (i = 0; i < count; i++) {
+                CHECK(messages[i].type == sequence[i].type,
+                      "message %lu type: %lu", i, messages[i].type);
+                CHECK(messages[i].stream_id == sequence[i].stream_id,
+                      "message %lu stream id: %lu", i, messages[i].stream_id);
+                CHECK(messages[i].timestamp == sequence[i].ts,
+                      "message %lu timestamp: %u", i, messages[i].timestamp);
+                CHECK(messages[i].length == sequence[i].len,
+                      "message %lu length: %lu", i, messages[i].length);
+                CHECK(messages[i].got == sequence[i].len,
+                      "message %lu fully delivered: %lu", i, messages[i].got);
+            }
+        }
+    }
+
+    ngx_media_buf_unref(payload);
+}
+
 static void
 test_amf(void)
 {
@@ -689,6 +996,7 @@ main(void)
     test_sha256();
     test_handshake();
     test_chunks();
+    test_writer_against_spec();
     test_amf();
 
     TEST_LEAKS();

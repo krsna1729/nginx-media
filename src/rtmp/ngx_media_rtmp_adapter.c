@@ -1283,6 +1283,7 @@ ngx_media_rtmp_prepare_frame(ngx_media_rtmp_prepare_t *prep,
     rc = ngx_media_rtmp_fanout_push(&prep->fan, type, frame->track_index,
                                     timestamp, payload, frame->keyframe, 0);
 
+
     ngx_media_buf_unref(payload);
 
     return rc;

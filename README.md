@@ -168,7 +168,37 @@ Phase 5 — HLS and recording (complete):
   H.264 + AAC
 - heap poisoning in the unit shim (`NGX_MEDIA_TEST_POISON`) caught an
   unterminated path handed to `open()`; the HLS test now runs with it enabled
-- next phase: RTMP ingest/output
+Phase 6 - RTMP ingest and output (complete):
+
+- `src/rtmp/ngx_media_rtmp_wire.*`: the protocol layer, free of nginx event
+  types so it can be unit tested against synthetic byte streams - simple and
+  Adobe digest handshakes (HMAC-SHA256 over the media server and flash player
+  keys, with the digest offset derived from the packet), chunk streams in all
+  four header formats with extended chunk ids and timestamps, chunk size and
+  abort control messages, message assembly across partial socket reads, and a
+  bounded AMF0 reader/writer
+- `src/rtmp/ngx_media_rtmp_adapter.*`: avcC and AudioSpecificConfig handling,
+  AVCC <-> Annex B reframing, FLV message bodies, ADTS framing for raw AAC,
+  the publisher state machine and the bounded fanout ring
+- publishers normalize into the representation the MPEG-TS path uses (Annex B
+  video, ADTS audio, config frames plus a track contract carrying the parameter
+  sets as an Annex B blob), so an RTMP source is interchangeable with an SRT
+  source for the selector, HLS, recording and SRT output (goal doc 34 item 1)
+- `src/rtmp/ngx_media_rtmp_module.c`: `media_rtmp_listen` and
+  `media_rtmp_source_priority`; `connect`/`createStream`/`publish`/`play` are
+  served with the control messages clients expect (window acknowledgement,
+  set peer bandwidth, chunk size, stream begin, status), publishers register as
+  sources of the same logical streams, and players read the program
+- players share payloads: the program is converted to FLV once per stream and
+  every connection adds only its own chunk headers, referencing the shared
+  media in place (goal doc 12.1)
+- `src/core/ngx_media_runtime.*`: one owning-worker timer drives the selection
+  tick, the per-stream outputs and the FLV preparation for every transport
+- `make rtmp` proves the exit criteria through nginx: an ffmpeg publisher
+  appears in the control API with its configured priority, the program reaches
+  HLS, and a second ffmpeg plays the program back over RTMP and decodes H.264
+  and AAC video/audio packets
+- next phase: SRT output and fanout
 
 
 ## Layout
@@ -180,6 +210,7 @@ Phase 5 — HLS and recording (complete):
     src/record/           RAW / ISO / PROGRAM recording taps
     src/codec/            Annex B NAL and ADTS framing helpers
     src/srt/              SRT transport adapter and Stream ID parsing
+    src/rtmp/             RTMP wire layer, FLV adapter and transport module
     src/mpegts/           MPEG-TS demux and ingest path
     tests/unit/           unit tests and the test-only nginx shim
     tests/integration/    integration, smoke, ingest and fixture harnesses
@@ -197,6 +228,7 @@ Phase 5 — HLS and recording (complete):
     make api-switch       # control API: listing and manual switch via nginx
     make failover         # kill / freeze / corrupt failover and switchback
     make hls               # HLS playlist, discontinuity, recordings over nginx
+    make rtmp              # RTMP publish and play of the same logical stream
 
 Requires `cc`, `make`, `curl`, `tar`, `ffmpeg` and (for the SRT targets)
 `libsrt`. `make nginx` builds nginx 1.30.5 with `--add-module` into `.build/`;

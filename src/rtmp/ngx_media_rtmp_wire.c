@@ -188,9 +188,10 @@ ngx_media_hmac_sha256(const u_char *key, size_t key_len, const u_char *data,
 /* --- handshake ----------------------------------------------------------- */
 
 /*
- * Adobe key material: the media server key authenticates the server side of
- * the digest handshake (S1) and the flash player key the S2 reply, exactly as
- * librtmp and libavformat implement it.
+ * Adobe key material.  Only the printable part of each key is used, which is
+ * what libavformat's validator and the FMS specification use: the server's S1
+ * digest is keyed with the media server key (36 bytes) at the offset derived
+ * from S1 itself.
  */
 static const u_char ngx_media_rtmp_fms_key[68] = {
     'G','e','n','u','i','n','e',' ','A','d','o','b','e',' ','F','l','a','s',
@@ -200,6 +201,10 @@ static const u_char ngx_media_rtmp_fms_key[68] = {
     0xCF,0xEB,0x31,0xAE
 };
 
+/* only the printable prefix of the key signs S1; S2 uses the full key */
+#define NGX_MEDIA_RTMP_SERVER_KEY_LEN 36
+#define NGX_MEDIA_RTMP_PLAYER_KEY_LEN 30
+
 static const u_char ngx_media_rtmp_player_key[68] = {
     'G','e','n','u','i','n','e',' ','A','d','o','b','e',' ','F','l','a','s',
     'h',' ','P','l','a','y','e','r',' ','0','0','1',
@@ -207,6 +212,7 @@ static const u_char ngx_media_rtmp_player_key[68] = {
     0x7E,0x57,0x6E,0xEC,0x5D,0x2D,0x29,0x80,0x6F,0xAB,0x93,0xB8,0xE6,0x36,
     0xCF,0xEB,0x31,0xAE
 };
+
 
 static void
 ngx_media_rtmp_random(u_char *dst, size_t len, uint64_t seed)
@@ -271,14 +277,42 @@ ngx_media_rtmp_handshake_init(ngx_media_rtmp_handshake_t *hs)
     memset(hs, 0, sizeof(ngx_media_rtmp_handshake_t));
 }
 
+/*
+ * The client's digest field sits at one of the two offsets the specification
+ * defines; the one that verifies against the flash player key tells us the
+ * client used the digest handshake and where its digest lives.
+ */
+static ngx_uint_t
+ngx_media_rtmp_handshake_client_digest(const u_char *c1)
+{
+    static const ngx_uint_t  bases[2] = { 8, 772 };
+    u_char                   digest[32];
+    ngx_uint_t               i, offset;
+
+    for (i = 0; i < 2; i++) {
+        offset = bases[i] + 4
+                 + (ngx_uint_t) (c1[bases[i]] + c1[bases[i] + 1]
+                                 + c1[bases[i] + 2] + c1[bases[i] + 3]) % 728;
+
+        ngx_media_rtmp_handshake_digest(c1, offset, ngx_media_rtmp_player_key,
+                                        NGX_MEDIA_RTMP_PLAYER_KEY_LEN, digest);
+
+        if (memcmp(digest, c1 + offset, 32) == 0) {
+            return offset;
+        }
+    }
+
+    return 0;
+}
+
 static void
 ngx_media_rtmp_handshake_reply(ngx_media_rtmp_handshake_t *hs)
 {
     u_char     *s1 = hs->out + 1;
     u_char     *s2 = hs->out + 1 + NGX_MEDIA_RTMP_HANDSHAKE_SIZE;
-    u_char      digest[32];
+    u_char      digest[32], key[32];
     uint64_t    seed;
-    ngx_uint_t  i;
+    ngx_uint_t  i, client_digest;
 
     seed = (uint64_t) time(NULL) * 1000003ULL;
 
@@ -300,22 +334,37 @@ ngx_media_rtmp_handshake_reply(ngx_media_rtmp_handshake_t *hs)
 
     ngx_media_rtmp_random(s1 + 8, NGX_MEDIA_RTMP_HANDSHAKE_SIZE - 8, seed);
 
-    if (hs->complex) {
-        ngx_uint_t offset = 12 + (ngx_uint_t) (s1[8] + s1[9] + s1[10] + s1[11])
-                                 % 728;
+    client_digest = ngx_media_rtmp_handshake_client_digest(hs->c1);
 
+    if (hs->complex && client_digest > 0) {
+        ngx_uint_t  offset = 12
+                             + (ngx_uint_t) (s1[8] + s1[9] + s1[10] + s1[11])
+                                   % 728;
+
+        /* S1 is signed with the printable part of the media server key */
         ngx_media_rtmp_handshake_digest(s1, offset, ngx_media_rtmp_fms_key,
-                                        sizeof(ngx_media_rtmp_fms_key),
-                                        digest);
+                                        NGX_MEDIA_RTMP_SERVER_KEY_LEN, digest);
         memcpy(s1 + offset, digest, 32);
+
+        /*
+         * S2 repeats the client's random body and is signed with a key
+         * derived from the client's own digest, which is what a validating
+         * client recomputes.
+         */
+        memcpy(s2, hs->c1, NGX_MEDIA_RTMP_HANDSHAKE_SIZE - 32);
+
+        ngx_media_hmac_sha256(ngx_media_rtmp_fms_key,
+                              sizeof(ngx_media_rtmp_fms_key),
+                              hs->c1 + client_digest, 32, key);
+
+        ngx_media_hmac_sha256(key, 32, s2,
+                              NGX_MEDIA_RTMP_HANDSHAKE_SIZE - 32, digest);
+        memcpy(s2 + NGX_MEDIA_RTMP_HANDSHAKE_SIZE - 32, digest, 32);
+
+    } else {
+        /* the simple handshake echoes the client's packet */
+        memcpy(s2, hs->c1, NGX_MEDIA_RTMP_HANDSHAKE_SIZE);
     }
-
-    ngx_media_rtmp_random(s2, NGX_MEDIA_RTMP_HANDSHAKE_SIZE - 32, seed ^ 0x5A5A);
-
-    ngx_media_hmac_sha256(ngx_media_rtmp_player_key,
-                          sizeof(ngx_media_rtmp_player_key), s2,
-                          NGX_MEDIA_RTMP_HANDSHAKE_SIZE - 32, digest);
-    memcpy(s2 + NGX_MEDIA_RTMP_HANDSHAKE_SIZE - 32, digest, 32);
 
     hs->out_len = 1 + 2 * NGX_MEDIA_RTMP_HANDSHAKE_SIZE;
 }
