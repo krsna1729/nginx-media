@@ -17,6 +17,7 @@
 #include "ngx_media_registry.h"
 #include "ngx_media_destination.h"
 #include "ngx_media_file.h"
+#include "ngx_media_hls_pull.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_selector.h"
 
@@ -879,6 +880,27 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
         {
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"file_open_failed\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        source = ngx_media_stream_source_find(stream, &id);
+
+    } else if (type == NGX_MEDIA_SOURCE_HLS_PULL) {
+        ngx_str_t  url;
+
+        if (ngx_media_api_json_field(&body, "path", &url) != NGX_OK
+            || url.len == 0)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"path_required_for_hls_pull\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        if (ngx_media_hls_pull_open(stream, &id, &url,
+                                    r->connection->log) == NULL)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"hls_pull_failed\"}");
             return NGX_HTTP_BAD_REQUEST;
         }
 

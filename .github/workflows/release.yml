@@ -53,6 +53,7 @@ jobs:
           make failover
           make hls
           make hls-push
+          make hls-pull
           make file-source
           make rtmp
           make rtmp-hevc

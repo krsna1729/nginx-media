@@ -1,0 +1,37 @@
+#ifndef NGX_MEDIA_HLS_PULL_H
+#define NGX_MEDIA_HLS_PULL_H
+
+#include "ngx_media.h"
+#include "ngx_media_ts_demux.h"
+
+/*
+ * HLS pull source (normative revision, acceptance case 6).
+ *
+ * A source that fetches a media playlist, fetches the segments it names, and
+ * demuxes them into the normal source gate.  Everything downstream - health,
+ * compatibility, selection, promotion - treats it exactly like a publisher,
+ * which is the point: adding one at runtime and promoting it is the same
+ * operation as promoting any other source.
+ *
+ *   playlist -> segment -> TS demux -> media frames -> source gate
+ *
+ * Each source owns a reader thread rather than being paced by the runtime
+ * tick, because fetching is sequential and blocking by nature: the thread
+ * waits for the origin between refreshes, and the event loop never does.
+ * The thread count is therefore the number of pull sources an operator adds,
+ * which is theirs to bound.
+ */
+
+typedef struct ngx_media_hls_pull_s ngx_media_hls_pull_t;
+
+/* opens url as a source on stream, and starts its reader */
+ngx_media_hls_pull_t *ngx_media_hls_pull_open(ngx_media_stream_t *stream,
+    const ngx_str_t *id, const ngx_str_t *url, ngx_log_t *log);
+
+/* stops the reader, joins it, and removes the source */
+void ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull);
+
+/* stops and joins every reader; called at shutdown */
+void ngx_media_hls_pull_stop_all(void);
+
+#endif /* NGX_MEDIA_HLS_PULL_H */
