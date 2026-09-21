@@ -29,6 +29,7 @@ cc -O1 -g -Wall -Wextra -Werror -std=c11 \
     "$ROOT/src/core/ngx_media_track.c" \
     "$ROOT/src/core/ngx_media_timeline.c" \
     "$ROOT/src/core/ngx_media_source.c" \
+    "$ROOT/src/core/ngx_media_destination.c" \
     "$ROOT/src/core/ngx_media_stream.c" \
     "$ROOT/src/core/ngx_media_policy.c" \
     "$ROOT/src/codec/ngx_media_nal.c" \

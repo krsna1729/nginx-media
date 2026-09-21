@@ -1123,6 +1123,45 @@ ngx_media_runtime_stop(void)
     }
 }
 
+/*
+ * Releases the runtime outputs of one stream: flush what is buffered, finalize
+ * the playlist and any recording part, and free the slot.  Called from ordered
+ * teardown, before the stream's feed goes away, because the flush reads from
+ * it.  Without this a create/delete cycle leaks an output slot every time.
+ */
+/* how many runtime output slots are in use: a leak shows up here */
+ngx_uint_t
+ngx_media_runtime_outputs_active(void)
+{
+    ngx_uint_t  i, active = 0;
+
+    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_OUTPUTS; i++) {
+        active += ngx_media_runtime_outputs[i].used ? 1 : 0;
+    }
+
+    return active;
+}
+
+void
+ngx_media_runtime_outputs_release(ngx_media_stream_t *stream)
+{
+    ngx_uint_t  i;
+
+    if (stream == NULL) {
+        return;
+    }
+
+    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_OUTPUTS; i++) {
+
+        if (ngx_media_runtime_outputs[i].used
+            && ngx_media_runtime_outputs[i].stream == stream)
+        {
+            ngx_media_runtime_outputs_stop(&ngx_media_runtime_outputs[i]);
+            return;
+        }
+    }
+}
+
 void
 ngx_media_runtime_shutdown(ngx_log_t *log)
 {

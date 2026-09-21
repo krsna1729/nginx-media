@@ -42,6 +42,16 @@ void ngx_media_runtime_tick(ngx_log_t *log);
 void ngx_media_runtime_shutdown(ngx_log_t *log);
 
 /*
+ * Ordered teardown for one stream's runtime outputs (HLS, recording): flush,
+ * finalize and free the slot.  Must run before the stream's feed is
+ * destroyed, because the flush reads it.
+ */
+void ngx_media_runtime_outputs_release(ngx_media_stream_t *stream);
+
+/* runtime output slots in use; a leak in ordered teardown shows up here */
+ngx_uint_t ngx_media_runtime_outputs_active(void);
+
+/*
  * Sink for the prepared transport bursts.  The SRT output registers here, so
  * HLS, recording and SRT destinations all consume the same preparation and a
  * destination costs one reference per burst (goal doc 16, 34 item 11).

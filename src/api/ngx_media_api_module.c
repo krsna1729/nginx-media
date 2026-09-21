@@ -16,6 +16,7 @@
 #include "ngx_media_platform.h"
 #include "ngx_media_registry.h"
 #include "ngx_media_destination.h"
+#include "ngx_media_runtime.h"
 #include "ngx_media_selector.h"
 
 #include <ngx_http.h>
@@ -331,7 +332,12 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "# TYPE nginx_media_source_healthy gauge\n"
                          "# HELP nginx_media_source_active "
                          "1 when the source is on air\n"
-                         "# TYPE nginx_media_source_active gauge\n");
+                         "# TYPE nginx_media_source_active gauge\n"
+                         "# HELP nginx_media_runtime_outputs "
+                         "runtime output slots in use\n"
+                         "# TYPE nginx_media_runtime_outputs gauge\n"
+                         "nginx_media_runtime_outputs %ui\n",
+                         ngx_media_runtime_outputs_active());
 
     for (q = ngx_queue_head(&registry->entries);
          q != (ngx_queue_t *) &registry->entries;

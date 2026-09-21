@@ -85,6 +85,9 @@ ngx_media_destination_add(ngx_media_stream_t *stream, const ngx_str_t *id,
     ngx_media_destination_t  *destination;
     ngx_str_t                *copy;
 
+    /* the model allocates from the stream's pool, so no logger is needed */
+    (void) log;
+
     if (stream == NULL || id == NULL || id->len == 0) {
         return NULL;
     }
@@ -132,7 +135,7 @@ ngx_media_destination_find(ngx_media_stream_t *stream, const ngx_str_t *id)
         destination = ngx_queue_data(q, ngx_media_destination_t, queue);
 
         if (destination->id.len == id->len
-            && ngx_strncmp(destination->id.data, id->data, id->len) == 0)
+            && ngx_memcmp(destination->id.data, id->data, id->len) == 0)
         {
             return destination;
         }
@@ -173,10 +176,12 @@ ngx_media_destination_start(ngx_media_stream_t *stream,
 
     ops = ngx_media_destination_backend(destination->type);
 
+    /*
+     * No backend means the type was accepted by the control API but nothing
+     * in this build can carry it.  The caller reports that; the model does
+     * not log, so it stays usable from hosts without nginx's logging.
+     */
     if (ops == NULL) {
-        ngx_log_error(NGX_LOG_WARN, log, 0,
-                      "media: no backend for destination %V type %ui",
-                      &destination->id, destination->type);
         return NGX_ERROR;
     }
 

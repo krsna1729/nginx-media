@@ -1,4 +1,5 @@
 #include "ngx_media_registry.h"
+#include "ngx_media_runtime.h"
 
 static ngx_media_registry_t  *ngx_media_registry_worker;
 
@@ -190,6 +191,13 @@ ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
         if (&entry->stream != stream) {
             continue;
         }
+
+        /*
+         * Ordered teardown.  The runtime outputs are released first because
+         * their flush reads the program feed; the stream destroy then takes
+         * the destinations down, tears the sources off and releases the feed.
+         */
+        ngx_media_runtime_outputs_release(&entry->stream);
 
         ngx_media_stream_destroy(&entry->stream);
 

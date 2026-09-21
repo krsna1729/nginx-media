@@ -449,6 +449,62 @@ if [ ! -f "$RUN/hls/index.m3u8" ]; then
     exit 1
 fi
 
+echo "== create/delete cycles with media do not exhaust the runtime"
+# The per-stream runtime output is a fixed table, and a slot is only taken
+# when a stream actually carries media - so a churn of empty streams proves
+# nothing.  These cycles each carry a short publish, which is what would fill
+# the table if ordered teardown failed to release the slot.  Ten cycles
+# against a table of eight: without the release the later ones get no outputs.
+CYCLE=0
+for i in $(seq 1 10); do
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"application\":\"live\",\"name\":\"cycle$i\"}" \
+        "$API/streams" >/dev/null
+
+    PX="$(publish encoder-$i 2)"
+    sleep 1
+
+    curl -fsS -X DELETE "$API/streams/live/cycle$i" >/dev/null
+    kill -KILL "$PX" 2>/dev/null
+    wait "$PX" 2>/dev/null
+
+    CYCLE=$i
+done
+
+echo "   $CYCLE cycles with media completed"
+
+# a stream that carries media now must still get its outputs
+PZ="$(publish encoder-z 12)"
+sleep 4
+
+for _ in $(seq 1 200); do
+    [ -f "$RUN/hls/index.m3u8" ] \
+        && [ "$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" || true)" -ge 1 ] \
+        && break
+    sleep 0.1
+done
+
+kill -KILL "$PZ" 2>/dev/null
+wait "$PZ" 2>/dev/null
+
+[ -f "$RUN/hls/index.m3u8" ] \
+    || { echo "no outputs after the churn: the table was exhausted" >&2
+         exit 1; }
+
+echo "   the runtime still serves media after the churn"
+
+# and the slots came back: this is the assertion that fails when ordered
+# teardown forgets to release a stream's runtime outputs
+sleep 2
+
+ACTIVE="$(curl -fsS "$API/metrics" \
+    | grep '^nginx_media_runtime_outputs ' | awk '{print $2}')"
+
+echo "   runtime output slots in use: ${ACTIVE:-?}"
+
+[ "${ACTIVE:-99}" -le 2 ] \
+    || { echo "runtime output slots leaked: $ACTIVE in use" >&2; exit 1; }
+
 trap - EXIT
 cleanup
 

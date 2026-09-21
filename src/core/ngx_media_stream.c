@@ -1,3 +1,4 @@
+#include "ngx_media_destination.h"
 #include "ngx_media_stream.h"
 #include "ngx_media_timeline.h"
 
@@ -99,6 +100,23 @@ ngx_media_stream_destroy(ngx_media_stream_t *stream)
     if (stream == NULL || stream->pool == NULL) {
         return;
     }
+
+    /*
+     * Destinations go first: each one's transport is stopped through its
+     * backend before the object that describes it is released, so a sender is
+     * never left writing into a stream that no longer exists.
+     */
+    for (q = ngx_queue_head(&stream->destinations);
+         q != (ngx_queue_t *) &stream->destinations;
+         q = next)
+    {
+        next = q->next;
+
+        ngx_media_destination_remove(stream,
+            ngx_queue_data(q, ngx_media_destination_t, queue));
+    }
+
+    ngx_queue_init(&stream->destinations);
 
     for (q = ngx_queue_head(&stream->sources);
          q != (ngx_queue_t *) &stream->sources;
