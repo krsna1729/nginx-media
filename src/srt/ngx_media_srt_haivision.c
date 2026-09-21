@@ -8,6 +8,8 @@
 #include "ngx_media_srt_streamid.h"
 #include "ngx_media_srt_transport.h"
 
+#include <stdio.h>
+
 #include <arpa/inet.h>
 #include <limits.h>
 #include <netinet/in.h>
@@ -54,6 +56,29 @@ ngx_media_srt_note_error(const char *detail)
 
     memcpy(ngx_media_srt_error, detail, len);
     ngx_media_srt_error[len] = '\0';
+}
+
+/*
+ * srt_getversion() returns the library version as 0xMMmmpp.  Either
+ * Haivision/srt or robotweax/srt answers this call, which is exactly how a
+ * deployment can tell which of the two it linked.
+ */
+static const char *
+ngx_media_srt_haivision_library_version(void)
+{
+    static char  version[32];
+    int          v;
+
+    if (version[0] != '\0') {
+        return version;
+    }
+
+    v = srt_getversion();
+
+    (void) snprintf(version, sizeof(version), "libsrt %d.%d.%d",
+                    (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff);
+
+    return version;
 }
 
 static const char *
@@ -106,7 +131,7 @@ static ngx_media_srt_session_t *ngx_media_srt_session_by_socket(
     SRTSOCKET sock);
 
 ngx_media_srt_ops_t ngx_media_srt_haivision_ops = {
-    "haivision",
+    "srt",
     ngx_media_srt_haivision_listen,
     ngx_media_srt_haivision_listen_close,
     ngx_media_srt_haivision_accept,
@@ -123,6 +148,7 @@ ngx_media_srt_ops_t ngx_media_srt_haivision_ops = {
     ngx_media_srt_haivision_poll_add_session,
     ngx_media_srt_haivision_poll_remove_session,
     ngx_media_srt_haivision_poll_wait,
+    ngx_media_srt_haivision_library_version,
     ngx_media_srt_haivision_last_error,
     ngx_media_srt_haivision_shutdown
 };

@@ -26,6 +26,8 @@ CORE := ../../src/core/ngx_media_buffer.c \
         ../../src/mpegts/ngx_media_ts_mux.c \
         ../../src/mpegts/ngx_media_ts_ingest.c \
         ../../src/srt/ngx_media_srt_streamid.c \
+        ../../src/srt/ngx_media_srt_transport.c \
+        ../../src/srt/ngx_media_srt_udp.c \
         ../../src/srt/ngx_media_srt_output_queue.c \
         ../../src/hls/ngx_media_hls_segmenter.c \
         ../../src/record/ngx_media_record.c \
@@ -37,7 +39,7 @@ SHIM := shim/ngx_shim.c
 TESTS := test_buffer test_frame test_feed test_track test_timeline \
          test_stream test_health test_compat test_selector test_codec \
          test_srt_streamid test_ts_ingest test_ts_demux test_ts_mux test_hls test_record \
-         test_rtmp_wire test_rtmp_flv test_srt_output test_owner test_ipc test_lifecycle test_fuzz test_bounds
+         test_rtmp_wire test_rtmp_flv test_srt_output test_owner test_ipc test_lifecycle test_fuzz test_bounds test_srt_udp
 BINS  := $(addprefix build/,$(TESTS))
 
 .PHONY: all test clean

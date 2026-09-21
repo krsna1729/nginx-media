@@ -22,7 +22,13 @@ fi
 
 cd "$SRC"
 
-if [ ! -f objs/Makefile ] || [ "$ROOT/config" -nt objs/Makefile ]; then
+# The backend selection changes which sources are linked, so it has to
+# invalidate the configure output the same way an edited config does.
+SRT_BACKEND="${MEDIA_SRT_BACKEND:-srt}"
+SRT_STAMP="$BUILD/.srt-backend"
+
+if [ ! -f objs/Makefile ] || [ "$ROOT/config" -nt objs/Makefile ] \
+   || [ ! -f "$SRT_STAMP" ] || [ "$(cat "$SRT_STAMP" 2>/dev/null)" != "$SRT_BACKEND" ]; then
     echo "== configuring nginx $VERSION with the nginx-media module"
     if ! ./configure \
             --prefix="$PREFIX" \
@@ -36,6 +42,8 @@ if [ ! -f objs/Makefile ] || [ "$ROOT/config" -nt objs/Makefile ]; then
         tail -n 40 "$BUILD/configure.log" >&2
         exit 1
     fi
+
+    echo "$SRT_BACKEND" > "$SRT_STAMP"
 fi
 
 echo "== building nginx"

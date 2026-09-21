@@ -102,6 +102,14 @@ typedef struct {
         ngx_media_srt_poll_event_t *events, ngx_uint_t max, ngx_uint_t *count);
 
     /*
+     * Implementation identity, reported once at startup: which backend is in
+     * use ("srt" for the SRT library, "udp" for the test double) and which
+     * library provides it (Haivision/srt or robotweax/srt, both of which
+     * expose the same C API and are therefore indistinguishable in code).
+     */
+    const char *(*library_version)(void);
+
+    /*
      * The last transport failure as a printable string.  The adapter never
      * logs: the caller reports the detail through its own logger.
      */
@@ -114,7 +122,8 @@ typedef struct {
 extern ngx_media_srt_ops_t ngx_media_srt_haivision_ops;
 
 /* selected backend; defaults to the Haivision libsrt backend */
-extern ngx_media_srt_ops_t *ngx_media_srt_backend;
+/* the backend in use: media_srt_backend selection, or the linked default */
+ngx_media_srt_ops_t *ngx_media_srt_backend(void);
 
 void ngx_media_srt_set_backend(ngx_media_srt_ops_t *ops);
 

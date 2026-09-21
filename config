@@ -1,11 +1,73 @@
 ngx_addon_name=ngx_media
 
-media_srt_libs=`pkg-config --libs srt 2>/dev/null`
+# SRT transport backend selection (goal doc 11.1).
+#
+# Haivision/srt is the reference SRT library the industry uses, and it is what
+# this module links by default.  robotweax/srt is a clean-slate C++
+# implementation of the *same* C API, so switching to it needs no code change
+# at all: point the build at its headers and library, e.g.
+#
+#   PKG_CONFIG_PATH=/opt/robotweax/lib/pkgconfig make nginx
+#   SRT_DIR=/opt/robotweax make nginx           # if it ships no .pc file
+#
+# and the module, the qualification suite and the integration tests all run
+# against it unchanged.  Which library ended up linked is reported at startup
+# through srt_getversion().
+#
+# MEDIA_SRT_BACKEND selects which *implementations of the module's own
+# transport contract* (ngx_media_srt_ops_t) are compiled in:
+#
+#   MEDIA_SRT_BACKEND=srt     the SRT library backend only (Haivision/srt or
+#                             robotweax/srt, whichever the build points at).
+#                             This is the default and the only production
+#                             configuration.
+#   MEDIA_SRT_BACKEND=udp     the UDP test double only, no libsrt.  Test
+#                             builds: it speaks UDP, not SRT, and has none of
+#                             SRT's reliability or encryption features.
+#   MEDIA_SRT_BACKEND=both    both, runtime selectable with
+#                             media_srt_backend srt|udp.  Used by the
+#                             qualification suite to run one scenario against
+#                             the library and against the test double.
+#
+# The UDP double is never a production transport.  It exists because the
+# module's own contract (ngx_media_srt_ops_t) can be implemented more than
+# once, and a boundary that is only ever crossed by one implementation is a
+# boundary nobody has tested.  Robotweax does not need this mechanism at all:
+# it exposes the same C API as Haivision/srt, so it is selected by the
+# library the build links.
+MEDIA_SRT_BACKEND=${MEDIA_SRT_BACKEND:-srt}
 
-if [ -z "$media_srt_libs" ]; then
-    echo "nginx-media: libsrt not found (pkg-config --libs srt)" >&2
-    exit 1
-fi
+case "$MEDIA_SRT_BACKEND" in
+    srt)
+        media_srt_srcs="$ngx_addon_dir/src/srt/ngx_media_srt_haivision.c"
+        media_srt_libs=`pkg-config --libs srt 2>/dev/null`
+
+        if [ -z "$media_srt_libs" ]; then
+            echo "nginx-media: libsrt not found (pkg-config --libs srt)" >&2
+            echo "nginx-media: use MEDIA_SRT_BACKEND=udp for a libsrt-free build" >&2
+            exit 1
+        fi
+        ;;
+    both)
+        media_srt_srcs="$ngx_addon_dir/src/srt/ngx_media_srt_haivision.c \
+                        $ngx_addon_dir/src/srt/ngx_media_srt_udp.c"
+        media_srt_libs=`pkg-config --libs srt 2>/dev/null`
+
+        if [ -z "$media_srt_libs" ]; then
+            echo "nginx-media: libsrt not found (pkg-config --libs srt)" >&2
+            exit 1
+        fi
+        ;;
+    udp)
+        media_srt_srcs="$ngx_addon_dir/src/srt/ngx_media_srt_udp.c"
+        media_srt_libs=
+        ;;
+    *)
+        echo "nginx-media: unknown MEDIA_SRT_BACKEND=$MEDIA_SRT_BACKEND" >&2
+        echo "nginx-media: expected srt, udp or both" >&2
+        exit 1
+        ;;
+esac
 
 # The worker hook registers an external eventfd in the event loop, which is
 # only possible after ngx_event_core_module has run ngx_event_process_init.
@@ -48,7 +110,7 @@ ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/srt/ngx_media_srt_output_queue.c \
                  $ngx_addon_dir/src/srt/ngx_media_srt_output.c \
                  $ngx_addon_dir/src/srt/ngx_media_srt_transport.c \
-                 $ngx_addon_dir/src/srt/ngx_media_srt_haivision.c \
+                 $media_srt_srcs \
                  $ngx_addon_dir/src/srt/ngx_media_srt_ingest.c \
                  $ngx_addon_dir/src/srt/ngx_media_srt_module.c"
 ngx_module_libs="$media_srt_libs -lpthread"

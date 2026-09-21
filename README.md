@@ -28,9 +28,15 @@ Phase 0 — skeleton and invariants (complete):
 
 Phase 1 — SRT ingest bootstrap (complete):
 
-- Haivision libsrt backend behind the protocol-neutral transport adapter
+- the SRT library behind the protocol-neutral transport adapter
   (`src/srt/ngx_media_srt_transport.h`), Stream ID parsing for
-  `#!::r=live/news,m=publish,s=encoder-a`
+  `#!::r=live/news,m=publish,s=encoder-a`.  Haivision/srt is the reference
+  implementation the industry uses and what the build links by default;
+  robotweax/srt implements the same C API, so switching to it needs no code
+  change at all — point the build at its headers and library
+  (`PKG_CONFIG_PATH=/opt/robotweax/lib/pkgconfig make nginx`).  Startup logs
+  `media: srt transport backend=srt library=libsrt 1.5.6`, which is how a
+  deployment knows which of the two it linked
 - bounded, spinlock-protected raw-TS handoff queue between transport and
   worker (`src/mpegts/ngx_media_ts_ingest.*`); drop-and-count, never blocks
 - SRT ingest inside nginx: `media_srt_listen host:port;`, worker 0 owns the
@@ -42,6 +48,28 @@ Phase 1 — SRT ingest bootstrap (complete):
   it deterministically with ffmpeg as publisher: parsed source identity,
   session and drain byte counts agree, zero drops, clean worker shutdown
 - next: phase 2 attaches the MPEG-TS demuxer to the drained chunks
+
+Transport backend selection (goal doc 11.1):
+
+    MEDIA_SRT_BACKEND=srt     # default: the SRT library only (production)
+    MEDIA_SRT_BACKEND=udp     # the UDP test double only, no libsrt needed
+    MEDIA_SRT_BACKEND=both    # both; media_srt_backend srt|udp at runtime
+
+`media_srt_backend srt|udp;` selects at runtime when a build carries both.
+`srt` means "the SRT library" — Haivision/srt or robotweax/srt, whichever the
+build linked; the module cannot tell them apart because they share one C API,
+which is the point.  `udp` is a conformance instrument, not an SRT
+implementation: it speaks plain UDP with none of SRT's reliability or
+encryption features, and it exists so the qualification suite can run one
+scenario against two implementations of the module's own contract.  It is
+never built into a production configuration.
+
+`make srt-qualify` builds the both-backend binary and qualifies them: a
+publisher feeds a program into the ingest path, the program is prepared once
+and pushed to a second nginx over an SRT destination, and both receivers must
+produce decodable HLS segments.  A third implementation is added by
+implementing `ngx_media_srt_ops_t` and adding it to the `case` in `config`;
+the suite covers it unchanged.
 
 Configuration (phase 1 spelling; the goal document's `media {}` block arrives
 with the stream database):

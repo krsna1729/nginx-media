@@ -19,6 +19,15 @@
 #include "ngx_media_route.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_srt_output.h"
+
+/*
+ * The backends media_srt_backend can select.  Both are weak: a build may link
+ * either, both, or neither, and the directive reports which ones it carries.
+ */
+extern ngx_media_srt_ops_t  ngx_media_srt_haivision_ops
+    __attribute__((weak));
+extern ngx_media_srt_ops_t  ngx_media_srt_udp_ops
+    __attribute__((weak));
 #include "ngx_media_selector.h"
 #include "ngx_media_srt_ingest.h"
 #include "ngx_media_ts_demux.h"
@@ -74,6 +83,8 @@ static char *ngx_media_srt_priority_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_media_srt_output_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_media_srt_backend_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 static void ngx_media_srt_output_sink(void *ctx, ngx_media_stream_t *stream,
     ngx_media_buf_t *burst, size_t len, ngx_uint_t keyframe);
 static void ngx_media_srt_output_handler(ngx_event_t *ev);
@@ -121,6 +132,13 @@ static ngx_command_t ngx_media_srt_commands[] = {
     { ngx_string("media_srt_source_priority"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2,
       ngx_media_srt_priority_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_srt_backend"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_srt_backend_cmd,
       0,
       0,
       NULL },
@@ -534,6 +552,51 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
 extern ngx_module_t  ngx_media_core_module;
 
 /*
+ * media_srt_backend haivision|udp
+ *
+ * The transport backend is a build-time-pluggable implementation of the same
+ * contract (goal doc 11.1).  "srt" is the SRT library backend: Haivision/srt
+ * is the reference library, and robotweax/srt is a clean-slate implementation
+ * of the same C API that the build can link instead without any code change.
+ * "udp" is the test double used to qualify that boundary; it is not an SRT
+ * implementation and is not built by default.
+ */
+static char *
+ngx_media_srt_backend_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_str_t  *value = cf->args->elts;
+
+    (void) cmd;
+    (void) conf;
+
+    if (value[1].len == sizeof("srt") - 1
+        && ngx_strncmp(value[1].data, "srt", sizeof("srt") - 1) == 0)
+    {
+        if (&ngx_media_srt_haivision_ops == NULL) {
+            return "this build has no SRT library backend"
+                   " (build with MEDIA_SRT_BACKEND=srt or both)";
+        }
+
+        ngx_media_srt_set_backend(&ngx_media_srt_haivision_ops);
+        return NGX_CONF_OK;
+    }
+
+    if (value[1].len == sizeof("udp") - 1
+        && ngx_strncmp(value[1].data, "udp", sizeof("udp") - 1) == 0)
+    {
+        if (&ngx_media_srt_udp_ops == NULL) {
+            return "this build has no UDP test double"
+                   " (build with MEDIA_SRT_BACKEND=udp or both)";
+        }
+
+        ngx_media_srt_set_backend(&ngx_media_srt_udp_ops);
+        return NGX_CONF_OK;
+    }
+
+    return "backend must be srt (the SRT library) or udp (test double)";
+}
+
+/*
  * media_srt_output <application/stream> <host:port> [streamid]
  *
  * The destination consumes the transport bursts the program runtime already
@@ -852,6 +915,20 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
 
     mcf = (ngx_media_srt_main_conf_t *)
               cycle->conf_ctx[ngx_media_srt_module.index];
+
+    /*
+     * Which transport implementation is in use, and which library provides
+     * it.  Haivision/srt and robotweax/srt are indistinguishable in code, so
+     * this line is how a deployment knows what it linked.
+     */
+    if (ngx_media_srt_backend() != NULL) {
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                      "media: srt transport backend=%s library=%s",
+                      ngx_media_srt_backend()->name,
+                      ngx_media_srt_backend()->library_version != NULL
+                          ? ngx_media_srt_backend()->library_version()
+                          : "unknown");
+    }
 
     /*
      * Every worker adopts the shared owner directory and its routing
