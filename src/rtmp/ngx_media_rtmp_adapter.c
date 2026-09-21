@@ -993,3 +993,297 @@ ngx_media_rtmp_fanout_head(const ngx_media_rtmp_fanout_t *fan)
 {
     return (fan != NULL) ? fan->head : 0;
 }
+
+/* --- program preparation ------------------------------------------------- */
+
+void
+ngx_media_rtmp_prepare_init(ngx_media_rtmp_prepare_t *prep, ngx_uint_t units,
+    size_t max_bytes)
+{
+    if (prep == NULL) {
+        return;
+    }
+
+    ngx_memzero(prep, sizeof(ngx_media_rtmp_prepare_t));
+
+    prep->nal_length_size = 4;
+
+    ngx_media_rtmp_fanout_init(&prep->fan, units, max_bytes);
+}
+
+void
+ngx_media_rtmp_prepare_destroy(ngx_media_rtmp_prepare_t *prep)
+{
+    if (prep == NULL) {
+        return;
+    }
+
+    ngx_media_rtmp_fanout_destroy(&prep->fan);
+    ngx_memzero(prep, sizeof(ngx_media_rtmp_prepare_t));
+}
+
+/* an FLV sequence header built from the program's own codec configuration */
+static ngx_int_t
+ngx_media_rtmp_prepare_sequence(ngx_media_rtmp_prepare_t *prep,
+    ngx_uint_t media_type, const ngx_media_track_t *track)
+{
+    u_char            body[1024];
+    u_char            avcc_record[512];
+    size_t            body_len = 0, record_len = 0;
+    ngx_media_buf_t  *payload;
+    ngx_int_t         rc = NGX_OK;
+
+    if (track == NULL || track->config == NULL) {
+        return NGX_OK;
+    }
+
+    if (media_type == NGX_MEDIA_TYPE_VIDEO) {
+        ngx_media_nal_iter_t  it;
+        ngx_media_nal_t       nal;
+        ngx_uint_t            have_sps = 0;
+        const u_char         *sps = NULL;
+        size_t                sps_len = 0, pps_len = 0;
+        const u_char         *pps = NULL;
+
+        ngx_media_nal_iter_init(&it, ngx_media_buf_data(track->config),
+                                ngx_media_buf_size(track->config));
+
+        while (ngx_media_nal_iter_next(&it, &nal)) {
+
+            if (nal.len < 1) {
+                continue;
+            }
+
+            if (ngx_media_nal_type(NGX_MEDIA_CODEC_H264, nal.data, nal.len)
+                == 7 && !have_sps)
+            {
+                sps = nal.data;
+                sps_len = nal.len;
+                have_sps = 1;
+
+            } else if (ngx_media_nal_type(NGX_MEDIA_CODEC_H264, nal.data,
+                                          nal.len) == 8 && pps == NULL)
+            {
+                pps = nal.data;
+                pps_len = nal.len;
+            }
+        }
+
+        if (!have_sps || pps == NULL || sps_len < 4) {
+            prep->skipped++;
+            return NGX_OK;
+        }
+
+        {
+            ngx_media_rtmp_avcc_t  avcc;
+
+            ngx_memzero(&avcc, sizeof(avcc));
+
+            avcc.version = 1;
+            avcc.profile = sps[1];
+            avcc.compatibility = sps[2];
+            avcc.level = sps[3];
+            avcc.nal_length_size = prep->nal_length_size;
+            avcc.nsps = 1;
+            avcc.sps[0].data = (u_char *) sps;
+            avcc.sps[0].len = sps_len;
+            avcc.npps = 1;
+            avcc.pps[0].data = (u_char *) pps;
+            avcc.pps[0].len = pps_len;
+
+            if (ngx_media_rtmp_avcc_build(&avcc, avcc_record,
+                                          sizeof(avcc_record),
+                                          &record_len) != NGX_OK)
+            {
+                prep->errors++;
+                return NGX_OK;
+            }
+
+            body[0] = (u_char) ((NGX_MEDIA_RTMP_FRAME_KEYFRAME << 4)
+                                | NGX_MEDIA_RTMP_CODEC_AVC);
+            body[1] = NGX_MEDIA_RTMP_AVC_SEQUENCE;
+            body[2] = body[3] = body[4] = 0;
+            ngx_memcpy(body + 5, avcc_record, record_len);
+            body_len = 5 + record_len;
+        }
+
+    } else {
+        /* the audio configuration is the AudioSpecificConfig itself */
+        body[0] = (u_char) ((NGX_MEDIA_RTMP_SOUND_AAC << 4) | 0x0F);
+        body[1] = NGX_MEDIA_RTMP_AAC_SEQUENCE;
+        ngx_memcpy(body + 2, ngx_media_buf_data(track->config),
+                   ngx_media_buf_size(track->config));
+        body_len = 2 + ngx_media_buf_size(track->config);
+    }
+
+    payload = ngx_media_buf_alloc(body_len);
+
+    if (payload == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(ngx_media_buf_data(payload), body, body_len);
+    (void) ngx_media_buf_freeze(payload, body_len);
+
+    rc = ngx_media_rtmp_fanout_push(&prep->fan,
+                                    (media_type == NGX_MEDIA_TYPE_VIDEO)
+                                        ? NGX_MEDIA_RTMP_MSG_VIDEO
+                                        : NGX_MEDIA_RTMP_MSG_AUDIO,
+                                    track->media_type, 0, payload, 1, 1);
+
+    ngx_media_buf_unref(payload);
+
+    return rc;
+}
+
+/* pushes the sequence headers of a new program contract */
+ngx_int_t
+ngx_media_rtmp_prepare_announce(ngx_media_rtmp_prepare_t *prep,
+    ngx_media_trackset_t *tracks)
+{
+    ngx_uint_t  i;
+
+    for (i = 0; i < tracks->count; i++) {
+
+        if (ngx_media_rtmp_prepare_sequence(prep, tracks->tracks[i].media_type,
+                                            &tracks->tracks[i]) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+    }
+
+    prep->tracks = tracks;
+
+    return NGX_OK;
+}
+
+ngx_int_t
+ngx_media_rtmp_prepare_frame(ngx_media_rtmp_prepare_t *prep,
+    const ngx_media_frame_t *frame)
+{
+    u_char           *body;
+    u_char           *converted;
+    size_t            body_len = 0, converted_len = 0;
+    size_t            capacity;
+    ngx_media_buf_t  *payload;
+    ngx_uint_t        type;
+    uint32_t          timestamp;
+    int32_t           composition_time;
+    ngx_int_t         rc;
+
+    if (prep == NULL || frame == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (frame->media_type != NGX_MEDIA_TYPE_VIDEO
+        && frame->media_type != NGX_MEDIA_TYPE_AUDIO)
+    {
+        return NGX_OK;
+    }
+
+    if (frame->payload == NULL) {
+        return NGX_OK;
+    }
+
+    timestamp = (uint32_t) (frame->dts / NGX_MEDIA_RTMP_TIMESCALE);
+
+    if (frame->media_type == NGX_MEDIA_TYPE_VIDEO) {
+        size_t  len = ngx_media_buf_size(frame->payload);
+
+        /* AVCC is shorter than Annex B: one length per start code at most */
+        capacity = len + 4;
+
+        converted = ngx_alloc(capacity, NULL);
+
+        if (converted == NULL) {
+            return NGX_ERROR;
+        }
+
+        if (ngx_media_rtmp_annexb_payload_to_avcc(
+                ngx_media_buf_data(frame->payload), len,
+                prep->nal_length_size, converted, capacity,
+                &converted_len) != NGX_OK)
+        {
+            ngx_free(converted);
+            prep->skipped++;
+            return NGX_OK;
+        }
+
+        composition_time = (int32_t) ((frame->pts - frame->dts)
+                                      / NGX_MEDIA_RTMP_TIMESCALE);
+
+        type = NGX_MEDIA_RTMP_MSG_VIDEO;
+
+    } else {
+        /* strip the ADTS framing the core carries: headers are 7 or 9 bytes */
+        ngx_media_adts_t  adts;
+        size_t            len = ngx_media_buf_size(frame->payload);
+        size_t            header_len = 0;
+
+        if (ngx_media_adts_parse(ngx_media_buf_data(frame->payload), len,
+                                 &adts) == NGX_OK)
+        {
+            header_len = adts.header_len;
+        }
+
+        if (header_len >= len) {
+            prep->skipped++;
+            return NGX_OK;
+        }
+
+        converted_len = len - header_len;
+        converted = ngx_alloc(converted_len, NULL);
+
+        if (converted == NULL) {
+            return NGX_ERROR;
+        }
+
+        ngx_memcpy(converted, ngx_media_buf_data(frame->payload) + header_len,
+                   converted_len);
+
+        composition_time = 0;
+        type = NGX_MEDIA_RTMP_MSG_AUDIO;
+    }
+
+    payload = ngx_media_buf_alloc(converted_len
+                                  + ((type == NGX_MEDIA_RTMP_MSG_VIDEO) ? 5 : 2));
+
+    if (payload == NULL) {
+        ngx_free(converted);
+        return NGX_ERROR;
+    }
+
+    body = ngx_media_buf_data(payload);
+
+    if (type == NGX_MEDIA_RTMP_MSG_VIDEO) {
+        uint32_t  cts = (uint32_t) composition_time;
+
+        body[0] = (u_char) (((frame->keyframe ? NGX_MEDIA_RTMP_FRAME_KEYFRAME
+                                              : NGX_MEDIA_RTMP_FRAME_INTER)
+                             << 4)
+                            | NGX_MEDIA_RTMP_CODEC_AVC);
+        body[1] = NGX_MEDIA_RTMP_AVC_NALU;
+        body[2] = (u_char) ((cts >> 16) & 0xFF);
+        body[3] = (u_char) ((cts >> 8) & 0xFF);
+        body[4] = (u_char) (cts & 0xFF);
+        body_len = 5;
+
+    } else {
+        body[0] = (u_char) ((NGX_MEDIA_RTMP_SOUND_AAC << 4) | 0x0F);
+        body[1] = NGX_MEDIA_RTMP_AAC_RAW;
+        body_len = 2;
+    }
+
+    ngx_memcpy(body + body_len, converted, converted_len);
+    body_len += converted_len;
+
+    ngx_free(converted);
+    (void) ngx_media_buf_freeze(payload, body_len);
+
+    rc = ngx_media_rtmp_fanout_push(&prep->fan, type, frame->track_index,
+                                    timestamp, payload, frame->keyframe, 0);
+
+    ngx_media_buf_unref(payload);
+
+    return rc;
+}

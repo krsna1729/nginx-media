@@ -180,4 +180,36 @@ const ngx_media_rtmp_media_t *ngx_media_rtmp_fanout_next(
 
 uint64_t ngx_media_rtmp_fanout_head(const ngx_media_rtmp_fanout_t *fan);
 
+/* --- program preparation (output) ---------------------------------------- */
+
+/*
+ * Converts program frames into the FLV messages RTMP players consume.  The
+ * conversion happens once per program: every player reads the same units, so
+ * no receiver copies media bytes (goal doc 12.1).  Sequence headers are
+ * emitted whenever the program's codec configuration changes.
+ */
+typedef struct {
+    ngx_media_rtmp_fanout_t  fan;
+    ngx_media_trackset_t    *tracks;      /* borrowed, the program's contract */
+    ngx_media_rtmp_avcc_t    avcc;
+    ngx_uint_t               have_avcc;
+    ngx_media_rtmp_asc_t     asc;
+    ngx_uint_t               have_asc;
+    ngx_uint_t               nal_length_size;
+    ngx_uint_t               errors;
+    ngx_uint_t               skipped;
+} ngx_media_rtmp_prepare_t;
+
+void ngx_media_rtmp_prepare_init(ngx_media_rtmp_prepare_t *prep,
+    ngx_uint_t units, size_t max_bytes);
+void ngx_media_rtmp_prepare_destroy(ngx_media_rtmp_prepare_t *prep);
+
+/* emits the FLV sequence headers of a newly active program contract */
+ngx_int_t ngx_media_rtmp_prepare_announce(ngx_media_rtmp_prepare_t *prep,
+    ngx_media_trackset_t *tracks);
+
+/* turns a program frame into one shared unit; config frames only announce */
+ngx_int_t ngx_media_rtmp_prepare_frame(ngx_media_rtmp_prepare_t *prep,
+    const ngx_media_frame_t *frame);
+
 #endif /* NGX_MEDIA_RTMP_ADAPTER_H */

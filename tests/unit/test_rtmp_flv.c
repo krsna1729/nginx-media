@@ -434,8 +434,6 @@ test_publisher(void)
                           NGX_MEDIA_RTMP_MSG_AUDIO, 0, message, 4, sink_frame,
                           sink_tracks, &sink);
 
-        printf("  [debug] audio sequence rc=%ld have_asc=%lu count=%lu\n", (long) rc,
-               pub.have_asc, pub.tracks.count);
 
         CHECK(rc == NGX_OK, "audio sequence header accepted");
     }
@@ -641,6 +639,161 @@ test_fanout(void)
     ngx_media_rtmp_fanout_destroy(&fan);
 }
 
+static void
+test_prepare(void)
+{
+    ngx_media_rtmp_prepare_t   prep;
+    ngx_media_trackset_t       tracks;
+    ngx_media_track_t          track;
+    ngx_media_buf_t           *config;
+    ngx_media_frame_t          frame;
+    ngx_media_buf_t           *payload;
+    const ngx_media_rtmp_media_t  *unit;
+    u_char                    *p;
+
+    TEST_CASE("program preparation for players");
+
+    ngx_media_rtmp_prepare_init(&prep, 8, 0);
+
+    /* the program contract: video (Annex B parameter sets) and audio (ASC) */
+    CHECK(ngx_media_trackset_init(&tracks, 4, NULL) == NGX_OK,
+          "trackset initialised");
+
+    config = ngx_media_buf_alloc(4 + sizeof(sps) + 4 + sizeof(pps));
+    p = ngx_media_buf_data(config);
+    p[0] = 0; p[1] = 0; p[2] = 0; p[3] = 1;
+    ngx_memcpy(p + 4, sps, sizeof(sps));
+    p[4 + sizeof(sps)] = 0;
+    p[5 + sizeof(sps)] = 0;
+    p[6 + sizeof(sps)] = 0;
+    p[7 + sizeof(sps)] = 1;
+    ngx_memcpy(p + 8 + sizeof(sps), pps, sizeof(pps));
+    (void) ngx_media_buf_freeze(config, 4 + sizeof(sps) + 4 + sizeof(pps));
+
+    ngx_memzero(&track, sizeof(track));
+    track.media_type = NGX_MEDIA_TYPE_VIDEO;
+    track.codec = NGX_MEDIA_CODEC_H264;
+    track.payload_format = NGX_MEDIA_PAYLOAD_ANNEXB;
+    track.profile = sps[1];
+    track.level = sps[3];
+    track.config = config;
+
+    CHECK(ngx_media_trackset_add(&tracks, &track) >= 0, "video track added");
+
+    ngx_media_buf_unref(config);
+
+    CHECK(ngx_media_rtmp_prepare_announce(&prep, &tracks) == NGX_OK,
+          "sequence headers announced");
+
+    unit = ngx_media_rtmp_fanout_next(&prep.fan, 0);
+    CHECK(unit != NULL && unit->config == 1, "a sequence header unit");
+    CHECK(unit != NULL && unit->type == NGX_MEDIA_RTMP_MSG_VIDEO,
+          "video sequence header");
+
+    if (unit != NULL) {
+        const u_char  *b = ngx_media_buf_data(unit->payload);
+
+        CHECK(ngx_media_buf_size(unit->payload) == 5 + 6 + 2 + sizeof(sps)
+              + 1 + 2 + sizeof(pps), "avcC in the body: %lu",
+              ngx_media_buf_size(unit->payload));
+        CHECK(b[0] == 0x17, "keyframe, AVC: %02x", b[0]);
+        CHECK(b[1] == NGX_MEDIA_RTMP_AVC_SEQUENCE, "sequence packet");
+        CHECK(b[5] == 1 && b[6] == sps[1] && b[8] == sps[3],
+              "avcC built from the SPS: %02x %02x %02x", b[5], b[6], b[8]);
+    }
+
+    /* a program video frame: Annex B becomes AVCC inside an FLV body */
+    payload = ngx_media_buf_alloc(4 + 3);
+    p = ngx_media_buf_data(payload);
+    p[0] = 0; p[1] = 0; p[2] = 0; p[3] = 1;
+    p[4] = 0x41; p[5] = 0x9A; p[6] = 0x11;
+    (void) ngx_media_buf_freeze(payload, 7);
+
+    ngx_media_frame_init(&frame);
+    frame.media_type = NGX_MEDIA_TYPE_VIDEO;
+    frame.codec = NGX_MEDIA_CODEC_H264;
+    frame.payload_format = NGX_MEDIA_PAYLOAD_ANNEXB;
+    frame.pts = 90 * 100;
+    frame.dts = 90 * 80;
+    frame.keyframe = 0;
+    ngx_media_frame_adopt(&frame, payload);   /* takes over our reference */
+
+    CHECK(ngx_media_rtmp_prepare_frame(&prep, &frame) == NGX_OK,
+          "video frame prepared");
+
+    unit = ngx_media_rtmp_fanout_next(&prep.fan, 1);
+    CHECK(unit != NULL && unit->timestamp == 80, "timestamp in milliseconds");
+    CHECK(unit != NULL && ngx_media_buf_size(unit->payload) == 5 + 4 + 3,
+          "AVCC body length: %lu",
+          unit != NULL ? ngx_media_buf_size(unit->payload) : 0);
+
+    if (unit != NULL) {
+        const u_char  *b = ngx_media_buf_data(unit->payload);
+
+        CHECK(b[0] == 0x27, "inter frame, AVC: %02x", b[0]);
+        CHECK(b[2] == 0 && b[3] == 0 && b[4] == 20,
+              "composition time 20: %02x %02x %02x", b[2], b[3], b[4]);
+        CHECK(b[5] == 0 && b[6] == 0 && b[7] == 0 && b[8] == 3,
+              "length prefix instead of the start code");
+        CHECK(b[9] == 0x41, "NAL bytes preserved");
+    }
+
+    ngx_media_frame_release(&frame);
+
+    /* a program audio frame: the ADTS header is stripped */
+    {
+        ngx_media_adts_t  adts;
+        u_char            adts_frame[16];
+        size_t            adts_len = 0;
+
+        ngx_memzero(&adts, sizeof(adts));
+        adts.object_type = 2;
+        adts.sample_rate = 48000;
+        adts.channels = 2;
+        adts.frame_len = 7 + 4;
+
+        CHECK(ngx_media_adts_write(&adts, adts_frame, sizeof(adts_frame),
+                                   &adts_len) == NGX_OK, "ADTS header written");
+        CHECK(adts_len == 7, "seven byte header: %lu", adts_len);
+        adts_frame[7] = 0xA1; adts_frame[8] = 0xA2;
+        adts_frame[9] = 0xA3; adts_frame[10] = 0xA4;
+
+        payload = ngx_media_buf_alloc(11);
+        ngx_memcpy(ngx_media_buf_data(payload), adts_frame, 11);
+        (void) ngx_media_buf_freeze(payload, 11);
+
+        ngx_media_frame_init(&frame);
+        frame.media_type = NGX_MEDIA_TYPE_AUDIO;
+        frame.codec = NGX_MEDIA_CODEC_AAC;
+        frame.payload_format = NGX_MEDIA_PAYLOAD_ADTS;
+        frame.pts = frame.dts = 90 * 40;
+        ngx_media_frame_adopt(&frame, payload);
+
+        CHECK(ngx_media_rtmp_prepare_frame(&prep, &frame) == NGX_OK,
+              "audio frame prepared");
+
+        unit = ngx_media_rtmp_fanout_next(&prep.fan, 2);
+        CHECK(unit != NULL && unit->type == NGX_MEDIA_RTMP_MSG_AUDIO,
+              "audio unit");
+        CHECK(unit != NULL && ngx_media_buf_size(unit->payload) == 2 + 4,
+              "ADTS header stripped: %lu",
+              unit != NULL ? ngx_media_buf_size(unit->payload) : 0);
+
+        if (unit != NULL) {
+            const u_char  *b = ngx_media_buf_data(unit->payload);
+
+            CHECK(b[0] == 0xAF && b[1] == NGX_MEDIA_RTMP_AAC_RAW,
+                  "FLV audio prefix: %02x %02x", b[0], b[1]);
+            CHECK(b[2] == 0xA1 && b[5] == 0xA4, "raw AAC payload preserved");
+        }
+
+        ngx_media_frame_release(&frame);
+    }
+
+    ngx_media_rtmp_prepare_destroy(&prep);
+    ngx_media_trackset_destroy(&tracks);
+}
+
 int
 main(void)
 {
@@ -652,6 +805,7 @@ main(void)
     test_flv_framing();
     test_publisher();
     test_fanout();
+    test_prepare();
 
     TEST_LEAKS();
     TEST_MAIN_END();
