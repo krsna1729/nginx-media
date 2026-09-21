@@ -39,6 +39,7 @@ typedef struct {
     u_char      *data;
     size_t       len;
     ngx_msec_t   time;
+    uint64_t     session_id;   /* transport session that produced the chunk */
 } ngx_media_ts_ingest_chunk_t;
 
 typedef struct {
@@ -59,7 +60,7 @@ void ngx_media_ts_ingest_destroy(ngx_media_ts_ingest_t *ingest);
 
 /* NGX_OK when queued, NGX_AGAIN when dropped because a ceiling was reached */
 ngx_int_t ngx_media_ts_ingest_write(ngx_media_ts_ingest_t *ingest,
-    const u_char *data, size_t len, ngx_msec_t now);
+    uint64_t session_id, const u_char *data, size_t len, ngx_msec_t now);
 
 ngx_uint_t ngx_media_ts_ingest_read(ngx_media_ts_ingest_t *ingest,
     ngx_media_ts_ingest_chunk_t *out, ngx_uint_t max_chunks);

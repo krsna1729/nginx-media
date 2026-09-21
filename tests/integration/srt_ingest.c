@@ -114,7 +114,7 @@ main(int argc, char **argv)
         n = ngx_media_srt_session_recv(session, rbuf, sizeof(rbuf), 200);
 
         if (n > 0) {
-            (void) ngx_media_ts_ingest_write(&ingest, rbuf, (size_t) n,
+            (void) ngx_media_ts_ingest_write(&ingest, 7, rbuf, (size_t) n,
                                              now_ms());
             last_data = now_ms();
 

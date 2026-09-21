@@ -20,9 +20,6 @@ static ngx_msec_t ngx_media_srt_now(void);
 static void ngx_media_srt_notify(ngx_media_srt_notify_t *notify);
 static ngx_uint_t ngx_media_srt_event_push(ngx_media_srt_ingest_t *ingest,
     const ngx_media_srt_event_t *event);
-static void ngx_media_srt_session_run(ngx_media_srt_ingest_t *ingest,
-    ngx_media_srt_session_t *session, uint64_t session_id,
-    ngx_media_srt_notify_t *notify);
 static void *ngx_media_srt_thread(void *data);
 
 static ngx_msec_t
@@ -71,7 +68,8 @@ ngx_media_srt_event_push(ngx_media_srt_ingest_t *ingest,
         return NGX_AGAIN;
     }
 
-    slot = &ingest->events[ingest->events_head & (ingest->events_capacity - 1)];
+    slot = &ingest->events[ingest->events_head
+                           & (ingest->events_capacity - 1)];
     *slot = *event;
 
     ingest->events_head++;
@@ -81,19 +79,70 @@ ngx_media_srt_event_push(ngx_media_srt_ingest_t *ingest,
     return NGX_OK;
 }
 
-static void
-ngx_media_srt_session_run(ngx_media_srt_ingest_t *ingest,
-    ngx_media_srt_session_t *session, uint64_t session_id,
-    ngx_media_srt_notify_t *notify)
+static ngx_media_srt_session_state_t *
+ngx_media_srt_session_state_alloc(ngx_media_srt_ingest_t *ingest)
 {
-    ngx_media_srt_event_t  event;
-    u_char                 buf[65536];
-    ngx_int_t              n, len;
-    uint64_t               bytes, chunks;
+    ngx_uint_t  i;
+
+    for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
+        if (ingest->sessions[i].session == NULL) {
+            return &ingest->sessions[i];
+        }
+    }
+
+    return NULL;
+}
+
+static ngx_media_srt_session_state_t *
+ngx_media_srt_session_state_find(ngx_media_srt_ingest_t *ingest,
+    ngx_media_srt_session_t *session)
+{
+    ngx_uint_t  i;
+
+    for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
+        if (ingest->sessions[i].session == session) {
+            return &ingest->sessions[i];
+        }
+    }
+
+    return NULL;
+}
+
+static void
+ngx_media_srt_session_state_release(ngx_media_srt_session_state_t *state)
+{
+    state->session = NULL;
+    state->id = 0;
+    state->bytes = 0;
+    state->chunks = 0;
+}
+
+static void
+ngx_media_srt_session_open(ngx_media_srt_ingest_t *ingest,
+    ngx_media_srt_session_t *session, ngx_media_srt_notify_t *notify)
+{
+    ngx_media_srt_event_t         event;
+    ngx_media_srt_session_state_t *state;
+    ngx_int_t                     len;
+
+    state = ngx_media_srt_session_state_alloc(ingest);
+
+    if (state == NULL) {
+        /* hard session ceiling: refuse rather than degrade the scheduler */
+        (void) ngx_atomic_fetch_add(&ingest->sessions_dropped, 1);
+        ngx_media_srt_session_close(session);
+        return;
+    }
+
+    ingest->sessions_opened++;
+    state->session = session;
+    state->id = ingest->sessions_opened;
+    state->bytes = 0;
+    state->chunks = 0;
 
     ngx_memzero(&event, sizeof(event));
     event.type = NGX_MEDIA_SRT_EVENT_OPEN;
-    event.session_id = session_id;
+    event.session_id = state->id;
 
     len = ngx_media_srt_session_streamid(session, event.streamid,
                                          NGX_MEDIA_SRT_STREAMID_MAX);
@@ -106,59 +155,71 @@ ngx_media_srt_session_run(ngx_media_srt_ingest_t *ingest,
     (void) ngx_media_srt_event_push(ingest, &event);
 
     (void) ngx_atomic_fetch_add(&ingest->sessions_accepted, 1);
+
     ngx_media_srt_notify(notify);
+}
 
-    bytes = 0;
-    chunks = 0;
-
-    for ( ;; ) {
-
-        if (ingest->stop) {
-            break;
-        }
-
-        n = ngx_media_srt_session_recv(session, buf, sizeof(buf), 200);
-
-        if (n > 0) {
-            (void) ngx_media_ts_ingest_write(&ingest->payload, buf,
-                                             (size_t) n,
-                                             ngx_media_srt_now());
-            bytes += (uint64_t) n;
-            chunks++;
-            ngx_media_srt_notify(notify);
-
-        } else if (n < 0) {
-            break;
-        }
-    }
+static void
+ngx_media_srt_session_finish(ngx_media_srt_ingest_t *ingest,
+    ngx_media_srt_session_state_t *state, ngx_media_srt_notify_t *notify)
+{
+    ngx_media_srt_event_t  event;
 
     ngx_memzero(&event, sizeof(event));
     event.type = NGX_MEDIA_SRT_EVENT_CLOSE;
-    event.session_id = session_id;
-    event.bytes = bytes;
-    event.chunks = chunks;
+    event.session_id = state->id;
+    event.bytes = state->bytes;
+    event.chunks = state->chunks;
 
     (void) ngx_media_srt_event_push(ingest, &event);
+
+    ngx_media_srt_session_close(state->session);
+
+    ngx_media_srt_session_state_release(state);
+
     ngx_media_srt_notify(notify);
 }
 
 static void *
 ngx_media_srt_thread(void *data)
 {
-    ngx_media_srt_ingest_t   *ingest = data;
-    ngx_media_srt_notify_t    notify;
-    ngx_media_srt_listener_t *listener;
-    ngx_media_srt_session_t  *session;
-    ngx_media_srt_event_t     event;
-    uint64_t                  session_id;
+    ngx_media_srt_ingest_t        *ingest = data;
+    ngx_media_srt_notify_t         notify;
+    ngx_media_srt_listener_t      *listener;
+    ngx_media_srt_session_t       *session;
+    ngx_media_srt_session_state_t *state;
+    ngx_media_srt_poll_t          *poll;
+    ngx_media_srt_poll_event_t     events[NGX_MEDIA_SRT_POLL_MAX];
+    ngx_media_srt_event_t          event;
+    u_char                         buf[65536];
+    ngx_uint_t                     i, count;
+    ngx_int_t                      n;
 
     notify.ingest = ingest;
     notify.last_notify = 0;
 
-    listener = ngx_media_srt_listen(ingest->conf.host.data,
-                                    ingest->conf.port, NULL);
+    listener = ngx_media_srt_listen(ingest->conf.host.data, ingest->conf.port,
+                                    NULL);
 
     if (listener == NULL) {
+        ngx_memzero(&event, sizeof(event));
+        event.type = NGX_MEDIA_SRT_EVENT_FAILED;
+
+        (void) ngx_media_srt_event_push(ingest, &event);
+        (void) ngx_atomic_fetch_add(&ingest->failed, 1);
+
+        ngx_media_srt_notify(&notify);
+
+        return NULL;
+    }
+
+    poll = ngx_media_srt_poll_create(NULL);
+
+    if (poll == NULL
+        || ngx_media_srt_poll_add_listener(poll, listener) != NGX_OK)
+    {
+        ngx_media_srt_listen_close(listener);
+
         ngx_memzero(&event, sizeof(event));
         event.type = NGX_MEDIA_SRT_EVENT_FAILED;
 
@@ -178,21 +239,76 @@ ngx_media_srt_thread(void *data)
     (void) ngx_media_srt_event_push(ingest, &event);
     ngx_media_srt_notify(&notify);
 
-    session_id = 0;
-
     while (!ingest->stop) {
 
-        session = ngx_media_srt_accept(listener, 200, NULL);
-        if (session == NULL) {
-            continue;
+        if (ngx_media_srt_poll_wait(poll, 200, events, NGX_MEDIA_SRT_POLL_MAX,
+                                    &count) != NGX_OK)
+        {
+            break;
         }
 
-        session_id++;
+        for (i = 0; i < count; i++) {
 
-        ngx_media_srt_session_run(ingest, session, session_id, &notify);
-        ngx_media_srt_session_close(session);
+            if (events[i].listener != NULL) {
+
+                session = ngx_media_srt_accept_ready(events[i].listener, NULL);
+
+                if (session == NULL) {
+                    continue;
+                }
+
+                if (ngx_media_srt_poll_add_session(poll, session) != NGX_OK) {
+                    ngx_media_srt_session_close(session);
+                    continue;
+                }
+
+                ngx_media_srt_session_open(ingest, session, &notify);
+                continue;
+            }
+
+            if (events[i].session == NULL) {
+                continue;
+            }
+
+            state = ngx_media_srt_session_state_find(ingest,
+                                                     events[i].session);
+
+            if (state == NULL) {
+                continue;
+            }
+
+            n = ngx_media_srt_session_recv(state->session, buf, sizeof(buf),
+                                           200);
+
+            if (n > 0) {
+                (void) ngx_media_ts_ingest_write(&ingest->payload, state->id,
+                                                 buf, (size_t) n,
+                                                 ngx_media_srt_now());
+                state->bytes += (uint64_t) n;
+                state->chunks++;
+
+                ngx_media_srt_notify(&notify);
+                continue;
+            }
+
+            if (n == 0) {
+                continue;
+            }
+
+            /* the publisher is gone */
+            ngx_media_srt_poll_remove_session(poll, state->session);
+            ngx_media_srt_session_finish(ingest, state, &notify);
+        }
     }
 
+    for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
+        if (ingest->sessions[i].session != NULL) {
+            ngx_media_srt_session_close(ingest->sessions[i].session);
+            ngx_media_srt_session_state_release(&ingest->sessions[i]);
+        }
+    }
+
+    ngx_media_srt_poll_destroy(poll);
     ngx_media_srt_listen_close(listener);
 
     return NULL;

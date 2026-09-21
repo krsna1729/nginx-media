@@ -68,7 +68,7 @@ Phase 2 — MPEG-TS normalization (complete):
   errors; `make srt-ingest-nginx`: 3 s of H.264+AAC over SRT yields 65 video
   and 110 audio frames, 3 keyframes and zero errors inside nginx
 
-Phase 3 — logical streams and redundant sources (core complete):
+Phase 3 — logical streams and redundant sources (complete):
 
 - `src/core/ngx_media_stream.*`: logical stream with a source registry, the
   program feed and the single write path into it; a stream has one active
@@ -83,15 +83,32 @@ Phase 3 — logical streams and redundant sources (core complete):
 - a promotion completes only at a decodable boundary and only after the
   demoted source's leases drain; a real switch bumps the generation and
   invalidates readers' cursors (the initial activation is not a switch)
+- `src/core/ngx_media_registry.*`: per-worker runtime stream registry (the
+  goal document's normative revision: configuration is capability, the stream
+  graph is runtime state)
+- `src/srt/`: the transport helper now runs **one shared poll over the
+  listener and every session** (goal doc 11.3) instead of one blocking loop
+  per publisher; payload chunks carry their session id and the worker routes
+  each session to its own demuxer, source and stream
+- `src/api/ngx_media_api_module.c`: `media_api` location handler exposing
+  `GET /media/api/v1/streams`, `GET .../{app}/{stream}`,
+  `GET .../{app}/{stream}/sources` and
+  `POST .../{app}/{stream}/switch?source=<id>` (bounded JSON, explicit status
+  codes; `switchback` reports not-implemented until automatic failover lands)
 - `make source-switch`: two live sources demuxed from real H.264+AAC fixtures,
   both hot; one manual promotion at frame 41 → generation 2, 0 DTS regressions
   over 475 program frames, the switch starts on a keyframe, the demoted source
   stops writing but keeps a hot 77-unit GOP cache
-- next: wiring streams/sources into the SRT worker and the control API
+- `make api-switch`: two real SRT publishers stay hot on `live/news`; the API
+  lists both, reports encoder-a active and encoder-b standby with a bounded
+  GOP cache, switches to encoder-b (generation 1 → 2, switches 1), and rejects
+  unknown sources (404), wrong methods (405) and unknown streams (404)
+- next phase: health, eligibility, priority selection and automatic failover
 
 ## Layout
 
     config                nginx add-on config
+    src/api/              control API (HTTP location handler)
     src/core/             portable media core (goal doc section 3)
     src/codec/            Annex B NAL and ADTS framing helpers
     src/srt/              SRT transport adapter and Stream ID parsing
@@ -109,6 +126,7 @@ Phase 3 — logical streams and redundant sources (core complete):
     make srt-ingest-nginx # SRT ingest through nginx, demuxed into frames
     make ts-fixture       # demux ffmpeg-generated H.264/H.265 MPEG-TS files
     make source-switch    # two hot sources, manual switch, timeline checks
+    make api-switch       # control API: listing and manual switch via nginx
 
 Requires `cc`, `make`, `curl`, `tar`, `ffmpeg` and (for the SRT targets)
 `libsrt`. `make nginx` builds nginx 1.30.5 with `--add-module` into `.build/`;

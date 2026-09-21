@@ -47,6 +47,18 @@ ngx_media_srt_accept(ngx_media_srt_listener_t *listener, ngx_msec_t timeout_ms,
     return ngx_media_srt_backend->accept(listener, timeout_ms, log);
 }
 
+ngx_media_srt_session_t *
+ngx_media_srt_accept_ready(ngx_media_srt_listener_t *listener, ngx_log_t *log)
+{
+    if (listener == NULL || ngx_media_srt_backend == NULL
+        || ngx_media_srt_backend->accept_ready == NULL)
+    {
+        return NULL;
+    }
+
+    return ngx_media_srt_backend->accept_ready(listener, log);
+}
+
 ngx_int_t
 ngx_media_srt_session_streamid(ngx_media_srt_session_t *session, u_char *buf,
     size_t cap)
@@ -112,4 +124,82 @@ ngx_media_srt_shutdown(void)
     }
 
     ngx_media_srt_backend->shutdown();
+}
+
+ngx_media_srt_poll_t *
+ngx_media_srt_poll_create(ngx_log_t *log)
+{
+    if (ngx_media_srt_backend == NULL
+        || ngx_media_srt_backend->poll_create == NULL)
+    {
+        return NULL;
+    }
+
+    return ngx_media_srt_backend->poll_create(log);
+}
+
+void
+ngx_media_srt_poll_destroy(ngx_media_srt_poll_t *poll)
+{
+    if (poll == NULL || ngx_media_srt_backend == NULL
+        || ngx_media_srt_backend->poll_destroy == NULL)
+    {
+        return;
+    }
+
+    ngx_media_srt_backend->poll_destroy(poll);
+}
+
+ngx_int_t
+ngx_media_srt_poll_add_listener(ngx_media_srt_poll_t *poll,
+    ngx_media_srt_listener_t *listener)
+{
+    if (poll == NULL || listener == NULL || ngx_media_srt_backend == NULL
+        || ngx_media_srt_backend->poll_add_listener == NULL)
+    {
+        return NGX_ERROR;
+    }
+
+    return ngx_media_srt_backend->poll_add_listener(poll, listener);
+}
+
+ngx_int_t
+ngx_media_srt_poll_add_session(ngx_media_srt_poll_t *poll,
+    ngx_media_srt_session_t *session)
+{
+    if (poll == NULL || session == NULL || ngx_media_srt_backend == NULL
+        || ngx_media_srt_backend->poll_add_session == NULL)
+    {
+        return NGX_ERROR;
+    }
+
+    return ngx_media_srt_backend->poll_add_session(poll, session);
+}
+
+void
+ngx_media_srt_poll_remove_session(ngx_media_srt_poll_t *poll,
+    ngx_media_srt_session_t *session)
+{
+    if (poll == NULL || session == NULL || ngx_media_srt_backend == NULL
+        || ngx_media_srt_backend->poll_remove_session == NULL)
+    {
+        return;
+    }
+
+    ngx_media_srt_backend->poll_remove_session(poll, session);
+}
+
+ngx_int_t
+ngx_media_srt_poll_wait(ngx_media_srt_poll_t *poll, ngx_msec_t timeout_ms,
+    ngx_media_srt_poll_event_t *events, ngx_uint_t max, ngx_uint_t *count)
+{
+    if (poll == NULL || events == NULL || count == NULL
+        || ngx_media_srt_backend == NULL
+        || ngx_media_srt_backend->poll_wait == NULL)
+    {
+        return NGX_ERROR;
+    }
+
+    return ngx_media_srt_backend->poll_wait(poll, timeout_ms, events, max,
+                                            count);
 }

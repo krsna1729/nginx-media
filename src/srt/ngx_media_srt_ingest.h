@@ -13,28 +13,30 @@
 #include <pthread.h>
 
 /*
- * SRT ingest runtime (goal doc 11.2).
+ * SRT ingest runtime (goal doc 11.2, 11.3).
  *
  *   SRT transport helper thread          NGINX worker
  *   -------------------------           --------------------------
- *   accept / recv / enqueue   ---->     bounded TS ingest queue
- *   compact events            ---->     bounded event ring
- *                             eventfd   worker event handler drains both
+ *   one shared poll owns the        ---> bounded TS ingest queue
+ *   listener and every session           (chunks carry a session id)
+ *   compact events                  ---> bounded event ring
+ *                            eventfd    worker event handler drains both
  *
  * The helper thread performs transport progress only: it never parses Stream
  * IDs, never touches logical streams and never allocates media beyond the
  * bounded queue.  It hands the raw Stream ID to the worker in a compact
- * event, and the worker owns parsing, validation and registration.
+ * event; the worker owns parsing, validation and registration.
  *
- * Phase 1 accepts one publisher at a time per listener; the shared transport
- * scheduler that owns many sessions (goal doc 11.3) arrives with the fanout
- * phases.
+ * One poll owns many sessions (goal doc 11.3): protocol progress is shared
+ * schedulable work instead of one blocking loop per receiver.
  */
 
 #define NGX_MEDIA_SRT_EVENT_READY  1
 #define NGX_MEDIA_SRT_EVENT_FAILED 2
 #define NGX_MEDIA_SRT_EVENT_OPEN   3
 #define NGX_MEDIA_SRT_EVENT_CLOSE  4
+
+#define NGX_MEDIA_SRT_MAX_SESSIONS 16
 
 typedef struct {
     ngx_uint_t  type;          /* NGX_MEDIA_SRT_EVENT_* */
@@ -51,7 +53,15 @@ typedef struct {
     ngx_uint_t  max_chunks;    /* payload queue ceilings */
     size_t      max_bytes;
     ngx_uint_t  max_events;    /* event ring capacity */
+    ngx_uint_t  max_sessions;  /* concurrent publishers */
 } ngx_media_srt_ingest_conf_t;
+
+typedef struct {
+    ngx_media_srt_session_t  *session;
+    uint64_t                  id;
+    uint64_t                  bytes;
+    uint64_t                  chunks;
+} ngx_media_srt_session_state_t;
 
 typedef struct {
     ngx_media_srt_ingest_conf_t  conf;
@@ -72,8 +82,12 @@ typedef struct {
     pthread_t                    thread;
     ngx_uint_t                   thread_started;
 
+    /* transport sessions owned by the shared poll */
+    ngx_media_srt_session_state_t  sessions[NGX_MEDIA_SRT_MAX_SESSIONS];
+    ngx_uint_t                     sessions_opened;
+
     ngx_atomic_t                 sessions_accepted;
-    ngx_atomic_t                 sessions_rejected;
+    ngx_atomic_t                 sessions_dropped;
     ngx_atomic_t                 events_dropped;
 } ngx_media_srt_ingest_t;
 

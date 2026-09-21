@@ -88,8 +88,8 @@ ngx_media_ts_ingest_destroy(ngx_media_ts_ingest_t *ingest)
 }
 
 ngx_int_t
-ngx_media_ts_ingest_write(ngx_media_ts_ingest_t *ingest, const u_char *data,
-    size_t len, ngx_msec_t now)
+ngx_media_ts_ingest_write(ngx_media_ts_ingest_t *ingest, uint64_t session_id,
+    const u_char *data, size_t len, ngx_msec_t now)
 {
     ngx_media_ts_ingest_chunk_t  *chunk;
     u_char                       *copy;
@@ -132,6 +132,7 @@ ngx_media_ts_ingest_write(ngx_media_ts_ingest_t *ingest, const u_char *data,
     chunk->data = copy;
     chunk->len = len;
     chunk->time = now;
+    chunk->session_id = session_id;
 
     ingest->bytes += len;
     ingest->head++;

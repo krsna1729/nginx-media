@@ -20,6 +20,10 @@ ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/core/ngx_media_frame.c \
                  $ngx_addon_dir/src/core/ngx_media_feed.c \
                  $ngx_addon_dir/src/core/ngx_media_track.c \
+                 $ngx_addon_dir/src/core/ngx_media_timeline.c \
+                 $ngx_addon_dir/src/core/ngx_media_source.c \
+                 $ngx_addon_dir/src/core/ngx_media_stream.c \
+                 $ngx_addon_dir/src/core/ngx_media_registry.c \
                  $ngx_addon_dir/src/codec/ngx_media_nal.c \
                  $ngx_addon_dir/src/codec/ngx_media_aac.c \
                  $ngx_addon_dir/src/mpegts/ngx_media_ts_demux.c \
@@ -33,6 +37,18 @@ ngx_module_libs="$media_srt_libs -lpthread"
 ngx_module_order=
 
 CORE_INCS="$CORE_INCS $ngx_addon_dir/src/core $ngx_addon_dir/src/codec \
-                     $ngx_addon_dir/src/mpegts $ngx_addon_dir/src/srt"
+                     $ngx_addon_dir/src/mpegts $ngx_addon_dir/src/srt \
+                     $ngx_addon_dir/src/api"
+
+. auto/module
+
+# control API: HTTP location handler
+ngx_module_type=HTTP
+ngx_module_name=ngx_media_api_module
+ngx_module_deps=
+ngx_module_srcs="$ngx_addon_dir/src/api/ngx_media_api_module.c"
+ngx_module_libs=
+ngx_module_incs="$ngx_addon_dir/src/core"
+ngx_module_order=
 
 . auto/module
