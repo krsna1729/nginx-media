@@ -101,6 +101,31 @@ queue.  A slow destination is dropped from, never allowed to stall the program.
   recording part cleanly instead of transferring a live descriptor.
 - Nothing in the media path allocates per packet or blocks a worker.
 
+## HLS push at fanout: does the copy path show up?
+
+`tests/bench/hls_push_fanout.sh` runs two builds of the same code with one
+function changed - the uploader's body transfer - against 8 destinations
+receiving the same segments, and reports worker CPU per uploaded segment,
+which is where a copy shows up.
+
+| Uploader | Uploads | CPU per upload |
+|---|---|---|
+| `sendfile` | 48 | 0.3908 s |
+| `fread` / `write` | 40 | 0.4702 s |
+
+**About 17% less CPU per upload with sendfile**, and more uploads completed
+over the same media.  `sendfile` is not a server-side privilege: it works on
+any socket, including the client connection an upload uses, so the page cache
+hands its pages straight to the socket and an upload costs one kernel-side
+copy per destination instead of two.
+
+Two honest caveats.  The upload counts differ between runs because the
+directory scan is timing-dependent, so this is indicative rather than a
+controlled A/B; and total worker CPU was nearly identical (18.76 s vs 18.81 s)
+because the media pipeline - ingest, demux, mux - dominates, so the upload
+copy is a small slice of the whole.  The saving is real and it is the right
+default; it is not where the time goes.
+
 ## Serving HLS at fanout: what the measurements say
 
 `make bench-hls-fanout` answers the question the sequential bench cannot:

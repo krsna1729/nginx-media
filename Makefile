@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push file-source rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault srt-qualify bench-hls bench-hls-fanout clean
+.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push file-source rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault srt-qualify bench-hls bench-hls-fanout bench-push-fanout clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -70,6 +70,9 @@ bench-hls:
 
 bench-hls-fanout:
 	tests/bench/hls_fanout.sh
+
+bench-push-fanout:
+	tests/bench/hls_push_fanout.sh
 
 srt-qualify:
 	MEDIA_SRT_BACKEND=both $(MAKE) nginx
