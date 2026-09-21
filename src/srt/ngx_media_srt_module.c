@@ -16,6 +16,7 @@
 
 #include "ngx_media_platform.h"
 #include "ngx_media_registry.h"
+#include "ngx_media_route.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_srt_output.h"
 #include "ngx_media_selector.h"
@@ -47,6 +48,11 @@ typedef struct {
     ngx_uint_t             used;
     ngx_media_stream_t    *stream;
     ngx_media_source_t    *source;
+
+    /* set when this worker does not own the stream and routes to the owner */
+    unsigned               routed:1;
+    uint32_t               hash;
+    uint64_t               routed_sequence;
     ngx_media_ts_demux_t   demux;
     ngx_uint_t             demux_ready;
     uint64_t               frames_video;
@@ -193,6 +199,13 @@ ngx_media_srt_sink_frame(void *ctx, const ngx_media_frame_t *frame)
         return;
     }
 
+    if (session->routed) {
+        /* the program lives on another worker: hand the frame over once */
+        (void) ngx_media_route_frame((ngx_cycle_t *) ngx_cycle, session->hash,
+                                     frame, session->routed_sequence++);
+        return;
+    }
+
     if (session->stream != NULL && session->source != NULL) {
         ngx_media_health_media(&session->source->health, frame->dts,
                                ngx_current_msec);
@@ -226,6 +239,11 @@ ngx_media_srt_sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
 {
     ngx_media_srt_slot_t  *session = ctx;
     ngx_uint_t                i;
+
+    if (session != NULL && session->routed) {
+        (void) ngx_media_route_tracks((ngx_cycle_t *) ngx_cycle, session->hash,
+                                      tracks);
+    }
 
     if (session != NULL && session->source != NULL) {
         (void) ngx_media_source_tracks_set(session->source, tracks,
@@ -302,6 +320,39 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
 
     session->id = session_id;
 
+    /*
+     * The program lives on exactly one worker.  When the publisher lands
+     * elsewhere, the frames are forwarded over the bounded inter-worker
+     * transport instead of being registered here (goal doc 22, 23).
+     */
+    session->hash = ngx_media_owner_hash(&id->application, &id->stream);
+
+    if (!ngx_media_route_is_owner((ngx_cycle_t *) ngx_cycle, session->hash)) {
+        session->routed = 1;
+
+        if (ngx_media_route_open((ngx_cycle_t *) ngx_cycle, session->hash,
+                                 &id->application, &id->stream, &id->source,
+                                 NGX_MEDIA_SOURCE_SRT,
+                                 ngx_media_srt_priority(&id->source))
+            != NGX_OK)
+        {
+            ngx_log_error(NGX_LOG_WARN, log, 0,
+                          "media: could not route %V/%V to its owner worker",
+                          &id->application, &id->stream);
+            session->routed = 0;
+            ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
+            return;
+        }
+
+        ngx_media_srt_demux_start(session, log);
+
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: srt publisher routed to the owner stream=%V/%V "
+                      "source=%V", &id->application, &id->stream, &id->source);
+
+        return;
+    }
+
     registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
 
     if (registry == NULL) {
@@ -343,6 +394,16 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
     }
 
     ngx_media_srt_stream_policy(stream);
+
+    /* publish ownership so other workers can route to us */
+    {
+        ngx_media_owner_dir_t  *dir = ngx_media_runtime_owner_dir();
+
+        if (dir != NULL) {
+            (void) ngx_media_owner_dir_claim(dir, session->hash,
+                                             (ngx_uint_t) ngx_process_slot);
+        }
+    }
 
     session->stream = stream;
     session->source = source;
@@ -415,6 +476,17 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
 
         ngx_media_ts_demux_destroy(&session->demux);
         session->demux_ready = 0;
+    }
+
+    if (session->routed) {
+        (void) ngx_media_route_close((ngx_cycle_t *) ngx_cycle, session->hash);
+
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: routed srt publisher closed hash=%uL frames=%uL",
+                      session->hash, session->routed_sequence);
+
+        ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
+        return;
     }
 
     stream = session->stream;
@@ -778,11 +850,24 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     mcf = (ngx_media_srt_main_conf_t *)
               cycle->conf_ctx[ngx_media_srt_module.index];
 
+    /*
+     * Every worker adopts the shared owner directory and its routing
+     * endpoints, and arms the program runtime: a worker that does not accept
+     * publishers still owns the programs its hash selects.
+     */
+    if (ngx_media_runtime_init(cycle, cycle->log) != NGX_OK) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "media: could not initialise the program runtime");
+        return NGX_ERROR;
+    }
+
+    (void) ngx_media_runtime_arm(cycle, cycle->log);
+
     if (mcf == NULL || !mcf->listen_set) {
         return NGX_OK;
     }
 
-    /* deterministic ownership: worker 0 owns the listener (goal doc 22) */
+    /* transport sockets stay with worker 0 (goal doc 22) */
     if (ngx_process_slot != 0) {
         return NGX_OK;
     }
@@ -868,15 +953,6 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
                       "media: %ui SRT destination(s) started", mcf->noutputs);
     }
 
-    /* every worker adopts the shared owner directory */
-    if (ngx_media_runtime_init(cycle, cycle->log) != NGX_OK) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                      "media: could not attach the shared owner directory");
-        return NGX_ERROR;
-    }
-
-    /* the shared runtime owns selection, outputs and recording taps */
-    (void) ngx_media_runtime_arm(cycle, cycle->log);
 
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
                   "media: SRT ingest runtime started for %V", &mcf->listen);

@@ -3,6 +3,7 @@
 
 #include "ngx_media.h"
 #include "ngx_media_owner_dir.h"
+#include "ngx_media_route.h"
 #include "ngx_media_rtmp_adapter.h"
 
 /*

@@ -5,6 +5,9 @@
 #include "ngx_media_hls_segmenter.h"
 #include "ngx_media_record.h"
 #include "ngx_media_registry.h"
+#include "ngx_media_route.h"
+
+#include <stdio.h>
 #include "ngx_media_selector.h"
 
 /*
@@ -54,6 +57,23 @@ static ngx_media_record_t   ngx_media_runtime_raw;
 static ngx_uint_t           ngx_media_runtime_raw_started;
 
 static ngx_media_owner_dir_t     *ngx_media_runtime_owners;
+
+/* sources that live in another worker and are fed through the routing layer */
+#define NGX_MEDIA_RUNTIME_MAX_ROUTED 32
+
+typedef struct {
+    ngx_uint_t          used;
+    uint32_t            hash;
+    ngx_media_stream_t *stream;
+    ngx_media_source_t *source;
+} ngx_media_runtime_routed_t;
+
+static ngx_media_runtime_routed_t ngx_media_runtime_routed[
+    NGX_MEDIA_RUNTIME_MAX_ROUTED];
+static uint64_t                   ngx_media_runtime_routed_frames;
+static uint64_t                   ngx_media_runtime_tick_logs;
+static uint64_t                   ngx_media_runtime_routed_msgs;
+static uint64_t                   ngx_media_runtime_routed_nopayload;
 static ngx_media_runtime_sink_pt  ngx_media_runtime_sink;
 static void                      *ngx_media_runtime_sink_ctx;
 
@@ -469,6 +489,352 @@ ngx_media_runtime_outputs_stop(ngx_media_runtime_outputs_t *out)
     ngx_memzero(out, sizeof(ngx_media_runtime_outputs_t));
 }
 
+/* --- owner side of the routing escape hatch ------------------------------ */
+
+/*
+ * Frames that arrive from another worker are fed into the local program as if
+ * the publisher were local: the owner creates the stream and source from the
+ * OPEN message and publishes every frame through the normal path.
+ */
+static ngx_int_t
+ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
+    const ngx_media_ipc_header_t *header, ngx_media_buf_t *payload)
+{
+    ngx_media_registry_t  *registry;
+    ngx_media_stream_t    *stream;
+    ngx_media_source_t    *source;
+    ngx_media_frame_t      frame;
+    ngx_str_t              application, name, source_id;
+    u_char                *p, *slash;
+    ngx_media_feed_conf_t  feed_conf;
+
+    (void) ctx;
+    (void) hash;
+
+    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+
+    if (registry == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (header->type == NGX_MEDIA_IPC_MSG_OPEN) {
+
+        if (payload == NULL || ngx_media_buf_size(payload) < 3) {
+            return NGX_ERROR;
+        }
+
+        p = ngx_media_buf_data(payload);
+
+        slash = ngx_strlchr(p, p + ngx_media_buf_size(payload), '/');
+
+        if (slash == NULL) {
+            return NGX_ERROR;
+        }
+
+        application.data = p;
+        application.len = (size_t) (slash - p);
+
+        name.data = slash + 1;
+
+        slash = ngx_strlchr(name.data,
+                            p + ngx_media_buf_size(payload), '/');
+
+        if (slash == NULL) {
+            return NGX_ERROR;
+        }
+
+        name.len = (size_t) (slash - name.data);
+
+        source_id.data = slash + 1;
+        source_id.len = ngx_media_buf_size(payload)
+                        - application.len - name.len - 2;
+
+        feed_conf.max_units = 2048;
+        feed_conf.max_bytes = 32 * 1024 * 1024;
+        feed_conf.max_age = 10000;
+
+        stream = ngx_media_registry_stream_create(registry, &application,
+                                                  &name, &feed_conf,
+                                                  ngx_cycle->log);
+
+        if (stream == NULL) {
+            return NGX_ERROR;
+        }
+
+        source = ngx_media_stream_source_find(stream, &source_id);
+
+        if (source != NULL) {
+            ngx_media_stream_source_remove(stream, source);
+        }
+
+        source = ngx_media_stream_source_add(stream, &source_id,
+                                             header->source_type,
+                                             header->priority,
+                                             ngx_cycle->log);
+
+        if (source == NULL) {
+            return NGX_ERROR;
+        }
+
+        ngx_media_health_init(&source->health, &stream->selector,
+                              ngx_current_msec);
+        ngx_media_health_transport(&source->health, 1, ngx_current_msec);
+
+        if (stream->active == NULL) {
+            (void) ngx_media_stream_promote(stream, source);
+        }
+
+        /* remember the routed source so its frames have a destination */
+        {
+            ngx_uint_t  i;
+
+            for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
+
+                if (!ngx_media_runtime_routed[i].used) {
+                    ngx_media_runtime_routed[i].used = 1;
+                    ngx_media_runtime_routed[i].hash = hash;
+                    ngx_media_runtime_routed[i].stream = stream;
+                    ngx_media_runtime_routed[i].source = source;
+                    break;
+                }
+            }
+        }
+
+        /* the owner claims the stream in the shared directory */
+        if (ngx_media_runtime_owners != NULL) {
+            (void) ngx_media_owner_dir_claim(ngx_media_runtime_owners, hash,
+                                             (ngx_uint_t) ngx_process_slot);
+        }
+
+        ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
+                      "media: routed source opened stream=%V/%V source=%V",
+                      &application, &name, &source_id);
+
+        return NGX_OK;
+    }
+
+    if (header->type == NGX_MEDIA_IPC_MSG_TRACKS) {
+        ngx_media_trackset_t  set;
+        const u_char         *q;
+        uint32_t              count, i2;
+        size_t                left;
+
+        if (payload == NULL) {
+            return NGX_ERROR;
+        }
+
+        q = ngx_media_buf_data(payload);
+        left = ngx_media_buf_size(payload);
+
+        if (left < sizeof(uint32_t)) {
+            return NGX_ERROR;
+        }
+
+        ngx_memcpy(&count, q, sizeof(uint32_t));
+        q += sizeof(uint32_t);
+        left -= sizeof(uint32_t);
+
+        if (count == 0 || count > 8
+            || ngx_media_trackset_init(&set, count, ngx_cycle->log) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+
+        for (i2 = 0; i2 < count; i2++) {
+            uint32_t           fields[10];
+            ngx_media_track_t  track;
+
+            if (left < sizeof(fields)) {
+                ngx_media_trackset_destroy(&set);
+                return NGX_ERROR;
+            }
+
+            ngx_memcpy(fields, q, sizeof(fields));
+            q += sizeof(fields);
+            left -= sizeof(fields);
+
+            if (fields[9] > left) {
+                ngx_media_trackset_destroy(&set);
+                return NGX_ERROR;
+            }
+
+            ngx_memzero(&track, sizeof(track));
+
+            track.media_type = fields[0];
+            track.codec = fields[1];
+            track.payload_format = fields[2];
+            track.sample_rate = fields[3];
+            track.channels = fields[4];
+            track.profile = fields[5];
+            track.level = fields[6];
+            track.width = fields[7];
+            track.height = fields[8];
+
+            if (fields[9] > 0) {
+                ngx_media_buf_t  *config = ngx_media_buf_alloc(fields[9]);
+
+                if (config == NULL) {
+                    ngx_media_trackset_destroy(&set);
+                    return NGX_ERROR;
+                }
+
+                ngx_memcpy(ngx_media_buf_data(config), q, fields[9]);
+                (void) ngx_media_buf_freeze(config, fields[9]);
+
+                track.config = config;
+                (void) ngx_media_trackset_add(&set, &track);
+                ngx_media_buf_unref(config);
+
+            } else {
+                (void) ngx_media_trackset_add(&set, &track);
+            }
+
+            q += fields[9];
+            left -= fields[9];
+        }
+
+        for (i2 = 0; i2 < NGX_MEDIA_RUNTIME_MAX_ROUTED; i2++) {
+
+            if (ngx_media_runtime_routed[i2].used
+                && ngx_media_runtime_routed[i2].hash == hash)
+            {
+                (void) ngx_media_source_tracks_set(
+                    ngx_media_runtime_routed[i2].source, &set, ngx_cycle->log);
+
+                for (count = 0; count < set.count; count++) {
+
+                    if (set.tracks[count].media_type == NGX_MEDIA_TYPE_VIDEO) {
+                        ngx_media_runtime_routed[i2].source->has_video = 1;
+                    }
+                }
+
+                break;
+            }
+        }
+
+        ngx_media_trackset_destroy(&set);
+
+        return NGX_OK;
+    }
+
+    if (header->type == NGX_MEDIA_IPC_MSG_CLOSE) {
+        ngx_uint_t  i;
+
+        /* the owning source disappears with its publisher */
+        for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
+
+            if (ngx_media_runtime_routed[i].used
+                && ngx_media_runtime_routed[i].hash == hash)
+            {
+                ngx_media_stream_source_remove(
+                    ngx_media_runtime_routed[i].stream,
+                    ngx_media_runtime_routed[i].source);
+
+                ngx_memzero(&ngx_media_runtime_routed[i],
+                            sizeof(ngx_media_runtime_routed_t));
+                break;
+            }
+        }
+
+        ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
+                      "media: routed source closed hash=%uL frames=%uL msgs=%uL "
+                      "nopayload=%uL", header->hash,
+                      ngx_media_runtime_routed_frames,
+                      ngx_media_runtime_routed_msgs,
+                      ngx_media_runtime_routed_nopayload);
+
+        return NGX_OK;
+    }
+
+    /*
+     * A media frame.  It goes to the *source* the OPEN message registered, not
+     * to whatever is currently active: the source is still standby until its
+     * first keyframe passes the gate, and the gate can only see frames that
+     * were published to it.
+     */
+    {
+        ngx_uint_t  i;
+
+        for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
+
+            if (ngx_media_runtime_routed[i].used
+                && ngx_media_runtime_routed[i].hash == hash)
+            {
+                break;
+            }
+        }
+
+        ngx_media_runtime_routed_msgs++;
+
+        if (ngx_media_runtime_routed_msgs <= 5
+            || (ngx_media_runtime_routed_msgs % 200) == 0)
+        {
+            fprintf(stderr, "route: frame msg=%lu hash=%u slot=%lu used=%lu "
+                    "payload=%p\n",
+                    (unsigned long) ngx_media_runtime_routed_msgs,
+                    (unsigned) hash, (unsigned long) i,
+                    i < NGX_MEDIA_RUNTIME_MAX_ROUTED
+                        ? ngx_media_runtime_routed[i].used : 9,
+                    (void *) payload);
+        }
+
+        if (i == NGX_MEDIA_RUNTIME_MAX_ROUTED) {
+            return NGX_OK;
+        }
+
+        if (payload == NULL) {
+            ngx_media_runtime_routed_nopayload++;
+            return NGX_OK;
+        }
+
+        ngx_media_frame_init(&frame);
+
+        frame.media_type = header->media_type;
+        frame.codec = header->codec;
+        frame.payload_format = header->payload_format;
+        frame.track_index = header->track_index;
+        frame.pts = header->pts;
+        frame.dts = header->dts;
+        frame.keyframe = header->keyframe ? 1 : 0;
+        frame.config = header->config ? 1 : 0;
+
+        ngx_media_frame_adopt(&frame, payload);
+
+        source = ngx_media_runtime_routed[i].source;
+        stream = ngx_media_runtime_routed[i].stream;
+
+        ngx_media_health_media(&source->health, frame.dts, ngx_current_msec);
+
+        (void) ngx_media_stream_publish(stream, source, &frame,
+                                        ngx_current_msec);
+
+        ngx_media_frame_release(&frame);
+
+        if (ngx_media_runtime_routed_frames <= 4
+            || (ngx_media_runtime_routed_frames % 200) == 0)
+        {
+            fprintf(stderr, "route: publish n=%lu key=%d config=%d active=%d "
+                    "state=%lu frames=%lu tracks=%p\n",
+                    (unsigned long) ngx_media_runtime_routed_frames,
+                    (int) frame.keyframe, (int) frame.config,
+                    stream->active != NULL,
+                    (unsigned long) source->state,
+                    (unsigned long) stream->program_frames,
+                    (void *) source->tracks);
+        }
+
+        if ((++ngx_media_runtime_routed_frames % 200) == 0) {
+            ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
+                          "media: %uL routed frames, program=%uL active=%V",
+                          ngx_media_runtime_routed_frames, stream->program_frames,
+                          stream->active != NULL ? &stream->active->id
+                                                 : &ngx_media_runtime_none);
+        }
+    }
+
+    return NGX_OK;
+}
+
 /* --- player preparation -------------------------------------------------- */
 
 ngx_media_rtmp_prepare_t *
@@ -616,6 +982,28 @@ ngx_media_runtime_tick(ngx_log_t *log)
         entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
         stream = &entry->stream;
 
+        /* only the owner drives a program's selection and outputs */
+        {
+            uint32_t    h = ngx_media_owner_hash(&stream->application,
+                                                 &stream->name);
+            ngx_uint_t  owner = ngx_media_route_owner((ngx_cycle_t *) ngx_cycle,
+                                                      h);
+
+            if ((++ngx_media_runtime_tick_logs % 20) == 0) {
+                fprintf(stderr, "route: tick slot=%d stream=%s/%s hash=%u "
+                        "owner=%lu dir=%lu\n", (int) ngx_process_slot,
+                        (char *) stream->application.data,
+                        (char *) stream->name.data, (unsigned) h,
+                        (unsigned long) owner,
+                        (unsigned long) ngx_media_owner_for(
+                            (ngx_cycle_t *) ngx_cycle, h));
+            }
+
+            if (owner != (ngx_uint_t) ngx_process_slot) {
+                continue;
+            }
+        }
+
         before = stream->switches;
 
         (void) ngx_media_selector_run(stream, now, &res);
@@ -691,7 +1079,17 @@ ngx_media_runtime_init(ngx_cycle_t *cycle, ngx_log_t *log)
 
     ngx_media_runtime_owners = ngx_media_owner_dir_attach(cycle, log);
 
-    return (ngx_media_runtime_owners != NULL) ? NGX_OK : NGX_ERROR;
+    if (ngx_media_runtime_owners == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (ngx_media_route_worker_init(cycle, log) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    ngx_media_route_set_sink(ngx_media_runtime_route_sink, NULL);
+
+    return NGX_OK;
 }
 
 ngx_media_owner_dir_t *
@@ -706,11 +1104,6 @@ ngx_media_runtime_arm(ngx_cycle_t *cycle, ngx_log_t *log)
     ngx_media_policy_t  *policy;
 
     if (ngx_media_runtime_armed) {
-        return 0;
-    }
-
-    /* deterministic ownership: worker 0 owns program state (goal doc 22) */
-    if (ngx_process_slot != 0) {
         return 0;
     }
 
@@ -775,6 +1168,7 @@ ngx_media_runtime_shutdown(ngx_log_t *log)
     (void) log;
 
     ngx_media_runtime_stop();
+    ngx_media_route_worker_shutdown(log);
 
     for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_OUTPUTS; i++) {
         ngx_media_runtime_outputs_stop(&ngx_media_runtime_outputs[i]);

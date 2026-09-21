@@ -16,6 +16,7 @@
 #include "ngx_media_platform.h"
 #include "ngx_media.h"
 #include "ngx_media_owner_dir.h"
+#include "ngx_media_route.h"
 #include "ngx_media_policy.h"
 
 static void *ngx_media_core_create_conf(ngx_cycle_t *cycle);
@@ -319,6 +320,11 @@ ngx_media_core_init_module(ngx_cycle_t *cycle)
      * small bookkeeping only: owner slot and pid, generation, heartbeat.
      */
     if (ngx_media_owner_dir_shm_create(cycle, 256, cycle->log) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    /* worker-to-worker routing pairs are inherited across the fork */
+    if (ngx_media_route_master_init(cycle, cycle->log) != NGX_OK) {
         return NGX_ERROR;
     }
 

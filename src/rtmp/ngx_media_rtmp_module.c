@@ -5,6 +5,7 @@
 #include "ngx_media_rtmp_adapter.h"
 #include "ngx_media_rtmp_wire.h"
 #include "ngx_media_registry.h"
+#include "ngx_media_route.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_selector.h"
 
@@ -61,6 +62,11 @@ struct ngx_media_rtmp_session_s {
     ngx_media_stream_t           *stream;
     ngx_media_source_t           *source;
     ngx_uint_t                    stream_id;
+
+    /* set when this worker does not own the stream and routes to the owner */
+    unsigned                      routed:1;
+    uint32_t                      routed_hash;
+    uint64_t                      routed_sequence;
 
     /* playing */
     ngx_media_rtmp_prepare_t     *prepare;
@@ -306,6 +312,15 @@ ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
 
     ngx_media_rtmp_reader_reset(&session->reader);
     ngx_media_rtmp_publisher_destroy(&session->publisher);
+
+    if (session->routed) {
+        (void) ngx_media_route_close((ngx_cycle_t *) ngx_cycle,
+                                     session->routed_hash);
+
+        ngx_log_error(NGX_LOG_NOTICE, session->log, 0,
+                      "media: routed rtmp publisher closed hash=%uL",
+                      session->routed_hash);
+    }
 
     if (stream != NULL && session->source != NULL) {
         ngx_media_health_transport(&session->source->health, 0,
@@ -692,6 +707,13 @@ ngx_media_rtmp_frame_cb(void *ctx, const ngx_media_frame_t *frame)
 {
     ngx_media_rtmp_session_t  *session = ctx;
 
+    if (session->routed) {
+        (void) ngx_media_route_frame((ngx_cycle_t *) ngx_cycle,
+                                     session->routed_hash, frame,
+                                     session->routed_sequence++);
+        return NGX_OK;
+    }
+
     if (session->stream == NULL || session->source == NULL) {
         return NGX_OK;
     }
@@ -712,6 +734,12 @@ ngx_media_rtmp_tracks_cb(void *ctx, const ngx_media_trackset_t *tracks)
 {
     ngx_media_rtmp_session_t  *session = ctx;
     ngx_uint_t                 i;
+
+    if (session->routed) {
+        (void) ngx_media_route_tracks((ngx_cycle_t *) ngx_cycle,
+                                      session->routed_hash, tracks);
+        return NGX_OK;
+    }
 
     if (session->source == NULL) {
         return NGX_OK;
@@ -803,6 +831,46 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
         return NGX_DECLINED;
     }
 
+    /*
+     * The program lives on exactly one worker; a publisher landing elsewhere
+     * is routed there over the bounded inter-worker transport (goal doc 22).
+     */
+    session->routed_hash = ngx_media_owner_hash(app, name);
+
+    if (!ngx_media_route_is_owner((ngx_cycle_t *) ngx_cycle,
+                                  session->routed_hash))
+    {
+        if (ngx_media_rtmp_keep(session, app) != NGX_OK
+            || ngx_media_rtmp_keep(session, name) != NGX_OK
+            || ngx_media_rtmp_keep(session, type) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+
+        if (ngx_media_route_open((ngx_cycle_t *) ngx_cycle,
+                                 session->routed_hash, app, name, name,
+                                 NGX_MEDIA_SOURCE_RTMP,
+                                 ngx_media_rtmp_priority(name)) != NGX_OK)
+        {
+            ngx_log_error(NGX_LOG_WARN, session->log, 0,
+                          "media: could not route %V/%V to its owner worker",
+                          app, name);
+            return NGX_ERROR;
+        }
+
+        session->routed = 1;
+        session->state = NGX_MEDIA_RTMP_STATE_PUBLISHING;
+
+        ngx_log_error(NGX_LOG_NOTICE, session->log, 0,
+                      "media: rtmp publisher routed to the owner stream=%V/%V",
+                      app, name);
+
+        ngx_media_rtmp_send_status(session, 0, "status",
+                                   "NetStream.Publish.Start", "publishing");
+
+        return NGX_OK;
+    }
+
     registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
 
     if (registry == NULL) {
@@ -859,6 +927,16 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
 
     if (stream->active == NULL) {
         (void) ngx_media_stream_promote(stream, source);
+    }
+
+    {
+        ngx_media_owner_dir_t  *dir = ngx_media_runtime_owner_dir();
+
+        if (dir != NULL) {
+            (void) ngx_media_owner_dir_claim(dir,
+                                             ngx_media_owner_hash(app, name),
+                                             (ngx_uint_t) ngx_process_slot);
+        }
     }
 
     session->stream = stream;
@@ -1547,11 +1625,20 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
     mcf = (ngx_media_rtmp_main_conf_t *)
               cycle->conf_ctx[ngx_media_rtmp_module.index];
 
+    /* every worker adopts the owner directory, routing and program runtime */
+    if (ngx_media_runtime_init(cycle, cycle->log) != NGX_OK) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "media: could not initialise the program runtime");
+        return NGX_ERROR;
+    }
+
+    (void) ngx_media_runtime_arm(cycle, cycle->log);
+
     if (mcf == NULL || !mcf->listen_set) {
         return NGX_OK;
     }
 
-    /* deterministic ownership: worker 0 owns the listener (goal doc 22) */
+    /* transport sockets stay with worker 0 (goal doc 22) */
     if (ngx_process_slot != 0) {
         return NGX_OK;
     }
@@ -1659,15 +1746,6 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
     ngx_media_rtmp_listener = c;
     ngx_media_rtmp_started = 1;
 
-    /* every worker adopts the shared owner directory */
-    if (ngx_media_runtime_init(cycle, cycle->log) != NGX_OK) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                      "media: could not attach the shared owner directory");
-        return NGX_ERROR;
-    }
-
-    /* the shared runtime owns selection, outputs and recording taps */
-    (void) ngx_media_runtime_arm(cycle, cycle->log);
 
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
                   "media: rtmp listener ready on %V", &mcf->listen);
