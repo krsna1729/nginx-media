@@ -1211,7 +1211,7 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
 
     (void) ngx_media_runtime_arm(cycle, cycle->log);
 
-    if (mcf == NULL || !mcf->listen_set) {
+    if (mcf == NULL) {
         return NGX_OK;
     }
 
@@ -1219,51 +1219,6 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     if (ngx_process_slot != 0) {
         return NGX_OK;
     }
-
-    if (ngx_media_srt_parse_endpoint(cycle->pool, &mcf->listen, &host, &port)
-        != NGX_OK)
-    {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                      "media: invalid media_srt_listen \"%V\"", &mcf->listen);
-        return NGX_ERROR;
-    }
-
-    ngx_memzero(&conf, sizeof(conf));
-
-    conf.host = host;
-    conf.port = port;
-    conf.max_chunks = 256;
-    conf.max_bytes = 8 * 1024 * 1024;
-    conf.max_events = 64;
-    conf.max_sessions = NGX_MEDIA_SRT_MAX_SESSIONS;
-    conf.params = ngx_media_srt_crypto_params(mcf, NULL, &mcf->crypto_params);
-
-    if (ngx_media_srt_ingest_start(&ngx_media_srt_ingest, &conf, cycle->log)
-        != NGX_OK)
-    {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                      "media: could not start the SRT ingest runtime");
-        return NGX_ERROR;
-    }
-
-    c = ngx_get_connection(ngx_media_srt_ingest.notify_fd, cycle->log);
-    if (c == NULL) {
-        ngx_media_srt_ingest_stop(&ngx_media_srt_ingest);
-        return NGX_ERROR;
-    }
-
-    c->data = &ngx_media_srt_ingest;
-    c->read->handler = ngx_media_srt_handler;
-    c->read->log = cycle->log;
-
-    if (ngx_add_event(c->read, NGX_READ_EVENT, 0) != NGX_OK) {
-        ngx_free_connection(c);
-        ngx_media_srt_ingest_stop(&ngx_media_srt_ingest);
-        return NGX_ERROR;
-    }
-
-    ngx_media_srt_connection = c;
-    ngx_media_srt_started = 1;
 
     /*
      * The SRT destination subsystem is started even with nothing declared:
@@ -1344,6 +1299,62 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
         ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
                       "media: %ui SRT destination(s) started", mcf->noutputs);
     }
+
+    /*
+     * The listener is optional.  An instance whose destinations all point
+     * outward publishes without ever accepting a publisher, and refusing to
+     * start its destinations because it has no listener would be exactly the
+     * bug this ordering fixes.
+     */
+    if (!mcf->listen_set) {
+        return NGX_OK;
+    }
+
+    if (ngx_media_srt_parse_endpoint(cycle->pool, &mcf->listen, &host, &port)
+        != NGX_OK)
+    {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "media: invalid media_srt_listen \"%V\"", &mcf->listen);
+        return NGX_ERROR;
+    }
+
+    ngx_memzero(&conf, sizeof(conf));
+
+    conf.host = host;
+    conf.port = port;
+    conf.max_chunks = 256;
+    conf.max_bytes = 8 * 1024 * 1024;
+    conf.max_events = 64;
+    conf.max_sessions = NGX_MEDIA_SRT_MAX_SESSIONS;
+    conf.params = ngx_media_srt_crypto_params(mcf, NULL, &mcf->crypto_params);
+
+    if (ngx_media_srt_ingest_start(&ngx_media_srt_ingest, &conf, cycle->log)
+        != NGX_OK)
+    {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "media: could not start the SRT ingest runtime");
+        return NGX_ERROR;
+    }
+
+    c = ngx_get_connection(ngx_media_srt_ingest.notify_fd, cycle->log);
+    if (c == NULL) {
+        ngx_media_srt_ingest_stop(&ngx_media_srt_ingest);
+        return NGX_ERROR;
+    }
+
+    c->data = &ngx_media_srt_ingest;
+    c->read->handler = ngx_media_srt_handler;
+    c->read->log = cycle->log;
+
+    if (ngx_add_event(c->read, NGX_READ_EVENT, 0) != NGX_OK) {
+        ngx_free_connection(c);
+        ngx_media_srt_ingest_stop(&ngx_media_srt_ingest);
+        return NGX_ERROR;
+    }
+
+    ngx_media_srt_connection = c;
+    ngx_media_srt_started = 1;
+
 
 
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,

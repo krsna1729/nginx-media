@@ -306,7 +306,8 @@ ngx_media_runtime_outputs_drain(ngx_media_runtime_outputs_t *out,
 
     for ( ;; ) {
         status = ngx_media_feed_read(&stream->program_feed, &out->cursor, 64,
-                                     512 * 1024, frames, &count);
+                                     512 * 1024, ngx_current_msec, frames,
+                                     &count);
 
         if (status == NGX_MEDIA_FEED_GENERATION_MISMATCH) {
             /* a switch is a discontinuity for every consumer */
@@ -886,7 +887,8 @@ found:
     for ( ;; ) {
         status = ngx_media_feed_read(&stream->program_feed, &slot->cursor,
                                      NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK,
-                                     1024 * 1024, frames, &count);
+                                     1024 * 1024, ngx_current_msec, frames,
+                                     &count);
 
         if (status == NGX_MEDIA_FEED_GENERATION_MISMATCH
             || status == NGX_MEDIA_FEED_OVERRUN)
@@ -935,6 +937,17 @@ found:
 
 /* --- timer --------------------------------------------------------------- */
 
+static ngx_media_runtime_stats_t  ngx_media_runtime_stats;
+static ngx_msec_t                 ngx_media_runtime_last_tick;
+
+void
+ngx_media_runtime_stats_get(ngx_media_runtime_stats_t *out)
+{
+    if (out != NULL) {
+        *out = ngx_media_runtime_stats;
+    }
+}
+
 void
 ngx_media_runtime_tick(ngx_log_t *log)
 {
@@ -949,6 +962,30 @@ ngx_media_runtime_tick(ngx_log_t *log)
 
     now = ngx_current_msec;
     policy = ngx_media_runtime_policy();
+
+    /*
+     * The timer asks for a fixed interval, so the gap between two ticks is
+     * the event loop's own delay: nothing here sleeps, and anything above the
+     * interval is time this worker could not get back to its timer.
+     */
+    if (ngx_media_runtime_last_tick != 0) {
+        ngx_msec_t  gap = now - ngx_media_runtime_last_tick;
+
+        ngx_media_runtime_stats.last_gap = gap;
+
+        if (gap > ngx_media_runtime_stats.max_gap) {
+            ngx_media_runtime_stats.max_gap = gap;
+        }
+
+        if (gap > NGX_MEDIA_RUNTIME_INTERVAL
+                   + NGX_MEDIA_RUNTIME_INTERVAL / 2)
+        {
+            ngx_media_runtime_stats.late_ticks++;
+        }
+    }
+
+    ngx_media_runtime_last_tick = now;
+    ngx_media_runtime_stats.ticks++;
 
     registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
 

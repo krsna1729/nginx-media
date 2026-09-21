@@ -166,10 +166,39 @@ ngx_media_feed_publish(ngx_media_feed_t *feed, const ngx_media_frame_t *frame,
     return NGX_OK;
 }
 
+static void
+ngx_media_feed_hist_record(ngx_media_feed_hist_t *hist, ngx_msec_t delay)
+{
+    ngx_uint_t  bucket = 0;
+    ngx_msec_t  bound;
+
+    /*
+     * A delay far beyond any plausible one means the clock moved, not that
+     * the fanout stalled for a minute.  Recording it in the top bucket would
+     * make the percentile useless, so it is counted at the ceiling.
+     */
+    if (delay > 60000) {
+        delay = 60000;
+    }
+
+    for (bound = 1; bound < delay && bucket < NGX_MEDIA_FEED_HIST_BUCKETS - 1;
+         bound <<= 1)
+    {
+        bucket++;
+    }
+
+    hist->buckets[bucket]++;
+    hist->count++;
+
+    if (delay > hist->max) {
+        hist->max = delay;
+    }
+}
+
 ngx_uint_t
-ngx_media_feed_read(const ngx_media_feed_t *feed, ngx_media_cursor_t *cursor,
-    ngx_uint_t max_units, size_t max_bytes, ngx_media_frame_t *out,
-    ngx_uint_t *out_count)
+ngx_media_feed_read(ngx_media_feed_t *feed, ngx_media_cursor_t *cursor,
+    ngx_uint_t max_units, size_t max_bytes, ngx_msec_t now,
+    ngx_media_frame_t *out, ngx_uint_t *out_count)
 {
     uint64_t                     seq;
     size_t                       bytes;
@@ -213,6 +242,10 @@ ngx_media_feed_read(const ngx_media_feed_t *feed, ngx_media_cursor_t *cursor,
 
         out[count] = slot->frame;
         ngx_media_buf_ref(slot->frame.payload);
+
+        if (now >= slot->publish_time) {
+            ngx_media_feed_hist_record(&feed->fanout, now - slot->publish_time);
+        }
 
         bytes += len;
         count++;
@@ -343,4 +376,58 @@ ngx_media_feed_last_keyframe(const ngx_media_feed_t *feed)
     }
 
     return feed->last_keyframe;
+}
+
+ngx_msec_t
+ngx_media_feed_fanout_percentile(const ngx_media_feed_t *feed,
+    ngx_uint_t percentile)
+{
+    uint64_t    target, seen;
+    ngx_uint_t  i;
+    ngx_msec_t  bound;
+
+    if (feed == NULL || feed->fanout.count == 0 || percentile == 0) {
+        return 0;
+    }
+
+    if (percentile > 100) {
+        percentile = 100;
+    }
+
+    target = (feed->fanout.count * percentile + 99) / 100;
+    seen = 0;
+
+    /*
+     * The answer is the upper bound of the bucket the percentile falls in,
+     * which is the conservative reading: the true value is somewhere inside
+     * that bucket and this never reports better than reality.
+     */
+    for (i = 0; i < NGX_MEDIA_FEED_HIST_BUCKETS; i++) {
+
+        seen += feed->fanout.buckets[i];
+
+        if (seen >= target) {
+            bound = 1;
+
+            for (ngx_uint_t b = 0; b < i; b++) {
+                bound <<= 1;
+            }
+
+            return bound;
+        }
+    }
+
+    return feed->fanout.max;
+}
+
+uint64_t
+ngx_media_feed_fanout_count(const ngx_media_feed_t *feed)
+{
+    return (feed != NULL) ? feed->fanout.count : 0;
+}
+
+uint64_t
+ngx_media_feed_fanout_max(const ngx_media_feed_t *feed)
+{
+    return (feed != NULL) ? feed->fanout.max : 0;
 }

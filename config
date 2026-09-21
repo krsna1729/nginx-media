@@ -124,6 +124,7 @@ ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/core/ngx_media_http.c \
                  $ngx_addon_dir/src/core/ngx_media_hls_pull.c \
                  $ngx_addon_dir/src/core/ngx_media_hls_ingest.c \
+                 $ngx_addon_dir/src/core/ngx_media_hls_profile.c \
                  $ngx_addon_dir/src/core/ngx_media_stream.c \
                  $ngx_addon_dir/src/core/ngx_media_registry.c \
                  $ngx_addon_dir/src/core/ngx_media_policy.c \

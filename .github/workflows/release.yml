@@ -55,6 +55,7 @@ jobs:
           make hls-push
           make hls-pull
           make hls-ingest
+          make hls-profile
           make file-source
           make rtmp
           make rtmp-hevc

@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest file-source rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault srt-qualify bench-hls bench-hls-fanout bench-push-fanout clean
+.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault srt-qualify bench-hls bench-hls-fanout bench-push-fanout clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -43,6 +43,12 @@ hls-pull:
 
 hls-ingest:
 	tests/integration/hls_ingest_nginx.sh
+
+hls-profile:
+	tests/integration/hls_profile_nginx.sh
+
+churn:
+	tests/integration/churn_nginx.sh
 
 file-source:
 	tests/integration/file_source_nginx.sh

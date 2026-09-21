@@ -116,13 +116,13 @@ main(void)
     TEST_ASSERT_EQ_U64(cursor.generation, 1);
     TEST_ASSERT_EQ_U64(cursor.next_sequence, 0);
 
-    status = ngx_media_feed_read(&feed, &cursor, 8, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_EMPTY);
     TEST_ASSERT_EQ_U64(count, 0);
 
     TEST_CASE("an uninitialised cursor is rejected");
     cursor.generation = 0;
-    status = ngx_media_feed_read(&feed, &cursor, 8, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_GENERATION_MISMATCH);
 
     TEST_CASE("publish/read round trip preserves order, advances cursor");
@@ -132,7 +132,7 @@ main(void)
     TEST_ASSERT_EQ_U64(ngx_media_feed_bytes(&feed), 40);
     TEST_ASSERT_EQ_U64(ngx_media_feed_last_keyframe(&feed), 0);
 
-    status = ngx_media_feed_read(&feed, &cursor, 8, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_BATCH);
     TEST_ASSERT_EQ_U64(count, 4);
     TEST_ASSERT_EQ_U64(cursor.next_sequence, 4);
@@ -145,7 +145,7 @@ main(void)
     TEST_ASSERT(out[0].keyframe);
     ngx_media_feed_release(out, count);
 
-    status = ngx_media_feed_read(&feed, &cursor, 8, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_EMPTY);
 
     TEST_CASE("batch limits: max_units, then max_bytes with progress");
@@ -153,28 +153,28 @@ main(void)
     ngx_media_feed_cursor_init(&feed, &cursor);
     TEST_ASSERT_EQ_INT(publish_n(&feed, 3, 20, 0, 100, 0), 0);
 
-    status = ngx_media_feed_read(&feed, &cursor, 2, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 2, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_BATCH);
     TEST_ASSERT_EQ_U64(count, 2);
     ngx_media_feed_release(out, count);
 
-    status = ngx_media_feed_read(&feed, &cursor, 2, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 2, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(count, 1);
     ngx_media_feed_release(out, count);
 
-    status = ngx_media_feed_read(&feed, &cursor, 2, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 2, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_EMPTY);
 
     /* budget smaller than one frame: the first unit is always returned */
     cursor_from_tail(&feed, &cursor);
-    status = ngx_media_feed_read(&feed, &cursor, 8, 10, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 10, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_BATCH);
     TEST_ASSERT_EQ_U64(count, 1);
     TEST_ASSERT_EQ_U64(cursor.next_sequence, 1);
     ngx_media_feed_release(out, count);
 
     /* two frames fit into the budget */
-    status = ngx_media_feed_read(&feed, &cursor, 8, 40, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 40, 1000, out, &count);
     TEST_ASSERT_EQ_U64(count, 2);
     ngx_media_feed_release(out, count);
 
@@ -188,7 +188,7 @@ main(void)
 
     cursor.generation = ngx_media_feed_generation(&feed);
     cursor.next_sequence = 0;
-    status = ngx_media_feed_read(&feed, &cursor, 8, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_OVERRUN);
     TEST_ASSERT_EQ_U64(cursor.next_sequence, 0);
 
@@ -197,7 +197,7 @@ main(void)
                                              NGX_MEDIA_FEED_RESYNC_LATEST),
                        NGX_OK);
     TEST_ASSERT_EQ_U64(cursor.next_sequence, 6);
-    status = ngx_media_feed_read(&feed, &cursor, 8, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_EMPTY);
 
     TEST_CASE("byte ceiling bounds retained payload bytes");
@@ -247,7 +247,7 @@ main(void)
     ngx_media_feed_discontinuity(&feed);
     TEST_ASSERT_EQ_U64(ngx_media_feed_generation(&feed), 2);
 
-    status = ngx_media_feed_read(&feed, &cursor, 8, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_GENERATION_MISMATCH);
     TEST_ASSERT_EQ_U64(cursor.generation, 1);
     TEST_ASSERT_EQ_U64(cursor.next_sequence, 3);
@@ -258,7 +258,7 @@ main(void)
     TEST_ASSERT_EQ_U64(cursor.generation, 2);
     TEST_ASSERT_EQ_U64(cursor.next_sequence, 2);
 
-    status = ngx_media_feed_read(&feed, &cursor, 8, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_BATCH);
     TEST_ASSERT_EQ_U64(count, 1);
     TEST_ASSERT(out[0].keyframe);
@@ -276,7 +276,7 @@ main(void)
                        NGX_OK);
     TEST_ASSERT_EQ_U64(cursor.next_sequence, 4);
 
-    status = ngx_media_feed_read(&feed, &cursor, 8, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(count, 4);
     TEST_ASSERT(out[0].keyframe);
     TEST_ASSERT_EQ_I64(out[0].pts, 4000);
@@ -299,7 +299,7 @@ main(void)
                                              NGX_MEDIA_FEED_RESYNC_KEYFRAME),
                        NGX_OK);
     TEST_ASSERT_EQ_U64(cursor.next_sequence, 8);
-    status = ngx_media_feed_read(&feed, &cursor, 8, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_EMPTY);
 
     TEST_CASE("a cursor ahead of the feed requires resync");
@@ -307,7 +307,7 @@ main(void)
     TEST_ASSERT_EQ_INT(publish_n(&feed, 2, 10, 0, 100, 0), 0);
     cursor.generation = ngx_media_feed_generation(&feed);
     cursor.next_sequence = ngx_media_feed_head(&feed) + 5;
-    status = ngx_media_feed_read(&feed, &cursor, 8, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_GENERATION_MISMATCH);
 
     TEST_CASE("readers hold payload references across feed destruction");
@@ -324,7 +324,7 @@ main(void)
     TEST_ASSERT_EQ_U64(ngx_media_buf_refs(payload), 1);
 
     cursor_from_tail(&feed, &cursor);
-    status = ngx_media_feed_read(&feed, &cursor, 4, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 4, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_BATCH);
     TEST_ASSERT_EQ_U64(ngx_media_buf_refs(payload), 2);
 
@@ -343,7 +343,7 @@ main(void)
     TEST_ASSERT_EQ_U64(ngx_media_feed_bytes(&feed), 0);
 
     cursor_from_tail(&feed, &cursor);
-    status = ngx_media_feed_read(&feed, &cursor, 4, 0, out, &count);
+    status = ngx_media_feed_read(&feed, &cursor, 4, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_BATCH);
     TEST_ASSERT_EQ_U64(count, 1);
     TEST_ASSERT_NULL(out[0].payload);
@@ -356,9 +356,9 @@ main(void)
 
     TEST_ASSERT_EQ_INT(ngx_media_feed_publish(NULL, &frame, 0), NGX_ERROR);
     TEST_ASSERT_EQ_INT(ngx_media_feed_publish(&feed, NULL, 0), NGX_ERROR);
-    TEST_ASSERT_EQ_U64(ngx_media_feed_read(NULL, &cursor, 1, 0, out, &count),
+    TEST_ASSERT_EQ_U64(ngx_media_feed_read(NULL, &cursor, 1, 0, 1000, out, &count),
                        NGX_MEDIA_FEED_ERROR);
-    TEST_ASSERT_EQ_U64(ngx_media_feed_read(&feed, NULL, 1, 0, out, &count),
+    TEST_ASSERT_EQ_U64(ngx_media_feed_read(&feed, NULL, 1, 0, 1000, out, &count),
                        NGX_MEDIA_FEED_ERROR);
     TEST_ASSERT_EQ_INT(ngx_media_feed_resync(&feed, &cursor, 99), NGX_ERROR);
 

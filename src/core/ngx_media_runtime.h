@@ -38,6 +38,25 @@ void ngx_media_runtime_stop(void);
 /* one scheduler visit: selector, outputs and player preparation */
 void ngx_media_runtime_tick(ngx_log_t *log);
 
+/*
+ * Worker-level health, the numbers that say whether this worker still has
+ * headroom (goal doc 32: event-loop delay is the first symptom of a worker
+ * that is falling behind).
+ *
+ * `gap` is the interval between the last two runtime ticks; the timer asks for
+ * NGX_MEDIA_RUNTIME_INTERVAL, so anything above it is time the event loop
+ * spent unable to run this timer.  `late` counts ticks that missed by more
+ * than half an interval.
+ */
+typedef struct {
+    uint64_t    ticks;
+    ngx_msec_t  last_gap;
+    ngx_msec_t  max_gap;
+    uint64_t    late_ticks;
+} ngx_media_runtime_stats_t;
+
+void ngx_media_runtime_stats_get(ngx_media_runtime_stats_t *out);
+
 /* stops and releases per-stream outputs; called from exit_process */
 void ngx_media_runtime_shutdown(ngx_log_t *log);
 

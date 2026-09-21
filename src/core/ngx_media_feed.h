@@ -56,6 +56,22 @@ typedef struct {
     ngx_msec_t         publish_time;
 } ngx_media_feed_slot_t;
 
+/*
+ * fanout_delay = dispatch_time - program_publish_time (goal doc 32).
+ *
+ * The primary capacity metric, and the one an operator can feel: how long a
+ * unit of media waits after the program publishes it before a consumer takes
+ * it.  Recorded as a log2 histogram, because percentiles are what matter and
+ * a histogram costs two operations on the dispatch path.
+ */
+#define NGX_MEDIA_FEED_HIST_BUCKETS  16
+
+typedef struct {
+    uint64_t  buckets[NGX_MEDIA_FEED_HIST_BUCKETS];  /* 0ms, 1ms, 2-3, 4-7 ... */
+    uint64_t  count;
+    uint64_t  max;
+} ngx_media_feed_hist_t;
+
 typedef struct {
     ngx_media_feed_slot_t  *slots;
     ngx_uint_t              capacity;   /* power of two, >= max_units */
@@ -68,6 +84,8 @@ typedef struct {
     uint64_t                last_keyframe;
     size_t                  bytes;      /* retained payload bytes */
     unsigned                has_keyframe:1;
+
+    ngx_media_feed_hist_t   fanout;     /* dispatch delay, all consumers */
 } ngx_media_feed_t;
 
 ngx_int_t ngx_media_feed_init(ngx_media_feed_t *feed,
@@ -77,9 +95,14 @@ void ngx_media_feed_destroy(ngx_media_feed_t *feed);
 ngx_int_t ngx_media_feed_publish(ngx_media_feed_t *feed,
     const ngx_media_frame_t *frame, ngx_msec_t now);
 
-ngx_uint_t ngx_media_feed_read(const ngx_media_feed_t *feed,
+/*
+ * now is the caller's clock.  The feed never reads one, but it does record how
+ * long each dispatched unit waited, which is the only place that interval is
+ * observable.
+ */
+ngx_uint_t ngx_media_feed_read(ngx_media_feed_t *feed,
     ngx_media_cursor_t *cursor, ngx_uint_t max_units, size_t max_bytes,
-    ngx_media_frame_t *out, ngx_uint_t *out_count);
+    ngx_msec_t now, ngx_media_frame_t *out, ngx_uint_t *out_count);
 
 void ngx_media_feed_release(ngx_media_frame_t *frames, ngx_uint_t count);
 
@@ -95,5 +118,11 @@ uint64_t ngx_media_feed_tail(const ngx_media_feed_t *feed);
 ngx_uint_t ngx_media_feed_units(const ngx_media_feed_t *feed);
 size_t ngx_media_feed_bytes(const ngx_media_feed_t *feed);
 uint64_t ngx_media_feed_last_keyframe(const ngx_media_feed_t *feed);
+
+/* the delay at the given percentile, in ms; 0 when nothing was dispatched */
+ngx_msec_t ngx_media_feed_fanout_percentile(const ngx_media_feed_t *feed,
+    ngx_uint_t percentile);
+uint64_t ngx_media_feed_fanout_count(const ngx_media_feed_t *feed);
+uint64_t ngx_media_feed_fanout_max(const ngx_media_feed_t *feed);
 
 #endif /* NGX_MEDIA_FEED_H */

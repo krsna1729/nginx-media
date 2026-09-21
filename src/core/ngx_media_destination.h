@@ -34,6 +34,16 @@ typedef struct ngx_media_destination_s {
     ngx_str_t               path;       /* filesystem destinations */
     ngx_str_t               ca_file;    /* TLS endpoints: trust anchor */
 
+    /*
+     * Platform profile (normative revision): a named set of rules layered on
+     * the generic HLS publisher.  Empty means no profile, which is the plain
+     * generic publisher.
+     */
+    ngx_str_t               profile;
+    ngx_uint_t              segment_duration_ms;
+    ngx_uint_t              playlist_window;
+    ngx_uint_t              http_post;
+
     uint64_t                revision;   /* bumped by every mutation */
     unsigned                enabled:1;  /* desired state */
 

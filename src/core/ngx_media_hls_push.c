@@ -1,4 +1,5 @@
 #include "ngx_media_hls_push.h"
+#include "ngx_media_hls_profile.h"
 #include "ngx_media_http.h"
 #include "ngx_media_destination.h"
 #include "ngx_media_stream.h"
@@ -213,10 +214,23 @@ ngx_media_hls_push_add(ngx_media_stream_t *stream,
 
     destination->impl = push;
 
-    ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                  "media: hls push destination %V started for %V/%V: %V -> %V",
-                  &destination->id, &stream->application, &stream->name,
-                  &push->directory, &push->url);
+    {
+        /*
+         * The endpoint carries the credential, so it is redacted before it
+         * reaches a log.  Acceptance case 15 asks for exactly this, and the
+         * safe way to get it is for the reporting path to be unable to print
+         * the raw value at all.
+         */
+        u_char     safe[512];
+        ngx_str_t  redacted;
+
+        ngx_media_redact_url(&push->url, safe, sizeof(safe), &redacted);
+
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: hls push destination %V started for %V/%V: "
+                      "%V -> %V", &destination->id, &stream->application,
+                      &stream->name, &push->directory, &redacted);
+    }
 
     return NGX_OK;
 }

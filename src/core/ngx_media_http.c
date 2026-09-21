@@ -1,3 +1,4 @@
+#include "ngx_media_hls_profile.h"
 #include "ngx_media_http.h"
 
 #include <openssl/ssl.h>

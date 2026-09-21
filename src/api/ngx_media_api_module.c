@@ -18,6 +18,7 @@
 #include "ngx_media_destination.h"
 #include "ngx_media_file.h"
 #include "ngx_media_compat.h"
+#include "ngx_media_hls_profile.h"
 #include "ngx_media_hls_ingest.h"
 
 #include <fcntl.h>
@@ -427,7 +428,23 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
         return NGX_ERROR;
     }
 
-    *last = ngx_snprintf(*last, end - *last, "}");
+    /*
+     * fanout_delay percentiles (goal doc 32): how long a unit of media waits
+     * after the program publishes it before a consumer takes it.  This is the
+     * number an operator can feel, and the one that says whether the
+     * deployment still has headroom.
+     */
+    *last = ngx_snprintf(*last, end - *last,
+                         ",\"fanout_ms\":{\"p50\":%M,\"p95\":%M,\"p99\":%M,"
+                         "\"max\":%uL},\"dispatched\":%uL}",
+                         ngx_media_feed_fanout_percentile(&stream->program_feed,
+                                                          50),
+                         ngx_media_feed_fanout_percentile(&stream->program_feed,
+                                                          95),
+                         ngx_media_feed_fanout_percentile(&stream->program_feed,
+                                                          99),
+                         ngx_media_feed_fanout_max(&stream->program_feed),
+                         ngx_media_feed_fanout_count(&stream->program_feed));
 
     return (*last < end - 1) ? NGX_OK : NGX_ERROR;
 }
@@ -501,10 +518,13 @@ static ngx_int_t
 ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
     u_char *end)
 {
-    ngx_queue_t                 *q, *sq;
-    ngx_media_registry_entry_t  *entry;
-    ngx_media_stream_t          *stream;
-    ngx_media_source_t          *source;
+    ngx_queue_t                    *q, *sq;
+    ngx_media_registry_entry_t     *entry;
+    ngx_media_stream_t             *stream;
+    ngx_media_source_t             *source;
+    ngx_media_runtime_stats_t       stats;
+
+    ngx_media_runtime_stats_get(&stats);
 
     *last = ngx_snprintf(*last, end - *last,
                          "# HELP nginx_media_stream_generation "
@@ -528,11 +548,39 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "# HELP nginx_media_source_active "
                          "1 when the source is on air\n"
                          "# TYPE nginx_media_source_active gauge\n"
+                         "# HELP nginx_media_stream_fanout_delay_ms "
+                         "dispatch_time minus program_publish_time, upper "
+                         "bound of the bucket the percentile falls in\n"
+                         "# TYPE nginx_media_stream_fanout_delay_ms gauge\n"
+                         "# HELP nginx_media_stream_dispatched_total "
+                         "units taken by consumers from the program feed\n"
+                         "# TYPE nginx_media_stream_dispatched_total counter\n"
+                         "# HELP nginx_media_stream_feed_units "
+                         "units retained by the program feed, the lag a slow "
+                         "consumer is running at\n"
+                         "# TYPE nginx_media_stream_feed_units gauge\n"
+                         "# HELP nginx_media_stream_feed_bytes "
+                         "payload bytes retained by the program feed\n"
+                         "# TYPE nginx_media_stream_feed_bytes gauge\n"
                          "# HELP nginx_media_runtime_outputs "
                          "runtime output slots in use\n"
                          "# TYPE nginx_media_runtime_outputs gauge\n"
-                         "nginx_media_runtime_outputs %ui\n",
-                         ngx_media_runtime_outputs_active());
+                         "# HELP nginx_media_worker_event_loop_delay_ms "
+                         "interval between the last two runtime ticks, which "
+                         "the timer asks to be 100ms\n"
+                         "# TYPE nginx_media_worker_event_loop_delay_ms gauge\n"
+                         "# HELP nginx_media_worker_event_loop_max_delay_ms "
+                         "worst tick interval this worker has seen\n"
+                         "# TYPE nginx_media_worker_event_loop_max_delay_ms gauge\n"
+                         "# HELP nginx_media_worker_late_ticks_total "
+                         "ticks that missed their interval by more than half\n"
+                         "# TYPE nginx_media_worker_late_ticks_total counter\n"
+                         "nginx_media_runtime_outputs %ui\n"
+                         "nginx_media_worker_event_loop_delay_ms %M\n"
+                         "nginx_media_worker_event_loop_max_delay_ms %M\n"
+                         "nginx_media_worker_late_ticks_total %uL\n",
+                         ngx_media_runtime_outputs_active(),
+                         stats.last_gap, stats.max_gap, stats.late_ticks);
 
     for (q = ngx_queue_head(&registry->entries);
          q != (ngx_queue_t *) &registry->entries;
@@ -547,13 +595,40 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                              "nginx_media_stream_switches"
                              "{application=\"%V\",name=\"%V\"} %uL\n"
                              "nginx_media_stream_program_frames"
-                             "{application=\"%V\",name=\"%V\"} %uL\n",
+                             "{application=\"%V\",name=\"%V\"} %uL\n"
+                             "nginx_media_stream_fanout_delay_ms"
+                             "{application=\"%V\",name=\"%V\",percentile=\"50\"} %M\n"
+                             "nginx_media_stream_fanout_delay_ms"
+                             "{application=\"%V\",name=\"%V\",percentile=\"95\"} %M\n"
+                             "nginx_media_stream_fanout_delay_ms"
+                             "{application=\"%V\",name=\"%V\",percentile=\"99\"} %M\n"
+                             "nginx_media_stream_dispatched_total"
+                             "{application=\"%V\",name=\"%V\"} %uL\n"
+                             "nginx_media_stream_feed_units"
+                             "{application=\"%V\",name=\"%V\"} %ui\n"
+                             "nginx_media_stream_feed_bytes"
+                             "{application=\"%V\",name=\"%V\"} %uz\n",
                              &stream->application, &stream->name,
                              stream->generation,
                              &stream->application, &stream->name,
                              stream->switches,
                              &stream->application, &stream->name,
-                             stream->program_frames);
+                             stream->program_frames,
+                             &stream->application, &stream->name,
+                             ngx_media_feed_fanout_percentile(
+                                 &stream->program_feed, 50),
+                             &stream->application, &stream->name,
+                             ngx_media_feed_fanout_percentile(
+                                 &stream->program_feed, 95),
+                             &stream->application, &stream->name,
+                             ngx_media_feed_fanout_percentile(
+                                 &stream->program_feed, 99),
+                             &stream->application, &stream->name,
+                             ngx_media_feed_fanout_count(&stream->program_feed),
+                             &stream->application, &stream->name,
+                             ngx_media_feed_units(&stream->program_feed),
+                             &stream->application, &stream->name,
+                             ngx_media_feed_bytes(&stream->program_feed));
 
         for (sq = ngx_queue_head(&stream->sources);
              sq != (ngx_queue_t *) &stream->sources;
@@ -1338,23 +1413,44 @@ ngx_media_api_dest_type(const ngx_str_t *text)
     return 0;
 }
 
+/*
+ * An endpoint may carry a credential in its URL - YouTube's HLS ingest does -
+ * so a read of the destination reports the endpoint with the credential
+ * removed.  The origin stays, which is what an operator actually needs to see;
+ * the key does not.  A value that is not URL-shaped passes through unchanged.
+ */
+static ngx_str_t
+ngx_media_api_safe_host(ngx_media_destination_t *destination, u_char *buf,
+    size_t cap)
+{
+    ngx_str_t  out;
+
+    ngx_media_redact_url(&destination->host, buf, cap, &out);
+
+    return out;
+}
+
 static ngx_int_t
 ngx_media_api_destination_json(ngx_media_destination_t *destination,
     u_char **last, u_char *end, ngx_int_t created)
 {
-    u_char  *tail = (u_char *) "";
+    u_char     *tail = (u_char *) "";
+    u_char      safe[512];
+    ngx_str_t   host;
 
     if (created >= 0) {
         tail = (u_char *) (created ? ",\"created\":true}"
                                    : ",\"created\":false}");
     }
 
+    host = ngx_media_api_safe_host(destination, safe, sizeof(safe));
+
     *last = ngx_snprintf(*last, end - *last,
                          "{\"id\":\"%V\",\"type\":%ui,\"host\":\"%V\","
                          "\"port\":%ui,\"enabled\":%s,"
                          "\"revision\":%uL%s",
                          &destination->id, destination->type,
-                         &destination->host, destination->port,
+                         &host, destination->port,
                          destination->enabled ? "true" : "false",
                          destination->revision, tail);
 
@@ -1374,6 +1470,7 @@ ngx_media_api_destination_create(ngx_http_request_t *r,
     ngx_media_stream_t *stream, u_char **last, u_char *end)
 {
     ngx_str_t                body, id, type_text, host, port_text, streamid;
+    ngx_str_t                profile_name;
     ngx_media_destination_t *destination;
     ngx_uint_t               type = 0, port = 0;
     ngx_int_t                n;
@@ -1482,6 +1579,68 @@ ngx_media_api_destination_create(ngx_http_request_t *r,
 
         if (copy != NULL) {
             destination->ca_file = *copy;
+        }
+    }
+
+    /*
+     * A platform profile validates the destination and fills its defaults
+     * before anything is started: a configuration the platform would reject
+     * should fail here, not on the wire at three in the morning.
+     */
+    ngx_str_null(&profile_name);
+
+    if (ngx_media_api_json_field(&body, "profile", &profile_name) == NGX_OK
+        && profile_name.len > 0)
+    {
+        const ngx_media_hls_profile_t  *profile;
+        const char                     *why;
+        ngx_uint_t                      duration = 0, window = 0, post = 0;
+
+        profile = ngx_media_hls_profile_find(&profile_name);
+
+        if (profile == NULL) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"unknown_profile\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        if (ngx_media_api_json_field(&body, "segment_duration_ms", &streamid)
+            == NGX_OK)
+        {
+            n = ngx_atoi(streamid.data, streamid.len);
+
+            if (n > 0) {
+                duration = (ngx_uint_t) n;
+            }
+        }
+
+        if (ngx_media_api_json_field(&body, "playlist_window", &streamid)
+            == NGX_OK)
+        {
+            n = ngx_atoi(streamid.data, streamid.len);
+
+            if (n > 0) {
+                window = (ngx_uint_t) n;
+            }
+        }
+
+        if (ngx_media_hls_profile_apply(profile, &host, &duration, &window,
+                                        &post, &why) != NGX_OK)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"profile_violation\","
+                                 "\"detail\":\"%s\"}", why);
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        destination->segment_duration_ms = duration;
+        destination->playlist_window = window;
+        destination->http_post = post;
+
+        copy = ngx_media_destination_strdup(stream->pool, &profile_name);
+
+        if (copy != NULL) {
+            destination->profile = *copy;
         }
     }
 
@@ -1669,6 +1828,8 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
 
         {
             ngx_uint_t  dfirst = 1;
+            u_char      safe[512];
+            ngx_str_t   host;
 
             for (sq = ngx_queue_head(&stream->destinations);
                  sq != (ngx_queue_t *) &stream->destinations;
@@ -1677,12 +1838,15 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
                 destination = ngx_queue_data(sq, ngx_media_destination_t,
                                              queue);
 
+                host = ngx_media_api_safe_host(destination, safe,
+                                               sizeof(safe));
+
                 *last = ngx_snprintf(*last, end - *last,
                                      "%s{\"id\":\"%V\",\"type\":%ui,"
                                      "\"host\":\"%V\",\"port\":%ui,"
                                      "\"enabled\":%s,\"revision\":%uL}",
                                      dfirst ? "" : ",", &destination->id,
-                                     destination->type, &destination->host,
+                                     destination->type, &host,
                                      destination->port,
                                      destination->enabled ? "true" : "false",
                                      destination->revision);
@@ -1690,7 +1854,24 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
             }
         }
 
-        *last = ngx_snprintf(*last, end - *last, "]}");
+        /*
+         * fanout_delay percentiles (goal doc 32): how long a unit of media
+         * waits after the program publishes it before a consumer takes it.
+         * This is the number an operator can feel, and the one that says
+         * whether the deployment still has headroom.
+         */
+        *last = ngx_snprintf(*last, end - *last,
+                             "],\"fanout_ms\":{\"p50\":%M,\"p95\":%M,"
+                             "\"p99\":%M,\"max\":%uL},\"dispatched\":%uL}",
+                             ngx_media_feed_fanout_percentile(
+                                 &stream->program_feed, 50),
+                             ngx_media_feed_fanout_percentile(
+                                 &stream->program_feed, 95),
+                             ngx_media_feed_fanout_percentile(
+                                 &stream->program_feed, 99),
+                             ngx_media_feed_fanout_max(&stream->program_feed),
+                             ngx_media_feed_fanout_count(
+                                 &stream->program_feed));
     }
 
     *last = ngx_snprintf(*last, end - *last, "],\"count\":%ui}",

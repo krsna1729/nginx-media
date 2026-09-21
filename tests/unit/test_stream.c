@@ -67,7 +67,7 @@ drain_program(ngx_media_stream_t *stream, feed_view_t *view)
 
     for ( ;; ) {
         status = ngx_media_feed_read(&stream->program_feed, &cursor, 32, 0,
-                                     out, &count);
+                                     1000, out, &count);
 
         if (status == NGX_MEDIA_FEED_GENERATION_MISMATCH) {
             (void) ngx_media_feed_resync(&stream->program_feed, &cursor,
@@ -263,7 +263,7 @@ main(void)
         cursor.next_sequence = 0;
 
         TEST_ASSERT_EQ_U64(ngx_media_feed_read(&stream.program_feed, &cursor, 8,
-                                               0, out, &count),
+                                               0, 1000, out, &count),
                            NGX_MEDIA_FEED_GENERATION_MISMATCH);
         TEST_ASSERT_EQ_INT(ngx_media_feed_resync(&stream.program_feed, &cursor,
                                                  NGX_MEDIA_FEED_RESYNC_KEYFRAME),

@@ -108,6 +108,12 @@ void ngx_destroy_pool(ngx_pool_t *pool);
 #define ngx_alloc(size, log)     ngx_media_test_alloc((size), (log))
 #define ngx_free(p)              ngx_media_test_free(p)
 
+/*
+ * nginx defines this in ngx_config.h, which the unit build does not include.
+ * The module headers use it, so the shim has to supply it.
+ */
+#define ngx_inline               inline
+
 #define ngx_memzero(buf, n)      (void) memset((buf), 0, (n))
 #define ngx_memcpy(dst, src, n)  (void) memcpy((dst), (src), (n))
 #define ngx_memcmp(s1, s2, n)    memcmp((s1), (s2), (n))
