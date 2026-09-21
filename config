@@ -37,14 +37,25 @@ ngx_addon_name=ngx_media
 # library the build links.
 MEDIA_SRT_BACKEND=${MEDIA_SRT_BACKEND:-srt}
 
+# An SRT library that ships no .pc file (some robotweax builds) is selected
+# with SRT_DIR instead.
+if [ -z "`pkg-config --libs srt 2>/dev/null`" ] && [ -n "$SRT_DIR" ]; then
+    export PKG_CONFIG_PATH="$SRT_DIR/lib/pkgconfig:$SRT_DIR/lib64/pkgconfig:$PKG_CONFIG_PATH"
+fi
+
 case "$MEDIA_SRT_BACKEND" in
     srt)
         media_srt_srcs="$ngx_addon_dir/src/srt/ngx_media_srt_haivision.c"
         media_srt_libs=`pkg-config --libs srt 2>/dev/null`
 
+        if [ -z "$media_srt_libs" ] && [ -n "$SRT_DIR" ]; then
+            media_srt_libs="-L$SRT_DIR/lib -L$SRT_DIR/lib64 -lsrt"
+            CORE_INCS="$CORE_INCS -I$SRT_DIR/include"
+        fi
+
         if [ -z "$media_srt_libs" ]; then
             echo "nginx-media: libsrt not found (pkg-config --libs srt)" >&2
-            echo "nginx-media: use MEDIA_SRT_BACKEND=udp for a libsrt-free build" >&2
+            echo "nginx-media: set SRT_DIR, or use MEDIA_SRT_BACKEND=udp for a libsrt-free build" >&2
             exit 1
         fi
         ;;
@@ -52,6 +63,11 @@ case "$MEDIA_SRT_BACKEND" in
         media_srt_srcs="$ngx_addon_dir/src/srt/ngx_media_srt_haivision.c \
                         $ngx_addon_dir/src/srt/ngx_media_srt_udp.c"
         media_srt_libs=`pkg-config --libs srt 2>/dev/null`
+
+        if [ -z "$media_srt_libs" ] && [ -n "$SRT_DIR" ]; then
+            media_srt_libs="-L$SRT_DIR/lib -L$SRT_DIR/lib64 -lsrt"
+            CORE_INCS="$CORE_INCS -I$SRT_DIR/include"
+        fi
 
         if [ -z "$media_srt_libs" ]; then
             echo "nginx-media: libsrt not found (pkg-config --libs srt)" >&2

@@ -135,6 +135,23 @@ printf '%s' "$SWITCH" | grep -q '"generation":2' \
 printf '%s' "$SWITCH" | grep -q '"switches":1' \
     || { echo "switch was not counted" >&2; exit 1; }
 
+METRICS="$(curl -fsS "$API/metrics")"
+
+printf '%s' "$METRICS" \
+    | grep -q 'nginx_media_stream_switches{application="live",name="news"} 1' \
+    || { echo "metrics did not report the switch" >&2; printf '%s\n' "$METRICS" >&2; exit 1; }
+printf '%s' "$METRICS" \
+    | grep -q 'nginx_media_stream_generation{application="live",name="news"} 2' \
+    || { echo "metrics did not report the generation" >&2; exit 1; }
+printf '%s' "$METRICS" \
+    | grep -q 'nginx_media_source_active{application="live",name="news",source="encoder-b"} 1' \
+    || { echo "metrics did not report the active source" >&2; exit 1; }
+printf '%s' "$METRICS" \
+    | grep -q 'nginx_media_source_active{application="live",name="news",source="encoder-a"} 0' \
+    || { echo "metrics did not report the demoted source" >&2; exit 1; }
+
+echo "   metrics ok (switches, generation, active source)"
+
 DETAIL="$(curl -fsS "$API/streams/live/news")"
 printf '%s\n' "$DETAIL"
 printf '%s' "$DETAIL" | grep -q '"active":"encoder-b"' \

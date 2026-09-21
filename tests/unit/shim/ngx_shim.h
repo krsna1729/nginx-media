@@ -69,6 +69,15 @@ struct ngx_queue_s {
 #define ngx_queue_data(q, type, link)                                         \
     (type *) ((u_char *) q - offsetof(type, link))
 
+/*
+ * The policy keeps its switch flag in nginx's flag-slot sentinel so that
+ * ngx_conf_set_flag_slot can own it.  Test builds have no nginx headers, so
+ * the same value has to exist here; nginx defines it as -1.
+ */
+#ifndef NGX_CONF_UNSET
+#define NGX_CONF_UNSET  -1
+#endif
+
 #define NGX_OK          0
 #define NGX_ERROR      -1
 #define NGX_AGAIN      -2

@@ -21,7 +21,7 @@
 typedef struct {
     ngx_msec_t   failure_timeout;
     ngx_msec_t   recovery_timeout;
-    ngx_uint_t   switch_keyframe;
+    ngx_flag_t   switch_keyframe;
     ngx_uint_t   switchback;
 
     /* static outputs applied to every stream (per-stream configuration

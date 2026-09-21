@@ -276,6 +276,103 @@ ngx_media_api_parse(u_char *uri, size_t len, ngx_str_t *application,
     return NGX_OK;
 }
 
+/*
+ * GET /media/api/v1/metrics
+ *
+ * Prometheus text format.  Every number here is already maintained by the
+ * program runtime; nothing is computed or sampled on the request path, so
+ * scraping costs one walk of the registry.
+ */
+static ngx_int_t
+ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
+    u_char *end)
+{
+    ngx_queue_t                 *q, *sq;
+    ngx_media_registry_entry_t  *entry;
+    ngx_media_stream_t          *stream;
+    ngx_media_source_t          *source;
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "# HELP nginx_media_stream_generation "
+                         "selection generation of the program\n"
+                         "# TYPE nginx_media_stream_generation counter\n"
+                         "# HELP nginx_media_stream_switches "
+                         "switches taken by the selector\n"
+                         "# TYPE nginx_media_stream_switches counter\n"
+                         "# HELP nginx_media_stream_program_frames "
+                         "frames carried by the program\n"
+                         "# TYPE nginx_media_stream_program_frames counter\n"
+                         "# HELP nginx_media_source_frames_in "
+                         "frames accepted from the source\n"
+                         "# TYPE nginx_media_source_frames_in counter\n"
+                         "# HELP nginx_media_source_frames_out "
+                         "frames the source delivered to the program\n"
+                         "# TYPE nginx_media_source_frames_out counter\n"
+                         "# HELP nginx_media_source_healthy "
+                         "1 when the source passes its health policy\n"
+                         "# TYPE nginx_media_source_healthy gauge\n"
+                         "# HELP nginx_media_source_active "
+                         "1 when the source is on air\n"
+                         "# TYPE nginx_media_source_active gauge\n");
+
+    for (q = ngx_queue_head(&registry->entries);
+         q != (ngx_queue_t *) &registry->entries;
+         q = q->next)
+    {
+        entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
+        stream = &entry->stream;
+
+        *last = ngx_snprintf(*last, end - *last,
+                             "nginx_media_stream_generation"
+                             "{application=\"%V\",name=\"%V\"} %ui\n"
+                             "nginx_media_stream_switches"
+                             "{application=\"%V\",name=\"%V\"} %uL\n"
+                             "nginx_media_stream_program_frames"
+                             "{application=\"%V\",name=\"%V\"} %uL\n",
+                             &stream->application, &stream->name,
+                             stream->generation,
+                             &stream->application, &stream->name,
+                             stream->switches,
+                             &stream->application, &stream->name,
+                             stream->program_frames);
+
+        for (sq = ngx_queue_head(&stream->sources);
+             sq != (ngx_queue_t *) &stream->sources;
+             sq = sq->next)
+        {
+            source = ngx_queue_data(sq, ngx_media_source_t, queue);
+
+            *last = ngx_snprintf(*last, end - *last,
+                                 "nginx_media_source_frames_in"
+                                 "{application=\"%V\",name=\"%V\","
+                                 "source=\"%V\"} %uL\n"
+                                 "nginx_media_source_frames_out"
+                                 "{application=\"%V\",name=\"%V\","
+                                 "source=\"%V\"} %uL\n"
+                                 "nginx_media_source_healthy"
+                                 "{application=\"%V\",name=\"%V\","
+                                 "source=\"%V\"} %d\n"
+                                 "nginx_media_source_active"
+                                 "{application=\"%V\",name=\"%V\","
+                                 "source=\"%V\"} %d\n",
+                                 &stream->application, &stream->name,
+                                 &source->id, source->frames_in,
+                                 &stream->application, &stream->name,
+                                 &source->id, source->frames_out,
+                                 &stream->application, &stream->name,
+                                 &source->id, source->health.healthy ? 1 : 0,
+                                 &stream->application, &stream->name,
+                                 &source->id, source->active ? 1 : 0);
+
+            if (*last >= end - 1) {
+                return NGX_ERROR;
+            }
+        }
+    }
+
+    return (*last < end - 1) ? NGX_OK : NGX_ERROR;
+}
+
 static ngx_int_t
 ngx_media_api_arg(ngx_http_request_t *r, const char *name, ngx_str_t *value)
 {
@@ -560,6 +657,13 @@ ngx_media_api_handler(ngx_http_request_t *r)
         last = ngx_snprintf(last, end - last, "{\"error\":\"no_registry\"}");
         status = NGX_HTTP_INTERNAL_SERVER_ERROR;
 
+    } else if (r->uri.len == sizeof("/media/api/v1/metrics") - 1
+               && ngx_memcmp(r->uri.data, "/media/api/v1/metrics",
+                             sizeof("/media/api/v1/metrics") - 1) == 0)
+    {
+        status = (ngx_media_api_metrics(registry, &last, end) == NGX_OK)
+                     ? NGX_HTTP_OK
+                     : NGX_HTTP_INTERNAL_SERVER_ERROR;
     } else {
         status = ngx_media_api_dispatch(r, registry, &last, end);
     }

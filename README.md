@@ -1,5 +1,7 @@
 # nginx-media
 
+Documentation: [architecture](docs/architecture.md) | [configuration](docs/configuration.md) | [control API](docs/api.md).
+
 Production-grade media subsystem for NGINX: redundant live and file inputs,
 one logical program, and bounded fanout to SRT, RTMP, HLS and recording.
 
@@ -164,8 +166,9 @@ Phase 3 — logical streams and redundant sources (complete):
 - `src/api/ngx_media_api_module.c`: `media_api` location handler exposing
   `GET /media/api/v1/streams`, `GET .../{app}/{stream}`,
   `GET .../{app}/{stream}/sources` and
-  `POST .../{app}/{stream}/switch?source=<id>` (bounded JSON, explicit status
-  codes; `switchback` reports not-implemented until automatic failover lands)
+  `POST .../{app}/{stream}/switch?source=<id>`,
+  `POST .../{app}/{stream}/switchback` and `GET .../metrics` (bounded JSON and
+  Prometheus text, explicit status codes; see `docs/api.md`)
 - `make source-switch`: two live sources demuxed from real H.264+AAC fixtures,
   both hot; one manual promotion at frame 41 → generation 2, 0 DTS regressions
   over 475 program frames, the switch starts on a keyframe, the demoted source
