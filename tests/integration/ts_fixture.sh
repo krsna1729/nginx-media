@@ -28,7 +28,9 @@ cc -O1 -g -Wall -Wextra -Werror -std=c11 \
     "$ROOT/src/core/ngx_media_track.c" \
     "$ROOT/src/codec/ngx_media_nal.c" \
     "$ROOT/src/codec/ngx_media_aac.c" \
+    "$ROOT/src/mpegts/ngx_media_ts_crc.c" \
     "$ROOT/src/mpegts/ngx_media_ts_demux.c" \
+    "$ROOT/src/mpegts/ngx_media_ts_mux.c" \
     "$ROOT/tests/unit/shim/ngx_shim.c"
 
 generate_h264() {

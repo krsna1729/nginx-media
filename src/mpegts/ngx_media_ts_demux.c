@@ -1,8 +1,7 @@
 #include "ngx_media_ts_demux.h"
+#include "ngx_media_ts_crc.h"
 
 #define NGX_MEDIA_TS_PID_MASK 0x1FFF
-
-static uint32_t ngx_media_ts_crc32(const u_char *p, size_t len);
 
 static void ngx_media_ts_process_packet(ngx_media_ts_demux_t *demux,
     const u_char *p);
@@ -38,33 +37,6 @@ static ngx_int_t ngx_media_ts_emit_config(ngx_media_ts_demux_t *demux,
 static int64_t ngx_media_ts_pes_ts(const u_char *p);
 static ngx_int_t ngx_media_ts_cc_check(ngx_uint_t *cc, ngx_uint_t *valid,
     ngx_uint_t new_cc, ngx_uint_t has_payload);
-
-/*
- * MPEG-2 systems CRC-32: poly 0x04C11DB7, init all ones, no final xor, MSB
- * first.  A section that appends its own CRC over this function yields zero.
- */
-static uint32_t
-ngx_media_ts_crc32(const u_char *p, size_t len)
-{
-    uint32_t  crc = 0xFFFFFFFFu;
-    size_t    i;
-    int       b;
-
-    for (i = 0; i < len; i++) {
-        crc ^= (uint32_t) p[i] << 24;
-
-        for (b = 0; b < 8; b++) {
-            if (crc & 0x80000000u) {
-                crc = (crc << 1) ^ 0x04C11DB7u;
-
-            } else {
-                crc = crc << 1;
-            }
-        }
-    }
-
-    return crc;
-}
 
 static ngx_uint_t
 ngx_media_ts_codec(ngx_uint_t stream_type)
