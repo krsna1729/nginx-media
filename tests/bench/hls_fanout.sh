@@ -178,13 +178,24 @@ enable_sendfile() {
 import sys
 p = sys.argv[1]
 s = open(p).read()
+
+# The anchor used to be "access_log off;" and the config says
+# "access_log $RUN/access.log;", so this replaced nothing and the sendfile
+# variants below were measuring the same configuration as the plain disk one -
+# two identical runs, reported as a sendfile comparison.  Anchor on the http
+# block itself and fail loudly if it is not there.
 if "sendfile on" not in s:
-    s = s.replace("    access_log off;",
-                  "    access_log off;\n    sendfile on;\n    tcp_nopush on;")
+    if "http {\n" not in s:
+        sys.exit("the http block moved: this bench would silently measure "
+                 "the same configuration twice")
+    s = s.replace("http {\n", "http {\n    sendfile on;\n    tcp_nopush on;\n", 1)
     open(p, "w").write(s)
 PYEOF
     "$NGINX" -p "$RUN" -c conf/nginx.conf -s reload >/dev/null 2>&1
     sleep 0.5
+
+    grep -q 'sendfile on' "$RUN/conf/nginx.conf" \
+        || { echo "sendfile was not enabled; the comparison is invalid" >&2; exit 1; }
 }
 
 fanout "disk"           "http://127.0.0.1:$PORT/disk"
