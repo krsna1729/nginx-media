@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch failover hls rtmp srt-output multi-worker clean
+.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch failover hls rtmp srt-output multi-worker soak clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -40,6 +40,9 @@ srt-output:
 
 multi-worker:
 	tests/integration/multi_worker_nginx.sh
+
+soak:
+	tests/integration/soak_nginx.sh
 
 clean:
 	$(MAKE) -C tests/unit clean

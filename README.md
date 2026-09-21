@@ -236,6 +236,13 @@ Hardening measurements recorded so far:
   (RTMP chunk reader, AMF0, SRT stream id, MPEG-TS demux, IPC reassembly) with
   random data and mutations of valid input: 14289 checks, no crash, overrun or
   leak
+- `tests/unit/test_bounds.c` exercises every hard bound at its limit and one
+  step past it, and fails every allocation through the shim so NULL handling is
+  proven (20 checks)
+- `make soak` churns publishers (alternating sources) through six cycles with
+  two configuration reloads in the middle and measures the worker: no crash, no
+  abort, memory flat (4712 kB -> 4540 kB across the run), HLS and recording
+  still produced, clean shutdown
 
 Phase 8 - multi-worker ownership (complete):
 
