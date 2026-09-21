@@ -1,4 +1,5 @@
 #include "ngx_media_file.h"
+#include "ngx_media_health.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_stream.h"
 
@@ -16,7 +17,8 @@ ngx_media_file_sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
         return;
     }
 
-    (void) ngx_media_source_tracks_set(source->source, tracks);
+    (void) ngx_media_source_tracks_set(source->source, tracks,
+                                       source->file.log);
     (void) ngx_media_health_tracks(&source->source->health, 1);
 }
 
@@ -146,9 +148,7 @@ ngx_media_file_advance(ngx_media_file_source_t *source, ngx_log_t *log)
 
         if (source->mode == NGX_MEDIA_FILE_LOOP) {
 
-            if (ngx_lseek(source->file.fd, 0, SEEK_SET)
-                == (off_t) NGX_ERROR)
-            {
+            if (lseek(source->file.fd, 0, SEEK_SET) == (off_t) -1) {
                 source->finished = 1;
                 return NGX_ERROR;
             }

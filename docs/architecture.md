@@ -101,6 +101,32 @@ queue.  A slow destination is dropped from, never allowed to stall the program.
   recording part cleanly instead of transferring a live descriptor.
 - Nothing in the media path allocates per packet or blocks a worker.
 
+## Serving HLS at fanout: what the measurements say
+
+`make bench-hls-fanout` answers the question the sequential bench cannot:
+many concurrent readers over a realistic sliding window (40 segments, 20 MiB,
+32 concurrent clients, 4 rounds, best of three passes, with the server's
+access log used to prove every request actually arrived).
+
+| Variant | Throughput | Requests/s |
+|---|---|---|
+| disk, `sendfile` off | 3077 MiB/s | 6154 |
+| disk, `sendfile on` + `tcp_nopush` | 2759 MiB/s | 5517 |
+| tmpfs, `sendfile on` | 2857 MiB/s | 5714 |
+| tmpfs, HTTPS with kTLS | 1127 MiB/s | 2254 |
+
+- **Still no advantage from a memory filesystem**, and none from `sendfile`,
+  even at 32 concurrent readers over a working set.  The differences are
+  within run-to-run noise; the disk and tmpfs variants are the same speed.
+- **TLS costs more at fanout than it does single-stream**: about 63% here
+  against 38% sequentially, because the crypto is CPU-bound and concurrency
+  multiplies that against a fixed core count.
+- **The honest limit of this measurement**: it is loopback.  `sendfile`'s real
+  value is avoiding the kernel-user copy on the way to a NIC, and loopback has
+  no NIC to skip.  A deployment serving over a real interface should expect
+  `sendfile` to matter more than this bench can show; what this bench *does*
+  establish is that it never costs anything, and that tmpfs is not the lever.
+
 ## Serving HLS: what the measurements say
 
 `make bench-hls` serves the same segment many times over each candidate
