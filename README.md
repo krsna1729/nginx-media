@@ -220,9 +220,9 @@ Phase 7 - SRT output and fanout (complete):
   destinations; B receives one of them, registers the announced source and
   produces its own decodable HLS output while A's HLS shows the shared
   preparation
-Phase 9 - scale hardening (in progress):
+Phase 9 - scale hardening (complete):
 
-Hardening measurements recorded so far:
+Hardening measurements recorded:
 
 - `make unit` runs every suite under ASan/UBSan: 23 suites, 0 failures
 - the concurrent suites (record writer, lifecycle cycles, program feed, stream
