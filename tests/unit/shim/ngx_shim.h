@@ -52,8 +52,12 @@ void ngx_media_test_free(void *ptr);
 
 #define ngx_memzero(buf, n)      (void) memset((buf), 0, (n))
 #define ngx_memcpy(dst, src, n)  (void) memcpy((dst), (src), (n))
+#define ngx_memcmp(s1, s2, n)    memcmp((s1), (s2), (n))
 
 #define ngx_atomic_fetch_add(p, n) \
     __atomic_fetch_add((p), (n), __ATOMIC_SEQ_CST)
+
+#define ngx_atomic_cmp_set(lock, old, set) \
+    __sync_bool_compare_and_swap((lock), (old), (set))
 
 #endif /* NGX_MEDIA_TEST_SHIM_H */

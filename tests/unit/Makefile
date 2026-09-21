@@ -3,17 +3,20 @@ CFLAGS  ?= -O1 -g
 SAN     ?= -fsanitize=address,undefined
 WARN     = -Wall -Wextra -Werror -std=c11
 
-INCLUDES = -I../../src/core -Ishim -I.
+INCLUDES = -I../../src/core -I../../src/srt -I../../src/mpegts -Ishim -I.
 DEFS     = -DNGX_MEDIA_UNIT_TEST
 
 CORE := ../../src/core/ngx_media_buffer.c \
         ../../src/core/ngx_media_frame.c \
         ../../src/core/ngx_media_feed.c \
-        ../../src/core/ngx_media_track.c
+        ../../src/core/ngx_media_track.c \
+        ../../src/mpegts/ngx_media_ts_ingest.c \
+        ../../src/srt/ngx_media_srt_streamid.c
 
 SHIM := shim/ngx_shim.c
 
-TESTS := test_buffer test_frame test_feed test_track
+TESTS := test_buffer test_frame test_feed test_track test_srt_streamid \
+         test_ts_ingest
 BINS  := $(addprefix build/,$(TESTS))
 
 .PHONY: all test clean
