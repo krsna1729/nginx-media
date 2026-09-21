@@ -137,6 +137,14 @@ struct ngx_media_source_s {
     ngx_media_stream_t     *stream;
     ngx_str_t               id;
     uint64_t                revision;
+
+    /*
+     * Desired state, as opposed to the observed state below: an operator can
+     * disable a source without deleting it, and the selector then ignores it
+     * however healthy it looks.  Sources are created enabled.
+     */
+    unsigned                enabled:1;
+
     ngx_uint_t              type;      /* NGX_MEDIA_SOURCE_* */
     ngx_uint_t              priority;
     ngx_uint_t              state;     /* activation gate state */

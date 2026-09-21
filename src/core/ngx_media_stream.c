@@ -152,6 +152,7 @@ ngx_media_stream_source_add(ngx_media_stream_t *stream, const ngx_str_t *id,
     source->stream = stream;
     source->type = type;
     source->priority = priority;
+    source->enabled = 1;
     source->state = NGX_MEDIA_SOURCE_STANDBY;
 
     if (ngx_media_source_preroll_init(source, NGX_MEDIA_PREROLL_DEFAULT_UNITS,

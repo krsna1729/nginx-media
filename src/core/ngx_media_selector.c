@@ -43,6 +43,14 @@ ngx_media_selector_evaluate(ngx_media_stream_t *stream, ngx_msec_t now,
             continue;
         }
 
+        /*
+         * Desired state first: a source an operator disabled is not a
+         * candidate however healthy it looks.
+         */
+        if (!source->enabled) {
+            continue;
+        }
+
         if (!source->health.eligible) {
             continue;
         }

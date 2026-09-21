@@ -24,6 +24,9 @@
 typedef ngx_int_t (*ngx_media_preroll_replay_pt)(void *ctx,
     const ngx_media_frame_t *frame);
 
+/* bumps the object revision: call it from every desired-state mutation */
+void ngx_media_source_touch(ngx_media_source_t *source);
+
 ngx_int_t ngx_media_source_preroll_init(ngx_media_source_t *source,
     ngx_uint_t max_units, size_t max_bytes, ngx_log_t *log);
 void ngx_media_source_preroll_destroy(ngx_media_source_t *source);

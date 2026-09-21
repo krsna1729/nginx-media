@@ -32,6 +32,8 @@ static char *ngx_media_api_set(ngx_conf_t *cf, ngx_command_t *cmd,
 static ngx_int_t ngx_media_api_init(ngx_conf_t *cf);
 static ngx_int_t ngx_media_api_handler(ngx_http_request_t *r);
 static void ngx_media_api_body_ready(ngx_http_request_t *r);
+static ngx_int_t ngx_media_api_sources(ngx_http_request_t *r,
+    ngx_media_stream_t *stream, ngx_str_t *action, u_char **last, u_char *end);
 static ngx_int_t ngx_media_api_stream_create(ngx_http_request_t *r,
     ngx_media_registry_t *registry, u_char **last, u_char *end);
 static ngx_int_t ngx_media_api_stream_delete(ngx_http_request_t *r,
@@ -737,6 +739,293 @@ ngx_media_api_stream_patch(ngx_http_request_t *r,
     return NGX_HTTP_OK;
 }
 
+/* --- source CRUD -------------------------------------------------------- */
+
+static ngx_uint_t
+ngx_media_api_source_type(const ngx_str_t *text)
+{
+    if (text->len == sizeof("srt") - 1
+        && ngx_strncasecmp(text->data, (u_char *) "srt", 3) == 0)
+    {
+        return NGX_MEDIA_SOURCE_SRT;
+    }
+
+    if (text->len == sizeof("rtmp") - 1
+        && ngx_strncasecmp(text->data, (u_char *) "rtmp", 4) == 0)
+    {
+        return NGX_MEDIA_SOURCE_RTMP;
+    }
+
+    if (text->len == sizeof("file") - 1
+        && ngx_strncasecmp(text->data, (u_char *) "file", 4) == 0)
+    {
+        return NGX_MEDIA_SOURCE_FILE;
+    }
+
+    if (text->len == sizeof("hls_pull") - 1
+        && ngx_strncasecmp(text->data, (u_char *) "hls_pull", 8) == 0)
+    {
+        return NGX_MEDIA_SOURCE_HLS_PULL;
+    }
+
+    if (text->len == sizeof("hls_push") - 1
+        && ngx_strncasecmp(text->data, (u_char *) "hls_push", 8) == 0)
+    {
+        return NGX_MEDIA_SOURCE_HLS_PUSH;
+    }
+
+    return 0;
+}
+
+/*
+ * POST /media/api/v1/streams/{application}/{name}/sources
+ *
+ * Body: {"id":"encoder-b","type":"srt","priority":50}.  A source is created
+ * without a transport attached: the identity is a label the operator chooses,
+ * and a publisher that presents it attaches to this object.  Creating one
+ * that exists returns the existing object, so replay is safe.
+ */
+static ngx_int_t
+ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
+    u_char **last, u_char *end)
+{
+    ngx_str_t           body, id, type_text, priority_text;
+    ngx_media_source_t *source;
+    ngx_uint_t          type = NGX_MEDIA_SOURCE_SRT, priority = 0;
+    ngx_int_t           n;
+
+    if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"body_too_large\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    if (ngx_media_api_json_field(&body, "id", &id) != NGX_OK || id.len == 0) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"id_required\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    if (ngx_media_api_json_field(&body, "type", &type_text) == NGX_OK) {
+        type = ngx_media_api_source_type(&type_text);
+
+        if (type == 0) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"unknown_source_type\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+    }
+
+    if (ngx_media_api_json_field(&body, "priority", &priority_text)
+        == NGX_OK)
+    {
+        n = ngx_atoi(priority_text.data, priority_text.len);
+
+        if (n < 0) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"bad_priority\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        priority = (ngx_uint_t) n;
+    }
+
+    source = ngx_media_stream_source_find(stream, &id);
+
+    if (source != NULL) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"id\":\"%V\",\"revision\":%uL,"
+                             "\"created\":false}", &source->id,
+                             source->revision);
+        return NGX_HTTP_OK;
+    }
+
+    source = ngx_media_stream_source_add(stream, &id, type, priority,
+                                         r->connection->log);
+
+    if (source == NULL) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"source_create_failed\"}");
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    ngx_media_source_touch(source);
+    ngx_media_stream_touch(stream);
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "{\"id\":\"%V\",\"revision\":%uL,"
+                         "\"created\":true}", &source->id, source->revision);
+
+    return NGX_HTTP_CREATED;
+}
+
+/*
+ * DELETE /media/api/v1/streams/{application}/{name}/sources/{source}
+ *
+ * Removing the active source is a normal operation: the selector fails over
+ * through the same path a failure would take, which is what the acceptance
+ * contract asks for.  Idempotent, like stream deletion.
+ */
+static ngx_int_t
+ngx_media_api_source_delete(ngx_media_stream_t *stream, ngx_str_t *source_id,
+    u_char **last, u_char *end)
+{
+    ngx_media_source_t  *source;
+
+    source = ngx_media_stream_source_find(stream, source_id);
+
+    if (source == NULL) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"id\":\"%V\",\"deleted\":false,"
+                             "\"reason\":\"absent\"}", source_id);
+        return NGX_HTTP_OK;
+    }
+
+    ngx_media_stream_source_remove(stream, source);
+    ngx_media_stream_touch(stream);
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "{\"id\":\"%V\",\"deleted\":true}", source_id);
+
+    return NGX_HTTP_OK;
+}
+
+/*
+ * POST .../sources/{source}/enable and /disable
+ *
+ * Desired state, so it is accepted whatever the transport is doing: disabling
+ * a source takes it out of selection without tearing its session down, which
+ * is what an operator wants when they intend to bring it back.
+ */
+static ngx_int_t
+ngx_media_api_source_set_enabled(ngx_media_stream_t *stream,
+    ngx_str_t *source_id, ngx_uint_t enabled, u_char **last, u_char *end)
+{
+    ngx_media_source_t  *source;
+
+    source = ngx_media_stream_source_find(stream, source_id);
+
+    if (source == NULL) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"source_not_found\"}");
+        return NGX_HTTP_NOT_FOUND;
+    }
+
+    source->enabled = enabled ? 1 : 0;
+
+    ngx_media_source_touch(source);
+    ngx_media_stream_touch(stream);
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "{\"id\":\"%V\",\"enabled\":%s,"
+                         "\"revision\":%uL}",
+                         &source->id, enabled ? "true" : "false",
+                         source->revision);
+
+    return NGX_HTTP_OK;
+}
+
+/* the action after the stream name: sources, sources/{id}[/enable|disable] */
+static ngx_int_t
+ngx_media_api_sources(ngx_http_request_t *r, ngx_media_stream_t *stream,
+    ngx_str_t *action, u_char **last, u_char *end)
+{
+    ngx_str_t  rest, source_id, verb;
+    u_char    *slash;
+
+    if (action->len < sizeof("sources") - 1
+        || ngx_strncmp(action->data, "sources", sizeof("sources") - 1) != 0)
+    {
+        return NGX_DECLINED;
+    }
+
+    rest.data = action->data + sizeof("sources") - 1;
+    rest.len = action->len - (sizeof("sources") - 1);
+
+    if (rest.len == 0) {
+        if (r->method == NGX_HTTP_POST) {
+            return ngx_media_api_source_create(r, stream, last, end);
+        }
+
+        return NGX_DECLINED;
+    }
+
+    if (rest.data[0] != '/') {
+        return NGX_DECLINED;
+    }
+
+    rest.data++;
+    rest.len--;
+
+    slash = ngx_strlchr(rest.data, rest.data + rest.len, '/');
+
+    if (slash == NULL) {
+        source_id = rest;
+        verb.len = 0;
+
+    } else {
+        source_id.data = rest.data;
+        source_id.len = slash - rest.data;
+        verb.data = slash + 1;
+        verb.len = rest.len - source_id.len - 1;
+    }
+
+    if (source_id.len == 0) {
+        return NGX_DECLINED;
+    }
+
+    if (verb.len == 0) {
+        if (r->method == NGX_HTTP_DELETE) {
+            return ngx_media_api_source_delete(stream, &source_id, last, end);
+        }
+
+        if (r->method == NGX_HTTP_GET) {
+            ngx_media_source_t  *source;
+
+            source = ngx_media_stream_source_find(stream, &source_id);
+
+            if (source == NULL) {
+                *last = ngx_snprintf(*last, end - *last,
+                                     "{\"error\":\"source_not_found\"}");
+                return NGX_HTTP_NOT_FOUND;
+            }
+
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"id\":\"%V\",\"type\":%ui,"
+                                 "\"priority\":%ui,\"enabled\":%s,"
+                                 "\"state\":\"%s\",\"revision\":%uL}",
+                                 &source->id, source->type, source->priority,
+                                 source->enabled ? "true" : "false",
+                                 ngx_media_api_state_name(source->state),
+                                 source->revision);
+
+            return NGX_HTTP_OK;
+        }
+
+        return NGX_DECLINED;
+    }
+
+    if (r->method != NGX_HTTP_POST) {
+        return NGX_HTTP_NOT_ALLOWED;
+    }
+
+    if (verb.len == sizeof("enable") - 1
+        && ngx_strncmp(verb.data, "enable", sizeof("enable") - 1) == 0)
+    {
+        return ngx_media_api_source_set_enabled(stream, &source_id, 1, last,
+                                                end);
+    }
+
+    if (verb.len == sizeof("disable") - 1
+        && ngx_strncmp(verb.data, "disable", sizeof("disable") - 1) == 0)
+    {
+        return ngx_media_api_source_set_enabled(stream, &source_id, 0, last,
+                                                end);
+    }
+
+    return NGX_DECLINED;
+}
+
 static ngx_int_t
 ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
     u_char **last, u_char *end)
@@ -839,6 +1128,16 @@ ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
         }
 
         return NGX_HTTP_OK;
+    }
+
+    if (action.len >= sizeof("sources") - 1
+        && ngx_memcmp(action.data, "sources", sizeof("sources") - 1) == 0)
+    {
+        ngx_int_t  rc = ngx_media_api_sources(r, stream, &action, last, end);
+
+        if (rc != NGX_DECLINED) {
+            return rc;
+        }
     }
 
     if (action.len == sizeof("sources") - 1

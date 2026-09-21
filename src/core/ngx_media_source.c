@@ -16,6 +16,14 @@ ngx_media_source_pow2(ngx_uint_t n)
     return p;
 }
 
+void
+ngx_media_source_touch(ngx_media_source_t *source)
+{
+    if (source != NULL) {
+        source->revision++;
+    }
+}
+
 ngx_int_t
 ngx_media_source_preroll_init(ngx_media_source_t *source, ngx_uint_t max_units,
     size_t max_bytes, ngx_log_t *log)
