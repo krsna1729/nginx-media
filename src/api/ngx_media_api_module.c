@@ -19,6 +19,10 @@
 
 #include <ngx_http.h>
 
+#define NGX_MEDIA_API_FEED_UNITS   2048
+#define NGX_MEDIA_API_FEED_BYTES   (32 * 1024 * 1024)
+#define NGX_MEDIA_API_FEED_AGE     10000
+
 #define NGX_MEDIA_API_BUF_SIZE  (64 * 1024)
 
 static ngx_str_t  ngx_media_api_none = ngx_string("none");
@@ -27,6 +31,15 @@ static char *ngx_media_api_set(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static ngx_int_t ngx_media_api_init(ngx_conf_t *cf);
 static ngx_int_t ngx_media_api_handler(ngx_http_request_t *r);
+static void ngx_media_api_body_ready(ngx_http_request_t *r);
+static ngx_int_t ngx_media_api_stream_create(ngx_http_request_t *r,
+    ngx_media_registry_t *registry, u_char **last, u_char *end);
+static ngx_int_t ngx_media_api_stream_delete(ngx_http_request_t *r,
+    ngx_media_registry_t *registry, ngx_str_t *application, ngx_str_t *name,
+    u_char **last, u_char *end);
+static ngx_int_t ngx_media_api_stream_patch(ngx_http_request_t *r,
+    ngx_media_registry_t *registry, ngx_str_t *application, ngx_str_t *name,
+    u_char **last, u_char *end);
 static ngx_int_t ngx_media_api_dispatch(ngx_http_request_t *r,
     ngx_media_registry_t *registry, u_char **last, u_char *end);
 static ngx_int_t ngx_media_api_stream_json(u_char **last, u_char *end,
@@ -373,6 +386,152 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
     return (*last < end - 1) ? NGX_OK : NGX_ERROR;
 }
 
+/* --- request body ------------------------------------------------------- */
+
+/*
+ * The control API takes small JSON objects.  A full parser would be a
+ * dependency and an attack surface for no gain here: the bodies are flat
+ * objects of short strings and integers, so this reads exactly that and
+ * rejects anything else.
+ */
+typedef struct {
+    ngx_str_t  body;
+    u_char    *pos;
+} ngx_media_api_json_t;
+
+static ngx_int_t
+ngx_media_api_read_body(ngx_http_request_t *r, ngx_pool_t *pool,
+    ngx_str_t *body)
+{
+    ngx_chain_t  *cl;
+    size_t        len = 0, pos = 0;
+    u_char       *dst;
+
+    body->len = 0;
+    body->data = NULL;
+
+    if (r->headers_in.content_length_n <= 0) {
+        return NGX_OK;
+    }
+
+    if (r->headers_in.content_length_n > 8192) {
+        return NGX_ERROR;
+    }
+
+    len = (size_t) r->headers_in.content_length_n;
+    dst = ngx_pnalloc(pool, len + 1);
+
+    if (dst == NULL) {
+        return NGX_ERROR;
+    }
+
+    for (cl = r->request_body->bufs; cl != NULL; cl = cl->next) {
+        size_t  take = cl->buf->last - cl->buf->pos;
+
+        if (pos + take > len) {
+            take = len - pos;
+        }
+
+        ngx_memcpy(dst + pos, cl->buf->pos, take);
+        pos += take;
+
+        if (pos == len) {
+            break;
+        }
+    }
+
+    if (pos != len) {
+        return NGX_ERROR;
+    }
+
+    dst[len] = '\0';
+
+    body->data = dst;
+    body->len = len;
+
+    return NGX_OK;
+}
+
+/* "key": "value"  |  "key": 123   -- the first match, or NGX_DECLINED */
+static ngx_int_t
+ngx_media_api_json_field(const ngx_str_t *body, const char *key,
+    ngx_str_t *value)
+{
+    u_char     *p, *end, *start;
+    size_t      key_len = strlen(key);
+
+    if (body->data == NULL) {
+        return NGX_DECLINED;
+    }
+
+    p = body->data;
+    end = body->data + body->len;
+
+    while (p < end) {
+        if (*p != '"') {
+            p++;
+            continue;
+        }
+
+        if ((size_t) (end - p) < key_len + 3
+            || ngx_strncmp(p + 1, key, key_len) != 0
+            || p[1 + key_len] != '"')
+        {
+            p++;
+            continue;
+        }
+
+        p += key_len + 2;
+
+        while (p < end && (*p == ' ' || *p == '\t')) {
+            p++;
+        }
+
+        if (p == end || *p != ':') {
+            p++;
+            continue;
+        }
+
+        p++;
+
+        while (p < end && (*p == ' ' || *p == '\t')) {
+            p++;
+        }
+
+        if (p == end) {
+            return NGX_DECLINED;
+        }
+
+        if (*p == '"') {
+            start = ++p;
+
+            while (p < end && *p != '"') {
+                p++;
+            }
+
+            if (p == end) {
+                return NGX_DECLINED;
+            }
+
+            value->data = start;
+            value->len = p - start;
+            return NGX_OK;
+        }
+
+        start = p;
+
+        while (p < end && *p != ',' && *p != '}' && *p != ' ') {
+            p++;
+        }
+
+        value->data = start;
+        value->len = p - start;
+        return NGX_OK;
+    }
+
+    return NGX_DECLINED;
+}
+
 static ngx_int_t
 ngx_media_api_arg(ngx_http_request_t *r, const char *name, ngx_str_t *value)
 {
@@ -382,6 +541,200 @@ ngx_media_api_arg(ngx_http_request_t *r, const char *name, ngx_str_t *value)
     key.len = strlen(name);
 
     return ngx_http_arg(r, key.data, key.len, value);
+}
+
+/*
+ * POST /media/api/v1/streams
+ *
+ * Body: {"application":"live","name":"news"}.  Creating a stream does not
+ * require a connected source, and creating one that already exists is not an
+ * error: it returns the existing object, so a controller can replay desired
+ * state after a restart without duplicating anything.
+ */
+static ngx_int_t
+ngx_media_api_stream_create(ngx_http_request_t *r,
+    ngx_media_registry_t *registry, u_char **last, u_char *end)
+{
+    ngx_str_t              body, application, name;
+    ngx_media_stream_t    *stream;
+    ngx_media_feed_conf_t  feed_conf;
+    ngx_uint_t             existed;
+
+    if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"body_too_large\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    if (ngx_media_api_json_field(&body, "application", &application)
+        != NGX_OK
+        || ngx_media_api_json_field(&body, "name", &name) != NGX_OK
+        || application.len == 0 || name.len == 0)
+    {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"application_and_name_required\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    existed = (ngx_media_registry_stream(registry, &application, &name)
+               != NULL);
+
+    ngx_memzero(&feed_conf, sizeof(feed_conf));
+
+    feed_conf.max_units = NGX_MEDIA_API_FEED_UNITS;
+    feed_conf.max_bytes = NGX_MEDIA_API_FEED_BYTES;
+    feed_conf.max_age = NGX_MEDIA_API_FEED_AGE;
+
+    stream = ngx_media_registry_stream_create(registry, &application, &name,
+                                              &feed_conf, r->connection->log);
+
+    if (stream == NULL) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"stream_create_failed\"}");
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    if (!existed) {
+        ngx_media_stream_touch(stream);
+    }
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "{\"application\":\"%V\",\"name\":\"%V\","
+                         "\"revision\":%uL,\"created\":%s}",
+                         &stream->application, &stream->name, stream->revision,
+                         existed ? "false" : "true");
+
+    return existed ? NGX_HTTP_OK : NGX_HTTP_CREATED;
+}
+
+/*
+ * DELETE /media/api/v1/streams/{application}/{name}[?revision=N]
+ *
+ * Teardown is ordered and idempotent: deleting a stream that is not there
+ * succeeds, because the caller asked for an end state and that end state
+ * holds.
+ */
+static ngx_int_t
+ngx_media_api_stream_delete(ngx_http_request_t *r,
+    ngx_media_registry_t *registry, ngx_str_t *application, ngx_str_t *name,
+    u_char **last, u_char *end)
+{
+    ngx_media_stream_t  *stream;
+    ngx_str_t            revision_text;
+    ngx_int_t            revision;
+
+    stream = ngx_media_registry_stream(registry, application, name);
+
+    if (stream == NULL) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"application\":\"%V\",\"name\":\"%V\","
+                             "\"deleted\":false,\"reason\":\"absent\"}",
+                             application, name);
+        return NGX_HTTP_OK;
+    }
+
+    if (ngx_media_api_arg(r, "revision", &revision_text) == NGX_OK) {
+        revision = ngx_atoi(revision_text.data, revision_text.len);
+
+        if (revision >= 0 && (uint64_t) revision != stream->revision) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"stale_revision\","
+                                 "\"revision\":%uL}",
+                                 stream->revision);
+            return NGX_HTTP_CONFLICT;
+        }
+    }
+
+    if (ngx_media_registry_stream_destroy(registry, stream) != NGX_OK) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"stream_delete_failed\"}");
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "{\"application\":\"%V\",\"name\":\"%V\","
+                         "\"deleted\":true}", application, name);
+
+    return NGX_HTTP_OK;
+}
+
+/*
+ * PATCH /media/api/v1/streams/{application}/{name}
+ *
+ * Body carries the fields to change plus, optionally, the revision the caller
+ * last saw.  A revision that no longer matches is refused rather than
+ * silently overwriting a newer desired state.
+ */
+static ngx_int_t
+ngx_media_api_stream_patch(ngx_http_request_t *r,
+    ngx_media_registry_t *registry, ngx_str_t *application, ngx_str_t *name,
+    u_char **last, u_char *end)
+{
+    ngx_media_stream_t  *stream;
+    ngx_str_t            body, value;
+    ngx_int_t            n;
+
+    stream = ngx_media_registry_stream(registry, application, name);
+
+    if (stream == NULL) {
+        *last = ngx_snprintf(*last, end - *last, "{\"error\":\"no_stream\"}");
+        return NGX_HTTP_NOT_FOUND;
+    }
+
+    if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"body_too_large\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    if (ngx_media_api_json_field(&body, "revision", &value) == NGX_OK) {
+        n = ngx_atoi(value.data, value.len);
+
+        if (n >= 0 && (uint64_t) n != stream->revision) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"stale_revision\","
+                                 "\"revision\":%uL}",
+                                 stream->revision);
+            return NGX_HTTP_CONFLICT;
+        }
+    }
+
+    if (ngx_media_api_json_field(&body, "failure_timeout_ms", &value)
+        == NGX_OK)
+    {
+        n = ngx_atoi(value.data, value.len);
+
+        if (n < 1) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"bad_failure_timeout\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        stream->selector.failure_timeout = (ngx_msec_t) n;
+        ngx_media_stream_touch(stream);
+    }
+
+    if (ngx_media_api_json_field(&body, "recovery_timeout_ms", &value)
+        == NGX_OK)
+    {
+        n = ngx_atoi(value.data, value.len);
+
+        if (n < 1) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"bad_recovery_timeout\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        stream->selector.recovery_timeout = (ngx_msec_t) n;
+        ngx_media_stream_touch(stream);
+    }
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "{\"application\":\"%V\",\"name\":\"%V\","
+                         "\"revision\":%uL}", &stream->application,
+                         &stream->name, stream->revision);
+
+    return NGX_HTTP_OK;
 }
 
 static ngx_int_t
@@ -412,8 +765,12 @@ ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
         break;
     }
 
-    /* collection: GET /streams */
+    /* collection: GET /streams, POST /streams */
     if (name.len == 0) {
+
+        if (r->method == NGX_HTTP_POST) {
+            return ngx_media_api_stream_create(r, registry, last, end);
+        }
 
         if (r->method != NGX_HTTP_GET) {
             *last = ngx_snprintf(*last, end - *last,
@@ -447,13 +804,29 @@ ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
 
     stream = ngx_media_registry_stream(registry, &application, &name);
 
-    if (stream == NULL) {
+    /*
+     * DELETE is answered even when the object is gone: the caller asked for
+     * an end state, and that end state holds.  Everything else needs the
+     * object to exist.
+     */
+    if (stream == NULL && !(action.len == 0 && r->method == NGX_HTTP_DELETE))
+    {
         *last = ngx_snprintf(*last, end - *last,
                              "{\"error\":\"stream_not_found\"}");
         return NGX_HTTP_NOT_FOUND;
     }
 
     if (action.len == 0) {
+
+        if (r->method == NGX_HTTP_DELETE) {
+            return ngx_media_api_stream_delete(r, registry, &application,
+                                               &name, last, end);
+        }
+
+        if (r->method == NGX_HTTP_PATCH) {
+            return ngx_media_api_stream_patch(r, registry, &application,
+                                              &name, last, end);
+        }
 
         if (r->method != NGX_HTTP_GET) {
             *last = ngx_snprintf(*last, end - *last,
@@ -626,26 +999,18 @@ ngx_media_api_send(ngx_http_request_t *r, ngx_int_t status, ngx_str_t *body)
     return ngx_http_output_filter(r, &out);
 }
 
-static ngx_int_t
-ngx_media_api_handler(ngx_http_request_t *r)
+static void
+ngx_media_api_body_ready(ngx_http_request_t *r)
 {
     ngx_media_registry_t  *registry;
     ngx_str_t              body;
     u_char                *buf, *last, *end;
-    ngx_int_t              status, rc;
-
-    if (!(r->method & (NGX_HTTP_GET|NGX_HTTP_POST))) {
-        return NGX_HTTP_NOT_ALLOWED;
-    }
-
-    rc = ngx_http_discard_request_body(r);
-    if (rc != NGX_OK) {
-        return rc;
-    }
+    ngx_int_t              status;
 
     buf = ngx_pnalloc(r->pool, NGX_MEDIA_API_BUF_SIZE);
     if (buf == NULL) {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
     }
 
     last = buf;
@@ -671,5 +1036,31 @@ ngx_media_api_handler(ngx_http_request_t *r)
     body.data = buf;
     body.len = last - buf;
 
-    return ngx_media_api_send(r, status, &body);
+    status = ngx_media_api_send(r, status, &body);
+
+    ngx_http_finalize_request(r, status);
+}
+
+static ngx_int_t
+ngx_media_api_handler(ngx_http_request_t *r)
+{
+    ngx_int_t  rc;
+
+    if (!(r->method & (NGX_HTTP_GET|NGX_HTTP_POST|NGX_HTTP_DELETE
+                       |NGX_HTTP_PATCH)))
+    {
+        return NGX_HTTP_NOT_ALLOWED;
+    }
+
+    /*
+     * Mutations carry a JSON body, so the request is only dispatched once it
+     * has arrived; nginx calls ngx_media_api_body_ready() when it has.
+     */
+    rc = ngx_http_read_client_request_body(r, ngx_media_api_body_ready);
+
+    if (rc >= NGX_HTTP_SPECIAL_RESPONSE) {
+        return rc;
+    }
+
+    return NGX_DONE;
 }

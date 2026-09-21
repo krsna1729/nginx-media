@@ -116,6 +116,15 @@ struct ngx_media_stream_s {
     ngx_media_selector_t    selector;
     ngx_media_feed_t        program_feed;
     ngx_uint_t              generation;
+
+    /*
+     * Object revision (normative revision): bumped by every mutation of the
+     * desired state, so a controller can send the revision it last saw and
+     * have a stale write rejected instead of silently overwriting a newer
+     * one.  Distinct from generation, which counts media switches.
+     */
+    uint64_t                revision;
+
     uint64_t                switches;
     uint64_t                emergency_switches;
     uint64_t                program_frames;
@@ -127,6 +136,7 @@ struct ngx_media_stream_s {
 struct ngx_media_source_s {
     ngx_media_stream_t     *stream;
     ngx_str_t               id;
+    uint64_t                revision;
     ngx_uint_t              type;      /* NGX_MEDIA_SOURCE_* */
     ngx_uint_t              priority;
     ngx_uint_t              state;     /* activation gate state */

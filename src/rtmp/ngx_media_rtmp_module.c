@@ -1796,7 +1796,15 @@ ngx_media_rtmp_ssl_ready(ngx_connection_t *c)
 
     ngx_log_error(NGX_LOG_INFO, c->log, 0, "media: rtmps handshake complete");
 
-    if (ngx_handle_read_event(c->read, 0) != NGX_OK) {
+    /*
+     * Both events have to be armed.  ngx_ssl_create_connection() takes the
+     * connection over during the handshake and can leave the write side
+     * disabled; a player then streams forever without ever being driven,
+     * which is a hang rather than an error.
+     */
+    if (ngx_handle_read_event(c->read, 0) != NGX_OK
+        || ngx_handle_write_event(c->write, 0) != NGX_OK)
+    {
         ngx_media_rtmp_close_session(session);
         return;
     }

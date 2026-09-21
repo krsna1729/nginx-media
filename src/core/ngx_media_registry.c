@@ -164,6 +164,44 @@ ngx_media_registry_stream_create(ngx_media_registry_t *registry,
     return &entry->stream;
 }
 
+/*
+ * Ordered teardown (normative revision): stop the program, then take the
+ * sources down, then release the object and its desired-state record.  The
+ * order matters because a source that is still running would otherwise write
+ * into a feed that no longer exists.
+ */
+ngx_int_t
+ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
+    ngx_media_stream_t *stream)
+{
+    ngx_media_registry_entry_t  *entry;
+    ngx_queue_t                 *q;
+
+    if (registry == NULL || stream == NULL) {
+        return NGX_ERROR;
+    }
+
+    for (q = ngx_queue_head(&registry->entries);
+         q != (ngx_queue_t *) &registry->entries;
+         q = q->next)
+    {
+        entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
+
+        if (&entry->stream != stream) {
+            continue;
+        }
+
+        ngx_media_stream_destroy(&entry->stream);
+
+        ngx_queue_remove(&entry->link);
+        registry->count--;
+
+        return NGX_OK;
+    }
+
+    return NGX_ERROR;
+}
+
 ngx_uint_t
 ngx_media_registry_count(const ngx_media_registry_t *registry)
 {

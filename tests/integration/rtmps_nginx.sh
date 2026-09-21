@@ -21,8 +21,10 @@ rm -rf "$RUN"
 mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/hls"
 
 PUB=0
+PLAY=0
 cleanup() {
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null
+    [ "$PLAY" != "0" ] && kill -KILL "$PLAY" 2>/dev/null
     pkill -KILL -f 'nginx: ' 2>/dev/null
     return 0
 }
@@ -108,8 +110,11 @@ done
 echo "   the program reached hls"
 
 # playback, while the publisher is still running
-timeout 60 ffmpeg -hide_banner -loglevel error -y \
+# -rw_timeout bounds the socket: without it a stalled RTMPS session makes
+# ffmpeg wait forever and the test hangs instead of failing
+timeout 45 ffmpeg -hide_banner -loglevel error -y \
     -tls_verify 1 -ca_file "$RUN/cert.pem" \
+    -rw_timeout 10000000 \
     -i "rtmps://127.0.0.1:$RTMP_PORT/live/tls" \
     -t 3 -c copy "$RUN/played.flv" >"$RUN/play.log" 2>&1 \
     || { cat "$RUN/play.log"; echo "rtmps playback failed" >&2; exit 1; }
@@ -124,6 +129,9 @@ printf '%s' "$PLAY_PROBE" | grep -q ',h264,video' \
 
 echo "   rtmps playback carried the program"
 
+# the publisher may be waiting on a session the server has not closed yet;
+# it has served its purpose, so do not let it hold the test open
+kill -KILL "$PUB" 2>/dev/null
 wait "$PUB" 2>/dev/null
 PUB=0
 

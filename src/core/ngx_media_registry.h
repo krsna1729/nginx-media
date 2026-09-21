@@ -42,6 +42,10 @@ ngx_media_stream_t *ngx_media_registry_stream_create(
     const ngx_str_t *name, const ngx_media_feed_conf_t *feed_conf,
     ngx_log_t *log);
 
+/* ordered teardown; NGX_ERROR when the stream is not in this registry */
+ngx_int_t ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
+    ngx_media_stream_t *stream);
+
 ngx_uint_t ngx_media_registry_count(const ngx_media_registry_t *registry);
 
 #endif /* NGX_MEDIA_REGISTRY_H */

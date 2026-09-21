@@ -28,6 +28,15 @@ ngx_media_stream_set_policy(ngx_media_stream_t *stream,
     stream->selector.switchback = policy->switchback;
 }
 
+/* every mutation of the desired state bumps the object revision */
+void
+ngx_media_stream_touch(ngx_media_stream_t *stream)
+{
+    if (stream != NULL) {
+        stream->revision++;
+    }
+}
+
 ngx_int_t
 ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
     ngx_log_t *log, const ngx_str_t *application, const ngx_str_t *name,
