@@ -987,6 +987,8 @@ ngx_media_runtime_tick(ngx_log_t *log)
     ngx_media_runtime_last_tick = now;
     ngx_media_runtime_stats.ticks++;
 
+    ngx_media_runtime_stats.reconnecting = 0;
+
     registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
 
     if (registry == NULL) {
@@ -1057,6 +1059,27 @@ ngx_media_runtime_tick(ngx_log_t *log)
             ngx_media_runtime_prepare_drain(stream, log);
         }
 
+        /*
+         * A source whose transport is up but which is not carrying media yet
+         * is reconnecting (goal doc 28): it is the population that says how
+         * much of the redundancy is actually available right now.
+         */
+        {
+            ngx_queue_t       *sq;
+            ngx_media_source_t *source;
+
+            for (sq = ngx_queue_head(&stream->sources);
+                 sq != (ngx_queue_t *) &stream->sources;
+                 sq = sq->next)
+            {
+                source = ngx_queue_data(sq, ngx_media_source_t, queue);
+
+                if (source->state == NGX_MEDIA_SOURCE_AWAITING_SYNC) {
+                    ngx_media_runtime_stats.reconnecting++;
+                }
+            }
+        }
+
         if (stream->switches != before) {
             ngx_log_error(NGX_LOG_NOTICE, log, 0,
                           "media: selector switched stream=%V/%V active=%V "
@@ -1065,6 +1088,16 @@ ngx_media_runtime_tick(ngx_log_t *log)
                           stream->active != NULL ? &stream->active->id
                                                  : &ngx_media_runtime_none,
                           stream->generation, stream->switches);
+        }
+    }
+
+    {
+        ngx_msec_t  service = ngx_current_msec - now;
+
+        ngx_media_runtime_stats.last_service = service;
+
+        if (service > ngx_media_runtime_stats.max_service) {
+            ngx_media_runtime_stats.max_service = service;
         }
     }
 

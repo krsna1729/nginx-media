@@ -438,11 +438,11 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
                          ",\"fanout_ms\":{\"p50\":%M,\"p95\":%M,\"p99\":%M,"
                          "\"max\":%uL},\"dispatched\":%uL}",
                          ngx_media_feed_fanout_percentile(&stream->program_feed,
-                                                          50),
+                                                          500),
                          ngx_media_feed_fanout_percentile(&stream->program_feed,
-                                                          95),
+                                                          950),
                          ngx_media_feed_fanout_percentile(&stream->program_feed,
-                                                          99),
+                                                          990),
                          ngx_media_feed_fanout_max(&stream->program_feed),
                          ngx_media_feed_fanout_count(&stream->program_feed));
 
@@ -578,9 +578,25 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "nginx_media_runtime_outputs %ui\n"
                          "nginx_media_worker_event_loop_delay_ms %M\n"
                          "nginx_media_worker_event_loop_max_delay_ms %M\n"
-                         "nginx_media_worker_late_ticks_total %uL\n",
+                         "nginx_media_worker_late_ticks_total %uL\n"
+                         "# HELP nginx_media_worker_service_ms "
+                         "how long the last runtime tick took, the time this "
+                         "worker spent serving every program it owns\n"
+                         "# TYPE nginx_media_worker_service_ms gauge\n"
+                         "# HELP nginx_media_worker_max_service_ms "
+                         "worst tick duration this worker has seen\n"
+                         "# TYPE nginx_media_worker_max_service_ms gauge\n"
+                         "# HELP nginx_media_reconnecting_sources "
+                         "sources whose transport is up but which are not "
+                         "carrying media yet\n"
+                         "# TYPE nginx_media_reconnecting_sources gauge\n"
+                         "nginx_media_worker_service_ms %M\n"
+                         "nginx_media_worker_max_service_ms %M\n"
+                         "nginx_media_reconnecting_sources %ui\n",
                          ngx_media_runtime_outputs_active(),
-                         stats.last_gap, stats.max_gap, stats.late_ticks);
+                         stats.last_gap, stats.max_gap, stats.late_ticks,
+                         stats.last_service, stats.max_service,
+                         stats.reconnecting);
 
     for (q = ngx_queue_head(&registry->entries);
          q != (ngx_queue_t *) &registry->entries;
@@ -602,6 +618,8 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                              "{application=\"%V\",name=\"%V\",percentile=\"95\"} %M\n"
                              "nginx_media_stream_fanout_delay_ms"
                              "{application=\"%V\",name=\"%V\",percentile=\"99\"} %M\n"
+                             "nginx_media_stream_fanout_delay_ms"
+                             "{application=\"%V\",name=\"%V\",percentile=\"99.9\"} %M\n"
                              "nginx_media_stream_dispatched_total"
                              "{application=\"%V\",name=\"%V\"} %uL\n"
                              "nginx_media_stream_feed_units"
@@ -616,13 +634,16 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                              stream->program_frames,
                              &stream->application, &stream->name,
                              ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 50),
+                                 &stream->program_feed, 500),
                              &stream->application, &stream->name,
                              ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 95),
+                                 &stream->program_feed, 950),
                              &stream->application, &stream->name,
                              ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 99),
+                                 &stream->program_feed, 990),
+                             &stream->application, &stream->name,
+                             ngx_media_feed_fanout_percentile(
+                                 &stream->program_feed, 999),
                              &stream->application, &stream->name,
                              ngx_media_feed_fanout_count(&stream->program_feed),
                              &stream->application, &stream->name,
@@ -1864,11 +1885,11 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
                              "],\"fanout_ms\":{\"p50\":%M,\"p95\":%M,"
                              "\"p99\":%M,\"max\":%uL},\"dispatched\":%uL}",
                              ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 50),
+                                 &stream->program_feed, 500),
                              ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 95),
+                                 &stream->program_feed, 950),
                              ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 99),
+                                 &stream->program_feed, 990),
                              ngx_media_feed_fanout_max(&stream->program_feed),
                              ngx_media_feed_fanout_count(
                                  &stream->program_feed));

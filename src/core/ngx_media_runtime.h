@@ -53,6 +53,17 @@ typedef struct {
     ngx_msec_t  last_gap;
     ngx_msec_t  max_gap;
     uint64_t    late_ticks;
+
+    /*
+     * How long the tick itself took.  This is the protocol-owner service
+     * duration (goal doc 28): the time one worker spends serving every
+     * program it owns, which is what bounds how many programs it can own.
+     */
+    ngx_msec_t  last_service;
+    ngx_msec_t  max_service;
+
+    /* sources that are up but not yet carrying media, per doc 28 */
+    ngx_uint_t  reconnecting;
 } ngx_media_runtime_stats_t;
 
 void ngx_media_runtime_stats_get(ngx_media_runtime_stats_t *out);

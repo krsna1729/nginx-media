@@ -1,16 +1,16 @@
 # Architecture
 
-`nginx-media` is an NGINX module that turns redundant live and file inputs into
-one logical program and distributes it over SRT, RTMP, HLS and recording.  This
-document is the map: what the pieces are, which thread owns what, and where the
-boundaries are that keep the design honest.
+`nginx-media` is an NGINX module that turns redundant live, file and HLS inputs
+into one logical program and distributes it over SRT, RTMP, HLS and recording.
+This document is the map: what the pieces are, which thread owns what, and where
+the boundaries are that keep the design honest.
 
 The invariant everything else follows from:
 
 ```
 INPUTS                 SOURCES                    SELECTOR            PROGRAM
 SRT / bonded SRT       identity -> probe ->       priority +          timeline-normalized
-RTMP / file            health -> eligibility      hysteresis          logical stream
+RTMP / file / HLS      health -> eligibility      hysteresis          logical stream
                                                   + switch policy
                                                                           |
                                         +---------------+-----------+-----+------+
@@ -20,22 +20,22 @@ RTMP / file            health -> eligibility      hysteresis          logical st
 
 A **logical stream** is not a publisher.  One logical stream has many
 **sources**: two encoders publishing the same program are two sources, a file
-slate is another, and SRT bonding is redundancy *inside* one source.  The
-selector picks one source at a time; every switch increments
-`stream->generation`.
+slate is another, a pulled HLS stream is another, and SRT bonding is redundancy
+*inside* one source.  The selector picks one source at a time; every switch
+increments `stream->generation`.
 
 ## Modules
 
 | Directory | What lives there |
 |---|---|
-| `src/core/` | the program model: buffers, frames, tracks, timeline, sources, streams, the registry, health, compatibility, selection, policy, owner hashing, IPC, routing |
+| `src/core/` | the program model: buffers, frames, tracks, timeline, sources, streams, destinations, the registry, health, compatibility, selection, policy, owner hashing, IPC, routing, the program feed and the runtime tick; also the file source and the HLS ingest, pull and push backends |
 | `src/mpegts/` | MPEG-TS: CRC, demux (PSI, PES, PCR, continuity), mux, and the raw-TS ingest queue |
 | `src/codec/` | NAL iteration/classification (H.264, H.265) and AAC framing |
 | `src/srt/` | the transport contract, its backends, ingest, output destinations and the SRT module |
 | `src/rtmp/` | RTMP wire protocol, FLV adapter and the RTMP module |
 | `src/hls/` | the segmenter |
 | `src/record/` | the recording writer (RAW, ISO, PROGRAM taps) |
-| `src/api/` | the HTTP control API |
+| `src/api/` | the HTTP control API, and the `media_hls_ingest` upload endpoint |
 
 `config` in the repository root is the module build description: it lists the
 sources, the SRT backend selection and the libraries, and it is what
@@ -44,19 +44,32 @@ sources, the SRT backend selection and the libraries, and it is what
 ## Threads
 
 NGINX workers own media state.  Threads exist only where a blocking call would
-otherwise stall an event loop, and each one hands work back to a worker through
-an eventfd rather than touching worker state directly:
+otherwise stall an event loop, and most of them hand work back to a worker
+through an eventfd rather than touching worker state directly:
 
 | Thread | Created by | Talks to the worker through |
 |---|---|---|
 | SRT ingest | `ngx_media_srt_ingest.c` | a bounded raw-TS queue plus an eventfd |
 | SRT destination sender (one per destination) | `ngx_media_srt_output.c` | a bounded per-destination subscriber queue |
 | Recording writer | `ngx_media_record.c` | a work queue |
+| HLS ingest reader (one per ingest source) | `ngx_media_hls_ingest.c` | publishes frames through the stream's publish path |
+| HLS pull reader (one per pull source) | `ngx_media_hls_pull.c` | publishes frames through the stream's publish path |
+| HLS push upload pool (fixed size, shared) | `ngx_media_hls_push.c` | a bounded per-destination queue |
 
-RTMP and the HTTP control API run entirely inside worker event loops.  Every
-thread is joined on the paths that stop it, including reload and shutdown; the
-unit lifecycle suite starts and stops them repeatedly, with work queued and in
-flight, under ThreadSanitizer.
+The two HTTP readers are the exception to the eventfd rule: they demux on their
+own thread and publish through the stream's own publish path — the same gate a
+publisher's frames enter — because the alternative would be to hand raw
+segments back and demux them twice.  The push pool is the mirror image of
+the SRT senders: one shared pool serves every destination, and each destination
+has its own bounded queue so a stalled remote cannot consume another
+destination's share.
+
+RTMP, the file source and the HTTP control API run entirely inside worker event
+loops: a file source advances from the runtime tick, never from a thread of its
+own.  Every thread is joined on the paths that stop it, including reload and
+shutdown: a reader is stopped and joined before the source it publishes into is
+torn down, and the recording writer is started and stopped repeatedly with work
+queued and in flight, under ThreadSanitizer.
 
 ## Ownership
 
@@ -69,6 +82,38 @@ generation, state, heartbeat — never mutable media state.  A publisher that
 lands on a non-owner worker is routed to the owner over a bounded internal
 transport (Unix `SOCK_SEQPACKET` by default); that escape hatch is for routing
 only, not a second data path.
+
+## The runtime graph
+
+What a deployment declares in configuration is small; what it runs is a graph.
+A **stream** is the program, and it owns two lists of runtime objects: its
+**sources** and its **destinations**.  Stream, source and destination all have a
+stable id and are created and addressed at runtime through the control API, not
+written into `nginx.conf`, which is what lets a source be added while the
+program is live and removed without a reload.
+
+The graph is desired state.  A controller keeps a document of what the graph
+should be and applies it; every create in the document is idempotent, so
+applying it again changes nothing, and the API can hand the current graph back
+in the shape it accepts.  That is what stands in for a database: the graph
+survives a controller restart because the controller keeps the document and the
+server re-applies it, not because the server stored a desired state it does not
+enforce.  A stream absent from the document is not deleted — pruning is the
+controller's decision, made with the delete calls, not a side effect of a
+replay.
+
+Each object carries a revision, bumped by every mutation of it or of a child,
+and a mutation that states the revision it last saw is refused when it is stale
+rather than overwriting a newer desired state.  Deletion does not require the
+object to exist: the caller asked for an end state and that end state holds,
+which is what makes a retry after a timeout safe.
+
+Destinations are the same kind of object as sources, reached through the same
+`ngx_media_destination_ops_t` contract the SRT transport uses: the core owns the
+model and the list, and a backend registers itself once and is called for every
+destination of the types it handles.  A destination type with no backend is
+accepted by the API and then fails to start, which is honest about what the
+build can carry.
 
 ## Data flow
 
@@ -90,13 +135,44 @@ Output: the program is prepared once (TS multiplex for SRT/record taps, FLV for
 RTMP, fragmented MPEG-TS for HLS) and each destination consumes its own bounded
 queue.  A slow destination is dropped from, never allowed to stall the program.
 
+### Where the other inputs and outputs sit
+
+Everything that reads or writes a file sits at the edge of the program, on the
+publishing side of the source gate or the consuming side of the fanout:
+
+- A `file` source reads one bounded chunk of an MPEG-TS file per runtime tick,
+  demuxes it and publishes the frames through the same source gate a publisher
+  feeds.  Pacing is the tick and never a sleep, so a large file cannot stall a
+  worker, and a slow file is simply a source that is not producing yet.
+- An `hls_pull` source fetches a playlist and its segments over HTTP or HTTPS
+  on its own thread, demuxes them and publishes them the same way.
+- An uploaded segment arrives through the `media_hls_ingest` endpoint: nginx
+  writes the body to a temp file and the handler renames it into the ingest
+  directory, so a reader sees a whole segment or none of it.  A reader of type
+  `hls_push` then demuxes it like any other source.  The writer and the reader
+  are separate halves on purpose — the ingest endpoint does not know what reads
+  the directory.
+- An `hls_push` destination watches the HLS output directory and uploads
+  segments to its endpoint on a bounded pool, each destination with its own
+  bounded queue.
+
+Because all of these publish through the source gate or consume from the
+fanout, selection, health and compatibility need to know nothing about where
+the bytes came from, and nothing here can change what goes to air: the HLS
+output is prepared from the program feed on the runtime tick, strictly
+downstream of selection.
+
 ## Failure behaviour
 
 - A source that stops producing fails on `failure_timeout` and the selector
   moves on; switching back is governed by `switchback` (`auto`, `manual`,
-  `never`) and `recovery_timeout`.
+  `never`) and `recovery_timeout`.  A `file` source that reaches the end of its
+  file stops producing and fails the same way, so a one-shot slate hands over
+  like a publisher that went away.
 - A destination that cannot keep up loses units from its own queue and counts
-  them; the program is unaffected.
+  them; the program is unaffected.  An `hls_push` destination whose remote has
+  stalled loses its oldest queued segment and counts it, and a delete stops it
+  and unlinks it first so nothing it queued outlives it.
 - Recording I/O never runs on the event loop, and reload closes the current
   recording part cleanly instead of transferring a live descriptor.
 - Nothing in the media path allocates per packet or blocks a worker.

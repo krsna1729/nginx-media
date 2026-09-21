@@ -119,9 +119,14 @@ ngx_uint_t ngx_media_feed_units(const ngx_media_feed_t *feed);
 size_t ngx_media_feed_bytes(const ngx_media_feed_t *feed);
 uint64_t ngx_media_feed_last_keyframe(const ngx_media_feed_t *feed);
 
-/* the delay at the given percentile, in ms; 0 when nothing was dispatched */
+/*
+ * The delay at the given percentile, in ms; 0 when nothing was dispatched.
+ *
+ * The percentile is in per-mille so that p99.9 - which goal doc 28 asks for -
+ * is expressible: 500 is p50, 999 is p99.9, 1000 is the maximum.
+ */
 ngx_msec_t ngx_media_feed_fanout_percentile(const ngx_media_feed_t *feed,
-    ngx_uint_t percentile);
+    ngx_uint_t permille);
 uint64_t ngx_media_feed_fanout_count(const ngx_media_feed_t *feed);
 uint64_t ngx_media_feed_fanout_max(const ngx_media_feed_t *feed);
 

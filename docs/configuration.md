@@ -17,6 +17,7 @@ http {
         listen 8080;
         location /hls/ { alias /var/lib/nginx/media/hls/; }
         location /media/api/ { media_api; }
+        location /ingest/ { media_hls_ingest /var/lib/nginx/media/ingest; }
     }
 }
 ```
@@ -173,6 +174,88 @@ publisher refused by an RTMPS listener.
 
 Location-level (`NGX_HTTP_LOC_CONF`, no arguments).  Enables the control API on
 that location; see `api.md` for the endpoints.
+
+### `media_hls_ingest <directory>;`
+
+Location-level (`NGX_HTTP_LOC_CONF`).  Turns that location into an upload
+endpoint: someone else's encoder `PUT`s or `POST`s an HLS segment to a URL
+under it and the body is stored in `<directory>` under the name at the end of
+the request URI, so the uploader names its segments the way a reader expects.
+
+```nginx
+location /ingest/ {
+    media_hls_ingest /var/lib/nginx/media/ingest;
+}
+```
+
+The endpoint deliberately does not know what reads the directory — the two
+halves stay separate, so an upload arriving by any other means works just as
+well.  The usual reader is a source of type `hls_push` created through the
+control API, which watches this directory.
+
+The body is written to a file by nginx's own machinery rather than read into
+memory, and the handler then renames it into place, so a reader either sees a
+whole segment or none of it, never a partial one.  Because that is a rename,
+`client_body_temp_path` has to be on the same filesystem as the ingest
+directory — the same requirement any nginx upload-to-final-location setup has.
+
+## Runtime sources and destinations
+
+A program's sources and destinations are not declared in configuration.  They
+are runtime objects created and addressed through the control API, which is
+what lets a source be added while the program is live and removed without a
+reload; `api.md` has the routes and the JSON.  Three of them are worth naming
+here because they read or write files.
+
+A **`file` source** reads an MPEG-TS file, opening it when the source is
+created.  It is paced by the runtime tick: one bounded chunk per tick, never a
+sleep, so a large file cannot stall a worker.
+
+```json
+{"id":"slate","type":"file","priority":10,"path":"/srv/slate.ts"}
+```
+
+A **`hls_pull` source** fetches a playlist and its segments over HTTP or HTTPS,
+demuxes them and publishes frames through the same source gate as a publisher,
+so selection and compatibility need to know nothing about where the bytes came
+from.  Relative playlist entries resolve against the playlist's own directory,
+an optional `ca_file` supplies a trust anchor for an origin whose certificate
+is not in the system store, and when the playlist has nothing new the reader
+waits for the origin rather than spinning.
+
+```json
+{"id":"upstream","type":"hls_pull",
+ "path":"https://origin.example/live/news/index.m3u8"}
+```
+
+A **`hls_push` destination** watches the HLS output directory and uploads its
+segments and playlists to an HTTP or HTTPS endpoint.  The directory has to be
+the one `media_hls` is configured to write to: the runtime tick scans that
+directory once per tick and offers anything new to every destination watching
+it, so a destination pointed somewhere else simply receives nothing.  Uploads
+run on a bounded pool and each destination has its own bounded queue, so a
+stalled remote drops its oldest queued segment and counts it rather than
+stalling the program or its neighbours.  An endpoint that carries a credential
+is redacted before it reaches a log or an API read.
+
+```json
+{"id":"cdn","type":"hls_push",
+ "host":"https://origin.example/live/news/",
+ "path":"/var/lib/nginx/media/hls",
+ "profile":"youtube_live"}
+```
+
+### Profile
+
+`profile` is a named set of platform rules layered on the generic HLS
+publisher, not a special path through the media core: `youtube_live` requires
+an `https` endpoint, a segment duration between 1000 and 4000 ms and at most
+five outstanding segments in the playlist, and fills the defaults when a field
+is unset.  A configuration the platform would reject is refused with
+`{"error":"profile_violation",...}` rather than clamped, because silently
+changing an operator's number is worse than telling them it is wrong.  The
+validated numbers are recorded on the destination; they do not yet drive the
+segmenter, which still decides its own segmentation.
 
 ## Build-time configuration
 

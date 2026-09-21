@@ -3,6 +3,7 @@
 #include <ngx_event.h>
 
 #include "ngx_media_rtmp_adapter.h"
+#include "ngx_media_rtmp_destination.h"
 #include "ngx_media_rtmp_wire.h"
 #include "ngx_media_registry.h"
 #include "ngx_media_route.h"
@@ -130,6 +131,7 @@ static ngx_media_rtmp_session_t  ngx_media_rtmp_sessions[
 
 static ngx_connection_t  *ngx_media_rtmp_listener;
 static ngx_uint_t         ngx_media_rtmp_started;
+static ngx_uint_t         ngx_media_rtmp_destinations_started;
 
 static ngx_command_t ngx_media_rtmp_commands[] = {
 
@@ -1904,12 +1906,39 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
 
     (void) ngx_media_runtime_arm(cycle, cycle->log);
 
-    if (mcf == NULL || !mcf->listen_set) {
+    if (mcf == NULL) {
         return NGX_OK;
     }
 
     /* transport sockets stay with worker 0 (goal doc 22) */
     if (ngx_process_slot != 0) {
+        return NGX_OK;
+    }
+
+    /*
+     * The RTMP destination backend is registered before the listener is
+     * considered.  A destination is created through the control API at
+     * runtime, so the ops table has to exist even on an instance that has no
+     * media_rtmp_listen: refusing to register it there would make the API
+     * answer destination_start_failed forever, which is exactly the bug this
+     * ordering fixes (goal doc 16).
+     */
+    {
+        static ngx_media_destination_ops_t  rtmp_destination_ops = {
+            NGX_MEDIA_DEST_RTMP,
+            ngx_media_rtmp_destination_add,
+            ngx_media_rtmp_destination_remove
+        };
+
+        (void) ngx_media_destination_register(&rtmp_destination_ops);
+    }
+
+    ngx_media_rtmp_destinations_started = 1;
+
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                  "media: rtmp destination backend ready");
+
+    if (!mcf->listen_set) {
         return NGX_OK;
     }
 
@@ -2027,6 +2056,21 @@ static void
 ngx_media_rtmp_exit_process(ngx_cycle_t *cycle)
 {
     ngx_uint_t  i;
+
+    /*
+     * Ordered teardown.  Destinations go first: each one owns a socket, a
+     * timer and a pointer into the shared FLV preparation, and leaving any of
+     * them live past the runtime's own shutdown is how a callback ends up
+     * reading a slot that no longer exists.
+     */
+    if (ngx_media_rtmp_destinations_started) {
+        ngx_media_rtmp_destinations_started = 0;
+
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                      "media: stopping RTMP destinations");
+
+        ngx_media_rtmp_destination_stop_all();
+    }
 
     if (!ngx_media_rtmp_started) {
         return;

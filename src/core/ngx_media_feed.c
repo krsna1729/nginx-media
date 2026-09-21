@@ -380,21 +380,21 @@ ngx_media_feed_last_keyframe(const ngx_media_feed_t *feed)
 
 ngx_msec_t
 ngx_media_feed_fanout_percentile(const ngx_media_feed_t *feed,
-    ngx_uint_t percentile)
+    ngx_uint_t permille)
 {
     uint64_t    target, seen;
     ngx_uint_t  i;
     ngx_msec_t  bound;
 
-    if (feed == NULL || feed->fanout.count == 0 || percentile == 0) {
+    if (feed == NULL || feed->fanout.count == 0 || permille == 0) {
         return 0;
     }
 
-    if (percentile > 100) {
-        percentile = 100;
+    if (permille > 1000) {
+        permille = 1000;
     }
 
-    target = (feed->fanout.count * percentile + 99) / 100;
+    target = (feed->fanout.count * permille + 999) / 1000;
     seen = 0;
 
     /*
