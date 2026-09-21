@@ -81,6 +81,10 @@ void ngx_media_record_stop(ngx_media_record_t *rec);
 ngx_int_t ngx_media_record_append(ngx_media_record_t *rec,
     ngx_media_buf_t *buf, size_t offset, size_t len);
 
+/* copies caller bytes into one payload buffer and queues it (RAW tap) */
+ngx_int_t ngx_media_record_append_bytes(ngx_media_record_t *rec,
+    const u_char *data, size_t len);
+
 void ngx_media_record_stats(ngx_media_record_t *rec,
     ngx_media_record_stats_t *out);
 

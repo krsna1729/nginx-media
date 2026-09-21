@@ -24,6 +24,12 @@ static char *ngx_media_recovery_timeout_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_media_switchback_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_media_hls_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_media_record_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_media_record_iso_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 static ngx_int_t ngx_media_parse_msec(const ngx_str_t *value,
     ngx_msec_t *out);
 
@@ -106,6 +112,34 @@ static ngx_command_t ngx_media_core_commands[] = {
     { ngx_string("media_failover_switchback"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
       ngx_media_switchback_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_hls"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_hls_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_record"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_record_cmd,
+      offsetof(ngx_media_policy_t, record_program_path),
+      0,
+      NULL },
+
+    { ngx_string("media_record_raw"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_record_cmd,
+      offsetof(ngx_media_policy_t, record_raw_path),
+      0,
+      NULL },
+
+    { ngx_string("media_record_iso"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2,
+      ngx_media_record_iso_cmd,
       0,
       0,
       NULL },
@@ -216,6 +250,60 @@ ngx_media_switchback_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     } else {
         return "must be auto, manual or never";
     }
+
+    return NGX_CONF_OK;
+}
+
+/*
+ * Output paths point into the configuration pool, which outlives every worker:
+ * the policy struct is created in that pool and inherited across the fork.
+ */
+static char *
+ngx_media_hls_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_media_policy_t  *policy = conf;
+    ngx_str_t           *value = cf->args->elts;
+
+    (void) cmd;
+
+    if (value[1].len == 0) {
+        return "must not be empty";
+    }
+
+    policy->hls_path = value[1];
+
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_media_record_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_str_t  *value = cf->args->elts;
+    ngx_str_t  *slot = (ngx_str_t *) ((char *) conf + cmd->conf);
+
+    if (value[1].len == 0) {
+        return "must not be empty";
+    }
+
+    *slot = value[1];
+
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_media_record_iso_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_media_policy_t  *policy = conf;
+    ngx_str_t           *value = cf->args->elts;
+
+    (void) cmd;
+
+    if (value[1].len == 0 || value[2].len == 0) {
+        return "must not be empty";
+    }
+
+    policy->record_iso_source = value[1];
+    policy->record_iso_path = value[2];
 
     return NGX_CONF_OK;
 }

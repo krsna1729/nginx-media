@@ -5,6 +5,14 @@
 size_t ngx_media_test_allocs;
 size_t ngx_media_test_frees;
 
+/*
+ * When NGX_MEDIA_TEST_POISON is set, allocations are 0xAA filled and carry a
+ * poisoned tail: a buffer handed to a syscall without a terminator then reads
+ * 0xAA instead of zeros, producing a visibly wrong filename.
+ */
+#define NGX_MEDIA_TEST_REDZONE 32
+static int ngx_media_test_poison = -1;
+
 void *
 ngx_media_test_alloc(size_t size, ngx_log_t *log)
 {
@@ -12,7 +20,22 @@ ngx_media_test_alloc(size_t size, ngx_log_t *log)
 
     (void) log;
 
-    p = malloc(size);
+    if (ngx_media_test_poison < 0) {
+        const char  *env = getenv("NGX_MEDIA_TEST_POISON");
+
+        ngx_media_test_poison = (env != NULL && env[0] == '1') ? 1 : 0;
+    }
+
+    if (ngx_media_test_poison) {
+        p = malloc(size + NGX_MEDIA_TEST_REDZONE);
+
+        if (p != NULL) {
+            memset(p, 0xAA, size + NGX_MEDIA_TEST_REDZONE);
+        }
+
+    } else {
+        p = malloc(size);
+    }
 
     if (p != NULL) {
         /* counters are read and written from test threads too */

@@ -134,7 +134,7 @@ Phase 4 — health, eligibility and automatic failover (complete):
   (SIGSTOP) fails after the failure timeout and recovers on thaw, and a
   garbage publisher registering as the primary is reported unhealthy
   (evidence level 37 of 63) while the program keeps flowing on the standby
-Phase 5 — HLS and recording (core complete):
+Phase 5 — HLS and recording (complete):
 
 - `src/mpegts/ngx_media_ts_mux.*`: PAT/PMT, PES packetization with PTS/DTS,
   adaptation-field padding and PCR, continuity counters, and batched bursts
@@ -155,6 +155,19 @@ Phase 5 — HLS and recording (core complete):
   rolling and written content
 - `make ts-fixture` also remuxes the real fixtures (demux -> mux -> demux) and
   requires every frame to match exactly
+- `media_hls <dir>`, `media_record <path>`, `media_record_raw <path>` and
+  `media_record_iso <source> <path>` wire the outputs into the worker: the
+  selection tick drains each stream's program feed, muxes one burst and hands
+  it to HLS and to the PROGRAM recording; the ISO tap muxes the named source
+  before the selector and the RAW tap records transport bytes before
+  normalization, and every output is closed cleanly on exit
+- `make hls` proves the exit criteria through nginx: a publisher is killed and
+  restarted mid-run, the playlist announces `#EXT-X-DISCONTINUITY` after the
+  switch, a segment fetched over HTTP is byte-identical to the file on disk and
+  probes as H.264 + AAC, and the PROGRAM, ISO and RAW recordings all probe as
+  H.264 + AAC
+- heap poisoning in the unit shim (`NGX_MEDIA_TEST_POISON`) caught an
+  unterminated path handed to `open()`; the HLS test now runs with it enabled
 - next phase: RTMP ingest/output
 
 
@@ -183,6 +196,7 @@ Phase 5 — HLS and recording (core complete):
     make source-switch    # two hot sources, manual switch, timeline checks
     make api-switch       # control API: listing and manual switch via nginx
     make failover         # kill / freeze / corrupt failover and switchback
+    make hls               # HLS playlist, discontinuity, recordings over nginx
 
 Requires `cc`, `make`, `curl`, `tar`, `ffmpeg` and (for the SRT targets)
 `libsrt`. `make nginx` builds nginx 1.30.5 with `--add-module` into `.build/`;

@@ -353,3 +353,30 @@ ngx_media_record_stats(ngx_media_record_t *rec, ngx_media_record_stats_t *out)
     *out = rec->stats;
     (void) pthread_mutex_unlock(&rec->mutex);
 }
+
+ngx_int_t
+ngx_media_record_append_bytes(ngx_media_record_t *rec, const u_char *data,
+    size_t len)
+{
+    ngx_media_buf_t  *buf;
+    ngx_int_t         rc;
+
+    if (rec == NULL || data == NULL || len == 0) {
+        return NGX_ERROR;
+    }
+
+    buf = ngx_media_buf_alloc(len);
+
+    if (buf == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(ngx_media_buf_data(buf), data, len);
+    (void) ngx_media_buf_freeze(buf, len);
+
+    rc = ngx_media_record_append(rec, buf, 0, len);
+
+    ngx_media_buf_unref(buf);
+
+    return rc;
+}

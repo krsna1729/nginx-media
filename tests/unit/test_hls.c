@@ -1,9 +1,20 @@
+/* setenv() for the allocation poison switch */
+#define _DEFAULT_SOURCE 1
+
 #include "ngx_media_test.h"
+
 #include "ngx_media_hls_segmenter.h"
 #include "ngx_media_ts_demux.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/stat.h>
+
+/* unterminated buffers must fail instead of reading zeroed heap */
+static void __attribute__((constructor)) ngx_media_hls_poison_alloc(void)
+{
+    setenv("NGX_MEDIA_TEST_POISON", "1", 1);
+}
 
 #define HLS_DIR ".build/hls-test"
 

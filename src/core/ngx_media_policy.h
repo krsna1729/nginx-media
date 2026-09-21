@@ -23,6 +23,14 @@ typedef struct {
     ngx_msec_t   recovery_timeout;
     ngx_uint_t   switch_keyframe;
     ngx_uint_t   switchback;
+
+    /* static outputs applied to every stream (per-stream configuration
+     * arrives with the stream database) */
+    ngx_str_t    hls_path;
+    ngx_str_t    record_program_path;
+    ngx_str_t    record_raw_path;
+    ngx_str_t    record_iso_path;
+    ngx_str_t    record_iso_source;   /* publisher identity for the ISO tap */
 } ngx_media_policy_t;
 
 #define NGX_MEDIA_POLICY_FAILURE_TIMEOUT_DEFAULT 1500

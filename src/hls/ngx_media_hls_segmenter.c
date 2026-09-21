@@ -71,6 +71,7 @@ ngx_media_hls_init(ngx_media_hls_t *hls, const ngx_media_hls_conf_t *conf,
     ngx_log_t *log)
 {
     ngx_uint_t  capacity;
+    ngx_str_t   dir;
 
     (void) log;
 
@@ -119,7 +120,21 @@ ngx_media_hls_init(ngx_media_hls_t *hls, const ngx_media_hls_conf_t *conf,
 
     hls->segments_capacity = capacity;
 
-    (void) mkdir((const char *) hls->conf.path.data, 0755);
+    /*
+     * The configured directory is an ngx_str_t, not a C string: build a
+     * terminated copy before handing it to mkdir().
+     */
+    dir.len = hls->conf.path.len;
+    dir.data = ngx_alloc(dir.len + 1, NULL);
+
+    if (dir.data != NULL) {
+        ngx_memcpy(dir.data, hls->conf.path.data, dir.len);
+        dir.data[dir.len] = '\0';
+
+        (void) mkdir((const char *) dir.data, 0755);
+
+        ngx_free(dir.data);
+    }
 
     return NGX_OK;
 }
@@ -155,10 +170,10 @@ ngx_media_hls_path(ngx_media_hls_t *hls, const ngx_str_t *name, ngx_str_t *out,
     out->len = hls->conf.path.len + 1 + name->len;
 
     if (pool != NULL) {
-        out->data = ngx_pnalloc(pool, out->len);
+        out->data = ngx_pnalloc(pool, out->len + 1);
 
     } else {
-        out->data = ngx_alloc(out->len, NULL);
+        out->data = ngx_alloc(out->len + 1, NULL);
     }
 
     if (out->data == NULL) {
@@ -170,6 +185,8 @@ ngx_media_hls_path(ngx_media_hls_t *hls, const ngx_str_t *name, ngx_str_t *out,
     p += hls->conf.path.len;
     *p++ = '/';
     ngx_memcpy(p, name->data, name->len);
+    p += name->len;
+    *p = '\0';   /* open(), unlink() and rename() take C strings */
 
     return NGX_OK;
 }
@@ -566,7 +583,7 @@ ngx_media_hls_write_playlist(ngx_media_hls_t *hls)
     }
 
     tmp.len = path.len + sizeof(".tmp") - 1;
-    tmp.data = ngx_alloc(tmp.len, NULL);
+    tmp.data = ngx_alloc(tmp.len + 1, NULL);
 
     if (tmp.data == NULL) {
         ngx_free(path.data);
@@ -577,6 +594,7 @@ ngx_media_hls_write_playlist(ngx_media_hls_t *hls)
     p = tmp.data;
     ngx_memcpy(p, path.data, path.len);
     ngx_memcpy(p + path.len, ".tmp", sizeof(".tmp") - 1);
+    p[tmp.len] = '\0';
 
     fd = open((const char *) tmp.data, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 
