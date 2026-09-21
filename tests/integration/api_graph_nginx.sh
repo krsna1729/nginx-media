@@ -449,6 +449,80 @@ if [ ! -f "$RUN/hls/index.m3u8" ]; then
     exit 1
 fi
 
+echo "== desired state is a replayable document"
+# its own stream, so this section does not depend on what earlier ones left
+curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"application":"live","name":"doc"}' "$API/streams" >/dev/null
+
+curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"doc-src","type":"srt","priority":70}' \
+    "$API/streams/live/doc/sources" >/dev/null
+
+DESIRED="$(curl -fsS "$API/desired")"
+printf '%s\n' "$DESIRED"
+
+printf '%s' "$DESIRED" | grep -q '"application":"live","name":"doc"' \
+    || { echo "the document does not describe the stream" >&2; exit 1; }
+printf '%s' "$DESIRED" | grep -q '"id":"doc-src"' \
+    || { echo "the document does not describe the source" >&2; exit 1; }
+
+BEFORE="$(curl -fsS "$API/desired" \
+    | grep -o '"id":"[a-z-]*"' | sort | uniq -c | sort -rn | head -1)"
+
+echo "== replaying it does not duplicate anything"
+STATUS="$(curl -sS -o "$RUN/replay.json" -w '%{http_code}' \
+    -X PUT -H 'Content-Type: application/json' -d "$DESIRED" "$API/desired")"
+
+cat "$RUN/replay.json"; echo
+
+[ "$STATUS" = "200" ] || { echo "replay should be 200, got $STATUS" >&2; exit 1; }
+
+grep -q '"children_created":0' "$RUN/replay.json" \
+    || { echo "the replay created something new" >&2; exit 1; }
+
+AFTER="$(curl -fsS "$API/desired" \
+    | grep -o '"id":"[a-z-]*"' | sort | uniq -c | sort -rn | head -1)"
+
+[ "$BEFORE" = "$AFTER" ] \
+    || { echo "the replay changed the graph: $BEFORE -> $AFTER" >&2; exit 1; }
+
+echo "   replayed with no duplicates ($AFTER)"
+
+echo "== a reload loses the graph and the document restores it"
+kill -HUP "$(cat "$RUN/logs/nginx.pid")"
+
+for _ in $(seq 1 100); do
+    grep -q 'srt listener ready' "$RUN/logs/error.log" 2>/dev/null && break
+    sleep 0.1
+done
+
+sleep 1
+
+AFTER_RELOAD="$(curl -fsS "$API/streams" | grep -c '"name":"doc"' || true)"
+
+echo "   streams after reload: $AFTER_RELOAD (the graph is worker state)"
+
+STATUS="$(curl -sS -o "$RUN/reconcile.json" -w '%{http_code}' \
+    -X PUT -H 'Content-Type: application/json' -d "$DESIRED" "$API/desired")"
+
+cat "$RUN/reconcile.json"; echo
+
+[ "$STATUS" = "200" ] || { echo "reconcile failed: $STATUS" >&2; exit 1; }
+
+curl -fsS "$API/streams" | grep -q '"name":"doc"' \
+    || { echo "the document did not restore the stream" >&2; exit 1; }
+
+curl -fsS "$API/streams/live/doc/sources" | grep -q '"id":"doc-src"' \
+    || { echo "the document did not restore the source" >&2; exit 1; }
+
+COUNT="$(curl -fsS "$API/desired" \
+    | grep -o '"id":"doc-src"' | wc -l)"
+
+[ "$COUNT" = "1" ] \
+    || { echo "reconcile duplicated the source: $COUNT" >&2; exit 1; }
+
+echo "   reconciled after reload without duplicates"
+
 echo "== create/delete cycles with media do not exhaust the runtime"
 # The per-stream runtime output is a fixed table, and a slot is only taken
 # when a stream actually carries media - so a churn of empty streams proves

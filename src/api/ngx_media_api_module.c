@@ -34,6 +34,14 @@ static char *ngx_media_api_set(ngx_conf_t *cf, ngx_command_t *cmd,
 static ngx_int_t ngx_media_api_init(ngx_conf_t *cf);
 static ngx_int_t ngx_media_api_handler(ngx_http_request_t *r);
 static void ngx_media_api_body_ready(ngx_http_request_t *r);
+static ngx_int_t ngx_media_api_json_array(const ngx_str_t *body,
+    const char *key, ngx_str_t *out);
+static ngx_int_t ngx_media_api_desired_get(ngx_media_registry_t *registry,
+    u_char **last, u_char *end);
+static ngx_int_t ngx_media_api_desired_put(ngx_http_request_t *r,
+    ngx_media_registry_t *registry, u_char **last, u_char *end);
+static ngx_int_t ngx_media_api_desired_children(ngx_http_request_t *r,
+    ngx_media_stream_t *stream, ngx_str_t *item, ngx_uint_t *created);
 static ngx_int_t ngx_media_api_sources(ngx_http_request_t *r,
     ngx_media_stream_t *stream, ngx_str_t *action, u_char **last, u_char *end);
 static ngx_int_t ngx_media_api_destinations(ngx_http_request_t *r,
@@ -1313,6 +1321,557 @@ ngx_media_api_destinations(ngx_http_request_t *r, ngx_media_stream_t *stream,
     return NGX_DECLINED;
 }
 
+/* --- desired state ------------------------------------------------------ */
+
+/*
+ * GET /media/api/v1/desired
+ *
+ * The whole graph as one document, in the same shape PUT accepts.  This is
+ * the replay contract the normative revision allows instead of a database: a
+ * controller keeps this document and re-applies it after a restart, and
+ * because every create is idempotent, replay cannot duplicate anything.
+ */
+static ngx_int_t
+ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
+    u_char *end)
+{
+    ngx_queue_t              *q, *sq;
+    ngx_media_registry_entry_t  *entry;
+    ngx_media_stream_t       *stream;
+    ngx_media_source_t       *source;
+    ngx_media_destination_t  *destination;
+    ngx_uint_t                first = 1;
+
+    *last = ngx_snprintf(*last, end - *last, "{\"streams\":[");
+
+    for (q = ngx_queue_head(&registry->entries);
+         q != (ngx_queue_t *) &registry->entries;
+         q = q->next)
+    {
+        entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
+        stream = &entry->stream;
+
+        *last = ngx_snprintf(*last, end - *last,
+                             "%s{\"application\":\"%V\",\"name\":\"%V\","
+                             "\"revision\":%uL,\"sources\":[",
+                             first ? "" : ",", &stream->application,
+                             &stream->name, stream->revision);
+        first = 0;
+
+        {
+            ngx_uint_t  sfirst = 1;
+
+            for (sq = ngx_queue_head(&stream->sources);
+                 sq != (ngx_queue_t *) &stream->sources;
+                 sq = sq->next)
+            {
+                source = ngx_queue_data(sq, ngx_media_source_t, queue);
+
+                *last = ngx_snprintf(*last, end - *last,
+                                     "%s{\"id\":\"%V\",\"type\":%ui,"
+                                     "\"priority\":%ui,\"enabled\":%s,"
+                                     "\"revision\":%uL}",
+                                     sfirst ? "" : ",", &source->id,
+                                     source->type, source->priority,
+                                     source->enabled ? "true" : "false",
+                                     source->revision);
+                sfirst = 0;
+            }
+        }
+
+        *last = ngx_snprintf(*last, end - *last, "],\"destinations\":[");
+
+        {
+            ngx_uint_t  dfirst = 1;
+
+            for (sq = ngx_queue_head(&stream->destinations);
+                 sq != (ngx_queue_t *) &stream->destinations;
+                 sq = sq->next)
+            {
+                destination = ngx_queue_data(sq, ngx_media_destination_t,
+                                             queue);
+
+                *last = ngx_snprintf(*last, end - *last,
+                                     "%s{\"id\":\"%V\",\"type\":%ui,"
+                                     "\"host\":\"%V\",\"port\":%ui,"
+                                     "\"enabled\":%s,\"revision\":%uL}",
+                                     dfirst ? "" : ",", &destination->id,
+                                     destination->type, &destination->host,
+                                     destination->port,
+                                     destination->enabled ? "true" : "false",
+                                     destination->revision);
+                dfirst = 0;
+            }
+        }
+
+        *last = ngx_snprintf(*last, end - *last, "]}");
+    }
+
+    *last = ngx_snprintf(*last, end - *last, "],\"count\":%ui}",
+                         ngx_media_registry_count(registry));
+
+    return NGX_OK;
+}
+
+/*
+ * Applies one stream's sources and destinations from a desired document.
+ * Existing children are left exactly as they are, which is what makes a
+ * replay idempotent: the controller's document is the same, so the result
+ * must be too.
+ */
+/*
+ * A type in a desired document may be written as a name or as the number the
+ * read side emits, so a document round-trips through GET and PUT unchanged.
+ */
+static ngx_uint_t
+ngx_media_api_source_type_value(const ngx_str_t *text)
+{
+    ngx_uint_t  named = ngx_media_api_source_type(text);
+    ngx_int_t   n;
+
+    if (named != 0) {
+        return named;
+    }
+
+    n = ngx_atoi(text->data, text->len);
+
+    if (n >= NGX_MEDIA_SOURCE_SRT && n <= NGX_MEDIA_SOURCE_HLS_PUSH) {
+        return (ngx_uint_t) n;
+    }
+
+    return 0;
+}
+
+static ngx_uint_t
+ngx_media_api_dest_type_value(const ngx_str_t *text)
+{
+    ngx_uint_t  named = ngx_media_api_dest_type(text);
+    ngx_int_t   n;
+
+    if (named != 0) {
+        return named;
+    }
+
+    n = ngx_atoi(text->data, text->len);
+
+    if (n >= NGX_MEDIA_DEST_SRT && n <= NGX_MEDIA_DEST_RECORD) {
+        return (ngx_uint_t) n;
+    }
+
+    return 0;
+}
+
+static ngx_int_t
+ngx_media_api_desired_children(ngx_http_request_t *r,
+    ngx_media_stream_t *stream, ngx_str_t *item, ngx_uint_t *created)
+{
+    ngx_str_t           array, child, value;
+    ngx_media_source_t *source;
+    ngx_media_destination_t  *destination;
+    ngx_uint_t          type, priority, port;
+    u_char             *p, *stop;
+    ngx_str_t          *copy;
+    ngx_int_t           n;
+
+    if (ngx_media_api_json_array(item, "sources", &array) == NGX_OK) {
+
+        p = array.data + 1;
+        stop = array.data + array.len - 1;
+
+        while (p < stop) {
+
+            if (*p == '{') {
+                u_char     *close = p;
+                ngx_int_t   depth = 0;
+
+                for (; close < stop; close++) {
+
+                    if (*close == '{') {
+                        depth++;
+
+                    } else if (*close == '}') {
+                        depth--;
+
+                        if (depth == 0) {
+                            break;
+                        }
+                    }
+                }
+
+                if (close == stop) {
+                    return NGX_ERROR;
+                }
+
+                child.data = p;
+                child.len = close - p + 1;
+                p = close + 1;
+
+            } else {
+                p++;
+                continue;
+            }
+
+            if (ngx_media_api_json_field(&child, "id", &value) != NGX_OK
+                || value.len == 0)
+            {
+                ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                              "media: desired: source without an id");
+                return NGX_ERROR;
+            }
+
+            if (ngx_media_stream_source_find(stream, &value) != NULL) {
+                continue;
+            }
+
+            type = NGX_MEDIA_SOURCE_SRT;
+
+            if (ngx_media_api_json_field(&child, "type", &value) == NGX_OK) {
+                type = ngx_media_api_source_type_value(&value);
+
+                if (type == 0) {
+                    ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                                  "media: desired: unknown source type \"%V\"",
+                                  &value);
+                    return NGX_ERROR;
+                }
+            }
+
+            priority = 0;
+
+            if (ngx_media_api_json_field(&child, "priority", &value)
+                == NGX_OK)
+            {
+                n = ngx_atoi(value.data, value.len);
+
+                if (n > 0) {
+                    priority = (ngx_uint_t) n;
+                }
+            }
+
+            if (ngx_media_api_json_field(&child, "id", &value) != NGX_OK) {
+                return NGX_ERROR;
+            }
+
+            source = ngx_media_stream_source_add(stream, &value, type,
+                                                 priority,
+                                                 r->connection->log);
+
+            if (source == NULL) {
+                ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                              "media: desired: source %V could not be added",
+                              &value);
+                return NGX_ERROR;
+            }
+
+            ngx_media_source_touch(source);
+            (*created)++;
+        }
+    }
+
+    if (ngx_media_api_json_array(item, "destinations", &array) == NGX_OK) {
+
+        p = array.data + 1;
+        stop = array.data + array.len - 1;
+
+        while (p < stop) {
+
+            if (*p == '{') {
+                u_char     *close = p;
+                ngx_int_t   depth = 0;
+
+                for (; close < stop; close++) {
+
+                    if (*close == '{') {
+                        depth++;
+
+                    } else if (*close == '}') {
+                        depth--;
+
+                        if (depth == 0) {
+                            break;
+                        }
+                    }
+                }
+
+                if (close == stop) {
+                    return NGX_ERROR;
+                }
+
+                child.data = p;
+                child.len = close - p + 1;
+                p = close + 1;
+
+            } else {
+                p++;
+                continue;
+            }
+
+            if (ngx_media_api_json_field(&child, "id", &value) != NGX_OK
+                || value.len == 0)
+            {
+                return NGX_ERROR;
+            }
+
+            if (ngx_media_destination_find(stream, &value) != NULL) {
+                continue;
+            }
+
+            type = 0;
+
+            if (ngx_media_api_json_field(&child, "type", &value) == NGX_OK) {
+                type = ngx_media_api_dest_type_value(&value);
+            }
+
+            if (type == 0) {
+                ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                              "media: desired: unknown destination type \"%V\"",
+                              &value);
+                return NGX_ERROR;
+            }
+
+            if (ngx_media_api_json_field(&child, "id", &value) != NGX_OK) {
+                return NGX_ERROR;
+            }
+
+            destination = ngx_media_destination_add(stream, &value, type,
+                                                    r->connection->log);
+
+            if (destination == NULL) {
+                return NGX_ERROR;
+            }
+
+            if (ngx_media_api_json_field(&child, "host", &value) == NGX_OK) {
+                copy = ngx_media_destination_strdup(stream->pool, &value);
+
+                if (copy == NULL) {
+                    return NGX_ERROR;
+                }
+
+                destination->host = *copy;
+            }
+
+            if (ngx_media_api_json_field(&child, "port", &value) == NGX_OK) {
+                n = ngx_atoi(value.data, value.len);
+
+                if (n > 0 && n <= 65535) {
+                    port = (ngx_uint_t) n;
+                    destination->port = port;
+                }
+            }
+
+            if (ngx_media_destination_start(stream, destination,
+                                            r->connection->log) != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+
+            ngx_media_destination_touch(destination);
+            (*created)++;
+        }
+    }
+
+    return NGX_OK;
+}
+
+/*
+ * The array value of "key".  ngx_media_api_json_field() reads a scalar and
+ * stops at the first comma, which silently truncates an array of objects, so
+ * arrays get their own reader that respects nesting.
+ */
+static ngx_int_t
+ngx_media_api_json_array(const ngx_str_t *body, const char *key,
+    ngx_str_t *out)
+{
+    u_char  *p, *end, *start;
+    size_t   key_len = strlen(key);
+    ngx_int_t depth = 0;
+
+    if (body->data == NULL) {
+        return NGX_DECLINED;
+    }
+
+    p = body->data;
+    end = body->data + body->len;
+
+    while (p < end) {
+
+        if (*p != '"' || (size_t) (end - p) < key_len + 3
+            || ngx_memcmp(p + 1, key, key_len) != 0
+            || p[1 + key_len] != '"')
+        {
+            p++;
+            continue;
+        }
+
+        p += key_len + 2;
+
+        while (p < end && (*p == ' ' || *p == '\t')) {
+            p++;
+        }
+
+        if (p == end || *p != ':') {
+            continue;
+        }
+
+        p++;
+
+        while (p < end && (*p == ' ' || *p == '\t')) {
+            p++;
+        }
+
+        if (p == end || *p != '[') {
+            return NGX_DECLINED;
+        }
+
+        start = p;
+
+        for (; p < end; p++) {
+
+            if (*p == '[') {
+                depth++;
+
+            } else if (*p == ']') {
+                depth--;
+
+                if (depth == 0) {
+                    out->data = start;
+                    out->len = p - start + 1;
+                    return NGX_OK;
+                }
+            }
+        }
+
+        return NGX_DECLINED;
+    }
+
+    return NGX_DECLINED;
+}
+
+/* the "streams" array of a desired document */
+static ngx_int_t
+ngx_media_api_desired_streams(const ngx_str_t *body, ngx_str_t *out)
+{
+    return ngx_media_api_json_array(body, "streams", out);
+}
+
+/*
+ * PUT /media/api/v1/desired
+ *
+ * Applies a desired document.  Everything here is create-or-update, so a
+ * controller may replay the same document as often as it likes: streams that
+ * exist are reused, sources and destinations that exist are left alone.  A
+ * stream that is absent from the document is *not* deleted - pruning is the
+ * controller's decision, made with the delete calls, not a side effect of a
+ * replay.
+ */
+static ngx_int_t
+ngx_media_api_desired_put(ngx_http_request_t *r,
+    ngx_media_registry_t *registry, u_char **last, u_char *end)
+{
+    ngx_str_t              body, streams, item, application, name;
+    ngx_media_stream_t    *stream;
+    ngx_media_feed_conf_t  feed_conf;
+    u_char                *p, *stop;
+    ngx_uint_t             applied = 0, created = 0;
+
+    if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"body_too_large\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    if (ngx_media_api_desired_streams(&body, &streams) != NGX_OK) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"streams_array_required\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    ngx_memzero(&feed_conf, sizeof(feed_conf));
+
+    feed_conf.max_units = NGX_MEDIA_API_FEED_UNITS;
+    feed_conf.max_bytes = NGX_MEDIA_API_FEED_BYTES;
+    feed_conf.max_age = NGX_MEDIA_API_FEED_AGE;
+
+    /*
+     * The array is walked one object at a time.  This is deliberately not a
+     * general JSON parser: the document shape is fixed and flat per object,
+     * and anything else is rejected rather than half-understood.
+     */
+    p = streams.data + 1;
+    stop = streams.data + streams.len - 1;
+
+    while (p < stop) {
+
+        if (*p != '{') {
+            p++;
+            continue;
+        }
+
+        {
+            u_char  *close = p;
+            ngx_int_t  depth = 0;
+
+            for (; close < stop; close++) {
+
+                if (*close == '{') {
+                    depth++;
+
+                } else if (*close == '}') {
+                    depth--;
+
+                    if (depth == 0) {
+                        break;
+                    }
+                }
+            }
+
+            if (close == stop) {
+                break;
+            }
+
+            item.data = p;
+            item.len = close - p + 1;
+            p = close + 1;
+        }
+
+        if (ngx_media_api_json_field(&item, "application", &application)
+            != NGX_OK
+            || ngx_media_api_json_field(&item, "name", &name) != NGX_OK
+            || application.len == 0 || name.len == 0)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"stream_needs_application_and_name\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        stream = ngx_media_registry_stream_create(registry, &application,
+                                                  &name, &feed_conf,
+                                                  r->connection->log);
+
+        if (stream == NULL) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"stream_create_failed\"}");
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        applied++;
+
+        if (ngx_media_api_desired_children(r, stream, &item, &created)
+            != NGX_OK)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"child_apply_failed\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+    }
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "{\"applied\":%ui,\"children_created\":%ui}",
+                         applied, created);
+
+    return NGX_HTTP_OK;
+}
+
 static ngx_int_t
 ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
     u_char **last, u_char *end)
@@ -1624,6 +2183,24 @@ ngx_media_api_body_ready(ngx_http_request_t *r)
         last = ngx_snprintf(last, end - last, "{\"error\":\"no_registry\"}");
         status = NGX_HTTP_INTERNAL_SERVER_ERROR;
 
+    } else if (r->uri.len == sizeof("/media/api/v1/desired") - 1
+               && ngx_memcmp(r->uri.data, "/media/api/v1/desired",
+                             sizeof("/media/api/v1/desired") - 1) == 0)
+    {
+        if (r->method == NGX_HTTP_PUT || r->method == NGX_HTTP_POST) {
+            status = ngx_media_api_desired_put(r, registry, &last, end);
+
+        } else if (r->method == NGX_HTTP_GET) {
+            status = (ngx_media_api_desired_get(registry, &last, end)
+                      == NGX_OK)
+                         ? NGX_HTTP_OK
+                         : NGX_HTTP_INTERNAL_SERVER_ERROR;
+
+        } else {
+            last = ngx_snprintf(last, end - last,
+                                "{\"error\":\"method_not_allowed\"}");
+            status = NGX_HTTP_NOT_ALLOWED;
+        }
     } else if (r->uri.len == sizeof("/media/api/v1/metrics") - 1
                && ngx_memcmp(r->uri.data, "/media/api/v1/metrics",
                              sizeof("/media/api/v1/metrics") - 1) == 0)
@@ -1649,7 +2226,7 @@ ngx_media_api_handler(ngx_http_request_t *r)
     ngx_int_t  rc;
 
     if (!(r->method & (NGX_HTTP_GET|NGX_HTTP_POST|NGX_HTTP_DELETE
-                       |NGX_HTTP_PATCH)))
+                       |NGX_HTTP_PATCH|NGX_HTTP_PUT)))
     {
         return NGX_HTTP_NOT_ALLOWED;
     }
