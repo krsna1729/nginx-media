@@ -33,6 +33,7 @@ cc -O1 -g -Wall -Wextra -Werror -std=c11 \
     "$ROOT/src/core/ngx_media_policy.c" \
     "$ROOT/src/codec/ngx_media_nal.c" \
     "$ROOT/src/codec/ngx_media_aac.c" \
+    "$ROOT/src/mpegts/ngx_media_ts_crc.c" \
     "$ROOT/src/mpegts/ngx_media_ts_demux.c" \
     "$ROOT/tests/unit/shim/ngx_shim.c"
 
