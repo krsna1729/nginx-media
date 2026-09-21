@@ -19,7 +19,8 @@ static int ngx_media_test_checks;
 #define TEST_FAIL(fmt, ...)                                                   \
     do {                                                                      \
         ngx_media_test_failures++;                                            \
-        printf("FAIL %s:%d: " fmt "\n", __FILE__, __LINE__, __VA_ARGS__);     \
+        printf("FAIL %s:%d: " fmt "\n", __FILE__, __LINE__,                   \
+               ##__VA_ARGS__);                                                \
     } while (0)
 
 #define TEST_ASSERT(cond)                                                     \

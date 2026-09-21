@@ -3,7 +3,7 @@ CFLAGS  ?= -O1 -g
 SAN     ?= -fsanitize=address,undefined
 WARN     = -Wall -Wextra -Werror -std=c11
 
-INCLUDES = -I../../src/core -I../../src/codec -I../../src/srt -I../../src/mpegts -I../../src/hls -I../../src/record -Ishim -I.
+INCLUDES = -I../../src/core -I../../src/codec -I../../src/srt -I../../src/mpegts -I../../src/hls -I../../src/record -I../../src/rtmp -Ishim -I.
 DEFS     = -DNGX_MEDIA_UNIT_TEST
 
 CORE := ../../src/core/ngx_media_buffer.c \
@@ -25,13 +25,15 @@ CORE := ../../src/core/ngx_media_buffer.c \
         ../../src/mpegts/ngx_media_ts_ingest.c \
         ../../src/srt/ngx_media_srt_streamid.c \
         ../../src/hls/ngx_media_hls_segmenter.c \
-        ../../src/record/ngx_media_record.c
+        ../../src/record/ngx_media_record.c \
+        ../../src/rtmp/ngx_media_rtmp_wire.c
 
 SHIM := shim/ngx_shim.c
 
 TESTS := test_buffer test_frame test_feed test_track test_timeline \
          test_stream test_health test_compat test_selector test_codec \
-         test_srt_streamid test_ts_ingest test_ts_demux test_ts_mux test_hls test_record
+         test_srt_streamid test_ts_ingest test_ts_demux test_ts_mux test_hls test_record \
+         test_rtmp_wire
 BINS  := $(addprefix build/,$(TESTS))
 
 .PHONY: all test clean
