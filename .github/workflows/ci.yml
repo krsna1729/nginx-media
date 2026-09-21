@@ -56,7 +56,9 @@ jobs:
           make srt-output
 
       - name: Integration - transport security
-        run: make srt-crypto
+        run: |
+          make srt-crypto
+          make rtmp-hevc
 
       - name: Upload logs on failure
         if: failure()

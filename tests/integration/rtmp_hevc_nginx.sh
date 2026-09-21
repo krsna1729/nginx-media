@@ -12,13 +12,10 @@
 # ffmpeg writes the enhanced form automatically for HEVC (extended header
 # byte, "hvc1" fourcc, HEVCDecoderConfigurationRecord on sequence start).
 #
-# STATUS: this test currently fails, and that is the point of it.  The codec
-# handling itself is proven: an earlier run produced an HLS segment that
-# ffprobe reports as hevc, so the extended header was parsed and modelled.
-# What does not yet hold is the session: the publisher is closed with
-# frames=0 configs=0 errors=0 skipped=0, which says the video tags never
-# reached the adapter at all, and ffmpeg reconnects (generation 2).  Until
-# that is understood, this is a failing probe, not a passing test.
+# The sequence-header builder needs at least 13 bytes of SPS: profile_space
+# and profile_idc live in byte 1 and level_idc in byte 12.  Accepting a
+# shorter SPS produced an hvcC with a garbage level, which is what a player
+# rejects when it opens the stream.
 
 set -uo pipefail
 

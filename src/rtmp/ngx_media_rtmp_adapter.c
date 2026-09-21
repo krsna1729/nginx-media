@@ -1642,7 +1642,11 @@ ngx_media_rtmp_prepare_sequence(ngx_media_rtmp_prepare_t *prep,
                 }
             }
 
-            if (vps == NULL || !have_sps || pps == NULL || sps_len < 3) {
+            /*
+             * profile_space/profile_idc live in SPS byte 1 and level_idc in
+             * byte 12, so anything shorter cannot be described.
+             */
+            if (vps == NULL || !have_sps || pps == NULL || sps_len < 13) {
                 prep->skipped++;
                 return NGX_OK;
             }

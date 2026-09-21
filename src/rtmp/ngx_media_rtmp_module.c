@@ -292,6 +292,8 @@ static void
 ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
 {
     ngx_media_stream_t  *stream = session->stream;
+    uint64_t             publisher_frames, publisher_configs;
+    uint64_t             publisher_errors, publisher_skipped;
 
     if (session->play_timer.timer_set) {
         ngx_del_timer(&session->play_timer);
@@ -311,6 +313,16 @@ ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
     }
 
     ngx_media_rtmp_reader_reset(&session->reader);
+    /*
+     * Read the counters before destroying the publisher: destroy zeroes the
+     * struct, which made every close log read frames=0 configs=0 whatever
+     * the session had actually carried.
+     */
+    publisher_frames = session->publisher.frames;
+    publisher_configs = session->publisher.configs;
+    publisher_errors = session->publisher.errors;
+    publisher_skipped = session->publisher.skipped;
+
     ngx_media_rtmp_publisher_destroy(&session->publisher);
 
     if (session->routed) {
@@ -331,9 +343,8 @@ ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
                       "media: rtmp publisher closed stream=%V/%V frames=%uL "
                       "configs=%uL errors=%uL skipped=%uL generation=%ui",
                       &stream->application, &stream->name,
-                      session->publisher.frames, session->publisher.configs,
-                      session->publisher.errors, session->publisher.skipped,
-                      stream->generation);
+                      publisher_frames, publisher_configs, publisher_errors,
+                      publisher_skipped, stream->generation);
     }
 
     if (session->stream_name.data != NULL) {

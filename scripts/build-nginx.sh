@@ -23,17 +23,21 @@ fi
 cd "$SRC"
 
 # The backend selection changes which sources are linked, so it has to
-# invalidate the configure output the same way an edited config does.
+# invalidate the configure output the same way an edited config does.  So does
+# this script itself: adding a configure flag would otherwise be ignored on a
+# tree that already has an objs/Makefile.
 SRT_BACKEND="${MEDIA_SRT_BACKEND:-srt}"
 SRT_STAMP="$BUILD/.srt-backend"
 
 if [ ! -f objs/Makefile ] || [ "$ROOT/config" -nt objs/Makefile ] \
+   || [ "${BASH_SOURCE[0]}" -nt objs/Makefile ] \
    || [ ! -f "$SRT_STAMP" ] || [ "$(cat "$SRT_STAMP" 2>/dev/null)" != "$SRT_BACKEND" ]; then
     echo "== configuring nginx $VERSION with the nginx-media module"
     if ! ./configure \
             --prefix="$PREFIX" \
             --add-module="$ROOT" \
             --with-threads \
+            --with-http_ssl_module \
             --without-http_rewrite_module \
             --without-http_gzip_module \
             >"$BUILD/configure.log" 2>&1

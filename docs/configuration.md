@@ -162,8 +162,32 @@ choice with no code change:
 
 ```sh
 PKG_CONFIG_PATH=/opt/robotweax/lib/pkgconfig make nginx
-SRT_DIR=/opt/robotweax make nginx          # if it ships no .pkgconfig file
+SRT_DIR=/opt/robotweax make nginx          # if it ships no .pc file
 ```
 
-Startup logs which library answered (`media: srt transport backend=srt
-library=libsrt 1.5.6`), which is how a deployment knows what it linked.
+Startup logs which library answered, which is how a deployment knows what it
+linked: `library=libsrt 1.5.6` for the packaged Haivision build, `libsrt
+1.5.7` for robotweax 0.2.4 (the number is the SRT API target, not the
+implementation's own release).
+
+**Qualified**: robotweax 0.2.4 built with `ENABLE_AEAD_API_PREVIEW=ON` and its
+libsrt pkg-config compatibility passes `make srt-ingest-nginx` and
+`make srt-qualify` unchanged, including a publisher linked against Haivision
+talking to a robotweax listener across the wire.  Nothing in this module knows
+which of the two it is running on.
+
+**One caveat the qualification found**: their default key lengths differ.  A
+robotweax listener configured with `media_srt_crypto <passphrase>` and an
+Haivision caller using a bare `passphrase=` fail the handshake with
+`ERROR:BADSECRET` — the correct secret, rejected.  Pinning the key length on
+both sides fixes it, and 16 is the interoperable choice:
+
+```nginx
+media_srt_crypto "correct-horse-battery" ctr 16 on;
+```
+```sh
+ffmpeg ... "srt://host:port?mode=caller&passphrase=correct-horse-battery&pbkeylen=16"
+```
+
+With that, encrypted interop works.  If encryption is in play across
+implementations, always set the key length explicitly.
