@@ -1,0 +1,9 @@
+# build outputs
+.build/
+objs/
+*.o
+*.so
+*.a
+
+# unit test binaries
+tests/unit/build/
