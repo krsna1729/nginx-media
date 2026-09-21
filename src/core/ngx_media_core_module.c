@@ -15,9 +15,11 @@
 
 #include "ngx_media_platform.h"
 #include "ngx_media.h"
+#include "ngx_media_owner_dir.h"
 #include "ngx_media_policy.h"
 
 static void *ngx_media_core_create_conf(ngx_cycle_t *cycle);
+static ngx_int_t ngx_media_core_init_module(ngx_cycle_t *cycle);
 static char *ngx_media_failure_timeout_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_media_recovery_timeout_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
@@ -159,7 +161,7 @@ ngx_module_t ngx_media_core_module = {
     ngx_media_core_commands,     /* module directives */
     NGX_CORE_MODULE,             /* module type */
     NULL,                        /* init master */
-    NULL,                        /* init module */
+    ngx_media_core_init_module,  /* init module: master, before forking */
     NULL,                        /* init process */
     NULL,                        /* init thread */
     NULL,                        /* exit thread */
@@ -306,4 +308,19 @@ ngx_media_record_iso_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     policy->record_iso_path = value[2];
 
     return NGX_CONF_OK;
+}
+
+static ngx_int_t
+ngx_media_core_init_module(ngx_cycle_t *cycle)
+{
+    /*
+     * The shared owner directory is allocated in the master before workers are
+     * forked, so every worker inherits the same pages (goal doc 22).  It holds
+     * small bookkeeping only: owner slot and pid, generation, heartbeat.
+     */
+    if (ngx_media_owner_dir_shm_create(cycle, 256, cycle->log) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
 }

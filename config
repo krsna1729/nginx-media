@@ -17,6 +17,8 @@ ngx_module_name="ngx_media_core_module ngx_media_srt_module ngx_media_rtmp_modul
 ngx_module_deps=
 ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/core/ngx_media_runtime.c \
+                 $ngx_addon_dir/src/core/ngx_media_owner.c \
+                 $ngx_addon_dir/src/core/ngx_media_owner_dir.c \
                  $ngx_addon_dir/src/core/ngx_media_buffer.c \
                  $ngx_addon_dir/src/core/ngx_media_frame.c \
                  $ngx_addon_dir/src/core/ngx_media_feed.c \

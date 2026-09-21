@@ -2,6 +2,7 @@
 #define NGX_MEDIA_RUNTIME_H
 
 #include "ngx_media.h"
+#include "ngx_media_owner_dir.h"
 #include "ngx_media_rtmp_adapter.h"
 
 /*
@@ -19,6 +20,15 @@
 #define NGX_MEDIA_RUNTIME_MAX_PREPARE     16
 #define NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK 64
 #define NGX_MEDIA_RUNTIME_HLS_TARGET      6000
+
+/*
+ * Worker initialisation: adopts the shared owner directory.  Every worker
+ * calls this, not only the owner of a given stream.
+ */
+ngx_int_t ngx_media_runtime_init(ngx_cycle_t *cycle, ngx_log_t *log);
+
+/* the shared owner directory of this worker, or NULL before init */
+ngx_media_owner_dir_t *ngx_media_runtime_owner_dir(void);
 
 /* idempotent: arms the runtime timer in this worker, 1 when it did */
 ngx_uint_t ngx_media_runtime_arm(ngx_cycle_t *cycle, ngx_log_t *log);

@@ -17,6 +17,7 @@ CORE := ../../src/core/ngx_media_buffer.c \
         ../../src/core/ngx_media_health.c \
         ../../src/core/ngx_media_compat.c \
         ../../src/core/ngx_media_selector.c \
+        ../../src/core/ngx_media_owner.c \
         ../../src/codec/ngx_media_nal.c \
         ../../src/codec/ngx_media_aac.c \
         ../../src/mpegts/ngx_media_ts_crc.c \
@@ -35,7 +36,7 @@ SHIM := shim/ngx_shim.c
 TESTS := test_buffer test_frame test_feed test_track test_timeline \
          test_stream test_health test_compat test_selector test_codec \
          test_srt_streamid test_ts_ingest test_ts_demux test_ts_mux test_hls test_record \
-         test_rtmp_wire test_rtmp_flv test_srt_output
+         test_rtmp_wire test_rtmp_flv test_srt_output test_owner
 BINS  := $(addprefix build/,$(TESTS))
 
 .PHONY: all test clean

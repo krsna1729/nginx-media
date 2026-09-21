@@ -53,6 +53,7 @@ static ngx_media_runtime_prepare_t
 static ngx_media_record_t   ngx_media_runtime_raw;
 static ngx_uint_t           ngx_media_runtime_raw_started;
 
+static ngx_media_owner_dir_t     *ngx_media_runtime_owners;
 static ngx_media_runtime_sink_pt  ngx_media_runtime_sink;
 static void                      *ngx_media_runtime_sink_ctx;
 
@@ -679,6 +680,24 @@ ngx_media_runtime_handler(ngx_event_t *ev)
     }
 
     ngx_add_timer(ev, NGX_MEDIA_RUNTIME_INTERVAL);
+}
+
+ngx_int_t
+ngx_media_runtime_init(ngx_cycle_t *cycle, ngx_log_t *log)
+{
+    if (ngx_media_runtime_owners != NULL) {
+        return NGX_OK;
+    }
+
+    ngx_media_runtime_owners = ngx_media_owner_dir_attach(cycle, log);
+
+    return (ngx_media_runtime_owners != NULL) ? NGX_OK : NGX_ERROR;
+}
+
+ngx_media_owner_dir_t *
+ngx_media_runtime_owner_dir(void)
+{
+    return ngx_media_runtime_owners;
 }
 
 ngx_uint_t

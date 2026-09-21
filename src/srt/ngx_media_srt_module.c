@@ -868,6 +868,13 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
                       "media: %ui SRT destination(s) started", mcf->noutputs);
     }
 
+    /* every worker adopts the shared owner directory */
+    if (ngx_media_runtime_init(cycle, cycle->log) != NGX_OK) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "media: could not attach the shared owner directory");
+        return NGX_ERROR;
+    }
+
     /* the shared runtime owns selection, outputs and recording taps */
     (void) ngx_media_runtime_arm(cycle, cycle->log);
 
