@@ -220,6 +220,23 @@ Phase 7 - SRT output and fanout (complete):
   destinations; B receives one of them, registers the announced source and
   produces its own decodable HLS output while A's HLS shows the shared
   preparation
+Phase 9 - scale hardening (in progress):
+
+Hardening measurements recorded so far:
+
+- `make unit` runs every suite under ASan/UBSan: 23 suites, 0 failures
+- the concurrent suites (record writer, lifecycle cycles, program feed, stream
+  registry) also run clean under `-fsanitize=thread`, with the binaries
+  verified as instrumented; no data races reported
+- `tests/unit/test_lifecycle.c` starts and stops a concurrent writer ten times
+  with work queued, repeats a stop, stops with work in flight and appends after
+  a stop - the shapes that previously produced a shutdown hang and a double
+  free
+- `tests/unit/test_fuzz.c` fuzzes every parser that consumes network bytes
+  (RTMP chunk reader, AMF0, SRT stream id, MPEG-TS demux, IPC reassembly) with
+  random data and mutations of valid input: 14289 checks, no crash, overrun or
+  leak
+
 Phase 8 - multi-worker ownership (complete):
 
 - `src/core/ngx_media_owner.*`: ownership is FNV-1a over `application/stream`,
