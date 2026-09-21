@@ -1,0 +1,127 @@
+name: release
+
+# Tagged releases.  Builds the pinned nginx with the module, runs the full
+# suite one more time on the exact commit being released, then publishes the
+# module sources, the built binary and checksums.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libpcre2-dev zlib1g-dev libssl-dev \
+            ffmpeg libsrt-openssl-dev
+
+      - name: Cache the pinned nginx source
+        uses: actions/cache@v4
+        with:
+          path: .build/nginx-1.30.5
+          key: nginx-${{ runner.os }}-1.30.5
+
+      - name: Build nginx with the module
+        run: make nginx
+
+      - name: Unit tests
+        run: make unit
+
+      - name: Full integration suite
+        run: |
+          make srt-ingest
+          make srt-ingest-nginx
+          make ts-fixture
+          make source-switch
+          make api-switch
+          make failover
+          make hls
+          make rtmp
+          make srt-output
+          make srt-crypto
+          make multi-worker
+          make soak
+          make fault
+
+      - name: Backend qualification (both transport backends)
+        run: make srt-qualify
+
+      - name: Verify the release does not link libsrt in a udp-only build
+        run: |
+          MEDIA_SRT_BACKEND=udp make nginx
+          if ldd .build/nginx-install/sbin/nginx | grep -q srt; then
+              echo "a udp-only build must not link libsrt" >&2
+              exit 1
+          fi
+          make nginx
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          STAGE="nginx-media-$VERSION"
+          mkdir -p "dist/$STAGE"
+
+          # module sources and build glue
+          tar -cf - \
+              --exclude='.build' --exclude='.git' --exclude='dist' \
+              config src tests scripts Makefile README.md \
+              | tar -xf - -C "dist/$STAGE"
+
+          # the built server, for anyone who wants the exact artifact
+          tar -czf "dist/nginx-$VERSION-linux-x86_64.tar.gz" \
+              -C .build/nginx-install sbin/nginx
+
+          tar -czf "dist/$STAGE.tar.gz" -C dist "$STAGE"
+          rm -rf "dist/$STAGE"
+
+          (cd dist && sha256sum ./*.tar.gz > SHA256SUMS)
+
+          ls -l dist
+
+      - name: Changelog
+        run: |
+          PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          {
+              echo "# ${GITHUB_REF_NAME:-dev}"
+              echo
+              if [ -n "$PREV" ]; then
+                  echo "Changes since $PREV:"
+                  echo
+                  git log --no-merges --pretty='- %s' "$PREV"..HEAD
+              else
+                  echo "Initial release."
+              fi
+          } > dist/CHANGELOG.md
+
+          cat dist/CHANGELOG.md
+
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: dist/CHANGELOG.md
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+      - name: Upload artifacts for manual runs
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: dist/

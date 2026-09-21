@@ -76,6 +76,49 @@ with the stream database):
 
     media_srt_listen 127.0.0.1:9000;
 
+SRT encryption (goal doc 11, phase 11):
+
+    media_srt_crypto <passphrase> [ctr|gcm] [0|16|24|32] [on|off];
+    media_srt_crypto_stream <application/stream> <passphrase> [...];
+
+The optional arguments are the cipher mode, the AES key length (0 = library
+default) and whether a peer whose secret does not match is rejected.  SRT
+requires 10..79 characters; anything else is a configuration error, not a
+handshake failure later.  The passphrase never appears in logs.
+
+Scope, and why it stops where it does:
+
+- **global** (`media_srt_crypto`) is the listener's passphrase, and the
+  default for every destination.
+- **stream** (`media_srt_crypto_stream`) overrides it for one program's
+  destinations.  Startup logs which scope each destination resolved to
+  (`media: srt destination 127.0.0.1:9001 crypto=stream`).
+- **source** scope is *not offered on the ingest side*, and that is a
+  protocol constraint rather than a missing feature: the passphrase is a
+  connection parameter, and a stream id is only readable after the handshake
+  completes.  One listener accepts many publishers, so it can carry exactly
+  one passphrase; per-publisher secrets would need one listener per
+  publisher.
+
+AES-GCM depends on the library: Haivision/srt as packaged here (1.5.6) is
+built without the AEAD API preview and has no `SRTO_CRYPTOMODE`, so `gcm` is
+refused with that reason in the log instead of silently falling back to
+AES-CTR.  `make srt-crypto` covers all of it against a real publisher:
+matching passphrase carries media, a wrong one is rejected with nothing
+registered, and `gcm` either works or says why it cannot.
+
+TLS and kTLS (phase 11):
+
+nginx base already carries kTLS — `src/event/ngx_event_openssl.c` calls
+`BIO_get_ktls_send` — and enables it automatically when OpenSSL and the kernel
+both support it, with `ssl_conf_command Options KTLS` as the control.  There is
+no configure flag and nothing for this module to implement: the surfaces that
+terminate TLS (HLS preview over HTTPS, and RTMPS once it lands) go through
+`ngx_ssl_*`, so they inherit kernel TLS for free.  What phase 11 has to do is
+keep it that way and say so, rather than hand-rolling a TLS path that would
+bypass it.  On this machine: OpenSSL 3.6.4, `linux/tls.h` with
+`TLS_TX`/`SOL_TLS`, so kTLS is available.
+
 Phase 2 — MPEG-TS normalization (complete):
 
 - `src/mpegts/ngx_media_ts_demux.*`: packet layer (sync/resync, transport

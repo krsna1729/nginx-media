@@ -172,7 +172,7 @@ ngx_media_srt_out_thread(void *data)
                     dest->conf.host.data, dest->conf.port,
                     dest->conf.streamid.len ? dest->conf.streamid.data : NULL,
                     dest->conf.streamid.len, dest->conf.connect_timeout,
-                    outs->log);
+                    dest->conf.params, outs->log);
 
                 if (dest->session == NULL) {
                     dest->reconnects++;

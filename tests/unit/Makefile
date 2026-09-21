@@ -42,7 +42,7 @@ TESTS := test_buffer test_frame test_feed test_track test_timeline \
          test_rtmp_wire test_rtmp_flv test_srt_output test_owner test_ipc test_lifecycle test_fuzz test_bounds test_srt_udp
 BINS  := $(addprefix build/,$(TESTS))
 
-.PHONY: all test clean
+.PHONY: all test tsan clean
 
 all: $(BINS)
 
@@ -52,6 +52,19 @@ build/%: %.c ngx_media_test.h $(CORE) $(SHIM)
 
 test: $(BINS)
 	@fail=0; for t in $(TESTS); do ./build/$$t || fail=1; done; exit $$fail
+
+# The suites that drive threads, rebuilt under ThreadSanitizer.  They live in
+# a separate directory so a normal build never mixes instrumentation.
+TSAN_TESTS := test_record test_lifecycle test_feed test_stream test_owner \
+              test_srt_output
+TSAN_BINS  := $(addprefix build/tsan/,$(TSAN_TESTS))
+
+tsan: $(TSAN_BINS)
+	@fail=0; for t in $(TSAN_TESTS); do ./build/tsan/$$t || fail=1; done; exit $$fail
+
+build/tsan/%: %.c ngx_media_test.h $(CORE) $(SHIM)
+	@mkdir -p build/tsan
+	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) -fsanitize=thread -o $@ $< $(CORE) $(SHIM) -lpthread
 
 clean:
 	rm -rf build

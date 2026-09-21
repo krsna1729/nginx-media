@@ -36,11 +36,29 @@ typedef struct {
     double     mbps_recv_rate;
 } ngx_media_srt_stats_t;
 
+/*
+ * Encryption parameters (goal doc 11).  A NULL params pointer means "no
+ * encryption"; an empty passphrase means the same.  Haivision/srt and
+ * robotweax/srt both take these through SRTO_PASSPHRASE, SRTO_PBKEYLEN,
+ * SRTO_CRYPTOMODE and SRTO_ENFORCEDENCRYPTION, so nothing here is specific to
+ * either library.
+ */
+#define NGX_MEDIA_SRT_CRYPTO_CTR  0
+#define NGX_MEDIA_SRT_CRYPTO_GCM  1
+
+typedef struct {
+    const u_char  *passphrase;      /* NULL or empty: no encryption */
+    size_t         passphrase_len;  /* the SRT library wants 10..79 */
+    ngx_uint_t     pbkeylen;        /* 0: library default, else 16, 24, 32 */
+    ngx_uint_t     cryptomode;      /* NGX_MEDIA_SRT_CRYPTO_CTR or _GCM */
+    ngx_uint_t     enforced;        /* reject peers whose secret does not match */
+} ngx_media_srt_params_t;
+
 typedef struct {
     const char *name;
 
     ngx_media_srt_listener_t *(*listen)(const u_char *host, ngx_uint_t port,
-        ngx_log_t *log);
+        const ngx_media_srt_params_t *params, ngx_log_t *log);
     void (*listen_close)(ngx_media_srt_listener_t *listener);
 
     /* accepted session, or NULL on timeout or error */
@@ -70,7 +88,7 @@ typedef struct {
      */
     ngx_media_srt_session_t *(*connect)(const u_char *host, ngx_uint_t port,
         const u_char *streamid, size_t streamid_len, ngx_msec_t timeout_ms,
-        ngx_log_t *log);
+        const ngx_media_srt_params_t *params, ngx_log_t *log);
 
     /*
      * > 0 bytes sent; 0 when the transport could not take the buffer yet
@@ -128,7 +146,7 @@ ngx_media_srt_ops_t *ngx_media_srt_backend(void);
 void ngx_media_srt_set_backend(ngx_media_srt_ops_t *ops);
 
 ngx_media_srt_listener_t *ngx_media_srt_listen(const u_char *host,
-    ngx_uint_t port, ngx_log_t *log);
+    ngx_uint_t port, const ngx_media_srt_params_t *params, ngx_log_t *log);
 void ngx_media_srt_listen_close(ngx_media_srt_listener_t *listener);
 
 ngx_media_srt_session_t *ngx_media_srt_accept(ngx_media_srt_listener_t *listener,
@@ -143,7 +161,8 @@ ngx_int_t ngx_media_srt_session_recv(ngx_media_srt_session_t *session,
 /* caller side: connects to a destination, optionally announcing a stream id */
 ngx_media_srt_session_t *ngx_media_srt_connect(const u_char *host,
     ngx_uint_t port, const u_char *streamid, size_t streamid_len,
-    ngx_msec_t timeout_ms, ngx_log_t *log);
+    ngx_msec_t timeout_ms, const ngx_media_srt_params_t *params,
+    ngx_log_t *log);
 ngx_int_t ngx_media_srt_session_send(ngx_media_srt_session_t *session,
     const u_char *buf, size_t len, ngx_msec_t timeout_ms);
 void ngx_media_srt_session_stats(ngx_media_srt_session_t *session,

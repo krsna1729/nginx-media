@@ -37,12 +37,13 @@ test_listen_connect_streamid(void)
 
     TEST_CASE("backend: listen, connect, accept and stream id");
 
-    listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", 24571, NULL);
+    listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", 24571, NULL,
+                                     NULL);
     CHECK(listener != NULL, "listener created");
 
     caller = ngx_media_srt_connect((const u_char *) "127.0.0.1", 24571,
                                    streamid, strlen((const char *) streamid),
-                                   1000, NULL);
+                                   1000, NULL, NULL);
     CHECK(caller != NULL, "caller connected");
 
     accepted = ngx_media_srt_accept(listener, 1000, NULL);
@@ -79,11 +80,12 @@ test_send_receive(void)
 
     TEST_CASE("backend: send and receive keep the bytes");
 
-    listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", 24572, NULL);
+    listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", 24572, NULL,
+                                     NULL);
     CHECK(listener != NULL, "listener created");
 
     caller = ngx_media_srt_connect((const u_char *) "127.0.0.1", 24572,
-                                   (const u_char *) "id", 2, 1000, NULL);
+                                   (const u_char *) "id", 2, 1000, NULL, NULL);
     CHECK(caller != NULL, "caller connected");
 
     accepted = ngx_media_srt_accept(listener, 1000, NULL);
@@ -161,7 +163,8 @@ test_stats_and_teardown(void)
 
     TEST_CASE("backend: stats, poll and teardown");
 
-    listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", 24573, NULL);
+    listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", 24573, NULL,
+                                     NULL);
     CHECK(listener != NULL, "listener created");
 
     poll = ngx_media_srt_poll_create(NULL);
@@ -173,7 +176,7 @@ test_stats_and_teardown(void)
     }
 
     caller = ngx_media_srt_connect((const u_char *) "127.0.0.1", 24573,
-                                   (const u_char *) "id", 2, 1000, NULL);
+                                   (const u_char *) "id", 2, 1000, NULL, NULL);
     CHECK(caller != NULL, "caller connected");
 
     if (poll != NULL) {

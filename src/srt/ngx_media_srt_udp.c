@@ -63,7 +63,8 @@ static ngx_media_srt_session_t  *ngx_media_srt_udp_callers;
 static ngx_uint_t                ngx_media_srt_udp_started;
 
 static ngx_media_srt_listener_t *ngx_media_srt_udp_listen(
-    const u_char *host, ngx_uint_t port, ngx_log_t *log);
+    const u_char *host, ngx_uint_t port,
+    const ngx_media_srt_params_t *params, ngx_log_t *log);
 static void ngx_media_srt_udp_listen_close(
     ngx_media_srt_listener_t *listener);
 static ngx_media_srt_session_t *ngx_media_srt_udp_accept(
@@ -76,7 +77,8 @@ static ngx_int_t ngx_media_srt_udp_recv(ngx_media_srt_session_t *session,
     u_char *buf, size_t cap, ngx_msec_t timeout_ms);
 static ngx_media_srt_session_t *ngx_media_srt_udp_connect(
     const u_char *host, ngx_uint_t port, const u_char *streamid,
-    size_t streamid_len, ngx_msec_t timeout_ms, ngx_log_t *log);
+    size_t streamid_len, ngx_msec_t timeout_ms,
+    const ngx_media_srt_params_t *params, ngx_log_t *log);
 static ngx_int_t ngx_media_srt_udp_send(ngx_media_srt_session_t *session,
     const u_char *buf, size_t len, ngx_msec_t timeout_ms);
 static void ngx_media_srt_udp_stats(ngx_media_srt_session_t *session,
@@ -170,11 +172,14 @@ ngx_media_srt_udp_socket(struct sockaddr_in *addr, int *fd)
 
 static ngx_media_srt_listener_t *
 ngx_media_srt_udp_listen(const u_char *host, ngx_uint_t port,
-    ngx_log_t *log)
+    const ngx_media_srt_params_t *params, ngx_log_t *log)
 {
     ngx_media_srt_listener_t  *listener;
     struct sockaddr_in         addr;
     int                        fd;
+
+    /* encryption is an SRT feature; this double speaks plain UDP */
+    (void) params;
 
     if (port == 0 || port > 65535
         || ngx_media_srt_udp_bind(host, port, &addr) != NGX_OK
@@ -458,7 +463,7 @@ ngx_media_srt_udp_recv(ngx_media_srt_session_t *session, u_char *buf,
 static ngx_media_srt_session_t *
 ngx_media_srt_udp_connect(const u_char *host, ngx_uint_t port,
     const u_char *streamid, size_t streamid_len, ngx_msec_t timeout_ms,
-    ngx_log_t *log)
+    const ngx_media_srt_params_t *params, ngx_log_t *log)
 {
     ngx_media_srt_session_t  *session;
     struct sockaddr_in        local, peer;
@@ -468,6 +473,7 @@ ngx_media_srt_udp_connect(const u_char *host, ngx_uint_t port,
     int                       fd;
 
     (void) timeout_ms;
+    (void) params;
 
     if (port == 0 || port > 65535 || streamid_len > NGX_MEDIA_SRT_STREAMID_MAX
         || ngx_media_srt_udp_bind(NULL, 0, &local) != NGX_OK

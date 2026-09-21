@@ -1,0 +1,58 @@
+name: nightly
+
+# Every night: the sanitizer and fuzz passes that are too slow for a pull
+# request, plus the soak test.  The unit binaries are built with ASan+UBSan by
+# default (tests/unit/Makefile), so "make unit" is already the sanitizer run;
+# this job adds ThreadSanitizer on the concurrent runtimes and the parser
+# fuzzers, then soaks the whole thing.
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  sanitizers-and-soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libpcre2-dev zlib1g-dev libssl-dev \
+            ffmpeg libsrt-openssl-dev
+
+      - name: Cache the pinned nginx source
+        uses: actions/cache@v4
+        with:
+          path: .build/nginx-1.30.5
+          key: nginx-${{ runner.os }}-1.30.5
+
+      - name: Build nginx with the module
+        run: make nginx
+
+      - name: Unit tests under ASan and UBSan
+        run: make unit
+
+      - name: Parser fuzzers (extended run)
+        run: |
+          NGX_MEDIA_FUZZ_SCALE=25 ./tests/unit/build/test_fuzz
+
+      - name: ThreadSanitizer on the concurrent runtimes
+        run: make tsan
+
+      - name: Soak - churn publishers, destinations and reloads
+        run: make soak
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-logs
+          path: .build/**/logs/error.log
+          if-no-files-found: ignore

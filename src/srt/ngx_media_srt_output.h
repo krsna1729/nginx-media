@@ -40,6 +40,13 @@ typedef struct {
     size_t      max_bytes;
     ngx_msec_t  connect_timeout;
     ngx_msec_t  send_timeout;
+
+    /*
+     * Encryption for this destination, or NULL for none.  Resolved when the
+     * outputs start, so the per-stream overrides apply regardless of the
+     * order the directives appear in.
+     */
+    const ngx_media_srt_params_t  *params;
 } ngx_media_srt_output_conf_t;
 
 typedef struct {

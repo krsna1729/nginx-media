@@ -1,0 +1,69 @@
+name: master
+
+# Merge to master: the full integration suite, including the multi-worker
+# routing, the soak test and the fault injection run.  CI covers the fast
+# paths; this is the one that has to be green before anything is tagged.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: master-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libpcre2-dev zlib1g-dev libssl-dev \
+            ffmpeg libsrt-openssl-dev
+
+      - name: Cache the pinned nginx source
+        uses: actions/cache@v4
+        with:
+          path: .build/nginx-1.30.5
+          key: nginx-${{ runner.os }}-1.30.5
+
+      - name: Build nginx with the module
+        run: make nginx
+
+      - name: Unit tests
+        run: make unit
+
+      - name: Full integration suite
+        run: |
+          make srt-ingest
+          make srt-ingest-nginx
+          make ts-fixture
+          make source-switch
+          make api-switch
+          make failover
+          make hls
+          make rtmp
+          make srt-output
+          make srt-crypto
+          make multi-worker
+          make soak
+          make fault
+
+      - name: Backend qualification (both transport backends)
+        run: make srt-qualify
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: master-logs
+          path: .build/**/logs/error.log
+          if-no-files-found: ignore

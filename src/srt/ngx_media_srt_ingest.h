@@ -54,6 +54,12 @@ typedef struct {
     size_t      max_bytes;
     ngx_uint_t  max_events;    /* event ring capacity */
     ngx_uint_t  max_sessions;  /* concurrent publishers */
+
+    /*
+     * Encryption for the listener, or NULL for none.  The passphrase points
+     * into the configuration, which outlives the listener.
+     */
+    const ngx_media_srt_params_t  *params;
 } ngx_media_srt_ingest_conf_t;
 
 typedef struct {

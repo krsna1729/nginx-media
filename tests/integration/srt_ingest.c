@@ -60,7 +60,8 @@ main(int argc, char **argv)
         return 1;
     }
 
-    listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", port, NULL);
+    listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", port, NULL,
+                                     NULL);
     if (listener == NULL) {
         fprintf(stderr, "srt listen failed on port %lu\n",
                 (unsigned long) port);

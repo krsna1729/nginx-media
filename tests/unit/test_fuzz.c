@@ -40,6 +40,15 @@ fuzz_next(void)
     return (uint32_t) (fuzz_state >> 16);
 }
 
+/*
+ * How many rounds each generator runs.  A nightly job wants far more than a
+ * developer waiting on a build, so the multiplier comes from the
+ * environment: NGX_MEDIA_FUZZ_SCALE=20 is twenty times the default work.
+ */
+static ngx_uint_t  fuzz_scale = 1;
+
+#define FUZZ_ROUNDS(n)  ((ngx_uint_t) (n) * fuzz_scale)
+
 static void
 fuzz_fill(u_char *buf, size_t len)
 {
@@ -114,7 +123,7 @@ test_rtmp_reader(void)
 
     TEST_CASE("fuzz: rtmp chunk reader");
 
-    for (i = 0; i < 2000; i++) {
+    for (i = 0; i < FUZZ_ROUNDS(2000); i++) {
         size_t  len = 1 + (fuzz_next() % sizeof(buf));
 
         fuzz_fill(buf, len);
@@ -172,7 +181,7 @@ test_rtmp_reader(void)
 
         CHECK(valid_len > 0, "a valid stream was produced");
 
-        for (i = 0; i < 2000 && valid_len > 0; i++) {
+        for (i = 0; i < FUZZ_ROUNDS(2000) && valid_len > 0; i++) {
             u_char  copy[2048];
 
             memcpy(copy, valid, valid_len);
@@ -202,7 +211,7 @@ test_amf(void)
 
     TEST_CASE("fuzz: amf0 decoder");
 
-    for (i = 0; i < 4000; i++) {
+    for (i = 0; i < FUZZ_ROUNDS(4000); i++) {
         size_t  len = 1 + (fuzz_next() % sizeof(buf));
 
         fuzz_fill(buf, len);
@@ -213,7 +222,7 @@ test_amf(void)
     }
 
     /* deep nesting must be rejected rather than recursing without bound */
-    for (i = 0; i < 64; i++) {
+    for (i = 0; i < FUZZ_ROUNDS(64); i++) {
         buf[i * 4] = NGX_MEDIA_AMF_OBJECT;
         buf[i * 4 + 1] = 0;
         buf[i * 4 + 2] = 1;
@@ -233,7 +242,7 @@ test_srt_streamid(void)
 
     TEST_CASE("fuzz: srt stream id parser");
 
-    for (i = 0; i < 4000; i++) {
+    for (i = 0; i < FUZZ_ROUNDS(4000); i++) {
         size_t  len = fuzz_next() % sizeof(buf);
 
         fuzz_fill(buf, len);
@@ -246,7 +255,7 @@ test_srt_streamid(void)
         const char  *valid = "#!::r=live/news,m=publish,s=encoder-a";
         size_t       valid_len = strlen(valid);
 
-        for (i = 0; i < 2000; i++) {
+        for (i = 0; i < FUZZ_ROUNDS(2000); i++) {
             u_char  copy[128];
 
             memcpy(copy, valid, valid_len);
@@ -293,7 +302,7 @@ test_ts_demux(void)
     sink.tracks = fuzz_ts_tracks;
     sink.frame = fuzz_ts_frame;
 
-    for (i = 0; i < 300; i++) {
+    for (i = 0; i < FUZZ_ROUNDS(300); i++) {
         size_t  len = 188 * (1 + (fuzz_next() % 20));
 
         fuzz_fill(buf, len);
@@ -329,7 +338,7 @@ test_ipc_reassembly(void)
 
     memset(&frame, 0, sizeof(frame));
 
-    for (i = 0; i < 4000; i++) {
+    for (i = 0; i < FUZZ_ROUNDS(4000); i++) {
         size_t  len = fuzz_next() % sizeof(buf);
 
         fuzz_fill(buf, len);
@@ -368,7 +377,15 @@ test_ipc_reassembly(void)
 int
 main(void)
 {
-    printf("== parser fuzzing\n");
+    {
+        const char  *env = getenv("NGX_MEDIA_FUZZ_SCALE");
+
+        if (env != NULL && atoi(env) > 0) {
+            fuzz_scale = (ngx_uint_t) atoi(env);
+        }
+    }
+
+    printf("== parser fuzzing (scale %lu)\n", (unsigned long) fuzz_scale);
 
     test_rtmp_reader();
     test_amf();

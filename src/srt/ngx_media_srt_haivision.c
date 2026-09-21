@@ -88,7 +88,8 @@ ngx_media_srt_haivision_last_error(void)
 }
 
 static ngx_media_srt_listener_t *ngx_media_srt_haivision_listen(
-    const u_char *host, ngx_uint_t port, ngx_log_t *log);
+    const u_char *host, ngx_uint_t port,
+    const ngx_media_srt_params_t *params, ngx_log_t *log);
 static void ngx_media_srt_haivision_listen_close(
     ngx_media_srt_listener_t *listener);
 static ngx_media_srt_session_t *ngx_media_srt_haivision_accept(
@@ -105,7 +106,8 @@ static ngx_int_t ngx_media_srt_haivision_recv(
     ngx_msec_t timeout_ms);
 static ngx_media_srt_session_t *ngx_media_srt_haivision_connect(
     const u_char *host, ngx_uint_t port, const u_char *streamid,
-    size_t streamid_len, ngx_msec_t timeout_ms, ngx_log_t *log);
+    size_t streamid_len, ngx_msec_t timeout_ms,
+    const ngx_media_srt_params_t *params, ngx_log_t *log);
 static ngx_int_t ngx_media_srt_haivision_send(
     ngx_media_srt_session_t *session, const u_char *buf, size_t len,
     ngx_msec_t timeout_ms);
@@ -153,9 +155,93 @@ ngx_media_srt_ops_t ngx_media_srt_haivision_ops = {
     ngx_media_srt_haivision_shutdown
 };
 
+/*
+ * SRTO_CRYPTOMODE is declared in srt.h only when the library was built with
+ * the AEAD API preview.  The option number is stable, so it is used directly
+ * when the header hides it; a library that does not implement the option
+ * rejects the call, and that is reported instead of silently downgrading to
+ * AES-CTR.
+ */
+#ifdef ENABLE_AEAD_API_PREVIEW
+#define NGX_MEDIA_SRT_OPT_CRYPTOMODE  SRTO_CRYPTOMODE
+#else
+#define NGX_MEDIA_SRT_OPT_CRYPTOMODE  62
+#endif
+
+/*
+ * Encryption (goal doc 11).  The parameters are library options, not module
+ * logic: SRTO_PASSPHRASE enables encryption, SRTO_PBKEYLEN picks AES-128/192/
+ * 256, SRTO_CRYPTOMODE picks CTR or GCM, and SRTO_ENFORCEDENCRYPTION decides
+ * whether a peer with a different secret is rejected or tolerated.  Both
+ * Haivision/srt and robotweax/srt implement all four.
+ */
+static ngx_int_t
+ngx_media_srt_haivision_apply_crypto(SRTSOCKET sock,
+    const ngx_media_srt_params_t *params)
+{
+    int  keylen, mode, enforced;
+
+    if (params == NULL || params->passphrase == NULL
+        || params->passphrase_len == 0)
+    {
+        return NGX_OK;
+    }
+
+    if (srt_setsockopt(sock, 0, SRTO_PASSPHRASE, params->passphrase,
+                       (int) params->passphrase_len) == SRT_ERROR)
+    {
+        ngx_media_srt_note_error("SRT rejected the passphrase");
+        return NGX_ERROR;
+    }
+
+    if (params->pbkeylen != 0) {
+        keylen = (int) params->pbkeylen;
+
+        if (srt_setsockopt(sock, 0, SRTO_PBKEYLEN, &keylen,
+                           sizeof(keylen)) == SRT_ERROR)
+        {
+            ngx_media_srt_note_error("SRT rejected the key length");
+            return NGX_ERROR;
+        }
+    }
+
+    if (params->cryptomode == NGX_MEDIA_SRT_CRYPTO_GCM) {
+        /*
+         * SRT_CM_AES_GCM.  The constant is not in the public header, so the
+         * value is spelled out here; a build whose library disagrees reports
+         * SRT_KM_S_BADCRYPTOMODE on the session rather than failing silently.
+         */
+        mode = 1;
+
+        if (srt_setsockopt(sock, 0, NGX_MEDIA_SRT_OPT_CRYPTOMODE, &mode,
+                           sizeof(mode)) == SRT_ERROR)
+        {
+            /*
+             * The library was built without the AEAD API preview, so it has
+             * no AES-GCM at all.  Say so: "listener failed" alone would send
+             * an operator looking at addresses and firewalls.
+             */
+            ngx_media_srt_note_error("AES-GCM is not available in this SRT "
+                                     "library build (SRTO_CRYPTOMODE "
+                                     "rejected); use ctr");
+            return NGX_ERROR;
+        }
+    }
+
+    enforced = params->enforced ? 1 : 0;
+
+    if (srt_setsockopt(sock, 0, SRTO_ENFORCEDENCRYPTION, &enforced,
+                       sizeof(enforced)) == SRT_ERROR)
+    {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
 static ngx_media_srt_listener_t *
 ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
-    ngx_log_t *log)
+    const ngx_media_srt_params_t *params, ngx_log_t *log)
 {
     ngx_media_srt_listener_t  *listener;
     struct sockaddr_in         addr;
@@ -163,11 +249,13 @@ ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
     int                        transtype, yes, timeout;
 
     if (host == NULL || host[0] == '\0' || port == 0 || port > 65535) {
+        ngx_media_srt_note_error("invalid listen address");
         return NULL;
     }
 
     if (!ngx_media_srt_started) {
         if (srt_startup() == SRT_ERROR) {
+            ngx_media_srt_note_error(srt_getlasterror_str());
             return NULL;
         }
 
@@ -176,6 +264,7 @@ ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
 
     sock = srt_create_socket();
     if (sock == SRT_INVALID_SOCK) {
+        ngx_media_srt_note_error(srt_getlasterror_str());
         return NULL;
     }
 
@@ -188,8 +277,13 @@ ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
         || srt_setsockopt(sock, 0, SRTO_REUSEADDR, &yes, sizeof(yes))
            == SRT_ERROR
         || srt_setsockopt(sock, 0, SRTO_RCVTIMEO, &timeout,
-                          sizeof(timeout)) == SRT_ERROR)
+                          sizeof(timeout)) == SRT_ERROR
+        || ngx_media_srt_haivision_apply_crypto(sock, params) != NGX_OK)
     {
+        if (ngx_media_srt_last_error()[0] == '\0') {
+            ngx_media_srt_note_error(srt_getlasterror_str());
+        }
+
         (void) srt_close(sock);
         return NULL;
     }
@@ -199,6 +293,7 @@ ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
     addr.sin_port = htons((uint16_t) port);
 
     if (inet_pton(AF_INET, (const char *) host, &addr.sin_addr) != 1) {
+        ngx_media_srt_note_error("unparsable listen address");
         (void) srt_close(sock);
         return NULL;
     }
@@ -206,12 +301,14 @@ ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
     if (srt_bind(sock, (struct sockaddr *) &addr, sizeof(addr)) == SRT_ERROR
         || srt_listen(sock, 8) == SRT_ERROR)
     {
+        ngx_media_srt_note_error(srt_getlasterror_str());
         (void) srt_close(sock);
         return NULL;
     }
 
     listener = ngx_alloc(sizeof(ngx_media_srt_listener_t), log);
     if (listener == NULL) {
+        ngx_media_srt_note_error("out of memory");
         (void) srt_close(sock);
         return NULL;
     }
@@ -376,7 +473,7 @@ ngx_media_srt_haivision_streamid(ngx_media_srt_session_t *session, u_char *buf,
 static ngx_media_srt_session_t *
 ngx_media_srt_haivision_connect(const u_char *host, ngx_uint_t port,
     const u_char *streamid, size_t streamid_len, ngx_msec_t timeout_ms,
-    ngx_log_t *log)
+    const ngx_media_srt_params_t *params, ngx_log_t *log)
 {
     ngx_media_srt_session_t  *session;
     struct sockaddr_in        addr;
@@ -412,7 +509,8 @@ ngx_media_srt_haivision_connect(const u_char *host, ngx_uint_t port,
         || srt_setsockopt(sock, 0, SRTO_CONNTIMEO, &timeout,
                           sizeof(timeout)) == SRT_ERROR
         || srt_setsockopt(sock, 0, SRTO_SNDTIMEO, &timeout,
-                          sizeof(timeout)) == SRT_ERROR)
+                          sizeof(timeout)) == SRT_ERROR
+        || ngx_media_srt_haivision_apply_crypto(sock, params) != NGX_OK)
     {
         ngx_media_srt_note_error(srt_getlasterror_str());
         (void) srt_close(sock);

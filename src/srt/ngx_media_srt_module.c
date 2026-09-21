@@ -41,6 +41,32 @@ typedef struct {
     ngx_uint_t  priority;  /* trusted operator configuration */
 } ngx_media_srt_priority_t;
 
+/*
+ * SRT encryption (goal doc 11).  The passphrase is stored here and the
+ * params struct points at it, so the pointer handed to the transport stays
+ * valid for the life of the configuration.
+ *
+ * Scope: one listener accepts many publishers, and the passphrase is a
+ * connection parameter -- the stream id only becomes readable *after* the
+ * handshake.  A per-source passphrase is therefore impossible on the ingest
+ * side: the listener carries one passphrase (the global setting).  Stream and
+ * destination scope apply where they can be honoured, on the output side.
+ */
+typedef struct {
+    ngx_str_t                passphrase;
+    ngx_uint_t               mode;       /* NGX_MEDIA_SRT_CRYPTO_CTR|GCM */
+    ngx_uint_t               pbkeylen;   /* 0: library default */
+    ngx_uint_t               enforced;
+    unsigned                 set:1;
+} ngx_media_srt_crypto_conf_t;
+
+#define NGX_MEDIA_SRT_MAX_CRYPTO_STREAMS  16
+
+typedef struct {
+    ngx_str_t                      name;     /* application/stream */
+    ngx_media_srt_crypto_conf_t    crypto;
+} ngx_media_srt_stream_crypto_t;
+
 typedef struct {
     ngx_str_t                listen;
     unsigned                 listen_set:1;
@@ -50,6 +76,13 @@ typedef struct {
     /* SRT destinations fed from the shared program preparation */
     ngx_media_srt_output_conf_t  outputs[NGX_MEDIA_SRT_MAX_OUTPUTS];
     ngx_uint_t                   noutputs;
+
+    /* SRT encryption: the listener default, and per-stream overrides */
+    ngx_media_srt_crypto_conf_t      crypto;
+    ngx_media_srt_params_t           crypto_params;   /* listener */
+    ngx_media_srt_params_t           output_params[NGX_MEDIA_SRT_MAX_OUTPUTS];
+    ngx_media_srt_stream_crypto_t    crypto_streams[NGX_MEDIA_SRT_MAX_CRYPTO_STREAMS];
+    ngx_uint_t                       ncrypto_streams;
 } ngx_media_srt_main_conf_t;
 
 typedef struct {
@@ -72,6 +105,8 @@ typedef struct {
 
 static void *ngx_media_srt_create_conf(ngx_cycle_t *cycle);
 static char *ngx_media_srt_listen_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_media_srt_crypto_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static ngx_int_t ngx_media_srt_init_process(ngx_cycle_t *cycle);
 static void ngx_media_srt_exit_process(ngx_cycle_t *cycle);
@@ -132,6 +167,22 @@ static ngx_command_t ngx_media_srt_commands[] = {
     { ngx_string("media_srt_source_priority"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2,
       ngx_media_srt_priority_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_srt_crypto"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1|NGX_CONF_TAKE2|NGX_CONF_TAKE3
+          |NGX_CONF_TAKE4,
+      ngx_media_srt_crypto_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_srt_crypto_stream"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2|NGX_CONF_TAKE3|NGX_CONF_TAKE4
+          |NGX_CONF_TAKE5,
+      ngx_media_srt_crypto_cmd,
       0,
       0,
       NULL },
@@ -552,6 +603,149 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
 extern ngx_module_t  ngx_media_core_module;
 
 /*
+ * The transport parameters for a stream: the per-stream override when one is
+ * configured for it, otherwise the global setting.  Returns NULL when no
+ * encryption applies.
+ */
+static const ngx_media_srt_params_t *
+ngx_media_srt_crypto_params(ngx_media_srt_main_conf_t *mcf,
+    const ngx_str_t *stream, ngx_media_srt_params_t *store)
+{
+    ngx_media_srt_crypto_conf_t  *crypto = &mcf->crypto;
+    ngx_uint_t                    i;
+
+    if (stream != NULL && stream->len != 0) {
+        for (i = 0; i < mcf->ncrypto_streams; i++) {
+            if (mcf->crypto_streams[i].name.len == stream->len
+                && ngx_strncmp(mcf->crypto_streams[i].name.data,
+                               stream->data, stream->len) == 0)
+            {
+                crypto = &mcf->crypto_streams[i].crypto;
+                break;
+            }
+        }
+    }
+
+    if (!crypto->set) {
+        return NULL;
+    }
+
+    ngx_memzero(store, sizeof(*store));
+
+    store->passphrase = crypto->passphrase.data;
+    store->passphrase_len = crypto->passphrase.len;
+    store->pbkeylen = crypto->pbkeylen;
+    store->cryptomode = crypto->mode;
+    store->enforced = crypto->enforced;
+
+    return store;
+}
+
+/*
+ * media_srt_crypto <passphrase> [ctr|gcm] [0|16|24|32] [on|off];
+ * media_srt_crypto_stream <application/stream> <passphrase> [...];
+ *
+ * The optional arguments are the cipher mode, the AES key length and whether
+ * a peer whose secret does not match is rejected.  SRT requires 10..79
+ * characters of passphrase; anything else is a configuration error rather
+ * than a handshake failure later.
+ */
+static char *
+ngx_media_srt_crypto_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_media_srt_main_conf_t  *mcf = conf;
+    ngx_str_t                  *value = cf->args->elts;
+    ngx_media_srt_crypto_conf_t  *crypto;
+    ngx_uint_t                  at = 1;
+
+    if (ngx_strcmp(value[0].data, "media_srt_crypto_stream") == 0) {
+        ngx_media_srt_stream_crypto_t  *entry;
+        ngx_uint_t                      i;
+
+        if (mcf->ncrypto_streams >= NGX_MEDIA_SRT_MAX_CRYPTO_STREAMS) {
+            return "too many media_srt_crypto_stream directives";
+        }
+
+        entry = NULL;
+
+        for (i = 0; i < mcf->ncrypto_streams; i++) {
+            if (mcf->crypto_streams[i].name.len == value[1].len
+                && ngx_strncmp(mcf->crypto_streams[i].name.data,
+                               value[1].data, value[1].len) == 0)
+            {
+                entry = &mcf->crypto_streams[i];
+                break;
+            }
+        }
+
+        if (entry == NULL) {
+            entry = &mcf->crypto_streams[mcf->ncrypto_streams++];
+            entry->name = value[1];
+        }
+
+        crypto = &entry->crypto;
+        at = 2;
+
+    } else {
+        crypto = &mcf->crypto;
+    }
+
+    if (crypto->set) {
+        return "duplicate SRT crypto directive";
+    }
+
+    if (value[at].len < 10 || value[at].len > 79) {
+        return "SRT passphrase must be 10..79 characters";
+    }
+
+    crypto->passphrase = value[at];
+    crypto->mode = NGX_MEDIA_SRT_CRYPTO_CTR;
+    crypto->pbkeylen = 0;
+    crypto->enforced = 1;
+    crypto->set = 1;
+
+    at++;
+
+    if (cf->args->nelts > at) {
+        if (ngx_strcmp(value[at].data, "gcm") == 0) {
+            crypto->mode = NGX_MEDIA_SRT_CRYPTO_GCM;
+
+        } else if (ngx_strcmp(value[at].data, "ctr") != 0) {
+            return "cipher mode must be ctr or gcm";
+        }
+
+        at++;
+    }
+
+    if (cf->args->nelts > at) {
+        ngx_int_t  len = ngx_atoi(value[at].data, value[at].len);
+
+        if (len != 0 && len != 16 && len != 24 && len != 32) {
+            return "key length must be 0 (library default), 16, 24 or 32";
+        }
+
+        crypto->pbkeylen = (ngx_uint_t) len;
+        at++;
+    }
+
+    if (cf->args->nelts > at) {
+        if (ngx_strcmp(value[at].data, "on") == 0) {
+            crypto->enforced = 1;
+
+        } else if (ngx_strcmp(value[at].data, "off") == 0) {
+            crypto->enforced = 0;
+
+        } else {
+            return "enforcement must be on or off";
+        }
+    }
+
+    (void) cmd;
+
+    return NGX_CONF_OK;
+}
+
+/*
  * media_srt_backend haivision|udp
  *
  * The transport backend is a build-time-pluggable implementation of the same
@@ -891,13 +1085,19 @@ ngx_media_srt_parse_endpoint(ngx_pool_t *pool, const ngx_str_t *endpoint,
         return NGX_ERROR;
     }
 
+    /*
+     * The transport hands the host to inet_pton(), which needs a NUL: the
+     * endpoint is a slice of the configuration, so the copy must be
+     * terminated rather than aliased.
+     */
     host->len = colon - endpoint->data;
-    host->data = ngx_pnalloc(pool, host->len);
+    host->data = ngx_pnalloc(pool, host->len + 1);
     if (host->data == NULL) {
         return NGX_ERROR;
     }
 
     ngx_memcpy(host->data, endpoint->data, host->len);
+    host->data[host->len] = '\0';
 
     *port = (ngx_uint_t) value;
 
@@ -968,6 +1168,7 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     conf.max_bytes = 8 * 1024 * 1024;
     conf.max_events = 64;
     conf.max_sessions = NGX_MEDIA_SRT_MAX_SESSIONS;
+    conf.params = ngx_media_srt_crypto_params(mcf, NULL, &mcf->crypto_params);
 
     if (ngx_media_srt_ingest_start(&ngx_media_srt_ingest, &conf, cycle->log)
         != NGX_OK)
@@ -999,6 +1200,35 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     /* SRT destinations consume the shared preparation of the program runtime */
     if (mcf->noutputs > 0) {
         ngx_media_srt_outputs_t  *outs;
+        ngx_uint_t                i;
+
+        for (i = 0; i < mcf->noutputs; i++) {
+            ngx_str_t  stream;
+
+            stream.len = mcf->outputs[i].application.len + 1
+                         + mcf->outputs[i].stream.len;
+            stream.data = ngx_pnalloc(cycle->pool, stream.len);
+
+            if (stream.data == NULL) {
+                return NGX_ERROR;
+            }
+
+            ngx_snprintf(stream.data, stream.len, "%V/%V",
+                         &mcf->outputs[i].application,
+                         &mcf->outputs[i].stream);
+
+            mcf->outputs[i].params = ngx_media_srt_crypto_params(
+                                         mcf, &stream,
+                                         &mcf->output_params[i]);
+
+            ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                          "media: srt destination %V:%ui crypto=%s",
+                          &mcf->outputs[i].host, mcf->outputs[i].port,
+                          mcf->outputs[i].params == NULL ? "none"
+                              : (mcf->outputs[i].params
+                                     == &mcf->crypto_params
+                                 ? "global" : "stream"));
+        }
 
         if (ngx_media_srt_outputs_start(&outs, mcf->outputs, mcf->noutputs,
                                         NGX_MEDIA_SRT_OUT_MAX_EVENTS,
@@ -1086,8 +1316,9 @@ ngx_media_srt_handler(ngx_event_t *ev)
 
             case NGX_MEDIA_SRT_EVENT_FAILED:
                 ngx_log_error(NGX_LOG_EMERG, ev->log, 0,
-                              "media: srt listener failed on %V:%ui",
-                              &ingest->conf.host, ingest->conf.port);
+                              "media: srt listener failed on %V:%ui (%s)",
+                              &ingest->conf.host, ingest->conf.port,
+                              ngx_media_srt_last_error());
                 break;
 
             case NGX_MEDIA_SRT_EVENT_OPEN:

@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch failover hls rtmp srt-output multi-worker soak fault srt-qualify clean
+.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch failover hls rtmp srt-output srt-crypto multi-worker soak fault srt-qualify clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -46,6 +46,9 @@ soak:
 
 fault:
 	tests/integration/fault_nginx.sh
+
+srt-crypto:
+	tests/integration/srt_crypto.sh
 
 srt-qualify:
 	MEDIA_SRT_BACKEND=both $(MAKE) nginx

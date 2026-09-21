@@ -1,0 +1,56 @@
+name: weekly
+
+# Weekly: the long runs.  Extended soak and fault injection against the real
+# transports, plus the backend qualification that builds the both-backend
+# binary and puts one scenario through each implementation.
+
+on:
+  schedule:
+    - cron: "41 4 * * 0"
+  workflow_dispatch:
+
+jobs:
+  extended:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libpcre2-dev zlib1g-dev libssl-dev \
+            ffmpeg libsrt-openssl-dev
+
+      - name: Cache the pinned nginx source
+        uses: actions/cache@v4
+        with:
+          path: .build/nginx-1.30.5
+          key: nginx-${{ runner.os }}-1.30.5
+
+      - name: Build nginx with the module
+        run: make nginx
+
+      - name: Unit tests
+        run: make unit
+
+      - name: Extended soak
+        run: |
+          SOAK_CYCLES=40 make soak
+
+      - name: Fault injection
+        run: make fault
+
+      - name: Transport backend qualification (both backends)
+        run: make srt-qualify
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-logs
+          path: .build/**/logs/error.log
+          if-no-files-found: ignore

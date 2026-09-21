@@ -199,7 +199,7 @@ ngx_media_srt_thread(void *data)
     notify.last_notify = 0;
 
     listener = ngx_media_srt_listen(ingest->conf.host.data, ingest->conf.port,
-                                    NULL);
+                                    ingest->conf.params, NULL);
 
     if (listener == NULL) {
         ngx_memzero(&event, sizeof(event));

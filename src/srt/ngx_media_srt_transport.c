@@ -38,7 +38,8 @@ ngx_media_srt_set_backend(ngx_media_srt_ops_t *ops)
 }
 
 ngx_media_srt_listener_t *
-ngx_media_srt_listen(const u_char *host, ngx_uint_t port, ngx_log_t *log)
+ngx_media_srt_listen(const u_char *host, ngx_uint_t port,
+    const ngx_media_srt_params_t *params, ngx_log_t *log)
 {
     if (ngx_media_srt_backend() == NULL
         || ngx_media_srt_backend()->listen == NULL)
@@ -46,7 +47,7 @@ ngx_media_srt_listen(const u_char *host, ngx_uint_t port, ngx_log_t *log)
         return NULL;
     }
 
-    return ngx_media_srt_backend()->listen(host, port, log);
+    return ngx_media_srt_backend()->listen(host, port, params, log);
 }
 
 void
@@ -234,14 +235,14 @@ ngx_media_srt_poll_wait(ngx_media_srt_poll_t *poll, ngx_msec_t timeout_ms,
 ngx_media_srt_session_t *
 ngx_media_srt_connect(const u_char *host, ngx_uint_t port,
     const u_char *streamid, size_t streamid_len, ngx_msec_t timeout_ms,
-    ngx_log_t *log)
+    const ngx_media_srt_params_t *params, ngx_log_t *log)
 {
     if (ngx_media_srt_backend()->connect == NULL) {
         return NULL;
     }
 
     return ngx_media_srt_backend()->connect(host, port, streamid, streamid_len,
-                                          timeout_ms, log);
+                                            timeout_ms, params, log);
 }
 
 ngx_int_t

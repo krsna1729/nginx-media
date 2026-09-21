@@ -1,0 +1,67 @@
+name: ci
+
+# Pull requests and pushes to master: build the module against the pinned
+# nginx, run the unit tests, then the integration targets that cover the
+# ingest, output and HLS paths end to end.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libpcre2-dev zlib1g-dev libssl-dev \
+            ffmpeg libsrt-openssl-dev
+
+      - name: Cache the pinned nginx source
+        uses: actions/cache@v4
+        with:
+          path: .build/nginx-1.30.5
+          key: nginx-${{ runner.os }}-1.30.5
+
+      - name: Build nginx with the module
+        run: make nginx
+
+      - name: Unit tests
+        run: make unit
+
+      - name: Integration - ingest and demux
+        run: |
+          make srt-ingest
+          make srt-ingest-nginx
+          make ts-fixture
+
+      - name: Integration - selection and outputs
+        run: |
+          make source-switch
+          make failover
+          make hls
+          make rtmp
+          make srt-output
+
+      - name: Integration - transport security
+        run: make srt-crypto
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: .build/**/logs/error.log
+          if-no-files-found: ignore
