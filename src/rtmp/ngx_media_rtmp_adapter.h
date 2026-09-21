@@ -24,6 +24,30 @@
 
 /* FLV video codec ids */
 #define NGX_MEDIA_RTMP_CODEC_AVC          7
+#define NGX_MEDIA_RTMP_CODEC_ENHANCED     15   /* E-RTMP extended header */
+
+/*
+ * Enhanced RTMP (E-RTMP).  A video tag whose first byte has the high bit set
+ * carries an extended header instead of the legacy codec id:
+ *
+ *   data[0] = 0x80 | (frame type << 4) | packet type
+ *   data[1..4] = fourcc ("avc1", "hvc1", "av01", ...)
+ *
+ * and the payload after the fourcc depends on the packet type.  The frame
+ * type nibble must be masked with 0x07: the flag shares that byte, so a
+ * keyframe sequence start arrives as 0x90 and an inter coded frame as 0xa1.
+ */
+#define NGX_MEDIA_RTMP_EX_HEADER_FLAG     0x80
+#define NGX_MEDIA_RTMP_FRAME_MASK         0x07
+
+#define NGX_MEDIA_RTMP_EX_SEQUENCE_START  0
+#define NGX_MEDIA_RTMP_EX_CODED_FRAMES    1
+#define NGX_MEDIA_RTMP_EX_SEQUENCE_END    2
+#define NGX_MEDIA_RTMP_EX_CODED_FRAMES_X  3   /* no composition time */
+#define NGX_MEDIA_RTMP_EX_METADATA        4
+
+/* frame type 5 is a command frame, which only ever carries metadata */
+#define NGX_MEDIA_RTMP_FRAME_COMMAND      5
 
 /* FLV audio format (AAC) */
 #define NGX_MEDIA_RTMP_SOUND_AAC          10
@@ -52,6 +76,33 @@ typedef struct {
     ngx_str_t   pps[NGX_MEDIA_RTMP_MAX_PARAM_SETS];
     ngx_uint_t  npps;
 } ngx_media_rtmp_avcc_t;
+
+/*
+ * HEVCDecoderConfigurationRecord (hvcC): the same array-of-NAL-units tail as
+ * avcC, behind a longer fixed header.  It carries VPS/SPS/PPS in one record.
+ */
+typedef struct {
+    ngx_uint_t  version;
+    ngx_uint_t  nal_length_size;
+    ngx_uint_t  profile_space;
+    ngx_uint_t  profile_idc;
+    ngx_uint_t  level;
+
+    ngx_str_t   vps[NGX_MEDIA_RTMP_MAX_PARAM_SETS];
+    ngx_uint_t  nvps;
+    ngx_str_t   sps[NGX_MEDIA_RTMP_MAX_PARAM_SETS];
+    ngx_uint_t  nsps;
+    ngx_str_t   pps[NGX_MEDIA_RTMP_MAX_PARAM_SETS];
+    ngx_uint_t  npps;
+} ngx_media_rtmp_hvcc_t;
+
+ngx_int_t ngx_media_rtmp_hvcc_parse(const u_char *data, size_t len,
+    ngx_media_rtmp_hvcc_t *out);
+ngx_int_t ngx_media_rtmp_hvcc_build(const ngx_media_rtmp_hvcc_t *hvcc,
+    u_char *dst, size_t capacity, size_t *out_len);
+size_t ngx_media_rtmp_hvcc_annexb_size(const ngx_media_rtmp_hvcc_t *hvcc);
+ngx_int_t ngx_media_rtmp_hvcc_to_annexb(const ngx_media_rtmp_hvcc_t *hvcc,
+    u_char *dst, size_t capacity, size_t *out_len);
 
 /* parsed AudioSpecificConfig fields */
 typedef struct {
@@ -103,6 +154,9 @@ typedef struct {
 
     ngx_media_rtmp_avcc_t avcc;
     ngx_uint_t            have_avcc;
+
+    ngx_media_rtmp_hvcc_t hvcc;          /* enhanced RTMP hvc1 publishers */
+    ngx_uint_t            have_hvcc;
 
     ngx_media_rtmp_asc_t  asc;
     ngx_uint_t            have_asc;

@@ -356,6 +356,138 @@ sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
     return NGX_OK;
 }
 
+/*
+ * Enhanced RTMP.  The fixture bytes are the shape ffmpeg n9 actually writes
+ * for HEVC: 0x90 = extended header, keyframe, SequenceStart, then "hvc1",
+ * then an HEVCDecoderConfigurationRecord.
+ */
+static void
+test_enhanced_rtmp(void)
+{
+    ngx_media_rtmp_hvcc_t   hvcc;
+    u_char                  record[512];
+    size_t                  record_len = 0, annexb_len = 0;
+    u_char                  annexb[512];
+    u_char                  tag[64];
+    ngx_media_rtmp_publisher_t  pub;
+    frame_sink_t            sink;
+    ngx_uint_t              configs = 0;
+    u_char                  vps[] = { 0x40, 0x01, 0x0c, 0x01 };
+    u_char                  sps[] = { 0x42, 0x01, 0x01, 0x60 };
+    u_char                  pps[] = { 0x44, 0x01, 0xc0 };
+
+    TEST_CASE("enhanced RTMP: hvcC, extended headers and fourcc dispatch");
+
+    /* build a record from parameter sets, then read it back */
+    ngx_memzero(&hvcc, sizeof(hvcc));
+
+    hvcc.version = 1;
+    hvcc.nal_length_size = 4;
+    hvcc.profile_idc = 1;
+    hvcc.level = 60;
+    hvcc.nvps = 1;
+    hvcc.vps[0].data = vps;
+    hvcc.vps[0].len = sizeof(vps);
+    hvcc.nsps = 1;
+    hvcc.sps[0].data = sps;
+    hvcc.sps[0].len = sizeof(sps);
+    hvcc.npps = 1;
+    hvcc.pps[0].data = pps;
+    hvcc.pps[0].len = sizeof(pps);
+
+    CHECK(ngx_media_rtmp_hvcc_build(&hvcc, record, sizeof(record),
+                                    &record_len) == NGX_OK,
+          "hvcC built");
+    CHECK(record_len > 23, "record carries the arrays: %lu", record_len);
+    CHECK(record[0] == 1, "configurationVersion is 1");
+    CHECK(record[22] == 3, "three arrays: VPS, SPS, PPS");
+
+    {
+        ngx_media_rtmp_hvcc_t  parsed;
+
+        CHECK(ngx_media_rtmp_hvcc_parse(record, record_len, &parsed)
+              == NGX_OK, "hvcC parsed");
+        CHECK(parsed.nvps == 1 && parsed.nsps == 1 && parsed.npps == 1,
+              "parameter sets recovered: %lu/%lu/%lu",
+              parsed.nvps, parsed.nsps, parsed.npps);
+        CHECK(parsed.level == 60, "level preserved: %lu", parsed.level);
+
+        CHECK(ngx_media_rtmp_hvcc_to_annexb(&parsed, annexb, sizeof(annexb),
+                                            &annexb_len) == NGX_OK,
+              "converted to Annex B");
+        CHECK(annexb_len == 12 + sizeof(vps) + sizeof(sps) + sizeof(pps),
+              "blob carries three start codes: %lu", annexb_len);
+    }
+
+    /* a truncated record must be refused, not read past */
+    CHECK(ngx_media_rtmp_hvcc_parse(record, 10, &hvcc) == NGX_ERROR,
+          "short record rejected");
+    CHECK(ngx_media_rtmp_hvcc_parse(record, record_len - 4, &hvcc)
+          == NGX_ERROR, "truncated record rejected");
+
+    /* the publisher: an extended sequence start then a coded frame */
+    ngx_memzero(&sink, sizeof(sink));
+
+    CHECK(ngx_media_rtmp_publisher_init(&pub, NULL) == NGX_OK,
+          "publisher initialised");
+
+    tag[0] = (u_char) (NGX_MEDIA_RTMP_EX_HEADER_FLAG
+                       | (NGX_MEDIA_RTMP_FRAME_KEYFRAME << 4)
+                       | NGX_MEDIA_RTMP_EX_SEQUENCE_START);
+    ngx_memcpy(tag + 1, "hvc1", 4);
+    ngx_memcpy(tag + 5, record, record_len);
+
+    CHECK(ngx_media_rtmp_publisher_feed(&pub, NGX_MEDIA_RTMP_MSG_VIDEO, 0,
+                                        tag, 5 + record_len, sink_frame,
+                                        sink_tracks, &sink) == NGX_OK,
+          "sequence start accepted");
+    CHECK(pub.have_hvcc == 1, "the publisher kept the hvcC");
+    CHECK(pub.tracks.count == 1, "one video track registered");
+    CHECK(pub.tracks.tracks[0].codec == NGX_MEDIA_CODEC_H265,
+          "track codec is H.265");
+    CHECK(pub.tracks.tracks[0].config != NULL, "track carries a config blob");
+
+    configs = sink.frames;
+
+    /* CodedFrames: fourcc, three composition-time bytes, then NAL units */
+    tag[0] = (u_char) (NGX_MEDIA_RTMP_EX_HEADER_FLAG
+                       | (NGX_MEDIA_RTMP_FRAME_KEYFRAME << 4)
+                       | NGX_MEDIA_RTMP_EX_CODED_FRAMES);
+    ngx_memcpy(tag + 1, "hvc1", 4);
+    tag[5] = tag[6] = tag[7] = 0;
+    tag[8] = 0; tag[9] = 0; tag[10] = 0; tag[11] = 3;   /* one 3-byte NAL */
+    tag[12] = 0x26; tag[13] = 0x01; tag[14] = 0xaf;
+
+    CHECK(ngx_media_rtmp_publisher_feed(&pub, NGX_MEDIA_RTMP_MSG_VIDEO, 40,
+                                        tag, 15, sink_frame, sink_tracks,
+                                        &sink) == NGX_OK,
+          "coded frame accepted");
+    CHECK(sink.frames == configs + 1, "the coded frame reached the sink");
+    /* the sequence header went to configs, so exactly one coded frame */
+    CHECK(sink.video_frames == 1, "counted as video: %lu", sink.video_frames);
+    CHECK(sink.configs == 1, "one configuration frame: %lu", sink.configs);
+
+    /* an unknown fourcc is counted and skipped, never mis-parsed */
+    tag[0] = (u_char) (NGX_MEDIA_RTMP_EX_HEADER_FLAG
+                       | (NGX_MEDIA_RTMP_FRAME_INTER << 4)
+                       | NGX_MEDIA_RTMP_EX_CODED_FRAMES);
+    ngx_memcpy(tag + 1, "av01", 4);
+
+    CHECK(ngx_media_rtmp_publisher_feed(&pub, NGX_MEDIA_RTMP_MSG_VIDEO, 80,
+                                        tag, 15, sink_frame, sink_tracks,
+                                        &sink) == NGX_OK,
+          "unknown fourcc handled");
+    CHECK(sink.frames == configs + 1, "it produced no frame");
+    CHECK(pub.skipped >= 1, "it was counted as skipped");
+
+    if (sink.last_payload != NULL) {
+        ngx_media_buf_unref(sink.last_payload);
+    }
+
+    ngx_media_trackset_destroy(&sink.tracks);
+    ngx_media_rtmp_publisher_destroy(&pub);
+}
+
 static void
 test_publisher(void)
 {
@@ -804,6 +936,7 @@ main(void)
     test_asc();
     test_flv_framing();
     test_publisher();
+    test_enhanced_rtmp();
     test_fanout();
     test_prepare();
 

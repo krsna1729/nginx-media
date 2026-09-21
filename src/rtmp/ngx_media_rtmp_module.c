@@ -329,10 +329,11 @@ ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
 
         ngx_log_error(NGX_LOG_NOTICE, session->log, 0,
                       "media: rtmp publisher closed stream=%V/%V frames=%uL "
-                      "configs=%uL errors=%uL generation=%ui",
+                      "configs=%uL errors=%uL skipped=%uL generation=%ui",
                       &stream->application, &stream->name,
                       session->publisher.frames, session->publisher.configs,
-                      session->publisher.errors, stream->generation);
+                      session->publisher.errors, session->publisher.skipped,
+                      stream->generation);
     }
 
     if (session->stream_name.data != NULL) {
