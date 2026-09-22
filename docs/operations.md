@@ -445,6 +445,31 @@ the default.  Placement survives a reload - the new generation binds the same
 endpoints and retries until the old generation releases them - and a shared
 port cannot.
 
+**A shared port also cannot carry a bonded caller**, and this is the harder
+constraint of the two.  libsrt builds the receiving side of a bond as a
+"mirror group": `CUDT::makeMePeerOf()` in `srtcore/core.cpp` looks it up with
+
+```c
+CUDTGroup* gp = uglobal().findPeerGroup_LOCKED(peergroup);
+```
+
+and `uglobal()` is process-global state.  Legs that arrive in the same
+process find that group and join it; legs that arrive in different processes
+each find nothing and each create their **own** mirror group, so the caller's
+bond is silently split into N single-leg groups.
+
+That is not awkward, it is incompatible.  Bonding exists so that a stream
+survives a path failing, which means the legs have *different source
+addresses* by construction - and a shared port hashes each leg independently
+on exactly that, so the legs scatter across workers on their own.  The
+port-per-worker mode has no such problem: a bonded caller sends every leg to
+the same destination address, so they all reach one process and one mirror
+group, which is what `srt_accept_bond` over that process's listening sockets
+expects.
+
+So a deployment that bonds must use one endpoint per worker, and the shared
+mode is for deployments that do not.
+
 ## What is bounded, and by what
 
 Everything that could grow without limit is bounded, and the bounds are
