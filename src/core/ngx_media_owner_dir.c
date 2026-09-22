@@ -147,10 +147,21 @@ ngx_media_owner_dir_reclaimable(ngx_media_owner_record_t *record)
         return 1;
     }
 
-    if (record->pid == (int32_t) ngx_pid) {
-        return 1;   /* our own record from a previous cycle */
-    }
-
+    /*
+     * Only a record whose owner has stopped making progress can be taken over.
+     *
+     * The owner's pid is deliberately not part of this.  A pid that matches
+     * ours is the normal case for a stream this worker owns, and reading it as
+     * "our own record from a previous cycle" disowns the very worker that
+     * holds the program: it then falls back to the deterministic slot, which
+     * for a claimed stream is usually a different worker, so the program has
+     * an owner everywhere and a driver nowhere.  A record from a previous
+     * cycle cannot be recognised by pid either - a worker forked by a reload
+     * has a new pid - and does not need to be: a draining old owner still
+     * heartbeats, so its record stays live and stays its own (goal doc 24),
+     * and a dead one stops heartbeating and is reclaimable after
+     * NGX_MEDIA_OWNER_STALE_MS.
+     */
     if (ngx_media_owner_dir_now() - (ngx_msec_t) record->heartbeat
         > NGX_MEDIA_OWNER_STALE_MS)
     {
@@ -320,6 +331,46 @@ ngx_media_owner_dir_slot(ngx_media_owner_dir_t *dir, uint32_t hash,
     ngx_media_owner_dir_unlock(dir);
 
     return slot;
+}
+
+/*
+ * The record a stream's owner has published, when it is still live.  A worker
+ * that does not drive a program reads the owner's progress here instead of
+ * reporting its own empty numbers as if they described the program: the
+ * generation, the frames and the source count in this record are the owner's
+ * observed state, refreshed by its heartbeat.
+ *
+ * A record whose owner stopped heartbeating reports as missing rather than as
+ * current, so a replica says "no owner is reporting" instead of serving a
+ * stale number as fact.
+ */
+ngx_int_t
+ngx_media_owner_dir_observe(ngx_media_owner_dir_t *dir, uint32_t hash,
+    ngx_media_owner_record_t *out)
+{
+    ngx_media_owner_record_t  *record;
+
+    if (dir == NULL || dir->shm == NULL || out == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_media_owner_dir_lock(dir);
+
+    record = ngx_media_owner_dir_find(dir, hash);
+
+    if (record == NULL || record->hash != hash
+        || record->state != NGX_MEDIA_OWNER_STATE_OWNED
+        || ngx_media_owner_dir_reclaimable(record))
+    {
+        ngx_media_owner_dir_unlock(dir);
+        return NGX_ERROR;
+    }
+
+    *out = *record;
+
+    ngx_media_owner_dir_unlock(dir);
+
+    return NGX_OK;
 }
 
 ngx_uint_t

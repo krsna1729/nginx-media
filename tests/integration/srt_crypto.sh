@@ -96,7 +96,7 @@ publish() {
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t "$3" -f mpegts \
-        "srt://127.0.0.1:$PORT?mode=caller&passphrase=$1&streamid=%23!::r%3Dlive%2Fcrypto%2Cm%3Dpublish%2Cs%3Dencoder-a" \
+        "srt://127.0.0.1:$PORT?mode=caller&passphrase=$1&streamid=#!::r=live/crypto,m=publish,s=encoder-a" \
         >"$2" 2>&1
 }
 

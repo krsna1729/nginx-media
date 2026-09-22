@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke bench-worker-scaling test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
+.PHONY: unit nginx smoke bench-worker-scaling bench-ingest-egress test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -125,6 +125,12 @@ bench-fanout-delay:
 # and one program's fanout is owned by one worker.
 bench-worker-scaling:
 	tests/bench/worker_scaling.sh
+
+# Ingest and egress scale differently: one program has one owner worker, so
+# its fanout is bound by that worker, while more programs spread across more
+# workers.
+bench-ingest-egress:
+	tests/bench/ingest_egress_scaling.sh
 
 srt-qualify:
 	MEDIA_SRT_BACKEND=both $(MAKE) nginx

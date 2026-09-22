@@ -208,6 +208,99 @@ ngx_media_route_set_sink(ngx_media_route_frame_pt cb, void *ctx)
     ngx_media_route_sink_ctx = ctx;
 }
 
+/*
+ * The control plane's fan-out.  Every worker's row of endpoint pairs is
+ * already there, so a broadcast is a walk of that row, and each send is a
+ * non-blocking write to a socket that either has room or reports NGX_AGAIN.
+ * Nothing here waits, retries or allocates: a graph operation is small and
+ * bounded, and a worker that cannot take it is skipped and counted.
+ */
+static uint64_t  ngx_media_route_undelivered;
+static ngx_msec_t  ngx_media_route_last_broadcast_log;
+
+ngx_uint_t
+ngx_media_route_broadcast(ngx_cycle_t *cycle, const ngx_media_ipc_header_t *header,
+    ngx_media_buf_t *payload, size_t length, ngx_uint_t *peers)
+{
+    ngx_media_ipc_endpoint_t  *endpoint;
+    ngx_uint_t                 i, slot, addressed = 0, delivered = 0;
+
+    (void) cycle;
+
+    if (header == NULL) {
+        return 0;
+    }
+
+    slot = (ngx_uint_t) ngx_worker;
+
+    if (ngx_media_route_workers < 2 || slot >= ngx_media_route_workers) {
+        /* a single worker is its own replica: there is nobody to tell */
+        if (peers != NULL) {
+            *peers = 0;
+        }
+
+        return 0;
+    }
+
+    for (i = 0; i < ngx_media_route_workers; i++) {
+
+        if (i == slot) {
+            continue;
+        }
+
+        endpoint = ngx_media_route_endpoints[i];
+
+        if (endpoint == NULL) {
+            continue;
+        }
+
+        addressed++;
+
+        if (ngx_media_ipc_send(endpoint, header, payload, 0, length) == NGX_OK)
+        {
+            delivered++;
+
+        } else {
+            ngx_media_route_undelivered++;
+        }
+    }
+
+    if (delivered != addressed
+        && ngx_current_msec - ngx_media_route_last_broadcast_log >= 1000)
+    {
+        /*
+         * Say so rather than pretending: this worker has the mutation and a
+         * peer does not, so that peer's replica is behind until the next
+         * operation for the same object - or until desired state is replayed
+         * through the API.
+         *
+         * The cumulative count is the exact record (it is a metric); the log
+         * line is a notice, so a peer that is stuck does not turn every later
+         * mutation into a write to the error log.
+         */
+        ngx_media_route_last_broadcast_log = ngx_current_msec;
+
+        ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
+                      "media: graph operation reached %ui of %ui workers; a "
+                      "worker that is gone or behind keeps an older replica "
+                      "until the next mutation for the same object "
+                      "(undelivered total: %uL)",
+                      delivered, addressed, ngx_media_route_undelivered);
+    }
+
+    if (peers != NULL) {
+        *peers = addressed;
+    }
+
+    return delivered;
+}
+
+uint64_t
+ngx_media_route_broadcast_undelivered(void)
+{
+    return ngx_media_route_undelivered;
+}
+
 static ngx_media_ipc_endpoint_t *
 ngx_media_route_endpoint_for(ngx_cycle_t *cycle, uint32_t hash)
 {

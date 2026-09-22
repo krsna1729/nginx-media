@@ -123,7 +123,7 @@ start_publisher() {
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t "$seconds" -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=%23!::r%3Dlive%2Fsoak%2Cm%3Dpublish%2Cs%3D$source" \
+        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/soak,m=publish,s=$source" \
         >>"$RUN/$log.log" 2>&1 &
     pid=$!
 

@@ -34,14 +34,14 @@ fi
 rm -rf "$RUN"
 mkdir -p "$RUN/logs" "$RUN/conf" "$RUN/html" "$RUN/hls"
 
-# The playlist and the segments are written by the worker, and this script may
-# run as root - inside the test container it does - where nginx drops its
-# workers to the user it was compiled with, `nobody`.  `nobody` cannot write a
-# tree this script owns, and the segmenter counts a segment it could not write
-# rather than failing loudly, so the whole HLS output stays empty and the test
-# sees no playlist at all.  The image states the worker user and chowns its
-# writable directories to match; the portable equivalent here is to leave the
-# runtime tree writable by whichever user the worker turns out to be.
+# The playlist and the segments are written by the worker, and the worker is
+# whoever the suite runs as - unless that is root, where nginx setuids it to
+# the user it was compiled with, `nobody`.  The segmenter counts a segment it
+# could not write rather than failing loudly, so a worker that cannot write
+# this tree leaves the HLS output empty and the test sees no playlist at all.
+# The image states its worker user and chowns its writable directories to
+# match; the portable equivalent here is to leave the runtime tree writable by
+# whichever user the worker turns out to be.
 chmod -R a+rwX "$RUN"
 
 cat > "$RUN/conf/nginx.conf" <<EOF
@@ -224,11 +224,55 @@ open_phase() {
 # whole instead of each being trusted on its own.
 close_phase() {
     local label="$1" promoted="$2" demoted="$3" width="$4"
-    local gen switches emergency disc segment demoted_json
+    local gen switches emergency disc segment demoted_json demoted_after_json
     local demoted_before promoted_before demoted_after promoted_after
 
     wait_for_active "$promoted"
     wait_for_writers_drained "$demoted"
+
+    # The demoted source is only observable for as long as its transport is
+    # up, and the failover phase freezes its publisher: SRT drops a publisher
+    # that has gone silent after its peer idle timeout - five seconds by
+    # default, and nothing this test can configure.  So the window that proves
+    # the demoted source stopped feeding the program is measured first and the
+    # segment is waited for afterwards, which is what keeps the two phases
+    # measuring the same thing on a slow machine.
+    demoted_json="$(source_json "$demoted")"
+
+    # a source the worker has already detached holds no writer either, and a
+    # source that is gone cannot feed the program: detachment is the strongest
+    # form of the property this phase measures
+    if [ -n "$demoted_json" ]; then
+        [ "$(source_field "$demoted_json" state)" = '"standby"' ] \
+            || { echo "$label: the demoted source is not a standby" >&2; exit 1; }
+        [ "$(source_field "$demoted_json" active)" = "false" ] \
+            || { echo "$label: the demoted source is still marked active" >&2; exit 1; }
+    fi
+
+    [ "$(api /streams/live/news/sources | grep -o '"active":true' | wc -l)" = "1" ] \
+        || { echo "$label: not exactly one source is active" >&2; exit 1; }
+
+    demoted_before="$(source_field "$demoted_json" frames_out)"
+    promoted_before="$(source_field "$(source_json "$promoted")" frames_out)"
+
+    sleep 1
+
+    demoted_after_json="$(source_json "$demoted")"
+    demoted_after="$(source_field "$demoted_after_json" frames_out)"
+    promoted_after="$(source_field "$(source_json "$promoted")" frames_out)"
+
+    # Both ends of the window have to have been observable for the comparison
+    # to mean anything; a source that vanished during it wrote nothing more,
+    # because its writer went with it - the same reading the writer drain above
+    # takes.
+    if [ -n "$demoted_json" ] && [ -n "$demoted_after_json" ]; then
+        [ "$demoted_after" = "$demoted_before" ] \
+            || { echo "$label: the demoted source wrote $((demoted_after - demoted_before)) more frames to the program" >&2;
+                 exit 1; }
+    fi
+
+    [ "$promoted_after" -gt "$promoted_before" ] \
+        || { echo "$label: the selected source stopped feeding the program" >&2; exit 1; }
 
     # The new generation starts on a sync boundary and carries the selected
     # source only: a writer left over from the demoted source would splice its
@@ -264,34 +308,6 @@ close_phase() {
         || { echo "$label: $segment carries $(segment_widths "$segment"), not ${width}px video only" >&2;
              exit 1; }
 
-    demoted_json="$(source_json "$demoted")"
-
-    # a source the worker has already detached holds no writer either; both
-    # phases of this test keep it connected, so this only guards the check
-    if [ -n "$demoted_json" ]; then
-        [ "$(source_field "$demoted_json" state)" = '"standby"' ] \
-            || { echo "$label: the demoted source is not a standby" >&2; exit 1; }
-        [ "$(source_field "$demoted_json" active)" = "false" ] \
-            || { echo "$label: the demoted source is still marked active" >&2; exit 1; }
-    fi
-
-    [ "$(api /streams/live/news/sources | grep -o '"active":true' | wc -l)" = "1" ] \
-        || { echo "$label: not exactly one source is active" >&2; exit 1; }
-
-    demoted_before="$(source_field "$demoted_json" frames_out)"
-    promoted_before="$(source_field "$(source_json "$promoted")" frames_out)"
-
-    sleep 1
-
-    demoted_after="$(source_field "$(source_json "$demoted")" frames_out)"
-    promoted_after="$(source_field "$(source_json "$promoted")" frames_out)"
-
-    [ "$demoted_after" = "$demoted_before" ] \
-        || { echo "$label: the demoted source wrote $((demoted_after - demoted_before)) more frames to the program" >&2;
-             exit 1; }
-    [ "$promoted_after" -gt "$promoted_before" ] \
-        || { echo "$label: the selected source stopped feeding the program" >&2; exit 1; }
-
     printf 'gen+%s switches+%s emergency+%s discontinuity=%s sync_boundary=keyframe only_selected=yes old_writer_gone=yes selected_feeding=yes\n' \
         "$((gen - PHASE_GEN0))" "$((switches - PHASE_SWITCHES0))" \
         "$((emergency - PHASE_EMERGENCY0))" "$((disc - PHASE_DISC0))"
@@ -310,7 +326,7 @@ publish() {
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t 30 -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3D$source" \
+        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/news,m=publish,s=$source" \
         >"$RUN/$out.log" 2>&1 &
 
     PUB_PID=$!

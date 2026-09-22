@@ -62,4 +62,25 @@ typedef ngx_int_t (*ngx_media_route_frame_pt)(void *ctx, uint32_t hash,
 
 void ngx_media_route_set_sink(ngx_media_route_frame_pt cb, void *ctx);
 
+/*
+ * Sends one message to every other worker: the control plane's counterpart of
+ * the routing escape hatch.  A graph mutation has to reach every worker, and
+ * each worker's row of endpoint pairs is the transport it already has.
+ *
+ * Best effort and bounded by construction: the send is a non-blocking write
+ * to an existing socket, so a worker that is gone (NGX_ERROR) or behind
+ * (NGX_AGAIN) is counted and skipped rather than waited for.  There is no
+ * acknowledgement and no retry - see ngx_media_graph.h for what that means
+ * for a replica that misses an operation.
+ *
+ * Returns how many peers took the message; the number of peers addressed
+ * (which is zero for a single-worker deployment) is returned in *peers.
+ */
+ngx_uint_t ngx_media_route_broadcast(ngx_cycle_t *cycle,
+    const ngx_media_ipc_header_t *header, ngx_media_buf_t *payload,
+    size_t length, ngx_uint_t *peers);
+
+/* messages that could not be handed to a peer, cumulative per worker */
+uint64_t ngx_media_route_broadcast_undelivered(void);
+
 #endif /* NGX_MEDIA_ROUTE_H */

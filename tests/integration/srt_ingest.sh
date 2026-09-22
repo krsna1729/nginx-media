@@ -70,7 +70,7 @@ if ! grep -q '^LISTENING' "$LOG"; then
 fi
 
 # #!::r=live/news,m=publish,s=encoder-a, URL-encoded
-STREAMID='%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3Dencoder-a'
+STREAMID='#!::r=live/news,m=publish,s=encoder-a'
 
 echo "== pushing 3s of MPEG-TS over SRT"
 ffmpeg -hide_banner -loglevel error -re \

@@ -107,7 +107,7 @@ if [ "$OWNERS" -ne 1 ]; then
 fi
 
 # #!::r=live/news,m=publish,s=encoder-a, URL-encoded
-STREAMID='%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3Dencoder-a'
+STREAMID='#!::r=live/news,m=publish,s=encoder-a'
 
 echo "== pushing 3s of MPEG-TS (H.264 + AAC) over SRT"
 ffmpeg -hide_banner -loglevel error -re \
@@ -209,7 +209,7 @@ timeout "$(( CHURN_SECS + 20 ))" ffmpeg -hide_banner -loglevel error -re \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -c:a aac -b:a 96k \
     -t "$CHURN_SECS" -f mpegts \
-    "srt://127.0.0.1:$PORT?mode=caller&streamid=%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3Dencoder-churn" \
+    "srt://127.0.0.1:$PORT?mode=caller&streamid=#!::r=live/news,m=publish,s=encoder-churn" \
     >"$RUN/churn.log" 2>&1 &
 CHURN_PID=$!
 
@@ -267,7 +267,7 @@ timeout "$(( FRESH_SECS + 20 ))" ffmpeg -hide_banner -loglevel error -re \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -c:a aac -b:a 96k \
     -t "$FRESH_SECS" -f mpegts \
-    "srt://127.0.0.1:$PORT?mode=caller&streamid=%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3Dencoder-fresh" \
+    "srt://127.0.0.1:$PORT?mode=caller&streamid=#!::r=live/news,m=publish,s=encoder-fresh" \
     >"$RUN/fresh.log" 2>&1 &
 FRESH_PID=$!
 

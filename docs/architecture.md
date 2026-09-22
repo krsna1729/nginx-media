@@ -83,6 +83,42 @@ lands on a non-owner worker is routed to the owner over a bounded internal
 transport (Unix `SOCK_SEQPACKET` by default); that escape hatch is for routing
 only, not a second data path.
 
+### The graph is replicated, the program is not
+
+One owner per program does not answer the control API's question, which is
+"what is the graph": an operator's request can land on any worker, and a worker
+that has never heard of a stream cannot answer a read or accept a source for
+it.  So every accepted mutation — a stream, a source, the source's desired state
+— is broadcast to the other workers over the same transport and applied to
+their registries.  Each worker holds a replica of the graph, and any worker can
+answer any read.
+
+A replica is not a second program.  Only the owner materialises a transport —
+opens the file, watches the directory, pulls the origin — and only the owner
+runs selection, the program feed and the outputs, so a program reads a file
+once rather than once per worker, and one program's egress is never split.  A
+A read that lands on a replica reports the graph, plus the generation and
+program-frame figures the owner published in the shared directory — with the
+owner named, and `observed_here` false when the numbers came from somewhere
+else.  The transport and fanout figures in the same document are the answering
+worker's own, so on a worker that does not drive the program they say nothing.
+A **destination** is an output rather than graph state and is not replicated:
+it is started where the program runs, so creating, deleting or applying one
+through a document is answered by the stream's owner — anywhere else the
+request is refused with `not_owner`, naming the owner, instead of starting a
+sender that is never handed media.  The two operations that act on the running
+program, a manual switch and a switchback, are refused the same way.
+
+Operations carry the revision the API assigned to the mutation, and a replica
+applies one only when the stream has not already moved past it, so an operation
+that raced another worker's change to the same stream is a no-op rather than a
+duplicate or a torn object.  This is a bounded, best-effort control plane, not
+consensus: a worker that is gone or behind is counted in
+`nginx_media_graph_undelivered_total`, logged and skipped, and a replica that
+missed an operation heals on the next mutation for that object or when a
+controller replays desired state through the API, which is safe because every
+create is idempotent.
+
 ## The runtime graph
 
 What a deployment declares in configuration is small; what it runs is a graph.

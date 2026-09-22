@@ -50,52 +50,6 @@ ngx_media_srt_streamid_init(ngx_media_srt_streamid_t *id)
     ngx_memzero(id, sizeof(ngx_media_srt_streamid_t));
 }
 
-static int
-ngx_media_srt_streamid_hex(u_char c)
-{
-    if (c >= '0' && c <= '9') { return c - '0'; }
-    if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
-    if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
-    return -1;
-}
-
-/*
- * Callers do not agree on whether a stream id arrives percent-encoded.
- * ffmpeg 6.1.1 passes whatever follows streamid= verbatim, so the
- * conventional "%23!::r=live/news,m=publish" arrives encoded; later ffmpeg
- * decodes it first and the same string arrives decoded.  Both are accepted
- * here rather than making the caller's version the operator's problem - a
- * stream id that cannot be parsed is a publisher that cannot connect, and
- * which ffmpeg you have is not something a deployment should have to know.
- *
- * Decoding only ever shortens, so a buffer the size of the input is enough.
- */
-static size_t
-ngx_media_srt_streamid_decode(const u_char *src, size_t len, u_char *dst)
-{
-    size_t  i, n = 0;
-    int     hi, lo;
-
-    for (i = 0; i < len; i++) {
-
-        if (src[i] == '%' && i + 2 < len) {
-            hi = ngx_media_srt_streamid_hex(src[i + 1]);
-            lo = ngx_media_srt_streamid_hex(src[i + 2]);
-
-            if (hi >= 0 && lo >= 0) {
-                dst[n++] = (u_char) ((hi << 4) | lo);
-                i += 2;
-                continue;
-            }
-        }
-
-        /* a stray % is left alone rather than corrupting the id */
-        dst[n++] = src[i];
-    }
-
-    return n;
-}
-
 ngx_int_t
 ngx_media_srt_streamid_parse(const u_char *data, size_t len,
     ngx_media_srt_streamid_t *id)
@@ -109,11 +63,21 @@ ngx_media_srt_streamid_parse(const u_char *data, size_t len,
         return NGX_ERROR;
     }
 
-    /* first, because init zeroes the storage the decode is about to fill */
+    /* first, because init zeroes the storage the copy fills */
     ngx_media_srt_streamid_init(id);
 
-    /* decoded into the struct, which owns the bytes from here on */
-    len = ngx_media_srt_streamid_decode(data, len, id->storage);
+    /*
+     * Copied into the struct, which owns the bytes from here on.  The parsed
+     * result outlives the call - it is stored on the source and read later by
+     * the control API - so pointing at the caller's buffer would be an
+     * implicit lifetime contract nobody wrote down.
+     *
+     * The bytes are copied as they arrived.  A stream id is opaque on the
+     * wire and a percent-encoded one is a client that did not decode the URL
+     * it was given; decoding it here would be compensating for that, and it
+     * would make a literal percent in an operator's stream id ambiguous.
+     */
+    ngx_memcpy(id->storage, data, len);
     data = id->storage;
 
     id->raw.data = (u_char *) data;

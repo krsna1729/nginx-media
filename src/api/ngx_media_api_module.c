@@ -7,16 +7,24 @@
  *   POST /media/api/v1/streams/{app}/{stream}/switch?source=<id>
  *
  * The API reads and mutates the runtime stream registry of the worker that
- * serves the request.  The SRT listener and the registry live in worker 0;
- * deployments that serve the API from several workers need the inter-worker
- * routing phase (goal doc 23), and until then non-owner workers report
- * "not_owner" rather than inventing state.
+ * serves the request, and every stream and source mutation is broadcast to the
+ * other workers, so each holds a replica of the graph and any worker can
+ * answer a read (see ngx_media_graph.h).  What is not replicated is the
+ * program: one worker drives a stream, only that worker holds its program feed
+ * and outputs, and only that worker materialises the transport of a file, an
+ * HLS origin or a watched directory.  A read that lands elsewhere reports the
+ * graph and the progress the owner published; the operations that only make
+ * sense where the program lives - a manual switch, a switchback, and a
+ * destination, which is an output rather than graph state - are answered by
+ * the owner or refused with `not_owner` naming it, never applied to a replica
+ * that nothing watches.
  */
 
 #include "ngx_media_platform.h"
 #include "ngx_media_registry.h"
 #include "ngx_media_destination.h"
 #include "ngx_media_file.h"
+#include "ngx_media_graph.h"
 #include "ngx_media_compat.h"
 #include "ngx_media_hls_profile.h"
 #include "ngx_media_hls_ingest.h"
@@ -82,6 +90,8 @@ static ngx_int_t ngx_media_api_stream_json(u_char **last, u_char *end,
     ngx_media_stream_t *stream);
 static ngx_int_t ngx_media_api_sources_json(u_char **last, u_char *end,
     ngx_media_stream_t *stream);
+static ngx_int_t ngx_media_api_not_owner(ngx_media_stream_t *stream,
+    u_char **last, u_char *end);
 static const char *ngx_media_api_state_name(ngx_uint_t state);
 static ngx_int_t ngx_media_api_send(ngx_http_request_t *r, ngx_int_t status,
     ngx_str_t *body);
@@ -402,8 +412,22 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
 static ngx_int_t
 ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream)
 {
+    ngx_media_runtime_progress_t  progress;
+
+    /*
+     * Generation and program frames describe the media a program carried, and
+     * a program has one driver.  On the worker that drives it they are the
+     * local numbers; on a replica they are the numbers the owner published,
+     * with the owner named, so a read never mixes "this program is not here"
+     * into a field that means "the program has carried nothing".
+     */
+    ngx_media_runtime_progress(&stream->application, &stream->name,
+                               stream->generation, stream->program_frames,
+                               &progress);
+
     *last = ngx_snprintf(*last, end - *last,
                          "{\"application\":\"%V\",\"name\":\"%V\","
+                         "\"owner\":%ui,\"observed_here\":%s,"
                          "\"generation\":%ui,\"switches\":%uL,"
                          "\"emergency_switches\":%uL,"
                          "\"failure_timeout_ms\":%ui,"
@@ -411,12 +435,14 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
                          "\"switchback\":%ui,"
                          "\"program_frames\":%uL,\"active\":",
                          &stream->application, &stream->name,
-                         stream->generation, stream->switches,
+                         progress.owner,
+                         progress.local ? "true" : "false",
+                         progress.generation, stream->switches,
                          stream->emergency_switches,
                          stream->selector.failure_timeout,
                          stream->selector.recovery_timeout,
                          stream->selector.switchback,
-                         stream->program_frames);
+                         progress.frames);
 
     if (stream->active != NULL) {
         *last = ngx_snprintf(*last, end - *last, "\"%V\"", &stream->active->id);
@@ -623,20 +649,37 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "sources whose transport is up but which are not "
                          "carrying media yet\n"
                          "# TYPE nginx_media_reconnecting_sources gauge\n"
+                         "# HELP nginx_media_graph_undelivered_total "
+                         "graph operations this worker could not hand to a "
+                         "peer worker, cumulative\n"
+                         "# TYPE nginx_media_graph_undelivered_total counter\n"
                          "nginx_media_worker_service_ms %M\n"
                          "nginx_media_worker_max_service_ms %M\n"
-                         "nginx_media_reconnecting_sources %ui\n",
+                         "nginx_media_reconnecting_sources %ui\n"
+                         "nginx_media_graph_undelivered_total %uL\n",
                          ngx_media_runtime_outputs_active(),
                          stats.last_gap, stats.max_gap, stats.late_ticks,
                          stats.last_service, stats.max_service,
-                         stats.reconnecting);
+                         stats.reconnecting,
+                         ngx_media_route_broadcast_undelivered());
 
     for (q = ngx_queue_head(&registry->entries);
          q != (ngx_queue_t *) &registry->entries;
          q = q->next)
     {
+        ngx_media_runtime_progress_t  progress;
+
         entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
         stream = &entry->stream;
+
+        /*
+         * Generation and program frames are the program's, not a replica's:
+         * they are read the same way the stream document reads them, so a
+         * scrape of any worker reports the same figures.
+         */
+        ngx_media_runtime_progress(&stream->application, &stream->name,
+                                   stream->generation, stream->program_frames,
+                                   &progress);
 
         *last = ngx_snprintf(*last, end - *last,
                              "nginx_media_stream_generation"
@@ -660,11 +703,11 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                              "nginx_media_stream_feed_bytes"
                              "{application=\"%V\",name=\"%V\"} %uz\n",
                              &stream->application, &stream->name,
-                             stream->generation,
+                             progress.generation,
                              &stream->application, &stream->name,
                              stream->switches,
                              &stream->application, &stream->name,
-                             stream->program_frames,
+                             progress.frames,
                              &stream->application, &stream->name,
                              ngx_media_feed_fanout_percentile(
                                  &stream->program_feed, 500),
@@ -924,9 +967,21 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
                                               &feed_conf, r->connection->log);
 
     /*
-     * The worker that creates a stream owns it.  Only the owner drives a
-     * program, so without this the stream exists on one worker and is driven
-     * by none, and the control API can build a graph that carries no media.
+     * The worker that creates a stream owns it.
+     *
+     * The alternative is the deterministic hash, which spreads programs
+     * evenly, and it does not work yet: a source that carries its own reader
+     * - a file, an origin, a directory - is opened by whoever applies the
+     * mutation, and only the owner materialises it.  With the hash, the
+     * originating worker is not the owner, so the reader it opened feeds a
+     * replica nobody drives.  Measured: eight programs over four workers kept
+     * 4000 frames with the claim and 1000 without, while the owners went from
+     * two to four.
+     *
+     * So ownership follows the creating worker for now, and the cost is that
+     * the spread follows nginx's accept distribution rather than a hash.
+     * Making the hash work means routing the originating apply through the
+     * owner-only materialisation path, which is the follow-up.
      */
     if (stream != NULL) {
         ngx_media_runtime_claim(&application, &name);
@@ -941,6 +996,15 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
     if (!existed) {
         ngx_media_stream_touch(stream);
     }
+
+    /*
+     * Every worker gets the stream, so the next request for it - a read, or a
+     * source added by an operator - is answered by whichever worker takes it
+     * instead of coming back 404.  Re-sending an unchanged stream is not a
+     * special case: the operation is idempotent, and it is how a controller
+     * replays desired state to a worker whose replica is behind.
+     */
+    (void) ngx_media_graph_stream_set(stream);
 
     *last = ngx_snprintf(*last, end - *last,
                          "{\"application\":\"%V\",\"name\":\"%V\","
@@ -990,6 +1054,14 @@ ngx_media_api_stream_delete(ngx_http_request_t *r,
     }
 
     ngx_media_runtime_release(&stream->application, &stream->name);
+
+    /*
+     * The replicas drop it too, before this worker's copy goes away: the
+     * operation carries the revision the stream had, so a replica that has
+     * already moved past it keeps the newer object instead of deleting it.
+     */
+    (void) ngx_media_graph_stream_delete(&stream->application, &stream->name,
+                                         stream->revision);
 
     if (ngx_media_registry_stream_destroy(registry, stream) != NGX_OK) {
         *last = ngx_snprintf(*last, end - *last,
@@ -1075,6 +1147,9 @@ ngx_media_api_stream_patch(ngx_http_request_t *r,
         ngx_media_stream_touch(stream);
     }
 
+    /* the desired-state change reaches the replicas, policy fields included */
+    (void) ngx_media_graph_stream_set(stream);
+
     *last = ngx_snprintf(*last, end - *last,
                          "{\"application\":\"%V\",\"name\":\"%V\","
                          "\"revision\":%uL}", &stream->application,
@@ -1134,6 +1209,8 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
     u_char **last, u_char *end)
 {
     ngx_str_t           body, id, type_text, priority_text;
+    ngx_str_t           source_path = ngx_null_string;
+    ngx_str_t           source_ca = ngx_null_string;
     ngx_media_source_t *source;
     ngx_uint_t          type = NGX_MEDIA_SOURCE_SRT, priority = 0;
     ngx_int_t           n;
@@ -1185,85 +1262,73 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
     }
 
     /*
-     * A file source has to be opened, not merely registered: it owns a reader
-     * that the runtime tick advances.  Everything else is a label a
-     * transport attaches to later.
+     * A file, a directory to watch and an origin to pull are each defined by a
+     * path, and the path is what the owner opens - so it is required here
+     * whatever worker this request landed on, even when this worker is not the
+     * one that will open it.
      */
     if (type == NGX_MEDIA_SOURCE_FILE) {
-        ngx_str_t  path;
 
-        if (ngx_media_api_json_field(&body, "path", &path) != NGX_OK
-            || path.len == 0)
+        if (ngx_media_api_json_field(&body, "path", &source_path) != NGX_OK
+            || source_path.len == 0)
         {
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"path_required_for_file_source\"}");
             return NGX_HTTP_BAD_REQUEST;
         }
 
-        if (ngx_media_file_open(stream, &id, &path, NGX_MEDIA_FILE_ONCE,
-                                r->connection->log) == NULL)
-        {
-            *last = ngx_snprintf(*last, end - *last,
-                                 "{\"error\":\"file_open_failed\"}");
-            return NGX_HTTP_BAD_REQUEST;
-        }
-
-        source = ngx_media_stream_source_find(stream, &id);
-
     } else if (type == NGX_MEDIA_SOURCE_HLS_PUSH) {
-        ngx_str_t  directory;
 
-        if (ngx_media_api_json_field(&body, "path", &directory) != NGX_OK
-            || directory.len == 0)
+        if (ngx_media_api_json_field(&body, "path", &source_path) != NGX_OK
+            || source_path.len == 0)
         {
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"path_required_for_hls_push\"}");
             return NGX_HTTP_BAD_REQUEST;
         }
 
-        if (ngx_media_hls_ingest_open(stream, &id, &directory,
-                                      r->connection->log) == NULL)
-        {
-            *last = ngx_snprintf(*last, end - *last,
-                                 "{\"error\":\"hls_ingest_failed\"}");
-            return NGX_HTTP_BAD_REQUEST;
-        }
-
-        source = ngx_media_stream_source_find(stream, &id);
-
     } else if (type == NGX_MEDIA_SOURCE_HLS_PULL) {
-        ngx_str_t  url;
 
-        if (ngx_media_api_json_field(&body, "path", &url) != NGX_OK
-            || url.len == 0)
+        if (ngx_media_api_json_field(&body, "path", &source_path) != NGX_OK
+            || source_path.len == 0)
         {
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"path_required_for_hls_pull\"}");
             return NGX_HTTP_BAD_REQUEST;
         }
 
-        ngx_str_t  ca_file;
-
-        if (ngx_media_api_json_field(&body, "ca_file", &ca_file) != NGX_OK) {
-            ngx_str_null(&ca_file);
+        if (ngx_media_api_json_field(&body, "ca_file", &source_ca) != NGX_OK) {
+            ngx_str_null(&source_ca);
         }
+    }
 
-        if (ngx_media_hls_pull_open(stream, &id, &url, &ca_file,
-                                    r->connection->log) == NULL)
-        {
+    /*
+     * A file source has to be opened, not merely registered: it owns a reader
+     * that the runtime tick advances.  Everything else is a label a transport
+     * attaches to later - and a reader is opened on the worker that drives the
+     * stream, with the other workers registering the desired state and letting
+     * the owner open it, so one program reads a file once rather than once per
+     * worker.
+     */
+    source = ngx_media_graph_source_open(stream, &id, type, priority,
+                                         &source_path, &source_ca,
+                                         r->connection->log);
+
+    if (source == NULL) {
+
+        /*
+         * A reader that could not be opened is the caller's problem only where
+         * this worker is the one that had to open it - a path that is not
+         * there, an origin that will not answer.  Anywhere else the request is
+         * refused for a reason only the owner can see, so the source is
+         * registered and the owner reports what it could not open.
+         */
+        if (ngx_media_graph_owns(&stream->application, &stream->name)) {
             *last = ngx_snprintf(*last, end - *last,
-                                 "{\"error\":\"hls_pull_failed\"}");
+                                 "{\"error\":\"source_open_failed\"}");
             return NGX_HTTP_BAD_REQUEST;
         }
 
-        source = ngx_media_stream_source_find(stream, &id);
-
-    } else {
-        source = ngx_media_stream_source_add(stream, &id, type, priority,
-                                             r->connection->log);
-    }
-
-    if (source == NULL) {
         *last = ngx_snprintf(*last, end - *last,
                              "{\"error\":\"source_create_failed\"}");
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
@@ -1271,6 +1336,10 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
 
     ngx_media_source_touch(source);
     ngx_media_stream_touch(stream);
+
+    /* the source, its path and its desired state reach every other worker */
+    (void) ngx_media_graph_source_set(stream, source, &source_path,
+                                      &source_ca);
 
     *last = ngx_snprintf(*last, end - *last,
                          "{\"id\":\"%V\",\"revision\":%uL,"
@@ -1304,6 +1373,8 @@ ngx_media_api_source_delete(ngx_media_stream_t *stream, ngx_str_t *source_id,
     ngx_media_stream_source_remove(stream, source);
     ngx_media_stream_touch(stream);
 
+    (void) ngx_media_graph_source_delete(stream, source_id, stream->revision);
+
     *last = ngx_snprintf(*last, end - *last,
                          "{\"id\":\"%V\",\"deleted\":true}", source_id);
 
@@ -1335,6 +1406,14 @@ ngx_media_api_source_set_enabled(ngx_media_stream_t *stream,
 
     ngx_media_source_touch(source);
     ngx_media_stream_touch(stream);
+
+    /*
+     * Disabling is desired state, so it is replicated like any other: the
+     * replica answers with the same desired state, and the owner is the one
+     * that takes it out of selection.  No path travels here - the reader, if
+     * this source has one, already exists on the owner.
+     */
+    (void) ngx_media_graph_source_set(stream, source, NULL, NULL);
 
     *last = ngx_snprintf(*last, end - *last,
                          "{\"id\":\"%V\",\"enabled\":%s,"
@@ -1776,6 +1855,20 @@ ngx_media_api_destinations(ngx_http_request_t *r, ngx_media_stream_t *stream,
         return NGX_DECLINED;
     }
 
+    /*
+     * A destination is an output, not graph state a replica can act on: it is
+     * started where the program runs, and a sender or an uploader started on a
+     * worker that does not drive the stream would never be handed anything to
+     * carry.  So the mutations are answered by the owner, with the owner
+     * named, rather than accepted here and silently pointless; the reads are
+     * not - a read reports the graph.
+     */
+    if (r->method != NGX_HTTP_GET
+        && ngx_media_api_not_owner(stream, last, end))
+    {
+        return NGX_HTTP_CONFLICT;
+    }
+
     rest.data = action->data + sizeof("destinations") - 1;
     rest.len = action->len - (sizeof("destinations") - 1);
 
@@ -2108,6 +2201,13 @@ ngx_media_api_desired_children(ngx_http_request_t *r,
 
             ngx_media_source_touch(source);
             (*created)++;
+
+            /*
+             * A desired document names source identities, not paths, so the
+             * source is replicated as what it is here: a label a transport
+             * attaches to later.  No reader is opened for it on any worker.
+             */
+            (void) ngx_media_graph_source_set(stream, source, NULL, NULL);
         }
     }
 
@@ -2157,6 +2257,24 @@ ngx_media_api_desired_children(ngx_http_request_t *r,
 
             if (ngx_media_destination_find(stream, &value) != NULL) {
                 continue;
+            }
+
+            /*
+             * A destination is started where the program runs, and the graph
+             * replica does not carry outputs: applying one here when this
+             * worker does not drive the stream would start a sender or an
+             * uploader that is never handed media.  The document is refused
+             * instead, naming the owner, so the controller can apply it there
+             * - every create in it is idempotent, so the streams and sources
+             * already applied are not applied twice.
+             */
+            if (!ngx_media_graph_owns(&stream->application, &stream->name)) {
+                ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                              "media: desired: destination %V belongs to "
+                              "%V/%V, which worker %ui does not drive",
+                              &value, &stream->application, &stream->name,
+                              (ngx_uint_t) ngx_worker);
+                return NGX_DECLINED;
             }
 
             type = 0;
@@ -2316,6 +2434,7 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
     ngx_media_feed_conf_t  feed_conf;
     u_char                *p, *stop;
     ngx_uint_t             applied = 0, created = 0;
+    ngx_int_t              rc;
 
     if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
         *last = ngx_snprintf(*last, end - *last,
@@ -2399,13 +2518,38 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
 
         applied++;
 
-        if (ngx_media_api_desired_children(r, stream, &item, &created)
-            != NGX_OK)
-        {
+        rc = ngx_media_api_desired_children(r, stream, &item, &created);
+
+        if (rc == NGX_DECLINED) {
+            /*
+             * The document asks for an output that only the stream's owner can
+             * start; the rest of it was applied, and applying it again there
+             * is idempotent.
+             */
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"destination_needs_owner\","
+                                 "\"owner\":%ui,\"stream\":\"%V/%V\"}",
+                                 ngx_media_route_owner(
+                                     (ngx_cycle_t *) ngx_cycle,
+                                     ngx_media_owner_hash(
+                                         &stream->application, &stream->name)),
+                                 &stream->application, &stream->name);
+            return NGX_HTTP_CONFLICT;
+        }
+
+        if (rc != NGX_OK) {
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"child_apply_failed\"}");
             return NGX_HTTP_BAD_REQUEST;
         }
+
+        /*
+         * A replay is how a controller heals a deployment, so it replicates
+         * like any other mutation: every worker ends up holding the same
+         * document, whether this worker created the stream or re-used one it
+         * already had.
+         */
+        (void) ngx_media_graph_stream_set(stream);
     }
 
     *last = ngx_snprintf(*last, end - *last,
@@ -2413,6 +2557,31 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
                          applied, created);
 
     return NGX_HTTP_OK;
+}
+
+/*
+ * A graph mutation can be applied on any worker, but the program it describes
+ * is driven by exactly one.  A manual switch acts on the running program, so a
+ * worker that is not its owner refuses it and names the owner, instead of
+ * accepting it and moving a copy of the graph that nothing watches.
+ */
+static ngx_int_t
+ngx_media_api_not_owner(ngx_media_stream_t *stream, u_char **last, u_char *end)
+{
+    ngx_uint_t  owner;
+
+    if (ngx_media_graph_owns(&stream->application, &stream->name)) {
+        return 0;
+    }
+
+    owner = ngx_media_route_owner((ngx_cycle_t *) ngx_cycle,
+                                  ngx_media_owner_hash(&stream->application,
+                                                       &stream->name));
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "{\"error\":\"not_owner\",\"owner\":%ui}", owner);
+
+    return 1;
 }
 
 static ngx_int_t
@@ -2574,6 +2743,10 @@ ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
             return NGX_HTTP_BAD_REQUEST;
         }
 
+        if (ngx_media_api_not_owner(stream, last, end)) {
+            return NGX_HTTP_CONFLICT;
+        }
+
         source = ngx_media_stream_source_find(stream, &source_id);
 
         if (source == NULL) {
@@ -2621,6 +2794,10 @@ ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"method_not_allowed\"}");
             return NGX_HTTP_NOT_ALLOWED;
+        }
+
+        if (ngx_media_api_not_owner(stream, last, end)) {
+            return NGX_HTTP_CONFLICT;
         }
 
         rc = ngx_media_selector_switchback(stream, ngx_current_msec);

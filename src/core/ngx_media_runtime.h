@@ -32,6 +32,27 @@ ngx_int_t ngx_media_runtime_init(ngx_cycle_t *cycle, ngx_log_t *log);
 ngx_media_owner_dir_t *ngx_media_runtime_owner_dir(void);
 
 /*
+ * Where a stream's program progress is true from this worker's point of view.
+ *
+ * The graph is replicated, but the program is not: one worker drives a stream,
+ * and only on that worker do the generation and the frame count describe the
+ * media that was actually carried.  A read that lands on a replica reports the
+ * numbers the owner published in the shared directory (goal doc 22) instead of
+ * its own empty ones, and says which worker they came from - so "how far has
+ * this program got" has one answer, whichever worker answers the request.
+ */
+typedef struct {
+    ngx_uint_t  owner;          /* the worker that drives the program */
+    ngx_uint_t  local;          /* 1 when the numbers are this worker's */
+    uint64_t    generation;
+    uint64_t    frames;
+} ngx_media_runtime_progress_t;
+
+void ngx_media_runtime_progress(const ngx_str_t *application,
+    const ngx_str_t *name, uint64_t local_generation, uint64_t local_frames,
+    ngx_media_runtime_progress_t *out);
+
+/*
  * Ownership, claimed rather than hashed.
  *
  * A worker that creates a stream through the control API owns it, and says

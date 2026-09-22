@@ -151,7 +151,7 @@ NETEM_B2_DOWN="delay 45ms loss 1%"
 # the rate above, which the viewer's fetch time is checked against
 V_RATE_BPS=1000000
 
-STREAMID='%23!::r%3Dlive%2Fnetns%2Cm%3Dpublish%2Cs%3D'
+STREAMID='#!::r=live/netns,m=publish,s='
 API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
 
 # The bonded publisher of phase 5.  Its stream id is handed to libsrt

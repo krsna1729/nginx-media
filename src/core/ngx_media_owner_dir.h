@@ -47,6 +47,15 @@ void ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint32_t hash,
 ngx_uint_t ngx_media_owner_dir_slot(ngx_media_owner_dir_t *dir, uint32_t hash,
     ngx_uint_t fallback);
 
+/*
+ * Reads the progress the owner of a stream published: owner slot, generation,
+ * frames and source count.  NGX_OK only while the record is live - an owner
+ * that stopped heartbeating reports as missing, so a reader can tell "the
+ * owner is not reporting" from "the program has carried nothing yet".
+ */
+ngx_int_t ngx_media_owner_dir_observe(ngx_media_owner_dir_t *dir,
+    uint32_t hash, ngx_media_owner_record_t *out);
+
 /* copies up to max records; returns how many were written */
 ngx_uint_t ngx_media_owner_dir_list(ngx_media_owner_dir_t *dir,
     ngx_media_owner_record_t *out, ngx_uint_t max);

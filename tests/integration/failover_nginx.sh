@@ -23,7 +23,7 @@ RUN="$ROOT/.build/failover-nginx"
 SRT_PORT="${FAILOVER_SRT_PORT:-19045}"
 HTTP_PORT="${FAILOVER_HTTP_PORT:-18445}"
 API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
-STREAMID='%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3D'
+STREAMID='#!::r=live/news,m=publish,s='
 
 WIDTH_A=320
 WIDTH_B=640

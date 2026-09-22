@@ -202,7 +202,7 @@ publish() {
         -f lavfi -i "testsrc2=size=320x240:rate=25" \
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -t "$2" -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3D$1" \
+        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/news,m=publish,s=$1" \
         >"$RUN/pub-$1.log" 2>&1 &
     echo $!
 }
@@ -233,7 +233,7 @@ timeout 40 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -t 12 -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3Dencoder-a" \
+    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/news,m=publish,s=encoder-a" \
     >"$RUN/pub.log" 2>&1 &
 PUB=$!
 

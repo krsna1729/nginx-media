@@ -102,11 +102,20 @@ FROM build AS test
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# ffmpeg is the publisher the suite drives, iproute2 is what the namespace
-# topology uses, and the rest is what the scripts assume is present.
+# Everything the suite reaches for:
+#
+#   ffmpeg    the publisher it drives
+#   iproute2  the namespace topology
+#   python3   hls-push, multi-worker and fault drive their sinks with it
+#   openssl   hls-pull and rtmps generate certificates
+#
+# The list is the suite's requirements, not a guess: a missing tool shows up
+# as "command not found" in one target and a green run in all the others,
+# which reads like a bug in the target rather than a gap in the image.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ffmpeg iproute2 procps ca-certificates curl \
+        ffmpeg iproute2 procps python3 openssl \
+        ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 # The suite drives the nginx this stage builds, and it looks for it under
@@ -119,6 +128,18 @@ RUN bash /src/scripts/build-nginx.sh
 COPY Makefile /src/Makefile
 COPY tests /src/tests
 COPY container /src/container
+
+# The suite runs as an ordinary user, and that is not cosmetic.  When the
+# master runs as root, nginx setuids its workers to the configure-time
+# default - nobody - and those workers cannot write the tree the suite
+# creates, so the HLS segmenter fails every write and the playlist never
+# appears.  As a normal user the master cannot setuid at all and the workers
+# run as that user, which is what happens on a developer's machine and on the
+# runner.  The suite's environment should match those, not differ from them.
+RUN useradd --create-home --uid 1000 builder \
+    && chown -R builder:builder /src
+
+USER builder
 
 WORKDIR /src
 

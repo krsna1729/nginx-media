@@ -1,5 +1,6 @@
 #include "ngx_media_runtime.h"
 #include "ngx_media_file.h"
+#include "ngx_media_graph.h"
 #include "ngx_media_hls_ingest.h"
 #include "ngx_media_hls_pull.h"
 #include "ngx_media_hls_push.h"
@@ -515,6 +516,16 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
     (void) ctx;
     (void) hash;
 
+    /*
+     * A graph operation is desired state, not media: it belongs to this
+     * worker's registry and needs no program of its own.  Applying it here
+     * keeps the control plane on the same transport as the routing escape
+     * hatch, with the same encoder, framing and bounds.
+     */
+    if (header->type == NGX_MEDIA_IPC_MSG_GRAPH) {
+        return ngx_media_graph_apply(header, payload);
+    }
+
     registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
 
     if (registry == NULL) {
@@ -632,6 +643,16 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
             (void) ngx_media_owner_dir_claim(ngx_media_runtime_owners, hash,
                                              (ngx_uint_t) ngx_worker);
         }
+
+        /*
+         * A publisher creates its stream here, on the owner, not through the
+         * API - so the other workers hear about it the way they hear about any
+         * other mutation: a replica of the graph, carrying the source as
+         * desired state.  Without this the stream a publisher is feeding would
+         * be invisible to a control request that landed elsewhere.
+         */
+        (void) ngx_media_graph_stream_set(stream);
+        (void) ngx_media_graph_source_set(stream, source, NULL, NULL);
 
         ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
                       "media: routed source opened stream=%V/%V source=%V",
@@ -753,9 +774,21 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
             if (ngx_media_runtime_routed[i].used
                 && ngx_media_runtime_routed[i].hash == hash)
             {
-                ngx_media_stream_source_remove(
-                    ngx_media_runtime_routed[i].stream,
-                    ngx_media_runtime_routed[i].source);
+                ngx_media_stream_t  *gone_stream =
+                    ngx_media_runtime_routed[i].stream;
+                ngx_media_source_t  *gone_source =
+                    ngx_media_runtime_routed[i].source;
+
+                ngx_media_stream_source_remove(gone_stream, gone_source);
+
+                /*
+                 * The replicas drop the same source: the publisher that
+                 * created it is gone, and a replica that kept it would answer
+                 * with a source nothing feeds.
+                 */
+                (void) ngx_media_graph_source_delete(gone_stream,
+                                                     &gone_source->id,
+                                                     gone_stream->revision);
 
                 ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
 
@@ -1029,6 +1062,59 @@ ngx_media_runtime_release(const ngx_str_t *application, const ngx_str_t *name)
     ngx_media_owner_dir_release(ngx_media_runtime_owners, hash,
                                 (ngx_uint_t) ngx_worker);
 }
+
+void
+ngx_media_runtime_progress(const ngx_str_t *application, const ngx_str_t *name,
+    uint64_t local_generation, uint64_t local_frames,
+    ngx_media_runtime_progress_t *out)
+{
+    ngx_media_owner_record_t  record;
+    uint32_t                  hash;
+    ngx_uint_t                owner;
+
+    if (out == NULL) {
+        return;
+    }
+
+    out->owner = (ngx_uint_t) ngx_worker;
+    out->local = 1;
+    out->generation = local_generation;
+    out->frames = local_frames;
+
+    if (ngx_media_runtime_owners == NULL || application == NULL
+        || name == NULL)
+    {
+        return;
+    }
+
+    hash = ngx_media_owner_hash(application, name);
+    owner = ngx_media_route_owner((ngx_cycle_t *) ngx_cycle, hash);
+
+    out->owner = owner;
+
+    if (owner == (ngx_uint_t) ngx_worker) {
+        /* this worker drives the program: its own numbers are the answer */
+        return;
+    }
+
+    /*
+     * A replica does not invent progress.  It reports what the owner
+     * published, and when the owner is not reporting - never claimed, dead, or
+     * past its heartbeat - it says so by reporting nothing rather than the
+     * zeros of a program that is running somewhere else.
+     */
+    out->local = 0;
+    out->generation = 0;
+    out->frames = 0;
+
+    if (ngx_media_owner_dir_observe(ngx_media_runtime_owners, hash, &record)
+        == NGX_OK)
+    {
+        out->generation = record.generation;
+        out->frames = record.frames;
+    }
+}
+
 static ngx_msec_t                 ngx_media_runtime_last_tick;
 
 void

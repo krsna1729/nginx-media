@@ -76,7 +76,7 @@ publish() {
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t "$seconds" -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=%23!::r%3Dlive%2Ffault%2Cm%3Dpublish%2Cs%3D$source" \
+        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/fault,m=publish,s=$source" \
         >>"$RUN/pub-$source.log" 2>&1 &
 
     pid=$!
@@ -108,7 +108,7 @@ except (BrokenPipeError, ValueError):
 ' \
     | ffmpeg -hide_banner -loglevel error -f mpegts -i pipe:0 -c copy \
         -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=%23!::r%3Dlive%2Ffault%2Cm%3Dpublish%2Cs%3Dencoder-a" \
+        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/fault,m=publish,s=encoder-a" \
         >>"$RUN/pub-corrupt.log" 2>&1 &
 }
 
@@ -191,7 +191,7 @@ echo "== stop"
 [ "$PUB_B" != "0" ] && kill -KILL "$PUB_B" 2>/dev/null || true
 PUB_A=0
 PUB_B=0
-pkill -KILL -f "mode=caller&streamid=%23!::r%3Dlive%2Ffault" 2>/dev/null || true
+pkill -KILL -f "mode=caller&streamid=#!::r=live/fault" 2>/dev/null || true
 
 sleep 1
 

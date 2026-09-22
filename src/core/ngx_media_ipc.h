@@ -35,6 +35,16 @@
 #define NGX_MEDIA_IPC_MSG_EOF        9
 
 /*
+ * A graph operation: one desired-state mutation of the control API, broadcast
+ * to every worker so each holds a replica of the graph.  It travels the same
+ * one-way transport as a routed publisher, but in the other direction: OPEN,
+ * TRACKS and CLOSE carry one stream's media to its owner, this carries the
+ * shape of the graph to everyone.  The payload is the operation (see
+ * ngx_media_graph.h), not media.
+ */
+#define NGX_MEDIA_IPC_MSG_GRAPH      10
+
+/*
  * The largest single datagram, header included.  A SOCK_SEQPACKET datagram is
  * delivered atomically: a receiver that offers a smaller buffer gets a
  * truncated one, so both sides use this exact bound and a payload chunk leaves

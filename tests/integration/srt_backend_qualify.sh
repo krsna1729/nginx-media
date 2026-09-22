@@ -107,7 +107,7 @@ EOF
             -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
             -c:a aac -b:a 96k \
             -t 10 -f mpegts \
-            "srt://127.0.0.1:$in_port?mode=caller&streamid=%23!::r%3Dlive%2Fqualify%2Cm%3Dpublish%2Cs%3Dencoder-a" \
+            "srt://127.0.0.1:$in_port?mode=caller&streamid=#!::r=live/qualify,m=publish,s=encoder-a" \
             >"$RUN/a/pub.log" 2>&1 &
         PUB=$!
 

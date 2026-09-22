@@ -24,7 +24,7 @@ RUN="$ROOT/.build/hls-nginx"
 SRT_PORT="${HLS_SRT_PORT:-19046}"
 HTTP_PORT="${HLS_HTTP_PORT:-18446}"
 API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
-STREAMID='%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3D'
+STREAMID='#!::r=live/news,m=publish,s='
 PUB_A=0
 PUB_B=0
 PUB_PID=0

@@ -118,7 +118,7 @@ timeout 60 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -t 30 -f mpegts \
-    "srt://127.0.0.1:$PULL_SRT?mode=caller&streamid=%23!::r%3Dlive%2Frelay%2Cm%3Dpublish%2Cs%3Dlive-encoder" \
+    "srt://127.0.0.1:$PULL_SRT?mode=caller&streamid=#!::r=live/relay,m=publish,s=live-encoder" \
     >"$RUN/pub-live.log" 2>&1 &
 PUB=$!
 
@@ -132,7 +132,7 @@ timeout 180 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=640x360:rate=25" \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -t 120 -f mpegts \
-    "srt://127.0.0.1:$ORIGIN_SRT?mode=caller&streamid=%23!::r%3Dlive%2Forigin%2Cm%3Dpublish%2Cs%3Dorigin-encoder" \
+    "srt://127.0.0.1:$ORIGIN_SRT?mode=caller&streamid=#!::r=live/origin,m=publish,s=origin-encoder" \
     >"$RUN/pub-origin.log" 2>&1 &
 ORIGIN_PUB=$!
 
