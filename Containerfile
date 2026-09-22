@@ -64,7 +64,12 @@
 # core does not decode, and an image that carries a decoder invites a
 # deployment that uses one.
 
-FROM debian:trixie AS build
+# The base is an argument so CI can run the same suite against a different
+# Debian without editing this file: trixie is the shipped image, sid is the
+# canary for the newest libraries.
+ARG BASE=debian:trixie
+
+FROM ${BASE} AS build
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -121,7 +126,7 @@ WORKDIR /src
 CMD ["make", "unit"]
 
 
-FROM debian:trixie AS runtime
+FROM ${BASE} AS runtime
 
 # Provenance, in the OCI standard labels rather than in a tag per build.  A
 # tag per commit is a tag explosion that gets worse the longer the project

@@ -1,22 +1,33 @@
 name: ci
 
-# Pull requests and pushes to master: build the module against the pinned
-# nginx, run the unit tests, then the integration targets that cover the
-# ingest, output and HLS paths end to end.
+# Three environments, because the libraries the media path depends on differ
+# enough between them to matter:
+#
+#   ubuntu    the runner itself: Ubuntu 24.04, libsrt 1.5.3, ffmpeg 6.1.1
+#   debian    the image's own base: Debian trixie, libsrt 1.5.4, ffmpeg 7.1.5
+#   sid       the canary: Debian sid, libsrt 1.5.7, ffmpeg 9
+#
+# The stream id bug that made this suite fail on every CI run was exactly an
+# environment difference - ffmpeg 6.1.1 passes the stream id percent-encoded
+# where later ffmpeg decodes it first - so one environment is not coverage.
+#
+# The container jobs run the same `make` targets as the runner does, through
+# the Containerfile's test stage, so a failure there reproduces locally with
+# `make test-in-container` instead of needing a runner to investigate.
 
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
+  ubuntu:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +38,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config \
             libpcre2-dev zlib1g-dev libssl-dev \
-            ffmpeg libsrt-openssl-dev
+            ffmpeg libsrt-openssl-dev iproute2
 
       - name: Cache the pinned nginx source
         uses: actions/cache@v4
@@ -40,6 +51,9 @@ jobs:
 
       - name: Unit tests
         run: make unit
+
+      - name: Concurrency suites under ThreadSanitizer
+        run: make -C tests/unit tsan
 
       - name: Integration - ingest and demux
         run: |
@@ -68,10 +82,68 @@ jobs:
           make rtmp-hevc
           make rtmps
 
+      - name: Integration - churn, soak and fault injection
+        run: |
+          make churn
+          make multi-worker
+          make soak
+          make fault
+
+      # Namespaces need privileges a container should not be given, so this
+      # is the one target that only runs here.
+      - name: Integration - namespace topology and netem
+        run: make netns
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: ci-logs
+          path: .build/**/logs/error.log
+          if-no-files-found: ignore
+
+  debian:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the test image
+        run: make test-image
+
+      - name: The integration suite, in the shipped image's environment
+        run: make test-in-container
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-debian
+          path: .build/**/logs/error.log
+          if-no-files-found: ignore
+
+  # The newest libraries, so a change upstream is seen here rather than in a
+  # deployment.  Not allowed to fail the run: sid moves, and a red run that
+  # turns out to be sid's churn teaches nothing.
+  sid:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the test image on sid
+        run: make test-image TEST_IMAGE=nginx-media:test-sid DOCKER="docker" BASE=debian:sid
+
+      - name: The integration suite on sid
+        run: make test-in-container TEST_IMAGE=nginx-media:test-sid
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs-sid
           path: .build/**/logs/error.log
           if-no-files-found: ignore

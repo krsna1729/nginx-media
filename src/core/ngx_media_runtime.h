@@ -31,6 +31,24 @@ ngx_int_t ngx_media_runtime_init(ngx_cycle_t *cycle, ngx_log_t *log);
 /* the shared owner directory of this worker, or NULL before init */
 ngx_media_owner_dir_t *ngx_media_runtime_owner_dir(void);
 
+/*
+ * Ownership, claimed rather than hashed.
+ *
+ * A worker that creates a stream through the control API owns it, and says
+ * so in the shared directory.  Without this the owner is whatever the hash
+ * picks, which is a different worker from the one that answered the request -
+ * and since only the owner drives a program, the program is driven by nobody
+ * and carries no media at all.  Measured with two workers: zero frames.
+ *
+ * The routed-publisher path already claims the same way when a publisher
+ * arrives, so this is the same mechanism applied at the other entry point
+ * rather than a second one.
+ */
+void ngx_media_runtime_claim(const ngx_str_t *application,
+    const ngx_str_t *name);
+void ngx_media_runtime_release(const ngx_str_t *application,
+    const ngx_str_t *name);
+
 /* idempotent: arms the runtime timer in this worker, 1 when it did */
 ngx_uint_t ngx_media_runtime_arm(ngx_cycle_t *cycle, ngx_log_t *log);
 void ngx_media_runtime_stop(void);

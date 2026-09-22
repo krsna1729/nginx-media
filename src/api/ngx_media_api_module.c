@@ -923,6 +923,15 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
     stream = ngx_media_registry_stream_create(registry, &application, &name,
                                               &feed_conf, r->connection->log);
 
+    /*
+     * The worker that creates a stream owns it.  Only the owner drives a
+     * program, so without this the stream exists on one worker and is driven
+     * by none, and the control API can build a graph that carries no media.
+     */
+    if (stream != NULL) {
+        ngx_media_runtime_claim(&application, &name);
+    }
+
     if (stream == NULL) {
         *last = ngx_snprintf(*last, end - *last,
                              "{\"error\":\"stream_create_failed\"}");
@@ -979,6 +988,8 @@ ngx_media_api_stream_delete(ngx_http_request_t *r,
             return NGX_HTTP_CONFLICT;
         }
     }
+
+    ngx_media_runtime_release(&stream->application, &stream->name);
 
     if (ngx_media_registry_stream_destroy(registry, stream) != NGX_OK) {
         *last = ngx_snprintf(*last, end - *last,

@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
+.PHONY: unit nginx smoke bench-worker-scaling test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -91,13 +91,17 @@ netns:
 # runs on the host, and on the CI runner, where namespaces are ordinary.
 DOCKER ?= $(shell docker info >/dev/null 2>&1 && echo docker || echo "sudo -n docker")
 TEST_IMAGE ?= nginx-media:test
+# The base the image and its test stage are built on.  sid is the canary for
+# the newest libraries; trixie is what ships.
+BASE ?= debian:trixie
 TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
     hls-profile file-source churn rtmp rtmp-hevc rtmps srt-output \
     srt-crypto multi-worker soak fault
 
 test-image:
-	$(DOCKER) build -f Containerfile --target test -t $(TEST_IMAGE) .
+	$(DOCKER) build -f Containerfile --target test --build-arg BASE=$(BASE) \
+	    -t $(TEST_IMAGE) .
 
 test-in-container: test-image
 	$(DOCKER) run --rm $(TEST_IMAGE) make $(TEST_TARGETS)
@@ -116,6 +120,11 @@ bench-push-fanout:
 
 bench-fanout-delay:
 	tests/bench/fanout_delay.sh
+
+# What more workers buy, and what they do not: the API is per-worker state,
+# and one program's fanout is owned by one worker.
+bench-worker-scaling:
+	tests/bench/worker_scaling.sh
 
 srt-qualify:
 	MEDIA_SRT_BACKEND=both $(MAKE) nginx
