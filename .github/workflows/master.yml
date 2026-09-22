@@ -18,8 +18,23 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
 
+    permissions:
+      contents: read
+      actions: write
+
     steps:
       - uses: actions/checkout@v4
+
+      - name: Take ownership of the apt archive dir
+        run: sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+
+      - name: Cache apt archives
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-
 
       - name: Install dependencies
         run: |

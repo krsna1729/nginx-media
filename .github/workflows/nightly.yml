@@ -11,13 +11,33 @@ on:
     - cron: "23 3 * * *"
   workflow_dispatch:
 
+concurrency:
+  # One night, one run: a second trigger waits rather than doubling a soak.
+  group: nightly
+  cancel-in-progress: false
+
 jobs:
   sanitizers-and-soak:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
+    permissions:
+      contents: read
+      actions: write
+
     steps:
       - uses: actions/checkout@v4
+
+      - name: Take ownership of the apt archive dir
+        run: sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+
+      - name: Cache apt archives
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-
 
       - name: Install dependencies
         run: |

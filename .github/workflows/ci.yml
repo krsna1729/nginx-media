@@ -29,8 +29,30 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
+    permissions:
+      contents: read
+      # actions/cache restores with read and saves with write.
+      actions: write
+
     steps:
       - uses: actions/checkout@v4
+
+      - name: Take ownership of the apt archive dir
+        # actions/cache restores as the runner user, and the archive dir is
+        # root-owned.  Without this the restore fails and every run pays for
+        # a cold apt.
+        run: sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+
+      - name: Cache apt archives
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          # The package list lives in the Install step below, so any edit to
+          # a workflow rotates the key.  A stale .deb shares its versioned
+          # filename with the index and is ignored, never installed.
+          key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-
 
       - name: Install dependencies
         run: |
@@ -106,6 +128,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
+    permissions:
+      contents: read
+      # the BuildKit GHA cache backend reads and writes through the token.
+      actions: write
+
+    env:
+      # Layer caching for the test image.  Reads hit on every run; writes
+      # happen only on main, so a pull request can never poison the cache
+      # the next run builds on.
+      DOCKER_CACHE_ARGS: ${{ github.ref == 'refs/heads/main' && '--cache-from type=gha --cache-to type=gha,mode=max' || '--cache-from type=gha' }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -130,6 +163,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     continue-on-error: true
+
+    permissions:
+      contents: read
+      actions: write
+
+    env:
+      DOCKER_CACHE_ARGS: ${{ github.ref == 'refs/heads/main' && '--cache-from type=gha --cache-to type=gha,mode=max' || '--cache-from type=gha' }}
 
     steps:
       - uses: actions/checkout@v4

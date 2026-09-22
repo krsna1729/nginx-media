@@ -94,6 +94,11 @@ netns:
 # runs on the host, and on the CI runner, where namespaces are ordinary.
 DOCKER ?= $(shell docker info >/dev/null 2>&1 && echo docker || echo "sudo -n docker")
 TEST_IMAGE ?= nginx-media:test
+# Extra flags for the image build, empty for a local run.  CI sets
+# DOCKER_CACHE_ARGS to the BuildKit GHA cache backend (--cache-from/--cache-to
+# type=gha), which only exists where ACTIONS_RUNTIME_TOKEN does; passing those
+# flags locally would fail, so they stay out of the default.
+DOCKER_CACHE_ARGS ?=
 # The base the image and its test stage are built on.  sid is the canary for
 # the newest libraries; trixie is what ships.
 BASE ?= debian:trixie
@@ -105,7 +110,7 @@ TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
 
 test-image:
 	$(DOCKER) build -f Containerfile --target test --build-arg BASE=$(BASE) \
-	    -t $(TEST_IMAGE) .
+	    -t $(TEST_IMAGE) $(DOCKER_CACHE_ARGS) .
 
 test-in-container: test-image
 	$(DOCKER) run --rm $(TEST_IMAGE) make $(TEST_TARGETS)
