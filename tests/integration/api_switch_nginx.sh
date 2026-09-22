@@ -34,6 +34,16 @@ fi
 rm -rf "$RUN"
 mkdir -p "$RUN/logs" "$RUN/conf" "$RUN/html" "$RUN/hls"
 
+# The playlist and the segments are written by the worker, and this script may
+# run as root - inside the test container it does - where nginx drops its
+# workers to the user it was compiled with, `nobody`.  `nobody` cannot write a
+# tree this script owns, and the segmenter counts a segment it could not write
+# rather than failing loudly, so the whole HLS output stays empty and the test
+# sees no playlist at all.  The image states the worker user and chowns its
+# writable directories to match; the portable equivalent here is to leave the
+# runtime tree writable by whichever user the worker turns out to be.
+chmod -R a+rwX "$RUN"
+
 cat > "$RUN/conf/nginx.conf" <<EOF
 worker_processes 1;
 daemon on;
@@ -145,7 +155,18 @@ wait_for_writers_drained() {
 }
 
 discontinuities() {
-    grep -c '^#EXT-X-DISCONTINUITY$' "$RUN/hls/index.m3u8" 2>/dev/null || true
+    local file="$RUN/hls/index.m3u8"
+
+    # The playlist only appears once the first segment closes, and that can be
+    # after this count is first taken.  `grep -c` on a file that is not there
+    # prints nothing at all, which is not a number any caller can compare - and
+    # a count of zero is what a playlist that does not exist yet means.
+    if [ ! -f "$file" ]; then
+        printf '0'
+        return
+    fi
+
+    grep -c '^#EXT-X-DISCONTINUITY$' "$file" || true
 }
 
 # the first segment of the newest generation: the one that follows the last
@@ -214,7 +235,13 @@ close_phase() {
     # own resolution into this segment.  The playlist only carries the segment
     # once it is closed, so this doubles as waiting for the switch to be
     # announced.
-    segment="$(wait_for_new_generation_segment "$PHASE_DISC0")"
+    #
+    # The wait runs in a subshell, so its own exit only ends that subshell:
+    # without this `||` the phase carries on with an empty segment name and
+    # reports a second failure - the generation check below - for whatever
+    # happened to the stream while it was waiting, which buries the one failure
+    # that says what actually went wrong.
+    segment="$(wait_for_new_generation_segment "$PHASE_DISC0")" || exit 1
 
     gen="$(stream_field generation)"
     switches="$(stream_field switches)"

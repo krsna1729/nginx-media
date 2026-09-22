@@ -339,11 +339,6 @@ ngx_media_runtime_outputs_drain(ngx_media_runtime_outputs_t *out,
                                             stream->active->tracks) == NGX_OK)
             {
                 out->tracks = stream->active->tracks;
-
-            } else {
-                ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                              "media: DBG set_tracks FAILED tracks=%ui",
-                              stream->active->tracks->count);
             }
         }
 
@@ -380,19 +375,6 @@ ngx_media_runtime_outputs_drain(ngx_media_runtime_outputs_t *out,
         }
 
         ngx_media_feed_release(frames, count);
-
-        ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                      "media: DBG drain count=%ui out_frames=%uL "
-                      "tracks_ready=%ui mux_packets=%uL mux_bytes=%uL "
-                      "bursts=%uL slices=%ui bsize=%uz psi=%uz drops=%uL "
-                      "hls_started=%ui hls_segments=%ui hls_dropped=%uL "
-                      "hls_errors=%uL",
-                      count, out->frames, out->mux.tracks_ready,
-                      out->mux.packets, out->mux.bytes, out->mux.bursts,
-                      out->burst.nslices, ngx_media_ts_burst_size(&out->burst),
-                      out->burst.psi_len, out->mux.frame_drops,
-                      out->hls.started, out->hls.nsegments,
-                      out->hls.dropped_frames, out->hls.errors);
 
         ngx_media_runtime_outputs_flush(out);
     }
