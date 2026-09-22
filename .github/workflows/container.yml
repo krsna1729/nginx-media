@@ -110,13 +110,23 @@ jobs:
         run: |
           IMAGE="ghcr.io/${{ github.repository }}"
 
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            # A release publishes its version and nothing else.  latest is not
-            # touched here on purpose - it belongs to main.
-            TAG="${GITHUB_REF_NAME#v}"
-          else
-            TAG="latest"
-          fi
+          # Derived from the ref rather than from github.ref_type, and with no
+          # default branch: a tag publishes its version, main publishes latest,
+          # and anything else stops the run.  The dangerous shape here is a
+          # fallback to latest, because that is how a release would silently
+          # overwrite the tag that belongs to main.
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              TAG="${GITHUB_REF_NAME#v}"
+              ;;
+            refs/heads/main)
+              TAG="latest"
+              ;;
+            *)
+              echo "nothing to publish for $GITHUB_REF" >&2
+              exit 1
+              ;;
+          esac
 
           echo "publishing $GITHUB_SHA as $IMAGE:$TAG"
 
