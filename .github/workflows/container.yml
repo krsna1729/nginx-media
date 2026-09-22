@@ -43,8 +43,14 @@ on:
 # Pull request builds cancel each other; publishes queue.  Cancelling a run
 # mid-push leaves a half-written tag, which is worse than waiting a minute for
 # the one ahead of it.
+#
+# The event name is in the group because GitHub allows only one *pending* run
+# per group, and a new run replaces a pending one regardless of
+# cancel-in-progress.  Without it, dispatching a prune while a publish was
+# queued cancelled the publish - observed, not theorised.  A prune now waits
+# in its own group and cannot displace a publish.
 concurrency:
-  group: container-${{ github.ref }}
+  group: container-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
