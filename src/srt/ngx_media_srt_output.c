@@ -63,7 +63,15 @@ struct ngx_media_srt_outputs_s {
 
     ngx_media_srt_out_event_t *events;
     ngx_uint_t                events_capacity;
-    ngx_uint_t                stopping;
+    /*
+     * Read by every sender thread on each pass and written by stop, which
+     * runs on the event loop.  A plain integer here is a data race, and the
+     * consequence is not theoretical: a sender that misses the write keeps
+     * walking the table after stop has joined it and freed everything it was
+     * reading.  ThreadSanitizer reports it the moment the file is built into
+     * the unit suite.
+     */
+    ngx_atomic_t              stopping;
     uint64_t                  events_head;
     uint64_t                  events_tail;
     pthread_mutex_t           events_mutex;
@@ -184,7 +192,7 @@ ngx_media_srt_out_thread(void *data)
 
     for ( ;; ) {
 
-        if (outs->stopping) {
+        if (ngx_atomic_fetch_add(&outs->stopping, 0) != 0) {
             return NULL;
         }
 
@@ -197,11 +205,19 @@ ngx_media_srt_out_thread(void *data)
              * about whether the pool should live.  Only outs->stopping ends
              * a sender.
              */
+            /*
+             * The lock is taken before the slot is inspected, not after:
+             * `used` is written under this mutex by add, and reading it
+             * outside is a data race even though the consequence is only a
+             * pass that skips a slot it would have served.  ThreadSanitizer
+             * reports it, and a race is a race.
+             */
+            (void) pthread_mutex_lock(&dest->mutex);
+
             if (!dest->used) {
+                (void) pthread_mutex_unlock(&dest->mutex);
                 continue;
             }
-
-            (void) pthread_mutex_lock(&dest->mutex);
 
             if (!dest->running || dest->sending) {
                 (void) pthread_mutex_unlock(&dest->mutex);
@@ -641,7 +657,7 @@ ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
         return;
     }
 
-    outs->stopping = 1;
+    (void) ngx_atomic_fetch_add(&outs->stopping, 1);
 
     for (i = 0; i < NGX_MEDIA_SRT_MAX_OUTPUTS; i++) {
         ngx_media_srt_output_t  *dest = &outs->destinations[i];

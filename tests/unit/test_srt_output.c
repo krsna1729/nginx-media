@@ -386,8 +386,18 @@ test_shared_sender_pool(void)
     ngx_media_srt_outputs_stop(outs);
     ngx_media_srt_listen_close(listener);
 
+    /*
+     * Under ThreadSanitizer this check is skipped rather than weakened: TSan
+     * runs threads of its own, so a kernel task count cannot say whether a
+     * sender survived.  It is not needed there either - if the join did not
+     * happen, the sender keeps walking the table after stop has freed it, and
+     * TSan reports that as a use-after-free, which is a stronger statement
+     * than this count.
+     */
+#ifndef __SANITIZE_THREAD__
     CHECK(thread_count() == base, "stopping joined every sender: %lu -> %lu",
           (unsigned long) after_media, (unsigned long) thread_count());
+#endif
 }
 
 int

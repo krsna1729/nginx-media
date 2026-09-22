@@ -97,6 +97,16 @@ typedef struct {
     ngx_atomic_t                 events_lock;
 
     int                          notify_fd; /* eventfd, worker-owned loop */
+
+    /*
+     * A byte written to notify_fd that the worker has not read yet.  The
+     * ingest thread skips its write while one is pending (the worker drains
+     * both queues when it wakes, so one byte covers everything pushed after
+     * it); the worker clears this before it drains, so a push that races the
+     * drain writes its own byte.  See ngx_media_srt_notify().
+     */
+    ngx_atomic_t                 notified;
+
     ngx_atomic_t                 stop;
 
     /*

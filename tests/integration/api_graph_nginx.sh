@@ -504,6 +504,21 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
     -d '{"id":"doc-src","type":"srt","priority":70}' \
     "$API/streams/live/doc/sources" >/dev/null
 
+# The document carries a destination as well as a source, so replaying it
+# exercises the destination half of the apply path.  A destination is the one
+# child that needs this worker's runtime to exist - its transport is started
+# by the worker that serves the request - so a worker that came up without it
+# is what "the reconcile failed" means.
+STATUS="$(curl -sS -o "$RUN/docdest.json" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d "{\"id\":\"doc-sink\",\"type\":\"srt\",\"host\":\"127.0.0.1\",\"port\":$SINK_PORT}" \
+    "$API/streams/live/doc/destinations")"
+
+cat "$RUN/docdest.json"; echo
+
+[ "$STATUS" = "201" ] \
+    || { echo "the doc destination was not created: $STATUS" >&2; exit 1; }
+
 DESIRED="$(curl -fsS "$API/desired")"
 printf '%s\n' "$DESIRED"
 
@@ -511,6 +526,8 @@ printf '%s' "$DESIRED" | grep -q '"application":"live","name":"doc"' \
     || { echo "the document does not describe the stream" >&2; exit 1; }
 printf '%s' "$DESIRED" | grep -q '"id":"doc-src"' \
     || { echo "the document does not describe the source" >&2; exit 1; }
+printf '%s' "$DESIRED" | grep -q '"id":"doc-sink"' \
+    || { echo "the document does not describe the destination" >&2; exit 1; }
 
 BEFORE="$(curl -fsS "$API/desired" \
     | grep -o '"id":"[a-z-]*"' | sort | uniq -c | sort -rn | head -1)"
@@ -644,14 +661,36 @@ cat "$RUN/reconcile.json"; echo
 
 [ "$STATUS" = "200" ] || { echo "reconcile failed: $STATUS" >&2; exit 1; }
 
+# the document's stream, source and destination were all mine to create: the
+# graph was empty after the reload, so a child the apply skipped would have to
+# be accounted for here
+CHILDREN="$(grep -o '"children_created":[0-9]*' "$RUN/reconcile.json" | cut -d: -f2)"
+
+[ "$CHILDREN" = "2" ] \
+    || { echo "the reconcile created $CHILDREN children, expected 2" >&2; exit 1; }
+
 curl -fsS "$API/streams" | grep -q '"name":"doc"' \
     || { echo "the document did not restore the stream" >&2; exit 1; }
 
 curl -fsS "$API/streams/live/doc/sources" | grep -q '"id":"doc-src"' \
     || { echo "the document did not restore the source" >&2; exit 1; }
 
-# exactly the document's objects: one stream, one source, and no destination
-# anywhere, because the document names none
+# The destination is the assertion for the class of failure this section
+# exists to catch.  A desired document whose destination is applied is the one
+# child that needs the *serving* worker's destination runtime to exist: the
+# apply calls the transport backend, and a worker that started without it
+# fails the whole document with 400 {"error":"child_apply_failed"} - the log
+# line below is that worker saying its runtime was there.
+curl -fsS "$API/streams/live/doc/destinations" | grep -q '"id":"doc-sink"' \
+    || { echo "the document did not restore the destination" >&2
+         curl -fsS "$API/streams/live/doc/destinations" >&2; exit 1; }
+
+grep -q "$WORKER_AFTER#$WORKER_AFTER:.*srt destination doc-sink started" \
+    "$RUN/logs/error.log" \
+    || { echo "worker $WORKER_AFTER did not start the document's destination" >&2
+         grep 'doc-sink' "$RUN/logs/error.log" >&2; exit 1; }
+
+# exactly the document's objects: one stream, one source, one destination
 STREAMS="$(curl -fsS "$API/streams" | grep -o '"name":"[a-z-]*"' | wc -l)"
 
 [ "$STREAMS" = "1" ] \
@@ -665,8 +704,13 @@ COUNT="$(curl -fsS "$API/desired" | grep -o '"id":"doc-src"' | wc -l)"
 DESTINATIONS="$(curl -fsS "$API/streams/live/doc/destinations" \
     | grep -o '"count":[0-9]*' | cut -d: -f2)"
 
-[ "$DESTINATIONS" = "0" ] \
-    || { echo "the restore created a destination the document does not name" >&2; exit 1; }
+[ "$DESTINATIONS" = "1" ] \
+    || { echo "expected the document's one destination, found $DESTINATIONS" >&2; exit 1; }
+
+DEST_COUNT="$(curl -fsS "$API/desired" | grep -o '"id":"doc-sink"' | wc -l)"
+
+[ "$DEST_COUNT" = "1" ] \
+    || { echo "reconcile duplicated the destination: $DEST_COUNT" >&2; exit 1; }
 
 # a stream the document does not mention stays deleted, and so does its
 # destination: the reconcile restores the document, it does not recreate what
@@ -681,7 +725,7 @@ STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "$API/streams/live/news/destin
 [ "$STATUS" = "404" ] \
     || { echo "a destination absent from the document was resurrected ($STATUS)" >&2; exit 1; }
 
-echo "   restored exactly: one stream, one source, no destination, nothing else"
+echo "   restored exactly: one stream, one source, one destination, nothing else"
 
 echo "== the worker the reload started carries media"
 PLIVE="$(publish encoder-live 12)"

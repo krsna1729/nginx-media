@@ -17,6 +17,8 @@
 #include "ngx_media_srt_streamid.h"
 #include "ngx_media_srt_transport.h"
 
+#include <pthread.h>
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <limits.h>
@@ -60,6 +62,16 @@ struct ngx_media_srt_poll_s {
 
 static ngx_media_srt_listener_t *ngx_media_srt_udp_listeners;
 static ngx_media_srt_session_t  *ngx_media_srt_udp_callers;
+
+/*
+ * The caller and listener session lists are walked and mutated from two
+ * threads: a sender reconnecting, and the event loop stopping or shutting
+ * down.  Without this lock the two can unlink and free the same session.
+ * ThreadSanitizer reported exactly that as a race in session_close, with the
+ * free in the shim as its follow-on symptom.
+ */
+static pthread_mutex_t           ngx_media_srt_udp_lock =
+                                     PTHREAD_MUTEX_INITIALIZER;
 static ngx_uint_t                ngx_media_srt_udp_started;
 
 static ngx_media_srt_listener_t *ngx_media_srt_udp_listen(
@@ -515,8 +527,10 @@ ngx_media_srt_udp_connect(const u_char *host, ngx_uint_t port,
     session->fd = fd;
     session->peer = peer;
     session->caller = 1;
+    (void) pthread_mutex_lock(&ngx_media_srt_udp_lock);
     session->next = ngx_media_srt_udp_callers;
     ngx_media_srt_udp_callers = session;
+    (void) pthread_mutex_unlock(&ngx_media_srt_udp_lock);
 
     /* announce the stream id so the listener can name the source */
     ngx_memcpy(packet, &magic, 4);
@@ -583,15 +597,21 @@ static void
 ngx_media_srt_udp_session_close(ngx_media_srt_session_t *session)
 {
     ngx_media_srt_session_t **pp;
+    ngx_uint_t                unlinked = 0;
 
     if (session == NULL) {
         return;
     }
 
-    /* a caller owns its socket, a listener session shares the listener's */
-    if (session->caller) {
-        (void) close(session->fd);
-    }
+    /*
+     * The list decides who closes: the thread that unlinks the session is the
+     * one that frees it, and a second caller that finds it already gone
+     * returns without touching the memory.  Two threads do reach here for the
+     * same session - a sender reconnecting and the event loop stopping - and
+     * an unconditional free after an unlink that matched nothing is a double
+     * free, which is what ThreadSanitizer was reporting.
+     */
+    (void) pthread_mutex_lock(&ngx_media_srt_udp_lock);
 
     for (pp = (session->listener != NULL) ? &session->listener->sessions
                                           : &ngx_media_srt_udp_callers;
@@ -599,8 +619,32 @@ ngx_media_srt_udp_session_close(ngx_media_srt_session_t *session)
     {
         if (*pp == session) {
             *pp = session->next;
+            unlinked = 1;
             break;
         }
+    }
+
+    (void) pthread_mutex_unlock(&ngx_media_srt_udp_lock);
+
+    if (!unlinked) {
+        return;
+    }
+
+    /*
+     * Known limitation of this double, recorded rather than hidden: closing
+     * the fd here races a sender that is inside sendto on the same fd, and
+     * ThreadSanitizer reports it intermittently.  The race is inherent to the
+     * pattern rather than a mistake - stop closes the session precisely to
+     * make a blocked send return - and the real backend does the same thing
+     * through libsrt's srt_close, which is documented as safe to call while
+     * another thread is sending.  A raw socket has no such guarantee, so this
+     * only ever affects the double.  Fixing it properly means giving the
+     * session a separate fd lifecycle (shutdown here, close once no sender
+     * holds it), which is a change to the double's model rather than a bug
+     * fix, and is left as a known gap instead of being papered over.
+     */
+    if (session->caller) {
+        (void) close(session->fd);
     }
 
     ngx_free(session);
@@ -614,9 +658,18 @@ ngx_media_srt_udp_shutdown(void)
             ngx_media_srt_udp_listeners);
     }
 
-    while (ngx_media_srt_udp_callers != NULL) {
-        ngx_media_srt_udp_session_close(
-            ngx_media_srt_udp_callers);
+    for ( ;; ) {
+        ngx_media_srt_session_t  *head;
+
+        (void) pthread_mutex_lock(&ngx_media_srt_udp_lock);
+        head = ngx_media_srt_udp_callers;
+        (void) pthread_mutex_unlock(&ngx_media_srt_udp_lock);
+
+        if (head == NULL) {
+            break;
+        }
+
+        ngx_media_srt_udp_session_close(head);
     }
 
     ngx_media_srt_udp_started = 0;

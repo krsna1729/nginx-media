@@ -13,6 +13,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NGINX="$ROOT/.build/nginx-install/sbin/nginx"
 RUN="$ROOT/.build/srt-nginx"
 PORT="${SRT_INGEST_NGINX_PORT:-19042}"
+API_PORT="${SRT_INGEST_NGINX_API_PORT:-19048}"
+API="http://127.0.0.1:$API_PORT/media/api/v1"
 LOG="$RUN/logs/error.log"
 
 if [ ! -x "$NGINX" ]; then
@@ -35,10 +37,46 @@ events {
 }
 
 media_srt_listen 127.0.0.1:$PORT;
+
+http {
+    access_log off;
+
+    server {
+        listen 127.0.0.1:$API_PORT;
+
+        location /media/api/ {
+            media_api;
+        }
+    }
+}
 EOF
 
 cleanup() {
-    "$NGINX" -p "$RUN" -c conf/nginx.conf -s quit 2>/dev/null || true
+    # only this script's instance, addressed through its own prefix's pid
+    # file.  A graceful signal is tried first so the master reaps its workers;
+    # a worker stuck in transport teardown must not keep the instance (and the
+    # ports) alive, so what is left is killed outright.  The prefix is unique
+    # to this target, so another agent's nginx is never touched.
+    [ -f "$RUN/logs/nginx.pid" ] || return 0
+
+    pid="$(cat "$RUN/logs/nginx.pid" 2>/dev/null)"
+
+    [ -n "$pid" ] || return 0
+
+    kill -QUIT "$pid" 2>/dev/null
+
+    for _ in $(seq 1 100); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.05
+    done
+
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill -KILL "$child" 2>/dev/null
+    done
+
+    kill -KILL "$pid" 2>/dev/null
+
+    return 0
 }
 trap cleanup EXIT
 
@@ -151,6 +189,143 @@ grep -q 'srt track 1 media=2 codec=3 format=3 rate=48000 channels=2 config=yes' 
     || { echo "AAC audio track not registered correctly" >&2; exit 1; }
 
 echo "== demuxed video=$VIDEO_FRAMES audio=$AUDIO_FRAMES keyframes=$KEYFRAMES"
+
+# A session the worker closes must give its ingest slot back clean, because
+# the slot is reused: alloc takes the first one with no session.  Anything the
+# closed session leaves behind is therefore inherited by the publisher that
+# lands on that slot next, and the failure that inherited state produces is
+# silent - the session is refused at its first poll event, before a byte is
+# read, so the publisher has a connected transport, reads bytes=0 and the
+# worker logs nothing about why.  This is the shape the assertion below
+# catches: remove a source under a live publisher (which is what makes the
+# worker ask for the session's close), then publish again and require the new
+# session to carry media.
+echo "== the slot a worker-closed session frees is reused clean"
+CHURN_SECS=12
+
+timeout "$(( CHURN_SECS + 20 ))" ffmpeg -hide_banner -loglevel error -re \
+    -f lavfi -i testsrc=size=320x240:rate=25 \
+    -f lavfi -i sine=frequency=440:sample_rate=48000 -ac 2 \
+    -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
+    -c:a aac -b:a 96k \
+    -t "$CHURN_SECS" -f mpegts \
+    "srt://127.0.0.1:$PORT?mode=caller&streamid=%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3Dencoder-churn" \
+    >"$RUN/churn.log" 2>&1 &
+CHURN_PID=$!
+
+for _ in $(seq 1 200); do
+    if grep -q 'srt source open app=live stream=news source=encoder-churn' \
+            "$LOG" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+
+grep -q 'srt source open app=live stream=news source=encoder-churn' "$LOG" \
+    || { echo "the churn publisher was not accepted" >&2
+         cat "$RUN/churn.log" >&2; exit 1; }
+
+CLOSES_BEFORE="$(grep -c 'srt source close' "$LOG" || true)"
+
+# ordered teardown: deleting the source closes its transport, so the worker
+# asks the ingest thread to close the session
+curl -fsS -X DELETE "$API/streams/live/news/sources/encoder-churn" >/dev/null
+
+for _ in $(seq 1 200); do
+    if grep -q 'source encoder-churn removed, closing its session' "$LOG"; then
+        break
+    fi
+    sleep 0.1
+done
+
+grep -q 'source encoder-churn removed, closing its session' "$LOG" \
+    || { echo "deleting the source did not close its session" >&2; exit 1; }
+
+# the property only shows on the slot the closed session frees, so the next
+# publisher has to start after that session is gone rather than racing it
+for _ in $(seq 1 200); do
+    if [ "$(grep -c 'srt source close' "$LOG" || true)" \
+         -gt "$CLOSES_BEFORE" ]; then
+        break
+    fi
+    sleep 0.1
+done
+
+[ "$(grep -c 'srt source close' "$LOG" || true)" -gt "$CLOSES_BEFORE" ] \
+    || { echo "the session whose source was removed never closed" >&2; exit 1; }
+
+kill -KILL "$CHURN_PID" 2>/dev/null
+wait "$CHURN_PID" 2>/dev/null || true
+
+# the next publisher is the one that proves the property
+FRESH_SECS=6
+CLOSES_AT_FRESH="$(grep -c 'srt source close' "$LOG" || true)"
+
+timeout "$(( FRESH_SECS + 20 ))" ffmpeg -hide_banner -loglevel error -re \
+    -f lavfi -i testsrc=size=320x240:rate=25 \
+    -f lavfi -i sine=frequency=440:sample_rate=48000 -ac 2 \
+    -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
+    -c:a aac -b:a 96k \
+    -t "$FRESH_SECS" -f mpegts \
+    "srt://127.0.0.1:$PORT?mode=caller&streamid=%23!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3Dencoder-fresh" \
+    >"$RUN/fresh.log" 2>&1 &
+FRESH_PID=$!
+
+# Its own frames have to reach the program.  The stream's program_frames is
+# cumulative and the publisher whose source was removed already contributed to
+# it, so this counts the frames of *this* source: a session that was dropped
+# at its first poll event never feeds the demux, so the source's frames_out
+# stays 0.
+for _ in $(seq 1 250); do
+    if curl -fsS "$API/streams/live/news/sources" 2>/dev/null \
+            | grep -qE '"id":"encoder-fresh"[^}]*"frames_out":[1-9]'; then
+        break
+    fi
+    sleep 0.1
+done
+
+curl -fsS "$API/streams/live/news/sources" \
+    | grep -qE '"id":"encoder-fresh"[^}]*"frames_out":[1-9]' \
+    || { echo "the publisher after the removed source carried no media" >&2
+         curl -fsS "$API/streams/live/news/sources" >&2
+         grep 'source=encoder-fresh' "$LOG" >&2
+         cat "$RUN/fresh.log" >&2; exit 1; }
+
+wait "$FRESH_PID" 2>/dev/null || true
+
+# and its session carried bytes rather than being dropped at bytes=0.  Its
+# close is the one this waits for: reading the last close line while the
+# session is still open would read the *previous* session's.
+for _ in $(seq 1 100); do
+    if [ "$(grep -c 'srt source close' "$LOG" || true)" \
+         -gt "$CLOSES_AT_FRESH" ]; then
+        break
+    fi
+    sleep 0.1
+done
+
+FRESH_CLOSE="$(grep 'srt source close' "$LOG" | tail -1 || true)"
+FRESH_BYTES="$(printf '%s' "$FRESH_CLOSE" | sed -n 's/.*bytes=\([0-9]*\).*/\1/p')"
+
+[ -n "$FRESH_BYTES" ] && [ "$FRESH_BYTES" -gt 0 ] \
+    || { echo "the session after the removed source was dropped: '$FRESH_CLOSE'" >&2
+         exit 1; }
+
+echo "   the next publisher's session carried bytes=$FRESH_BYTES"
+
+# And every session that opened was closed.  The worker learns about a
+# session from the ingest thread's ring, and a wake-up that is skipped while
+# no byte is pending strands the event: the worker never logs the CLOSE, never
+# frees the slot, and keeps the dead publisher's source registered - one of
+# sixteen slots per stranded event, with nothing in the log to say so.
+OPENS="$(grep -c 'srt source open' "$LOG" || true)"
+CLOSES="$(grep -c 'srt source close' "$LOG" || true)"
+
+[ "$OPENS" = "$CLOSES" ] \
+    || { echo "$OPENS sessions were accepted but $CLOSES closed:" >&2
+         grep 'srt source' "$LOG" >&2; exit 1; }
+
+echo "   every accepted session was closed ($OPENS/$CLOSES)"
 
 echo "== stopping nginx"
 "$NGINX" -p "$RUN" -c conf/nginx.conf -s quit

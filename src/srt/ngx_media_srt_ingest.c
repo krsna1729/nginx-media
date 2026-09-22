@@ -5,11 +5,12 @@
 #include <unistd.h>
 
 /*
- * A readiness byte lands on the eventfd no more than once per millisecond;
- * the worker re-reads both queues until they are empty, so coalescing wakes
- * is safe (goal doc 15: clear and re-check).
+ * The wake-up is one byte on the eventfd, and the worker re-reads both queues
+ * until they are empty (goal doc 15: clear and re-check), so a byte the worker
+ * has not taken yet covers every event pushed after it: no second write is
+ * needed while one is pending.  What a byte may not do is go missing - see
+ * ngx_media_srt_notify().
  */
-#define NGX_MEDIA_SRT_NOTIFY_INTERVAL 1
 
 /*
  * Binding the listener can legitimately fail on a reload: the worker being
@@ -21,13 +22,8 @@
 #define NGX_MEDIA_SRT_LISTEN_RETRY_MS   100
 #define NGX_MEDIA_SRT_LISTEN_WARN_EVERY 50
 
-typedef struct {
-    ngx_media_srt_ingest_t  *ingest;
-    ngx_msec_t               last_notify;
-} ngx_media_srt_notify_t;
-
 static ngx_msec_t ngx_media_srt_now(void);
-static void ngx_media_srt_notify(ngx_media_srt_notify_t *notify);
+static void ngx_media_srt_notify(ngx_media_srt_ingest_t *ingest);
 static ngx_uint_t ngx_media_srt_event_push(ngx_media_srt_ingest_t *ingest,
     const ngx_media_srt_event_t *event);
 static ngx_media_srt_listener_t *ngx_media_srt_thread_listen(
@@ -46,22 +42,40 @@ ngx_media_srt_now(void)
 }
 
 static void
-ngx_media_srt_notify(ngx_media_srt_notify_t *notify)
+ngx_media_srt_notify(ngx_media_srt_ingest_t *ingest)
 {
-    ngx_msec_t  now;
-    uint64_t    one = 1;
-    ssize_t     n;
+    uint64_t  one = 1;
+    ssize_t   n;
 
-    now = ngx_media_srt_now();
-
-    if (now - notify->last_notify < NGX_MEDIA_SRT_NOTIFY_INTERVAL) {
+    /*
+     * A byte the worker has not read yet is a wake-up it has not taken, and
+     * when it takes it, it drains everything queued by then - so a pending
+     * byte covers what is being pushed now and the write can be skipped.
+     *
+     * With nothing pending the write is not optional.  Skipping it to save a
+     * syscall is what stranded an event: the ingest pushes an OPEN or a
+     * CLOSE, finds the rate limit still in force from a push the worker has
+     * already consumed, writes nothing, and no byte is left for the worker to
+     * wake on.  The session's OPEN is then never registered (its media is
+     * read and dropped) or its CLOSE is never seen (its slot is never freed,
+     * and the worker logs nothing either way).
+     *
+     * `notified` is cleared by the worker before it drains, so a push that
+     * races the drain writes its own byte rather than relying on the one
+     * being read at that moment.
+     */
+    if (ingest->notified) {
         return;
     }
 
-    notify->last_notify = now;
+    ingest->notified = 1;
 
-    n = write(notify->ingest->notify_fd, &one, sizeof(one));
-    (void) n;
+    n = write(ingest->notify_fd, &one, sizeof(one));
+
+    if (n != (ssize_t) sizeof(one)) {
+        /* nothing was left pending: the next push has to write again */
+        ingest->notified = 0;
+    }
 }
 
 static ngx_uint_t
@@ -123,15 +137,32 @@ ngx_media_srt_session_state_find(ngx_media_srt_ingest_t *ingest,
 static void
 ngx_media_srt_session_state_release(ngx_media_srt_session_state_t *state)
 {
-    state->session = NULL;
-    state->id = 0;
-    state->bytes = 0;
-    state->chunks = 0;
+    /*
+     * The whole slot goes back to its free state, close_requested included.
+     * A slot that held a session the worker asked to close (the control API
+     * removed its source) kept that request, and alloc hands the slot to the
+     * first publisher that needs one - whose first poll event then took the
+     * close_requested branch in the loop below and finished the session
+     * before a byte was read: accepted, bytes=0, and no line in the log
+     * saying why.  That is why it took a source delete among a few session
+     * churn cycles to show up.
+     */
+    /*
+     * The whole slot goes back to its free state, close_requested included.
+     * A slot that held a session the worker asked to close (the control API
+     * removed its source) kept that request, and alloc hands the slot to the
+     * first publisher that needs one - whose first poll event then took the
+     * close_requested branch in the loop below and finished the session
+     * before a byte was read: accepted, bytes=0, and no line in the log
+     * saying why.  That is why it took a source delete among a few session
+     * churn cycles to show up.
+     */
+    ngx_memzero(state, sizeof(ngx_media_srt_session_state_t));
 }
 
 static void
 ngx_media_srt_session_open(ngx_media_srt_ingest_t *ingest,
-    ngx_media_srt_session_t *session, ngx_media_srt_notify_t *notify)
+    ngx_media_srt_session_t *session)
 {
     ngx_media_srt_event_t         event;
     ngx_media_srt_session_state_t *state;
@@ -168,12 +199,12 @@ ngx_media_srt_session_open(ngx_media_srt_ingest_t *ingest,
 
     (void) ngx_atomic_fetch_add(&ingest->sessions_accepted, 1);
 
-    ngx_media_srt_notify(notify);
+    ngx_media_srt_notify(ingest);
 }
 
 static void
 ngx_media_srt_session_finish(ngx_media_srt_ingest_t *ingest,
-    ngx_media_srt_session_state_t *state, ngx_media_srt_notify_t *notify)
+    ngx_media_srt_session_state_t *state)
 {
     ngx_media_srt_event_t  event;
 
@@ -189,7 +220,7 @@ ngx_media_srt_session_finish(ngx_media_srt_ingest_t *ingest,
 
     ngx_media_srt_session_state_release(state);
 
-    ngx_media_srt_notify(notify);
+    ngx_media_srt_notify(ingest);
 }
 
 /*
@@ -296,7 +327,6 @@ static void *
 ngx_media_srt_thread(void *data)
 {
     ngx_media_srt_ingest_t        *ingest = data;
-    ngx_media_srt_notify_t         notify;
     ngx_media_srt_listener_t      *listener;
     ngx_media_srt_session_t       *session;
     ngx_media_srt_session_state_t *state;
@@ -307,9 +337,6 @@ ngx_media_srt_thread(void *data)
     ngx_uint_t                     i, count;
     ngx_uint_t                     accepting = 1;
     ngx_int_t                      n;
-
-    notify.ingest = ingest;
-    notify.last_notify = 0;
 
     listener = ngx_media_srt_thread_listen(ingest);
 
@@ -334,7 +361,7 @@ ngx_media_srt_thread(void *data)
         (void) ngx_media_srt_event_push(ingest, &event);
         (void) ngx_atomic_fetch_add(&ingest->failed, 1);
 
-        ngx_media_srt_notify(&notify);
+        ngx_media_srt_notify(ingest);
 
         return NULL;
     }
@@ -345,7 +372,7 @@ ngx_media_srt_thread(void *data)
     event.type = NGX_MEDIA_SRT_EVENT_READY;
 
     (void) ngx_media_srt_event_push(ingest, &event);
-    ngx_media_srt_notify(&notify);
+    ngx_media_srt_notify(ingest);
 
     while (!ingest->stop) {
 
@@ -382,6 +409,12 @@ ngx_media_srt_thread(void *data)
         if (ngx_media_srt_poll_wait(poll, 200, events, NGX_MEDIA_SRT_POLL_MAX,
                                     &count) != NGX_OK)
         {
+            if (ingest->log != NULL) {
+                ngx_log_error(NGX_LOG_ERR, ingest->log, 0,
+                              "media: srt ingest poll failed (%s); the "
+                              "listener is stopping", ngx_media_srt_last_error());
+            }
+
             break;
         }
 
@@ -401,11 +434,24 @@ ngx_media_srt_thread(void *data)
                 }
 
                 if (ngx_media_srt_poll_add_session(poll, session) != NGX_OK) {
+                    /*
+                     * The session is closed, so the publisher sees a
+                     * transport that connects and then carries nothing.  Say
+                     * so: without this line the only evidence is on the
+                     * client, and the cause looks like the client's.
+                     */
+                    if (ingest->log != NULL) {
+                        ngx_log_error(NGX_LOG_WARN, ingest->log, 0,
+                                      "media: closing an accepted srt session: "
+                                      "it could not be polled (%s)",
+                                      ngx_media_srt_last_error());
+                    }
+
                     ngx_media_srt_session_close(session);
                     continue;
                 }
 
-                ngx_media_srt_session_open(ingest, session, &notify);
+                ngx_media_srt_session_open(ingest, session);
                 continue;
             }
 
@@ -422,7 +468,7 @@ ngx_media_srt_thread(void *data)
 
             if (state->close_requested) {
                 ngx_media_srt_poll_remove_session(poll, state->session);
-                ngx_media_srt_session_finish(ingest, state, &notify);
+                ngx_media_srt_session_finish(ingest, state);
                 continue;
             }
 
@@ -436,7 +482,7 @@ ngx_media_srt_thread(void *data)
                 state->bytes += (uint64_t) n;
                 state->chunks++;
 
-                ngx_media_srt_notify(&notify);
+                ngx_media_srt_notify(ingest);
                 continue;
             }
 
@@ -446,7 +492,7 @@ ngx_media_srt_thread(void *data)
 
             /* the publisher is gone */
             ngx_media_srt_poll_remove_session(poll, state->session);
-            ngx_media_srt_session_finish(ingest, state, &notify);
+            ngx_media_srt_session_finish(ingest, state);
         }
     }
 

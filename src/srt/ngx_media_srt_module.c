@@ -1583,6 +1583,14 @@ ngx_media_srt_handler(ngx_event_t *ev)
     r = read(ingest->notify_fd, evbuf, sizeof(evbuf));
     (void) r;
 
+    /*
+     * The byte is taken, so a wake-up is no longer outstanding.  This happens
+     * before the drains below, not after: an event pushed while this handler
+     * runs must write a byte of its own, because the drain may already have
+     * passed the point where it was queued.  See ngx_media_srt_notify().
+     */
+    ingest->notified = 0;
+
     force_summary = 0;
 
     for ( ;; ) {
