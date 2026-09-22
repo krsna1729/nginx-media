@@ -186,7 +186,10 @@ cat "$RUN/hls/index.m3u8"
 # The playlist is the contract with the player, so it is checked as one after
 # every source change rather than by grepping for a tag: it must stay well
 # formed, list contiguous sequences from the media sequence it announces, and
-# every segment it references must exist, be served and decode.
+# every segment it references must exist, be served and decode.  The segment
+# that follows a discontinuity is additionally required to begin at a video
+# keyframe: a generation opens on a sync boundary, and a segment cut there
+# before the incoming keyframe arrives would start mid-GOP.
 #
 # The number of switches the playlist has announced is the discontinuity
 # sequence plus the discontinuity tags still inside the window: a tag whose
@@ -201,6 +204,7 @@ check_playlist() {
     local expected="$1" label="$2"
     local playlist="$RUN/hls/index.m3u8"
     local target disc dseq seq first_uri first_num uri uris cur prev n tries
+    local body opens probe first_flags
 
     # a switch only shows up once the segment that follows it has closed, so
     # wait for the announcement instead of racing the segmenter
@@ -239,9 +243,24 @@ check_playlist() {
     target="$(sed -n 's/^#EXT-X-TARGETDURATION:\([0-9]*\).*/\1/p' "$playlist" | head -1)"
     seq="$(sed -n 's/^#EXT-X-MEDIA-SEQUENCE:\([0-9]*\).*/\1/p' "$playlist" | head -1)"
 
-    uris="$(grep -E '\.ts$' "$playlist")"
+    # one snapshot of the playlist for the segment list and the tags: the
+    # segmenter rewrites it as it cuts, and both must describe the same
+    # version of it
+    body="$(cat "$playlist")"
+
+    uris="$(printf '%s\n' "$body" | grep -E '\.ts$')"
     n="$(printf '%s\n' "$uris" | grep -c . || true)"
     [ "$n" -ge 1 ] || { echo "$label: the playlist references no segment" >&2; return 1; }
+
+    # The segment after each #EXT-X-DISCONTINUITY opens a generation.  The
+    # switch is taken at the incoming source's keyframe and the segmenter drops
+    # everything that arrives before it, so such a segment begins at a video
+    # sync boundary - that is the whole point of the discontinuity (SPEC 19
+    # "begin only from a valid sync boundary", definition of done item 6).
+    opens="$(awk '
+        /^#EXT-X-DISCONTINUITY$/ { pending = 1; next }
+        /\.ts$/ { if (pending) { printf "%s ", $0; pending = 0 } }' \
+        <<< "$body")"
 
     first_uri="$(printf '%s\n' "$uris" | head -1)"
     first_num="${first_uri#*seg-}"
@@ -295,10 +314,48 @@ check_playlist() {
             || { echo "$label: $uri is served differently than it is on disk" >&2
                  return 1; }
 
-        ffprobe -hide_banner -loglevel error -show_entries \
-            stream=codec_name,codec_type -of csv "$RUN/check.ts" 2>/dev/null \
-            | grep -q ',h264,video' \
-            || { echo "$label: $uri does not decode as H.264 video" >&2; return 1; }
+        # ffprobe's output is captured before it is searched.  Piping it
+        # straight into `grep -q` is a race: grep exits at the first match
+        # while ffprobe is still writing, ffprobe dies on SIGPIPE, and
+        # `set -o pipefail` reports the pipeline as failed even though the
+        # line was found - on a loaded machine that turned a segment that
+        # carried H.264 into "does not decode as H.264 video".  Capturing the
+        # output also tells a segment that could not be read apart from one
+        # that really has no video stream.
+        probe="$(ffprobe -hide_banner -loglevel error -show_entries \
+            stream=codec_name,codec_type -of csv "$RUN/check.ts" 2>&1)" \
+            || { echo "$label: $uri could not be probed" >&2
+                 printf '%s\n' "$probe" >&2; return 1; }
+
+        printf '%s' "$probe" | grep -q ',h264,video' \
+            || { echo "$label: $uri does not decode as H.264 video" >&2
+                 printf '%s\n' "$probe" >&2; return 1; }
+
+        case " $opens" in
+            *" $uri "*)
+                # The segment that opens a generation must begin at a video
+                # sync boundary: one cut at the discontinuity before the
+                # incoming keyframe arrives would start mid-GOP and be
+                # undecodable from its first frame.  ffprobe's diagnostics are
+                # kept out of the captured output here: this check reads the
+                # *first* line, and a decoder warning about a mid-GOP start
+                # would otherwise be mistaken for it.
+                probe="$(ffprobe -hide_banner -loglevel error \
+                    -select_streams v:0 -show_entries packet=flags \
+                    -of csv=p=0 "$RUN/check.ts" 2>"$RUN/packets.err")" \
+                    || { echo "$label: $uri could not be probed for packets" >&2
+                         cat "$RUN/packets.err" >&2; return 1; }
+
+                first_flags="$(printf '%s\n' "$probe" | sed -n 1p)"
+
+                case "$first_flags" in
+                    K*) ;;
+                    *) echo "$label: $uri opens a generation but its first video packet is not a keyframe (flags '${first_flags:-none}')" >&2
+                       cat "$RUN/packets.err" >&2
+                       return 1 ;;
+                esac
+                ;;
+        esac
     done <<< "$uris"
 
     # no EXTINF may exceed the target duration the playlist announces
