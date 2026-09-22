@@ -446,6 +446,217 @@ there is configuration, not scheduling.  A *shared* port is the exception to all
 kernel hashes each publisher onto a worker, and the operator places nothing -
 see "One shared SRT port" below for what that trades away.
 
+### Where ingest and egress each saturate under fanout
+
+`make bench-ingest-egress-fanout` answers the two sizing questions with
+numbers: what one SRT endpoint's receive path costs as the offered packet rate
+rises, and what more workers buy for a program's egress.  It also runs the
+same publisher load twice - placed on the endpoint of the worker that owns its
+program, and on another worker's endpoint, where every frame is routed - so
+the price of the escape hatch is measured rather than asserted.
+
+Conditions, printed with the numbers by the bench itself: one host (20 CPUs,
+no netem); `media_srt_listen` given once per worker, so worker *i* binds entry
+*i* and a publisher is placed by choosing the endpoint it connects to; one
+program per publisher; pre-encoded 720p25 MPEG-TS published with `-c copy`, so
+what is measured is the receiver's cost and not an encoder's; publishers
+padded to a chosen transport rate with the muxer's `-muxrate` where a packet
+rate is the independent variable.  CPU is per thread, from
+`/proc/<pid>/task/<tid>/stat`, as a percentage of one core over a measured
+window; the module's own threads are unnamed and are labelled once per
+instance from a stack backtrace, and libsrt's are named by the library
+(`SRT:RcvQ`, `SRT:SndQ`, `SRT:TsbPd`, `SRT:GC`).
+
+**Before the idle-wait fix, a worker with nothing to do burned a core.**  This
+was the floor in the pre-fix run, and it was not zero:
+
+| workers | idle CPU | of which the SRT sender thread |
+|---|---|---|
+| 1 | 98% | 97% |
+| 2 | 194% | 97% + 96% |
+| 4 | 380% | 95% + 95% + 94% + 94% |
+
+No publisher, no destination, no media: the sender pool thread
+(`ngx_media_srt_out_thread`) ran flat out.  Its loop took each of the eight
+destination slots' mutex, skipped the slot when it was unused, and returned to
+the top with nothing to wait on - so with no destination in use it spun.  It
+stopped as soon as one slot was used (the live-egress table below shows the
+same thread at 0.08%).  This was a defect, not a cost to size against.
+
+The sender now waits on a pool condition variable while no destination slot is
+used, and wakes for runtime adds or shutdown.  A post-fix `PHASES=floor` smoke
+run measured 0% idle sender CPU at one, two and four workers.  The pre-fix
+table remains as the regression evidence that motivated the change.
+
+**Ingest: one endpoint is one receive thread, and it is not the first thing to
+give.**  Sixteen publishers is the per-worker session ceiling, so the only
+variable left on one endpoint is the packet rate each of them offers:
+
+The high-rate rows below are from that pre-fix run; the `sender thread` column
+is the measured idle-spin defect, not ingest work.  Use the `SRT:RcvQ`,
+`ingest thread` and `worker` columns for the receive-path comparison.
+
+| offered per publisher | chunks/s | MiB/s | `SRT:RcvQ` | ingest thread | worker | sender thread | ingest-queue drops |
+|---|---|---|---|---|---|---|---|
+| 20M | 28,971 | 36.2 | 9.6% | 4.9% | 3.9% | 96.8% | 0 |
+| 40M | 57,694 | 72.2 | 16.4% | 9.3% | 6.6% | 96.7% | 503 |
+| 80M | 115,262 | 144.5 | 30.8% | 20.5% | 13.9% | 96.8% | 735 |
+| 120M | 203,688 | 255.4 | 36.8% | 26.8% | 18.8% | 97.4% | 582 |
+
+A chunk is one SRT payload unit, 1316 bytes of MPEG-TS, so the last row is
+2.0 Gbit/s arriving on one port.  Three things follow, and the third is the
+one that contradicts what this document used to imply:
+
+- **The receive path is one thread per port, and it is linear in the packet
+  rate.**  Every session on the endpoint is demultiplexed and reassembled by
+  one `SRT:RcvQ` thread, and its cost rises with the offered rate - from 9.6%
+  to 36.8% of a core across a sevenfold rise in the offered packet rate.  The
+  module's own threads rise with it and stay behind it: the ingest thread
+  costs half to three quarters of what the receive thread costs, and the
+  worker's event loop about 40-50% of it.  That is the same conclusion the
+  endpoint table above reaches from the placement side: an endpoint is a unit
+  of receive capacity, and it is not divisible.
+- **One core of receive is well beyond what the endpoint can be offered.**
+  Extrapolating the measured slope, `SRT:RcvQ` would reach 100% somewhere
+  around 0.5M chunks/s (about 5 Gbit/s), and the receive path is at 36.8% of a
+  core at the highest rate this bench could push through sixteen sessions.  No
+  thread on the port saturates at any rate the session ceiling allows.
+- **What gives first is the module's ingest queue, not the receive thread.**
+  From 40M per publisher (72 MiB/s, 58k chunks/s) the 256-chunk / 8 MiB raw-TS
+  queue behind the ingest thread starts dropping, a few hundred chunks in a
+  six-second window, while `SRT:RcvQ` is still under 17% of a core.  The
+  library's own drop sites stayed silent throughout (0 receive-buffer drops,
+  10-11 late-packet drops per instance), so the loss is this module's queue
+  filling between the worker's visits to it, not the transport failing to
+  receive.  The "first thing to saturate as publishers are added to one port"
+  is therefore the queue, and the fix for it is a deeper or faster-drained
+  queue rather than another core.
+
+**Ingest scales by endpoint, not by worker.**  First the publishers grown on
+one endpoint at a fixed rate:
+
+| publishers | chunks/s | MiB/s | `SRT:RcvQ` | ingest thread | worker |
+|---|---|---|---|---|---|
+| 4 | 3,091 | 3.8 | 1.5% | 0.5% | 0.6% |
+| 8 | 6,154 | 7.6 | 2.9% | 1.1% | 1.1% |
+| 12 | 9,173 | 11.3 | 3.5% | 1.3% | 1.4% |
+| 16 | 12,175 | 15.0 | 5.0% | 1.9% | 2.2% |
+
+and then the endpoints grown with the workers, twelve publishers per
+endpoint, spread round-robin over them:
+
+| workers | endpoints | publishers | chunks/s | MiB/s | `SRT:RcvQ` per worker |
+|---|---|---|---|---|---|
+| 1 | 1 | 12 | 9,183 | 11.4 | 3.5% |
+| 2 | 2 | 24 | 14,948 | 18.5 | 3.9%, 3.7% |
+| 4 | 4 | 48 | 32,544 | 40.2 | 3.7%, 3.5%, 3.7%, 3.8% |
+
+The per-port figure is the point: each worker carries its own endpoint at
+3.5-4% of a core whether there is one worker or four, and the instance's total
+carried rises with the endpoint count.  A second run of the same table
+reported 9,129 / 25,126 / 35,889 chunks/s - the totals move with how evenly
+the publishers pace themselves, which is a property of the load generator and
+not of the server, while the per-port cost stayed in the same 3.5-4% band.
+What workers buy is endpoints, and endpoints are what ingest scales with.
+
+And the converse, which is the reason the port-per-worker mode exists: the
+same twelve publishers on **one** endpoint, with one worker and with four:
+
+| workers | chunks/s | MiB/s | worker 0 `SRT:RcvQ` | the other workers |
+|---|---|---|---|---|
+| 1 | 9,176 | 11.3 | 3.5% | — |
+| 4 | 8,725 | 10.8 | 4.3% | 0.6%, 0.5%, 0.6% - their floor, no receive work |
+
+Three idle workers and their three endpoints add nothing to the one port
+carrying the load: the same media, the same receive thread, the same cost.
+
+**Egress: HLS spreads, live destinations do not.**  One program, two shapes of
+egress.  HLS is served from the shared segment store by nginx's own HTTP path,
+so the kernel's `reuseport` hash spreads the readers; live SRT destinations
+are prepared and fed by the owner in process:
+
+| workers | HLS readers: requests/s | MiB/s | HTTP CPU per worker | requests per worker |
+|---|---|---|---|---|
+| 1 | 147 | 459.5 | 13.6% | 1,784 |
+| 2 | 145 | 456.5 | 8.9%, 8.3% | 907, 878 |
+| 4 | 143 | 449.0 | 5.6%, 5.1%, 4.9%, 5.6% | 455, 434, 414, 477 |
+
+| workers | live SRT destinations started | program frames/s | owner CPU | sender thread | other workers |
+|---|---|---|---|---|---|
+| 1 | 8/8 | 25.1 | 8% (receive 7.6%, tick 0.3%) | 0.08% | — |
+| 2 | 8/8 | 25.9 | 8% (receive 8.3%) | 0.08% | 99% floor |
+| 4 | 8/8 | 25.1 | 5% (receive 5.1%) | 0.08% | 99%, 98%, 98% floor |
+
+- **Adding workers helps HLS and does nothing for live destinations.**  The
+  readers are spread by the kernel: per-worker HTTP CPU falls 13.6% → 8.5% →
+  5.3% as workers go 1 → 2 → 4, and the requests split almost evenly, so HLS
+  egress is genuinely parallel across workers.  Throughput stays flat at about
+  450 MiB/s because the bench's own reader pool is the limit there, not the
+  server.
+- **Eight live destinations cost the owner less than a tenth of a core.**  The
+  same 128 Mbit/s of program media pushed to eight receivers is 0.08% of a
+  core of sender thread - it is eight sessions, not eight copies of the media,
+  and the price of a destination is its socket.  What it is not is spreadable:
+  the work is the owner's, and the other workers show their floor and nothing
+  else however many of them there are.
+
+**The price of misplacement.**  Twelve publishers, two workers, identical
+publisher commands and identical offered rate, one program per publisher,
+HLS on so the feed has a consumer.  In the placed run every publisher connects
+to worker 0's endpoint, which owns its program; in the routed run every
+publisher connects to worker 1's endpoint and every frame crosses the
+internal transport.  The bench checks the placement from the log: twelve of
+twelve sessions logged as routed in the routed run, zero of twelve in the
+placed run.
+
+| | placed | routed |
+|---|---|---|
+| media carried, by the receiving worker | 23,911 chunks/s (29.8 MiB/s) | 24,505 chunks/s (30.6 MiB/s) |
+| owner's ingest-queue drops, six-second window | 2,129 | 0 |
+| owner's feed backlog | 2,992 units | 3,012 units |
+| owner fanout delay p50 / p99 | 64 ms / 128 ms | 64 ms / 128 ms |
+| owner worker: `SRT:RcvQ` / ingest / tick | 7.00% / 3.02% / 5.41% | 0.64% / 0% / 2.70% |
+| accepting worker: `SRT:RcvQ` / ingest / tick | 0.64% / 0.16% / 0% | 6.84% / 3.18% / 4.45% |
+| workload CPU, sender floor removed | 15.6% of a core | 17.8% of a core |
+
+- **The escape hatch costs about 14% more CPU for the same media**, and it
+  costs it on two workers instead of one: 15.6% of a core placed against 17.8%
+  routed, for 23.9k against 24.5k chunks/s carried.  The extra is the second
+  hop - the accepting worker's demultiplex and forward, and the owner's
+  receive and republish - and it is the price of the placement being wrong.
+- **Throughput is not the price.**  The two runs carried the same media to
+  within 2.5%, and an earlier pair of runs of the same comparison differed by
+  30% in the opposite direction, which is the load generator's pacing and not
+  the transport: the offered rate of a `-re` file publisher is not exact
+  enough to price a few percent of throughput with.  What is reproducible is
+  the CPU and the queue.
+- **The queue is where the two differ in kind.**  Placed, the owner receives
+  at full rate and its own 256-chunk ingest queue overflows (2,129 chunks lost
+  in the window).  Routed, the owner's queue does not overflow at all: the
+  bounded transport applies backpressure instead, so the accepting worker
+  cannot forward faster than the owner takes it, and the publisher is slowed
+  rather than the media dropped.  That is the escape hatch working as
+  designed, and it is why a routed publisher loses less media under overload
+  than a placed one whose owner is busy.
+- **Latency is not observable here, and this is the honest limit.**  The
+  reported fanout percentiles are identical in both cases (64 ms p50, 128 ms
+  p99) because `publish_time` is stamped by the owner when the frame enters
+  the program feed - after the transport hop - so the metric cannot see the
+  hop.  The IPC header carries media timestamps, not an arrival clock, and no
+  counter reports transit time.  What the hop costs is measurable as CPU and
+  as queue behaviour; its latency is not separable from the black box, and
+  this section does not claim a number for it.
+
+**Which side is the limiter.**  Under extreme fanout of *one* program, egress
+is: the program's tick, its feed, its segmenter and its live destinations all
+run on the owner worker, so its fanout is bound by one worker whatever the
+worker count - adding workers moves none of it, as the live-destination table
+shows directly.  Ingest is the side that scales, and it scales by endpoint,
+one receive thread per bound port, with the module's own ingest queue filling
+before that thread runs out of core.  So a deployment that needs more ingest
+buys endpoints and programs, and a deployment that needs more fanout for one
+program cannot buy it with workers at all.
+
 ### One shared SRT port, and what it costs
 
 The port-per-worker mode above is one way.  There is another - one endpoint for
@@ -730,39 +941,123 @@ lines, so they need `error_log ... info;` like every other operational line
 here.  The totals are in the session's transport statistics (`pktRcvDropTotal`,
 which the adapter reports as `packets_dropped_too_late`).
 
-### robotweax: the same options, a different runtime
+### robotweax: the same API and options, a different runtime
 
-The alternative implementation is selected at build time (`configuration.md`)
-and speaks the same C API, so the option table above does not change with it.
-The defaults it reports are the same numbers: 12,058,624 for `SRTO_RCVBUF` and
-`SRTO_SNDBUF`, 25,600 for `SRTO_FC`, 120 ms for the receive latency, −1 for
-`SRTO_MAXBW`.  What changes is the runtime underneath.
+The alternative implementation is selected at build time
+(`configuration.md`) and speaks the same C API, so the module's option table
+does not change with it.  The defaults it reports are the same numbers:
+12,058,624 for `SRTO_RCVBUF` and `SRTO_SNDBUF`, 25,600 for `SRTO_FC`, 120 ms
+for receive latency, and −1 for `SRTO_MAXBW`.  What changes is the runtime
+underneath the adapter.
 
-It does not create a thread per port or per session.  Its transport runs on a
-fixed, process-wide pool — two scheduler shards, a four-worker executor and a
-lazily created close worker, seven threads in a worker process, independent of
-how many listeners, publishers and destinations there are (measured: seven
-threads with one listener bound, seven with two).  Channel work is assigned to
-a shard by a round-robin counter, so one port's receive path is still
-serialized on one thread, but the transport can use two cores in total however
-many ports exist, where libsrt gives each port its own thread.  The pool size is
-not an option or an API; there is no reuseport equivalent either.
+This is the common qualified SRT profile, not a claim that every optional
+extension or value range is identical.  Robotweax's documented compatibility
+limits include a 1,500-byte MSS ceiling, a deliberately bounded FEC geometry
+(up to 128 columns), platform-specific native socket-option differences, and
+the group topology limits below.  Qualify the exact option profile used by a
+deployment rather than treating the shared C API as complete feature parity.
 
-The one thing it offers that the libsrt on this machine does not is connection
-groups: robotweax compiles bonding in unconditionally, while the distribution
-libsrt does not — `srt_create_group()` returns `SRT_INVALID_SOCK`,
-`SRTO_GROUPCONNECT` is rejected as an unknown option, and that is exactly what
-the module reports as "this SRT library was built without bonding".  So a
-deployment that wants a bonded listener picks robotweax, or a libsrt built with
-`-DENABLE_BONDING=ON`, for that reason and not for throughput.
+Robotweax does not create a permanent thread per port or per session.  Its
+transport runs on a fixed, process-wide pool: two scheduler shards, a
+four-worker executor and a lazily created close worker.  The qualified 0.2.4
+install measured seven runtime threads with one listener and seven with two.
+The count is per nginx worker process:
 
-Plainly: switching libraries changes no scaling property of this module's
-ingest or egress.  The per-port single-threaded receive path is the same on
-both, the options and their defaults are the same, and the thread count per
-worker goes *down* rather than up — the library stops charging a thread pair
-per bound port and per destination, and charges a fixed pool instead.  What it
-buys is a different ceiling, not a higher one: fewer threads, and less receive
-parallelism as ports are added.
+```text
+nginx worker 0 -> one Robotweax pool
+nginx worker 1 -> one independent Robotweax pool
+nginx worker 2 -> one independent Robotweax pool
+```
+
+Channel work is assigned to a shard by a round-robin counter.  One port's
+receive path is still serialized on one scheduler thread, but all listeners,
+publishers and destinations in that worker share the same pool.  Adding
+listeners does not add runtime threads; adding nginx workers adds independent
+pools and their fixed thread cost.  The pool size is not an nginx option or a
+public Robotweax scaling API.
+
+The seven-thread figure is the Robotweax library only.  The worker also pays
+for nginx-media's ingest thread and its bounded output sender pool:
+`ngx_media_srt_output.c` starts up to `NGX_MEDIA_SRT_MAX_OUTPUTS` sender
+threads for the configured pool, while destinations added later reuse those
+threads.  Module queue, session-table and IPC limits therefore remain
+independent of the Robotweax scheduler limit.
+
+That is a different ceiling, not automatically a higher one:
+
+| Workload change | Haivision/libsrt | Robotweax/SRT |
+|---|---|---|
+| More publishers on one port | share that port's `RcvQ` | share that channel's scheduler work |
+| More ports in one worker | add an `RcvQ`/`SndQ` pair per port | share the fixed pool |
+| More live sessions | add `TsbPd` per session | share the fixed pool |
+| More SRT destinations | add an `RcvQ`/`SndQ` pair per destination | share the fixed pool |
+| More nginx workers | add process-local libsrt runtimes | add process-local Robotweax runtimes |
+
+Haivision therefore offers more receive lanes as endpoints are added, but its
+thread count grows with ports, destinations and live timestamped sessions.
+Robotweax bounds thread growth, but ports and destinations contend for a
+bounded scheduler/executor and may reach that shared CPU ceiling sooner.  A
+lower thread count is not a throughput claim; measure the target bitrate,
+latency, loss pattern, destination count and worker count on the target host.
+
+### Robotweax groups, shared ports and process scope
+
+Robotweax includes the group ABI in the qualified build.  Its
+`srt_accept_bond()` operation forms an explicit group domain from multiple
+listeners in the same process.  That supports a bonded caller arriving
+through multiple local interfaces in one nginx worker.  It does not join
+listeners in different nginx workers: each process has its own handle and
+group registry.  Every leg of one bonded caller must therefore reach the same
+worker, and `media_srt_listen_shared` cannot be used for that caller.
+
+The installed 0.2.4 library exports `srt_bind_acquire()`, which is the public
+socket-attachment API needed by the module's shared-listener path.  In that
+mode nginx owns a UDP socket, sets `SO_REUSEPORT`, and asks the backend to
+attach to it; the kernel distributes non-bonded flows across workers.  This is
+not a Robotweax-internal reuseport scheduler, and it does not share session
+state or group state across processes.  The complete shared-listener path
+must still pass backend qualification; symbol presence alone is not an
+end-to-end test.
+
+Operationally:
+
+- Use per-worker endpoints for bonded listeners and predictable ownership.
+- Use a shared endpoint only for non-bonded traffic that can tolerate kernel
+  flow placement and the documented process-set stability requirement.
+- Do not expect a reload or worker-set change to migrate an existing SRT
+  session safely between runtimes.
+- Do not use Robotweax's fixed pool as a reason to remove the module's own
+  ingest, output, queue, or IPC limits.
+- Robotweax's supported group topology is limited to the qualified Live
+  Caller/Listener Broadcast and Backup paths; it is not a striping,
+  balancing, multicast, group-Rendezvous, File/Stream, or arbitrary
+  cross-process group implementation.
+
+The adapter remains the same in both cases: it owns the listener/session
+handles and caller buffers; `recv()` returns transport-processed bytes;
+`send()` queues already-prepared bytes; `streamid()` supplies identity to the
+core; `stats()` supplies transport counters; and shutdown/close are ordered
+around the module's threads.  The backend owns handshake, packet
+demultiplexing, reassembly, reliability, pacing, retransmission and UDP I/O.
+Nothing in the media core should branch on a Haivision or Robotweax private
+handle.
+
+Robotweax is pre-1.0 and its production limit is its documented, measured
+runtime rather than a universal throughput guarantee.  The installed
+architecture and connection-group contracts are the source for the runtime
+claims here:
+
+```text
+/opt/robotweax/share/doc/robotweax_srt/docs/architecture.md
+/opt/robotweax/share/doc/robotweax_srt/docs/performance.md
+/opt/robotweax/share/doc/robotweax_srt/docs/connection-groups.md
+/opt/robotweax/share/doc/robotweax_srt/docs/limitations.md
+```
+
+The cross-library encryption caveat remains: pin `SRTO_PBKEYLEN` explicitly
+on both sides when a Haivision peer and a Robotweax peer share a passphrase.
+The interoperable configuration used by qualification is key length 16; see
+`configuration.md`.
 
 ## What is bounded, and by what
 
@@ -780,10 +1075,10 @@ approached is a reading, not a directive.
 | SRT ingest sessions | 16 per worker | `media: no free ingest session slot` |
 | SRT ingest queue | 256 chunks / 8 MiB | new chunks dropped and counted; demuxer counts the continuity damage |
 | SRT session receive buffer (library) | 8192 packets / 12,058,624 bytes per session | `No room to store incoming packet` in the error log; the packet is lost before our counters see it |
-| SRT receive queue (library) | one thread per listening endpoint, shared by every session on it | the first thing that saturates as publishers are added to one port; no metric, only the log |
+| SRT receive queue (Haivision library) | one `RcvQ` thread per listening endpoint, shared by every session on it | no metric, only the log.  Measured well below saturation: 36.8% of a core at 2.0 Gbit/s through sixteen sessions; Robotweax uses the fixed pool described above |
 | SRT UDP receive buffer (kernel) | `net.core.rmem_max` per listening endpoint, shared by every session | `ss -ulmpn` shows `rb` for the port; overflow is silent and appears as loss and retransmission |
 | SRT flow window (library) | 25,600 packets in flight per session | caps one session's throughput at `FC × payload / RTT` on a lossy path |
-| SRT threads per worker (library) | 1 GC + 2 per bound port + 1 per live session + 2 per destination | `ps -L -o comm -p <worker-pid>`; 44 at one endpoint, sixteen publishers and eight destinations |
+| Haivision SRT threads per worker (library) | 1 GC + 2 per bound port + 1 per live session + 2 per destination | `ps -L -o comm -p <worker-pid>`; 44 at one endpoint, sixteen publishers and eight destinations; Robotweax uses seven measured library threads instead |
 | RTMP sessions | 32 per worker, so 32 × workers in the instance | `media: rtmp: no free session slot` |
 | RTMP destination queue | 128 messages | drops to the next sync boundary |
 | HLS push queue | 64 entries per destination, pool of 4 | internal counters only; nothing published |

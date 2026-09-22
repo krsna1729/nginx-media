@@ -415,14 +415,188 @@ configuration.  On this machine (400 requests of a 3.3 MiB segment):
 ## Transport backends
 
 The SRT transport is a contract (`ngx_media_srt_ops_t` in
-`src/srt/ngx_media_srt_transport.h`), not a library call.  Haivision/srt is the
-reference implementation and the production default; robotweax/srt exposes the
-same C API, so it is selected by pointing the build at its headers and library
-with no code change.  The two differ underneath in one way that matters here:
-robotweax runs its transport on a fixed, process-wide pool instead of a thread
-pair per bound port and a timestamp thread per session, so the thread map above
-is Haivision's, and `operations.md` carries the comparison.  A UDP
-implementation of the same contract exists purely as a test double so the
-qualification suite can run one scenario against two implementations; it is not
-an SRT implementation and is not built by default.  See `configuration.md` for
-the build and runtime switches.
+`src/srt/ngx_media_srt_transport.h`), not a library call.  The media core and
+the ingest/output modules see the contract; they do not see `SRTSOCKET`,
+`CUDT`, Robotweax handles, or either library's private C++ types.
+
+```mermaid
+flowchart LR
+    CORE["nginx-media core<br/>ownership, stream IDs, media, fanout"]
+    OPS["ngx_media_srt_ops_t<br/>the transport boundary"]
+    H["Haivision / libsrt"]
+    R["Robotweax / SRT"]
+    HR["per-port muxers<br/>RcvQ + SndQ<br/>TsbPd per session"]
+    RR["process-wide runtime pool<br/>scheduler shards + executor"]
+    ACQ["application-owned UDP socket<br/>for listen_shared"]
+    K["kernel SO_REUSEPORT<br/>flow distribution"]
+
+    CORE --> OPS
+    OPS --> H
+    OPS --> R
+    H --> HR
+    R --> RR
+    OPS --> ACQ --> K
+```
+
+### What our code asks the backend to do
+
+| Adapter surface | What the module owns | What the backend owns |
+|---|---|---|
+| `listen`, `listen_bond`, `listen_shared` | endpoint policy and retry | socket binding, listener state, group admission, or acquired-socket attachment |
+| `poll_create`, `poll_add_*`, `poll_wait` | the ingest event loop | readiness and transport progress |
+| `accept`, `accept_ready`, `streamid`, `recv` | the ingest thread and caller buffers | handshake, UDP receive, packet demultiplexing, reassembly, loss handling and receive buffering |
+| `connect`, `send`, `stats` | destination queues and sender threads | connect, pacing, retransmission, UDP writes and transport statistics |
+| `session_shutdown`, `session_close` | ordered thread teardown | waking blocked operations and releasing transport state |
+| `library_version`, `last_error`, `shutdown` | startup logging and lifecycle | implementation identity, diagnostics and backend-global cleanup |
+
+The adapter deliberately does not parse Stream IDs, register sources, mutate
+logical streams, select a program, prepare output formats, or fan out media.
+`streamid()` only supplies the identity to the module; ownership is then
+`hash(application/stream) % workers`, and a non-owner session is routed by the
+core IPC layer.  `recv()` supplies bytes into a caller-owned buffer and
+`send()` accepts already-prepared transport bytes.  These boundaries are the
+reason both libraries can qualify against the same module code.
+
+The source-level path is intentionally visible:
+
+- `src/srt/ngx_media_srt_module.c` parses `media_srt_*` directives, selects
+  per-worker endpoints and starts/stops the worker-side transport.
+- `src/srt/ngx_media_srt_transport.c` is the small forwarding layer.  It
+  dispatches through the selected `ngx_media_srt_ops_t` table and turns an
+  absent optional operation into a normal capability failure.
+- `src/srt/ngx_media_srt_haivision.c` owns the `SRTSOCKET` wrappers and the
+  SRT C-API implementation of the table.  The filename is historical: the
+  same adapter can link against Haivision/libsrt or Robotweax/SRT; it does not
+  use Haivision private internals.
+- `src/srt/ngx_media_srt_ingest.c` and `ngx_media_srt_ingest.h` own the
+  bounded per-worker session state, one shared transport poll, Stream ID
+  extraction and the ingest thread.  A full session table refuses a new
+  session rather than growing the scheduler.
+- `src/srt/ngx_media_srt_output.c` and `ngx_media_srt_output_queue.*` own
+  per-destination queues and sender threads, then call only `connect`, `send`,
+  `stats`, `session_shutdown` and `session_close`.
+- `src/srt/ngx_media_srt_udp.c` is a plain-UDP conformance double.  It is not a
+  third SRT runtime and must not be used to infer reliability, encryption,
+  pacing, group or library-thread behavior.
+
+The runtime counts above exclude module-owned threads.  In particular,
+`ngx_media_srt_output.c` starts a bounded sender pool (up to
+`NGX_MEDIA_SRT_MAX_OUTPUTS` threads) that walks the destination table;
+runtime-added destinations reuse that pool rather than creating another
+thread.  The ingest thread, bounded session table and IPC/event-loop work are
+also nginx-media resources.  Robotweax bounds the library's transport cost,
+not the complete worker's thread or queue budget.
+
+`listen_shared` is an adapter capability, not an automatic property of every
+SRT library.  The module creates the native UDP socket, sets `SO_REUSEPORT`,
+binds it, and hands it to the backend through `srt_bind_acquire()` when the
+selected backend exposes that path.  The kernel can then distribute
+non-bonded flows across nginx processes; the SRT runtime still remains
+process-local.  A backend that cannot acquire an application-owned socket
+returns no shared-listener operation, and the directive must not be
+approximated silently.
+
+### Haivision/libsrt runtime
+
+Haivision's `CUDTUnited` and its muxer registry are process-local.  A bound UDP
+port gets one multiplexer containing:
+
+```text
+one bound port
+    ├── SRT:RcvQ       UDP read, packet demux, reassembly, loss handling
+    └── SRT:SndQ       pacing, retransmission, UDP write
+
+each live session
+    └── SRT:TsbPd      timestamp play-time decision
+```
+
+Every accepted session on that port shares the port's receive and send queue
+threads.  An outgoing destination is autobound to an ephemeral port and gets
+its own pair.  Consequently, adding endpoints gives more receive lanes, but
+adding publishers to one endpoint does not.  The cost is a growing thread
+count: one pair per bound port or destination and one timestamp thread per
+live session.
+
+The group registry is also process-local.  A bonded caller's legs must reach
+one nginx worker so the same `CUDTUnited` can join them.  Separate nginx
+workers cannot form one mirror group merely because their UDP sockets share an
+address.
+
+### Robotweax/SRT runtime
+
+Robotweax is an independent SRT implementation behind the same C API.  Its
+installed architecture contract schedules protocol work by connection
+affinity, so one logical connection's state machine is not mutated
+concurrently.  It uses a bounded, process-wide execution model rather than a
+permanent waiting thread for every socket.
+
+The qualified Robotweax 0.2.4 runtime measured in `/opt/robotweax` has:
+
+```text
+one nginx worker process
+└── one Robotweax runtime
+    ├── scheduler shard 0
+    ├── scheduler shard 1
+    ├── executor worker 0..3
+    └── lazy close worker
+```
+
+That is seven runtime threads with one listener and with two listeners.  Work
+for a channel is assigned to a scheduler shard by a round-robin counter.  One
+port's receive path is therefore still serialized on one scheduler thread,
+while all ports and destinations in that process share the fixed pool.  The
+pool size is not an nginx directive or a public Robotweax scaling API.
+
+Robotweax supplies connection groups and `srt_accept_bond()`.  Its group
+contract can form a domain from multiple listeners **in the same process**;
+listeners that are not in that domain remain isolated.  This helps a bonded
+caller use multiple local interfaces within one worker, but it is not
+cross-process group state.  All legs of a bond still have to reach one nginx
+worker in this architecture.
+
+The installed Robotweax library exports `srt_bind_acquire()` as well as the
+group APIs, so it has the public pieces needed for the module's acquired-socket
+path.  That proves API availability, not every deployment property: the
+complete `media_srt_listen_shared` path remains an integration qualification,
+and the runtime itself has no internal reuseport-equivalent.
+
+### Scaling comparison and limits
+
+| Question | Haivision/libsrt | Robotweax/SRT |
+|---|---|---|
+| Receive unit | one `RcvQ` per bound port | one scheduler shard per channel assignment |
+| One port | one receive thread | one scheduler thread |
+| More ports in one worker | adds queue threads and receive lanes | shares the fixed pool; at most the measured scheduler parallelism |
+| More sessions | adds per-session `TsbPd` threads | shares the pool; no permanent thread per session |
+| More destinations | adds an `RcvQ`/`SndQ` pair per destination | shares the pool |
+| More nginx workers | independent process-local runtimes | independent process-local runtimes |
+| Bonding | build-dependent, same-process group registry | built-in groups, same-process group domain |
+| Shared port | application-owned socket plus kernel `SO_REUSEPORT` when supported | same acquired-socket requirement; no internal reuseport pool |
+
+Neither backend turns one SRT port into an unlimited parallel receive path.
+Haivision offers more parallelism as endpoints are added, at the cost of
+threads.  Robotweax keeps thread count bounded, but ports contend for its
+fixed scheduler pool and can reach that ceiling sooner.  Adding nginx workers
+adds independent process-local runtime instances in either case; it does not
+merge their session or group registries.
+
+The production consequences are:
+
+- Use one endpoint per worker for predictable ingest placement.
+- Point every source of one logical program at the program owner's endpoint.
+- Keep every leg of one bonded caller in one worker; `media_srt_listen_shared`
+  is not a bonding mode.
+- Treat the IPC route as a correction path for a misplaced publisher, not as a
+  way to create more receive capacity.
+- Treat shared-port membership changes as a session-failure risk: the kernel
+  can re-hash flows, while neither runtime can migrate session state between
+  nginx processes.
+- Size module queues, library buffers, scheduler capacity and worker count
+  separately; a lower Robotweax thread count is not proof of higher media
+  throughput.
+
+The detailed measured thread names, buffer defaults, discard points, shared
+port behavior and Robotweax limitations are in `operations.md`.  The backend
+selection and qualification commands are in `configuration.md`.  The UDP
+implementation in this repository is only a conformance test double; it is
+not a third production SRT runtime.

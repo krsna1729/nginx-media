@@ -404,6 +404,12 @@ it.
 Haivision/srt and robotweax/srt expose the same C API, so switching is a link
 choice with no code change:
 
+The link choice does not change the module's caller-facing transport contract,
+but it does change runtime ownership, group capability and scaling limits.  See
+`architecture.md` for the call boundary and both runtime topologies, and
+`operations.md` for measured threads, buffers, shared-port behavior and
+process-scope limitations.
+
 ```sh
 PKG_CONFIG_PATH=/opt/robotweax/lib/pkgconfig make nginx
 SRT_DIR=/opt/robotweax make nginx          # if it ships no .pc file

@@ -78,6 +78,14 @@ struct ngx_media_srt_outputs_s {
 
     int                       notify_fd;
     ngx_log_t                *log;
+
+    /*
+     * Sender threads sleep here when the runtime has no destination slots.
+     * The destination conditions wake a slot's sender once it is active; this
+     * condition is only the pool-lifetime wakeup for an empty table.
+     */
+    pthread_mutex_t             idle_mutex;
+    pthread_cond_t              idle_cond;
 };
 
 static void
@@ -176,6 +184,29 @@ ngx_media_srt_out_report(ngx_media_srt_outputs_t *outs, ngx_uint_t index,
     ngx_media_srt_out_event_push(outs, &event);
 }
 
+
+static ngx_uint_t
+ngx_media_srt_out_any_used(ngx_media_srt_outputs_t *outs)
+{
+    ngx_media_srt_output_t  *dest;
+    ngx_uint_t               i;
+    ngx_uint_t               used;
+
+    for (i = 0; i < NGX_MEDIA_SRT_MAX_OUTPUTS; i++) {
+        dest = &outs->destinations[i];
+
+        (void) pthread_mutex_lock(&dest->mutex);
+        used = dest->used;
+        (void) pthread_mutex_unlock(&dest->mutex);
+
+        if (used) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static void *
 ngx_media_srt_out_thread(void *data)
 {
@@ -189,12 +220,15 @@ ngx_media_srt_out_thread(void *data)
     size_t                    len, off;
     ngx_uint_t                i;
     ngx_int_t                 rc;
+    ngx_uint_t                 have_dest;
 
     for ( ;; ) {
 
         if (ngx_atomic_fetch_add(&outs->stopping, 0) != 0) {
             return NULL;
         }
+
+        have_dest = 0;
 
         for (i = 0; i < NGX_MEDIA_SRT_MAX_OUTPUTS; i++) {
             dest = &outs->destinations[i];
@@ -219,6 +253,8 @@ ngx_media_srt_out_thread(void *data)
                 continue;
             }
 
+            have_dest = 1;
+
             if (!dest->running || dest->sending) {
                 (void) pthread_mutex_unlock(&dest->mutex);
                 continue;
@@ -239,7 +275,7 @@ ngx_media_srt_out_thread(void *data)
 
                 if (!dest->running) {
                     (void) pthread_mutex_unlock(&dest->mutex);
-                    return NULL;
+                    continue;
                 }
 
                 dest->session = ngx_media_srt_connect(
@@ -349,10 +385,15 @@ ngx_media_srt_out_thread(void *data)
 
             if (dest->epoch != epoch) {
                 /*
-                 * The slot was handed to another destination while the send
-                 * was in flight: the cursor, the session and the counters
-                 * below all belong to the queue that was replaced.
+                 * The slot was removed or handed to another destination while
+                 * the send was in flight: the session, cursor and queue belong
+                 * to the replaced state. If remove() deferred closing the session
+                 * because this send was in flight, clean it up now.
                  */
+                if (!dest->used && dest->session != NULL) {
+                    ngx_media_srt_session_close(dest->session);
+                    dest->session = NULL;
+                }
                 (void) pthread_mutex_unlock(&dest->mutex);
                 continue;
             }
@@ -404,6 +445,24 @@ ngx_media_srt_out_thread(void *data)
 
             (void) pthread_mutex_unlock(&dest->mutex);
         }
+
+        if (!have_dest) {
+            /*
+             * Recheck while holding the pool mutex.  An add can publish a
+             * slot between the table scan and this lock; the recheck avoids
+             * sleeping after that add's wakeup has already happened.
+             */
+            (void) pthread_mutex_lock(&outs->idle_mutex);
+
+            while (ngx_atomic_fetch_add(&outs->stopping, 0) == 0
+                   && !ngx_media_srt_out_any_used(outs))
+            {
+                (void) pthread_cond_wait(&outs->idle_cond,
+                                         &outs->idle_mutex);
+            }
+
+            (void) pthread_mutex_unlock(&outs->idle_mutex);
+        }
     }
 }
 
@@ -446,6 +505,9 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
                 outs->events_capacity * sizeof(ngx_media_srt_out_event_t));
 
     (void) pthread_mutex_init(&outs->events_mutex, NULL);
+
+    (void) pthread_mutex_init(&outs->idle_mutex, NULL);
+    (void) pthread_cond_init(&outs->idle_cond, NULL);
 
     /*
      * The full capacity is allocated up front: destinations can be added and
@@ -578,6 +640,10 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
 
     (void) pthread_mutex_unlock(&dest->mutex);
 
+    (void) pthread_mutex_lock(&outs->idle_mutex);
+    (void) pthread_cond_broadcast(&outs->idle_cond);
+    (void) pthread_mutex_unlock(&outs->idle_mutex);
+
     /*
      * No thread is created here.  The senders are a pool that walks the whole
      * table, so a new slot is picked up by threads that already exist, and
@@ -635,10 +701,15 @@ ngx_media_srt_outputs_remove(ngx_media_srt_outputs_t *outs, ngx_uint_t index)
     (void) pthread_cond_broadcast(&dest->cond);
 
     if (dest->session != NULL) {
-        ngx_media_srt_session_close(dest->session);
-        dest->session = NULL;
+        if (!dest->sending) {
+            ngx_media_srt_session_close(dest->session);
+            dest->session = NULL;
+        }
+        /*
+         * If sending is active, the in-flight sender thread will close the
+         * session once it re-acquires dest->mutex and observes epoch mismatch.
+         */
     }
-
     ngx_media_srt_queue_destroy(&dest->queue);
 
     (void) pthread_mutex_unlock(&dest->mutex);
@@ -658,6 +729,10 @@ ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
     }
 
     (void) ngx_atomic_fetch_add(&outs->stopping, 1);
+
+    (void) pthread_mutex_lock(&outs->idle_mutex);
+    (void) pthread_cond_broadcast(&outs->idle_cond);
+    (void) pthread_mutex_unlock(&outs->idle_mutex);
 
     for (i = 0; i < NGX_MEDIA_SRT_MAX_OUTPUTS; i++) {
         ngx_media_srt_output_t  *dest = &outs->destinations[i];
@@ -693,6 +768,9 @@ ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
     }
 
     outs->nthreads = 0;
+
+    (void) pthread_cond_destroy(&outs->idle_cond);
+    (void) pthread_mutex_destroy(&outs->idle_mutex);
 
     /*
      * No sender can be inside a call on these sessions any more: the ones

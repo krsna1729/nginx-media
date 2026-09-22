@@ -1,0 +1,1261 @@
+#!/usr/bin/env bash
+#
+# Ingest and egress under extreme fanout: where each side saturates, on whose
+# thread, and what placing a publisher on a worker that does not own its
+# program costs.
+#
+# Four things, measured rather than reasoned about:
+#
+#   floor    a worker with no media at all, so the CPU a worker burns before
+#            any publisher arrives is a number, not a target: after the
+#            idle-wait fix the sender pool sleeps with every slot unused; the
+#            pre-fix run recorded the defect as roughly one core per worker.
+#
+#   ingest   libsrt runs the receive path itself, one thread per bound UDP
+#            port, and this module's ingest thread only copies out of the
+#            session buffer.  So the ceiling on one endpoint should be one
+#            core and not one worker - which means publishers scale by
+#            *endpoint* and not by worker count.  This ramps publishers onto
+#            an endpoint and attributes CPU per thread, because "the ceiling
+#            is one core" is a claim about `SRT:RcvQ`, not about a process.
+#
+#   egress   one program has one owner worker.  HLS is served from the shared
+#            segment store, so the kernel spreads readers over every worker
+#            (`listen ... reuseport`), while live destinations are prepared
+#            and fed by the owner in process and cannot be spread at all.
+#            Both are measured per worker count, so "does adding workers
+#            help" is a number for each rather than a principle.
+#
+#   placed   a publisher that lands on a worker which does not own its
+#   vs       program has its frames carried to the owner over the bounded
+#   routed   SOCK_SEQPACKET transport.  The same load is run both ways - on
+#            its owners' endpoint and on another worker's - and the difference
+#            in CPU, throughput and owner queue is reported, so the escape
+#            hatch has a price instead of a description.  Ownership is
+#            deterministic (FNV-1a over application/stream, hash % workers)
+#            and the graph reports the owner, so streams can be named to own
+#            a chosen slot and placed on a chosen endpoint.
+#
+# Publishers stream a pre-encoded file with -c copy, so what is measured is
+# the receiver's cost and not ffmpeg's encoder.  `media_srt_listen` is given
+# once per worker, so worker i binds the i-th endpoint, and a publisher is
+# placed by choosing the endpoint it connects to.
+#
+# Thread identification: the threads this module creates are unnamed, and
+# nginx names every thread "nginx" (its own, the HLS push pool, the SRT
+# sender, the SRT ingest thread).  libsrt names its own - `SRT:RcvQ:wN`,
+# `SRT:SndQ:wN`, `SRT:TsbPd`, `SRT:GC` - so those are read from
+# /proc/<tid>/comm.  The worker's own threads are labelled once per instance
+# from a stack backtrace, because a detached thread is otherwise
+# indistinguishable from the worker's event loop; if that is unavailable the
+# labels fall back to comm and the conditions say so.
+#
+# CPU is per thread from /proc/<pid>/task/<tid>/stat, and the window is the
+# wall time the two samples were taken over, not the sleep between them.
+#
+# Conditions are printed with the numbers.  One host, no netem, nothing else
+# running.
+#
+#   make bench-ingest-egress-fanout
+#   PHASES=misplace make bench-ingest-egress-fanout     one phase
+#   HI_BITRATE=45M PHASES=ingest ...                    more aggressive
+
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+NGINX="$ROOT/.build/nginx-install/sbin/nginx"
+RUN="$ROOT/.build/ingest-egress-fanout"
+
+# ports from the pid, so two runs on one host cannot collide.  One block is 40
+# wide: endpoints 0-3, http and rtmp at +0/+1, destination sinks from +20.
+BASE=$(( 30000 + ($$ % 40) * 40 ))
+HTTP_PORT="$BASE"
+RTMP_PORT="$(( BASE + 1 ))"
+
+PHASES="${PHASES:-floor ingest egress misplace}"
+WINDOW="${WINDOW:-6}"
+FLOOR_WINDOW="${FLOOR_WINDOW:-4}"
+
+# ingest ceiling: sixteen publishers is the per-worker session ceiling, so the
+# offered packet rate is what has to be raised to reach one core on one port.
+# -muxrate pads each publisher's transport stream to the chosen rate, so the
+# receive path sees a packet rate that is a parameter and not whatever the
+# content happened to encode to.
+HI_PUBS="${HI_PUBS:-16}"
+HI_RATES="${HI_RATES:-20M 40M 80M 120M}"
+
+# ingest, publisher growth on one endpoint
+PUB_STEPS="${PUB_STEPS:-4 8 12 16}"
+
+# ingest, endpoint scaling: the same per-publisher rate at every worker count,
+# so the only thing that changes is how many endpoints carry the load and how
+# many receive threads exist
+LO_BITRATE="${LO_BITRATE:-6M}"
+LO_PER_PORT="${LO_PER_PORT:-12}"
+LO_WORKERS="${LO_WORKERS:-1 2 4}"
+
+# egress
+EGRESS_WORKERS="${EGRESS_WORKERS:-1 2 4}"
+HLS_READERS="${HLS_READERS:-48}"
+HLS_SECONDS="${HLS_SECONDS:-12}"
+SRT_DESTS="${SRT_DESTS:-8}"
+LIVE_SECONDS="${LIVE_SECONDS:-12}"
+
+# placement
+MP_WORKERS="${MP_WORKERS:-2}"
+MP_PUBS="${MP_PUBS:-12}"
+MP_BITRATE="${MP_BITRATE:-20M}"
+# -muxrate makes the offered rate a parameter, so the placed and routed runs
+# carry the same media and the CPU comparison is per unit carried
+MP_RATE="${MP_RATE:-20M}"
+
+# live egress: the program's own rate.  The source file is encoded at this
+# target, because the destinations carry the program and not the padding: a
+# transport stream padded with null packets costs the receive path and is
+# dropped by the demuxer, so it does not reach an output.
+LIVE_BITRATE="${LIVE_BITRATE:-20M}"
+LIVE_RATE="${LIVE_RATE:-}"
+
+PUBS=()
+SINKS=()
+STORM=0
+
+SRT_PORTS=()
+declare -A ENDPOINT_INDEX=()
+declare -A SLOT=()
+declare -A ROLE=()
+declare -A TID_PID=()
+LABELLED=1
+W_BEFORE=""
+W_AFTER=""
+W_DUR=0
+
+cleanup() {
+    local p
+
+    for p in ${PUBS[@]+"${PUBS[@]}"} ${SINKS[@]+"${SINKS[@]}"}; do
+        kill -KILL "$p" 2>/dev/null
+    done
+
+    [ "$STORM" != "0" ] && kill -KILL "$STORM" 2>/dev/null
+
+    stop_instance
+
+    return 0
+}
+trap cleanup EXIT
+
+[ -x "$NGINX" ] || { echo "nginx is not built; run: make nginx" >&2; exit 1; }
+
+# --- process bookkeeping ----------------------------------------------------
+#
+# nginx overwrites the worker's argv with its process title ("nginx: worker
+# process"), so `pgrep -f <prefix>` matches nothing - an earlier version of
+# this bench reported zero CPU for exactly that reason.  The workers are the
+# children of the master the pid file names, which survives the retitling.
+
+master_pid() {
+    cat "$RUN/logs/nginx.pid" 2>/dev/null || true
+}
+
+worker_pids() {
+    local m
+
+    m="$(master_pid)"
+    [ -n "$m" ] || return 0
+
+    pgrep -P "$m" 2>/dev/null || true
+}
+
+pid_of() {   # <log> <ere> → the pid on the last matching line
+    grep -E "$2" "$1" 2>/dev/null \
+        | sed -n 's/.*\[[a-z]*\] \([0-9][0-9]*\)#.*/\1/p' | tail -1
+}
+
+# worker i binds the i-th endpoint and the log line naming the endpoint
+# carries the pid that bound it, so a worker's slot is a lookup
+map_slots() {
+    local p i
+
+    SLOT=()
+
+    for p in $(worker_pids); do
+        for i in "${SRT_PORTS[@]}"; do
+            [ "$(pid_of "$RUN/logs/error.log" \
+                  "srt listener ready on 127.0.0.1:$i\$")" = "$p" ] \
+                && SLOT["$p"]="${ENDPOINT_INDEX[$i]}"
+        done
+    done
+
+    return 0
+}
+
+slot_name() {   # <pid>
+    if [ -n "${SLOT[$1]:-}" ]; then
+        printf 'w%s' "${SLOT[$1]}"
+    else
+        printf 'pid%s' "$1"
+    fi
+}
+
+stop_instance() {
+    local m p
+
+    m="$(master_pid)"
+    [ -n "$m" ] || return 0
+
+    # workers first: killing the master outright orphans them, and an orphaned
+    # worker still holds its SRT port and its routing sockets
+    for p in $(pgrep -P "$m" 2>/dev/null); do
+        kill -KILL "$p" 2>/dev/null
+    done
+
+    kill -QUIT "$m" 2>/dev/null
+    sleep 1
+    kill -KILL "$m" 2>/dev/null
+
+    rm -f "$RUN/logs/nginx.pid"
+
+    return 0
+}
+
+# --- thread labelling -------------------------------------------------------
+
+label_worker() {   # <pid> → 0 when a backtrace with symbols was read
+    local pid="$1" out tid role
+
+    out="$(sudo -n gdb -p "$pid" -batch -ex 'thread apply all bt 14' 2>/dev/null)"
+    [ -n "$out" ] || return 1
+
+    out="$(printf '%s\n' "$out" | awk '
+        /^Thread [0-9]+ \(Thread/ {
+            if (tid != "") { print tid, (role == "" ? "unlabelled" : role) }
+            match($0, /LWP [0-9]+/)
+            tid = substr($0, RSTART + 4, RLENGTH - 4)
+            role = ""
+            next
+        }
+        /ngx_media_srt_thread/       { role = "ingest" }
+        /ngx_media_srt_out_thread/   { if (role == "") role = "srt-send" }
+        /ngx_media_hls_push_thread/  { if (role == "") role = "hls-push" }
+        /ngx_worker_process_cycle/   { if (role == "") role = "worker" }
+        /CRcvQueue::worker/          { if (role == "") role = "SRT:RcvQ" }
+        /CSndQueue::worker/          { if (role == "") role = "SRT:SndQ" }
+        /CUDT::tsbpd/                { if (role == "") role = "SRT:TsbPd" }
+        /garbageCollect/             { if (role == "") role = "SRT:GC" }
+        END { if (tid != "") print tid, (role == "" ? "unlabelled" : role) }
+    ')"
+
+    [ -n "$out" ] || return 1
+
+    while read -r tid role; do
+        ROLE["$tid"]="$role"
+    done <<< "$out"
+
+    return 0
+}
+
+label_all() {
+    local p
+
+    LABELLED=1
+    ROLE=()
+
+    for p in $(worker_pids); do
+        label_worker "$p" || LABELLED=0
+    done
+}
+
+role_of() {   # <pid> <tid> ; the backtrace label first, the comm name after
+    local pid="$1" tid="$2" comm
+
+    if [ -n "${ROLE[$tid]:-}" ]; then
+        printf '%s' "${ROLE[$tid]}"
+        return 0
+    fi
+
+    comm="$(cat "/proc/$pid/task/$tid/comm" 2>/dev/null || echo unknown)"
+
+    case "$comm" in
+        SRT:RcvQ*) printf 'SRT:RcvQ' ;;
+        SRT:SndQ*) printf 'SRT:SndQ' ;;
+        SRT:TsbPd) printf 'SRT:TsbPd' ;;
+        SRT:GC)    printf 'SRT:GC' ;;
+        nginx)     printf 'nginx-thread' ;;
+        *)         printf '%s' "$comm" ;;
+    esac
+}
+
+# --- CPU sampling -----------------------------------------------------------
+#
+# /proc/<pid>/task/<tid>/stat, utime+stime.  The comm field is parenthesised
+# and may contain spaces ("nginx: worker process"), so the fields are counted
+# from after the last ')': utime is the twelfth of what is left, stime the
+# thirteenth.
+
+sample_cpu() {
+    local p t tid
+
+    for p in $(worker_pids); do
+        for t in /proc/"$p"/task/*; do
+            [ -r "$t/stat" ] || continue
+            tid="$(basename "$t")"
+            printf '%s %s %s %s\n' "$p" "$tid" "$(role_of "$p" "$tid")" \
+                "$(awk '{ sub(/^[^)]*\) /, ""); print $12 + $13 }' "$t/stat")"
+        done
+    done
+}
+
+# the samples bracket the sleep, so the window is measured, not assumed
+cpu_window() {   # <seconds>
+    local t0 t1
+
+    W_BEFORE="$RUN/before"
+    W_AFTER="$RUN/after"
+
+    t0="$(date +%s.%N)"
+    sample_cpu > "$W_BEFORE"
+    sleep "$1"
+    sample_cpu > "$W_AFTER"
+    t1="$(date +%s.%N)"
+
+    W_DUR="$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", b - a }')"
+}
+
+# per (worker, role) percent of one core between two samples
+report_cpu() {   # <before> <after> <seconds>
+    local pid role pct
+
+    awk -v w="$3" '
+        NR == FNR { a[$1" "$2] = $4; next }
+        { cpu[$1" "$3] += $4 - a[$1" "$2] }
+        END { for (k in cpu) print k, cpu[k] * 100 / (w * 100) }
+    ' "$1" "$2" | sort -k2,2 -k1,1 | while read -r pid role pct; do
+        printf '%s %s %s\n' "$(slot_name "$pid")" "$role" "$pct"
+    done
+}
+
+# the roles worth a line of their own
+detail_cpu() {   # <before> <after> <seconds>
+    report_cpu "$1" "$2" "$3" | awk '
+        $2 == "SRT:RcvQ" || $2 == "SRT:SndQ" || $2 == "SRT:TsbPd" \
+        || $2 == "ingest" || $2 == "worker" || $2 == "srt-send" \
+        || $2 == "SRT:GC" || $2 == "hls-push" { print; next }
+        { other[$1] += $3 }
+        END { for (w in other) printf "%s other %d\n", w, other[w] }
+    ' | sort
+}
+
+cpu_total() {   # <before> <after> <seconds>
+    report_cpu "$1" "$2" "$3" \
+        | awk '{ c[$1] += $3 } END { for (w in c) printf "%s=%d%% ", w, c[w] }'
+}
+
+# --- API helpers ------------------------------------------------------------
+#
+# The control API answers from the worker that accepts the request.  With more
+# than one worker a request can land on a replica, where a mutation is refused
+# with not_owner and where the program's fanout histogram is empty - the feed
+# is the owner's.  Two URLs in one curl invocation share the connection, so
+# they land on the same worker: reading the stream document first says whether
+# the worker that will answer the metrics is the owner.
+
+api() { printf 'http://127.0.0.1:%s/media/api/v1' "$HTTP_PORT"; }
+
+stream_field() {   # <name> <field>
+    curl -fsS "$(api)/streams/live/$1" 2>/dev/null \
+        | sed -n "s/.*\"$2\":\([0-9]*\).*/\1/p" | head -1
+}
+
+# A read can land on a worker that has no copy of a stream a publisher
+# created, and answers 404.  Retrying is how the owner is reached; the value
+# itself is the owner's either way, because program progress is published in
+# the shared directory.
+field_any() {   # <name> <field> [tries]
+    local i v
+
+    for i in $(seq 1 "${3:-12}"); do
+        v="$(stream_field "$1" "$2")"
+        [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+        sleep 0.2
+    done
+
+    return 1
+}
+
+owner_of() {   # <name> → the owner the graph reports
+    local i v
+
+    for i in $(seq 1 40); do
+        v="$(stream_field "$1" owner)"
+        [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+        sleep 0.25
+    done
+
+    return 1
+}
+
+owner_metrics() {   # <name> → the owner's own metrics, on one connection
+    local i out
+
+    for i in $(seq 1 40); do
+        out="$(curl -fsS "$(api)/streams/live/$1" "$(api)/metrics" 2>/dev/null)" \
+            || continue
+
+        case "$out" in
+            *'"observed_here":true'*) printf '%s' "$out"; return 0 ;;
+        esac
+    done
+
+    return 1
+}
+
+owner_metric() {   # <name> <metric>
+    owner_metrics "$1" 2>/dev/null \
+        | grep "^$2{application=\"live\",name=\"$1\"" | awk '{print $2}' | head -1
+}
+
+owner_percentile() {   # <name> <percentile>
+    owner_metrics "$1" 2>/dev/null \
+        | grep "fanout_delay_ms{application=\"live\",name=\"$1\"" \
+        | grep "percentile=\"$2\"" | awk '{print $2}' | head -1
+}
+
+post_owner() {   # <path> <json> ; retried until the owner answers it
+    local i code
+
+    for i in $(seq 1 60); do
+        code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' -d "$2" "$(api)$1" 2>/dev/null)"
+
+        case "$code" in
+            2*) return 0 ;;
+            # 409 not_owner and 404 both mean "this worker cannot answer for
+            # that stream": with more than one worker the request lands on a
+            # replica, so the next attempt is the point, not an error
+            409|404) sleep 0.2 ;;
+            *)  echo "   POST $1 answered $code" >&2; return 1 ;;
+        esac
+    done
+
+    echo "   POST $1 never reached the owner" >&2
+    return 1
+}
+
+# --- the owner hash ---------------------------------------------------------
+#
+# FNV-1a over application/stream, the arithmetic in src/core/ngx_media_owner.c,
+# so streams whose owner is a chosen slot can be named on purpose.
+
+owner_names() {   # <slot> <workers> <count> <prefix> → names, one per line
+    python3 - "$1" "$2" "$3" "$4" <<'PY'
+import sys
+
+want, workers, count, prefix = (int(sys.argv[1]), int(sys.argv[2]),
+                                int(sys.argv[3]), sys.argv[4])
+found = 0
+
+for i in range(1, 20000):
+    name = "%s%d" % (prefix, i)
+    h = 2166136261
+    for b in b"live/" + name.encode():
+        h ^= b
+        h = (h * 16777619) & 0xffffffff
+    if h % workers == want:
+        print(name)
+        found += 1
+        if found == count:
+            break
+PY
+}
+
+# --- the instance -----------------------------------------------------------
+
+make_source() {   # <path> <bitrate>
+    ffmpeg -hide_banner -loglevel error -f lavfi \
+        -i "testsrc2=size=1280x720:rate=25" \
+        -c:v libx264 -preset ultrafast -g 50 -pix_fmt yuv420p \
+        -b:v "$2" -maxrate "$2" -minrate "$2" -bufsize 60M \
+        -t 30 -f mpegts "$1" 2>/dev/null
+
+    [ -s "$1" ] || { echo "could not build the $2 source" >&2; exit 1; }
+
+    printf '   source %s: %s KiB over 30s (%.1f Mbit/s)\n' \
+        "$2" "$(( $(stat -c %s "$1") / 1024 ))" \
+        "$(awk -v b="$(stat -c %s "$1")" 'BEGIN { printf "%.1f", b * 8 / 30 / 1000000 }')"
+}
+
+write_config() {   # <workers> <hls yes|no> <rtmp yes|no>
+    local w="$1" i
+
+    SRT_PORTS=()
+    ENDPOINT_INDEX=()
+
+    for i in $(seq 0 $(( w - 1 ))); do
+        SRT_PORTS+=( "$(( BASE + 2 + i ))" )
+        ENDPOINT_INDEX[$(( BASE + 2 + i ))]="$i"
+    done
+
+    {
+        echo "worker_processes $w;"
+        echo "daemon on;"
+        echo "error_log logs/error.log info;"
+        echo "pid logs/nginx.pid;"
+        echo
+        echo "events { worker_connections 8192; }"
+        echo
+
+        [ "$2" = yes ] && echo "media_hls $RUN/hls;"
+
+        for i in "${SRT_PORTS[@]}"; do
+            echo "media_srt_listen 127.0.0.1:$i;"
+        done
+
+        [ "$3" = yes ] && echo "media_rtmp_listen 127.0.0.1:$RTMP_PORT;"
+
+        echo
+        echo "http {"
+
+        if [ "$2" = yes ]; then
+            echo "    log_format media_pid \"\$pid \$bytes_sent\";"
+            echo "    access_log logs/access.log media_pid;"
+        else
+            echo "    access_log off;"
+        fi
+
+        echo
+        echo "    server {"
+        echo "        listen 127.0.0.1:$HTTP_PORT reuseport;"
+        echo
+        echo "        location /media/api/ { media_api; }"
+        echo "        location /hls/       { alias $RUN/hls/; }"
+        echo "    }"
+        echo "}"
+    } > "$RUN/conf/nginx.conf"
+}
+
+start_instance() {   # <workers> <hls> <rtmp>
+    local i want
+
+    stop_instance
+    rm -rf "$RUN/hls" "$RUN/logs"
+    mkdir -p "$RUN/logs" "$RUN/hls"
+
+    write_config "$1" "$2" "$3"
+
+    "$NGINX" -p "$RUN" -c conf/nginx.conf -t >"$RUN/conf.log" 2>&1 \
+        || { cat "$RUN/conf.log" >&2; echo "configuration rejected" >&2; exit 1; }
+
+    "$NGINX" -p "$RUN" -c conf/nginx.conf
+
+    for i in $(seq 1 400); do
+        want="$(grep -c 'srt listener ready' "$RUN/logs/error.log" 2>/dev/null || true)"
+        [ "${want:-0}" -ge "$1" ] && break
+        sleep 0.05
+    done
+
+    want="$(grep -c 'srt listener ready' "$RUN/logs/error.log" 2>/dev/null || true)"
+    [ "${want:-0}" -ge "$1" ] \
+        || { echo "not every endpoint was bound ($want of $1)" >&2
+             tail -5 "$RUN/logs/error.log" >&2; exit 1; }
+
+    if [ "$3" = yes ]; then
+        for i in $(seq 1 200); do
+            grep -q 'rtmp listener ready' "$RUN/logs/error.log" 2>/dev/null && break
+            sleep 0.05
+        done
+    fi
+
+    map_slots
+    label_all
+
+    # the placement every number below depends on: which worker bound which
+    # endpoint, read back from the log
+    PLACEMENT=""
+    for i in $(seq 0 $(( $1 - 1 ))); do
+        PLACEMENT="$PLACEMENT ${SRT_PORTS[$i]}->$(slot_name "$(pid_of "$RUN/logs/error.log" "srt listener ready on 127.0.0.1:${SRT_PORTS[$i]}\$")")"
+    done
+
+    return 0
+}
+
+publish() {   # <endpoint port> <name> <source> [muxrate]
+    local rate=()
+
+    # -muxrate pads the transport stream to a chosen rate, so the packet rate
+    # a publisher offers is a parameter rather than whatever the content
+    # happens to encode to
+    [ -n "${4:-}" ] && rate=( -muxrate "$4" )
+
+    ffmpeg -hide_banner -loglevel error -re -stream_loop -1 -i "$3" -c copy \
+        "${rate[@]}" -f mpegts \
+        "srt://127.0.0.1:$1?mode=caller&streamid=#!::r=live/$2,m=publish,s=enc-$2" \
+        >/dev/null 2>&1 &
+}
+
+kill_pubs() {
+    local p
+
+    for p in ${PUBS[@]+"${PUBS[@]}"}; do
+        kill -KILL "$p" 2>/dev/null
+    done
+
+    # reaped, so the shell does not print a "Killed" line per publisher
+    for p in ${PUBS[@]+"${PUBS[@]}"}; do
+        wait "$p" 2>/dev/null
+    done
+
+    PUBS=()
+    return 0
+}
+
+kill_one() {   # <pid> ; the same, for a single publisher or receiver
+    [ -n "${1:-}" ] || return 0
+    kill -KILL "$1" 2>/dev/null
+    wait "$1" 2>/dev/null
+    return 0
+}
+
+# --- ingest throughput, per worker ------------------------------------------
+#
+# Every worker's own main thread logs what its ingest thread drained, so the
+# line is per-worker evidence of how much arrived and how much of it the raw
+# queue dropped.  The counters are cumulative, so the window is a delta.
+
+drained_last() {   # <pid> <field>
+    grep "^.*\[[a-z]*\] $1#" "$RUN/logs/error.log" 2>/dev/null \
+        | grep 'srt ingest drained' | tail -1 \
+        | sed -n "s/.* $2=\([0-9]*\).*/\1/p"
+}
+
+ingest_totals() {   # sums the last drained line of every worker
+    local p b c d s any=0
+
+    BYTES=0; CHUNKS=0; DROPPED=0; SESSIONS=0
+
+    for p in $(worker_pids); do
+        b="$(drained_last "$p" bytes)"
+        [ -n "$b" ] || continue
+
+        any=1
+        c="$(drained_last "$p" chunks)"
+        d="$(drained_last "$p" dropped_chunks)"
+        s="$(drained_last "$p" sessions)"
+
+        BYTES=$(( BYTES + b )); CHUNKS=$(( CHUNKS + c ))
+        DROPPED=$(( DROPPED + d )); SESSIONS=$(( SESSIONS + s ))
+    done
+
+    [ "$any" = 1 ]
+}
+
+row() {   # <workers> <publishers> <delivered> <chunks/s> <MiB/s>
+    printf '%-8s %-6s %-11s %-11s %-9s %s\n' "$1" "$2" "$3" "$4" "$5" \
+        "$(cpu_total "$W_BEFORE" "$W_AFTER" "$W_DUR")"
+}
+
+detail_rows() {   # <publishers>
+    detail_cpu "$W_BEFORE" "$W_AFTER" "$W_DUR" \
+        | awk -v p="$1" '{ printf "   %-4s %-10s %-6s %s%%\n", p, $2, $1, $3 }'
+}
+
+mibps() {   # <bytes> ; bytes/s over the window, in MiB
+    awk -v b="$1" -v w="$W_DUR" 'BEGIN { printf "%.1f", b / 1048576 / w }'
+}
+
+# --- phases -----------------------------------------------------------------
+
+phase_floor() {
+    local w
+
+    echo
+    echo "== floor: what a worker burns with no publisher and no destination"
+    echo
+    printf '%-8s %-10s %s\n' workers 'idle CPU' 'per-thread'
+
+    for w in $LO_WORKERS; do
+
+        start_instance "$w" no no
+        cpu_window "$FLOOR_WINDOW"
+
+        printf '%-8s %-10s %s\n' "$w" \
+            "$(cpu_total "$W_BEFORE" "$W_AFTER" "$W_DUR")" \
+            "$(report_cpu "$W_BEFORE" "$W_AFTER" "$W_DUR" \
+               | awk '$2 == "srt-send" { printf "%s=%d%% ", $1, $3 }')"
+    done
+
+    echo "   (no media has been published at this point in the run)"
+    return 0
+}
+
+phase_ingest_high() {
+    local rate i delivered b0 c0 d0 db dc dd late noroom
+
+    echo
+    echo "== ingest: $HI_PUBS publishers on one endpoint, one worker, with the"
+    echo "   offered rate raised ($HI_RATES per publisher, -muxrate)"
+    echo "   $HI_PUBS is the per-worker session ceiling, so the only thing that"
+    echo "   rises here is the packet rate one port has to carry"
+    echo
+    printf '%-8s %-10s %-11s %-9s %-8s %s\n' rate chunks/s MiB/s dropped \
+        seqno-late 'CPU per worker (total)'
+
+    make_source "$RUN/media/hi.ts" "$LO_BITRATE"
+
+    for rate in $HI_RATES; do
+
+        start_instance 1 no no
+
+        PUBS=()
+        for i in $(seq 1 "$HI_PUBS"); do
+            publish "${SRT_PORTS[0]}" "hi$i" "$RUN/media/hi.ts" "$rate"
+            PUBS+=( $! )
+        done
+
+        sleep "$WINDOW"
+
+        delivered=0
+        for i in $(seq 1 "$HI_PUBS"); do
+            [ -n "$(field_any "hi$i" program_frames 6)" ] \
+                && delivered=$(( delivered + 1 ))
+        done
+
+        # the drained counters are sampled around the window only: reading
+        # them across the delivered loop above would divide a longer interval
+        # by the window and report a rate nobody carried
+        ingest_totals; b0=$BYTES; c0=$CHUNKS; d0=$DROPPED
+        cpu_window "$WINDOW"
+        ingest_totals || true
+
+        db=$(( BYTES - b0 )); dc=$(( CHUNKS - c0 )); dd=$(( DROPPED - d0 ))
+
+        # the library's own two drop sites, which are not module counters
+        late="$(grep -c 'RCV-DROPPED' "$RUN/logs/error.log" 2>/dev/null)"
+        noroom="$(grep -c 'No room to store incoming packet' \
+                  "$RUN/logs/error.log" 2>/dev/null)"
+        late="${late:-0}"
+        noroom="${noroom:-0}"
+
+        printf '%-8s %-10s %-11s %-9s %-8s %s\n' "$rate" \
+            "$(awk -v c="$dc" -v w="$W_DUR" 'BEGIN { printf "%d", c / w }')" \
+            "$(mibps "$db")" "$dd" "$(( late + noroom ))" \
+            "$(cpu_total "$W_BEFORE" "$W_AFTER" "$W_DUR")"
+
+        printf '   %-4s sessions %s  fanout-delay drops %s  receive-buffer drops %s\n' \
+            "$rate" "$delivered/$HI_PUBS" "$late" "$noroom"
+
+        detail_rows "$rate"
+
+        kill_pubs
+        sleep 1
+    done
+
+    return 0
+}
+
+phase_ingest_publishers() {
+    local k i delivered b0 c0 d0 db dc dd
+
+    echo
+    echo "== ingest: publishers grown on one endpoint at ~$LO_BITRATE each"
+    echo
+    printf '%-8s %-6s %-11s %-11s %-9s %s\n' workers publ. delivered \
+        chunks/s MiB/s 'CPU per worker (total)'
+
+    for k in $PUB_STEPS; do
+
+        start_instance 1 no no
+
+        PUBS=()
+        for i in $(seq 1 "$k"); do
+            publish "${SRT_PORTS[0]}" "pu$i" "$RUN/media/lo.ts"
+            PUBS+=( $! )
+        done
+
+        sleep "$WINDOW"
+
+        delivered=0
+        for i in $(seq 1 "$k"); do
+            [ -n "$(field_any "pu$i" program_frames 6)" ] \
+                && delivered=$(( delivered + 1 ))
+        done
+
+        ingest_totals; b0=$BYTES; c0=$CHUNKS; d0=$DROPPED
+        cpu_window "$WINDOW"
+        ingest_totals || true
+
+        db=$(( BYTES - b0 )); dc=$(( CHUNKS - c0 )); dd=$(( DROPPED - d0 ))
+
+        row 1 "$k" "$delivered/$k" \
+            "$(awk -v c="$dc" -v w="$W_DUR" 'BEGIN { printf "%d", c / w }')" \
+            "$(mibps "$db")"
+        detail_rows "$k"
+
+        [ "$dd" -gt 0 ] && echo "   dropped chunks in the window: $dd"
+
+        kill_pubs
+        sleep 1
+    done
+
+    return 0
+}
+
+phase_ingest_endpoints() {
+    local w n i delivered b0 c0 db dc
+
+    echo
+    echo "== ingest: the same publishers per endpoint, across worker counts"
+    echo "   ~$LO_BITRATE publishers, $LO_PER_PORT per endpoint, spread"
+    echo "   round-robin over the endpoints the instance binds"
+    echo
+    printf '%-8s %-6s %-11s %-11s %-9s %s\n' workers publ. delivered \
+        chunks/s MiB/s 'CPU per worker (total)'
+
+    for w in $LO_WORKERS; do
+        n=$(( w * LO_PER_PORT ))
+
+        start_instance "$w" no no
+
+        echo "   endpoints:$PLACEMENT"
+
+        PUBS=()
+        for i in $(seq 1 "$n"); do
+            publish "${SRT_PORTS[$(( (i - 1) % w ))]}" "lo$i" "$RUN/media/lo.ts"
+            PUBS+=( $! )
+        done
+
+        sleep "$WINDOW"
+
+        delivered=0
+        for i in $(seq 1 "$n"); do
+            [ -n "$(field_any "lo$i" program_frames 6)" ] \
+                && delivered=$(( delivered + 1 ))
+        done
+
+        ingest_totals; b0=$BYTES; c0=$CHUNKS
+        cpu_window "$WINDOW"
+        ingest_totals || true
+
+        db=$(( BYTES - b0 )); dc=$(( CHUNKS - c0 ))
+
+        row "$w" "$n" "$delivered/$n" \
+            "$(awk -v c="$dc" -v w="$W_DUR" 'BEGIN { printf "%d", c / w }')" \
+            "$(mibps "$db")"
+        detail_rows "$n"
+
+        kill_pubs
+        sleep 1
+    done
+
+    return 0
+}
+
+phase_ingest_one_port() {
+    local w n i delivered b0 c0 db dc
+
+    echo
+    echo "== ingest: $LO_PER_PORT publishers on one endpoint, from a single"
+    echo "   worker and from an instance with four workers bound (three idle)"
+    echo
+    printf '%-8s %-6s %-11s %-11s %-9s %s\n' workers publ. delivered \
+        chunks/s MiB/s 'CPU per worker (total)'
+
+    for w in 1 4; do
+        n="$LO_PER_PORT"
+
+        start_instance "$w" no no
+
+        PUBS=()
+        for i in $(seq 1 "$n"); do
+            publish "${SRT_PORTS[0]}" "op$i" "$RUN/media/lo.ts"
+            PUBS+=( $! )
+        done
+
+        sleep "$WINDOW"
+
+        delivered=0
+        for i in $(seq 1 "$n"); do
+            [ -n "$(field_any "op$i" program_frames 6)" ] \
+                && delivered=$(( delivered + 1 ))
+        done
+
+        ingest_totals; b0=$BYTES; c0=$CHUNKS
+        cpu_window "$WINDOW"
+        ingest_totals || true
+
+        db=$(( BYTES - b0 )); dc=$(( CHUNKS - c0 ))
+
+        row "$w" "$n" "$delivered/$n" \
+            "$(awk -v c="$dc" -v w="$W_DUR" 'BEGIN { printf "%d", c / w }')" \
+            "$(mibps "$db")"
+        detail_rows "$n"
+
+        kill_pubs
+        sleep 1
+    done
+
+    return 0
+}
+
+# --- egress -----------------------------------------------------------------
+
+segments_closed() {   # the playlist's closed segments, 0 when there is none
+    local n
+
+    n="$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" 2>/dev/null)"
+    printf '%s' "${n:-0}"
+}
+
+hls_storm() {
+    local list="$RUN/urls.txt" name
+    while :; do
+        : > "$list"
+
+        for name in $(grep -v '^#' "$RUN/hls/index.m3u8" 2>/dev/null \
+                      | grep '\.ts$' || true); do
+            printf 'url = "http://127.0.0.1:%s/hls/%s"\noutput = "/dev/null"\n' \
+                "$HTTP_PORT" "$name" >> "$list"
+        done
+
+        [ -s "$list" ] || { sleep 0.2; continue; }
+
+        curl -fsS --parallel --parallel-max "$HLS_READERS" \
+            --config "$list" >/dev/null 2>&1 || true
+
+        sleep 0.02
+    done
+}
+
+phase_egress_hls() {
+    local w i served mib rps pub
+
+    echo
+    echo "== egress: $HLS_READERS concurrent HLS readers against one program"
+    echo "   the segmenter runs on the owner; each reader is served by"
+    echo "   whichever worker the kernel hashed it to"
+    echo
+    printf '%-8s %-12s %-11s %-9s %s\n' workers requests/s MiB/s \
+        segments 'CPU per worker (total)'
+
+    for w in $EGRESS_WORKERS; do
+
+        start_instance "$w" yes no
+        : > "$RUN/logs/access.log"
+
+        publish "${SRT_PORTS[0]}" "eg" "$RUN/media/lo.ts"
+        pub=$!
+
+        for i in $(seq 1 400); do
+            [ "$(segments_closed)" -ge 3 ] && break
+            sleep 0.1
+        done
+
+        sleep 4
+
+        hls_storm &
+        STORM=$!
+
+        cpu_window "$HLS_SECONDS"
+
+        kill -KILL "$STORM" 2>/dev/null
+        STORM=0
+        sleep 0.5
+
+        served="$(wc -l < "$RUN/logs/access.log" 2>/dev/null || echo 0)"
+        mib="$(awk -v s="$W_DUR" \
+               '{ b += $2 } END { printf "%.1f", b / 1048576 / s }' \
+               "$RUN/logs/access.log" 2>/dev/null || echo 0)"
+        rps="$(awk -v n="$served" -v s="$W_DUR" 'BEGIN { printf "%d", n / s }')"
+
+        printf '%-8s %-12s %-11s %-9s %s\n' "$w" "$rps" "$mib" \
+            "$(segments_closed)" \
+            "$(cpu_total "$W_BEFORE" "$W_AFTER" "$W_DUR")"
+
+        echo "   requests per worker (the access log's \$pid):"
+        awk '{ c[$1]++ } END { for (p in c) print p, c[p] }' \
+            "$RUN/logs/access.log" 2>/dev/null \
+            | while read -r p n; do
+                  printf '     %-6s %s requests\n' "$(slot_name "$p")" "$n"
+              done
+
+        detail_rows hls
+
+        kill_one "$pub"
+        sleep 1
+    done
+
+    return 0
+}
+
+phase_egress_live() {
+    local w d port pub started owner dests f0 f1
+
+    echo
+    echo "== egress: $SRT_DESTS live SRT destinations on one program"
+    echo "   each is pushed to an ffmpeg receiver of its own, prepared and fed"
+    echo "   by the owner worker in process"
+    echo
+    printf '%-8s %-13s %-11s %s\n' workers started frames/s \
+        'CPU per worker (total)'
+
+    make_source "$RUN/media/lv.ts" "$LIVE_BITRATE"
+
+    for w in $EGRESS_WORKERS; do
+
+        start_instance "$w" no yes
+
+        publish "${SRT_PORTS[0]}" "lv" "$RUN/media/lv.ts" "$LIVE_RATE"
+        pub=$!
+
+        for d in $(seq 1 200); do
+            [ -n "$(field_any lv program_frames 8)" ] && break
+            sleep 0.1
+        done
+
+        owner="$(owner_of lv)"
+
+        # the receivers have to be listening before the destinations connect
+        SINKS=()
+        for d in $(seq 1 "$SRT_DESTS"); do
+            port=$(( BASE + 20 + d ))
+            ffmpeg -hide_banner -loglevel error \
+                -i "srt://127.0.0.1:$port?mode=listener" -c copy -f null - \
+                >"$RUN/sink-$d.log" 2>&1 &
+            SINKS+=( $! )
+        done
+
+        sleep 2
+
+        for d in $(seq 1 "$SRT_DESTS"); do
+            post_owner "/streams/live/lv/destinations" \
+                "{\"id\":\"sink$d\",\"type\":\"srt\",\"host\":\"127.0.0.1\",\"port\":$(( BASE + 20 + d )),\"streamid\":\"#!::r=live/lv,m=publish,s=sink$d\"}" \
+                || true
+        done
+
+        sleep 5
+
+        dests="$(grep -cE 'media: srt destination sink[0-9]+ started' \
+                  "$RUN/logs/error.log" 2>/dev/null || true)"
+        dests="${dests:-0}"
+        f0="$(field_any lv program_frames 8)"; f0="${f0:-0}"
+
+        cpu_window "$LIVE_SECONDS"
+
+        f1="$(field_any lv program_frames 8)"; f1="${f1:-0}"
+
+        printf '%-8s %-13s %-11s %s\n' "$w" "$dests/$SRT_DESTS" \
+            "$(awk -v f="$(( f1 - f0 ))" -v s="$W_DUR" \
+               'BEGIN { printf "%.1f", f / s }')" \
+            "$(cpu_total "$W_BEFORE" "$W_AFTER" "$W_DUR")"
+
+        echo "   owner reported: ${owner:-?}; destinations started: $dests"
+
+        detail_rows live
+
+        for d in ${SINKS[@]+"${SINKS[@]}"}; do kill_one "$d"; done
+        SINKS=()
+        kill_one "$pub"
+        sleep 1
+    done
+
+    return 0
+}
+
+# --- placed versus routed ---------------------------------------------------
+
+phase_misplace() {
+    local w="$MP_WORKERS" i n="$MP_PUBS"
+    local placed routed placed_owner routed_owner routed_log placed_routed
+    local f0 f1 frames units backlog p50 p99 span t0 t1
+
+    echo
+    echo "== placement: $n publishers on their owner's endpoint, and the same"
+    echo "   $n on another worker's endpoint, where every one is routed"
+    echo "   $w workers, ~$MP_BITRATE each, ${WINDOW}s windows"
+    echo
+
+    make_source "$RUN/media/mp.ts" "$MP_BITRATE"
+
+    mapfile -t PLACED < <(owner_names 0 "$w" "$n" p)
+    mapfile -t ROUTED < <(owner_names 0 "$w" "$n" r)
+
+    for i in "${!PLACED[@]}"; do
+        [ -n "${PLACED[$i]}" ] && [ -n "${ROUTED[$i]}" ] \
+            || { echo "could not name $n streams with owner 0" >&2; exit 1; }
+    done
+
+    for case in placed routed; do
+
+        # HLS is on so the program has a consumer: the fanout delay histogram
+        # only records a dispatch when something takes a unit out of the feed.
+        # The segmenter runs on the owner in both cases, so it is common to
+        # both and cancels in the comparison.
+        start_instance "$w" yes no
+
+        echo "   endpoints:$PLACEMENT"
+
+        PUBS=()
+        if [ "$case" = placed ]; then
+            # accepted by the owner that drives the program: no transport
+            for i in "${!PLACED[@]}"; do
+                publish "${SRT_PORTS[0]}" "${PLACED[$i]}" "$RUN/media/mp.ts" \
+                    "$MP_RATE"
+                PUBS+=( $! )
+            done
+        else
+            # accepted by worker 1 and routed to the owner on worker 0
+            for i in "${!ROUTED[@]}"; do
+                publish "${SRT_PORTS[1]}" "${ROUTED[$i]}" "$RUN/media/mp.ts" \
+                    "$MP_RATE"
+                PUBS+=( $! )
+            done
+        fi
+
+        sleep 6
+
+        # Everything is sampled between t0 and t1, and the rates are divided
+        # by that interval rather than by the sleep: reading 12 programs'
+        # counters takes long enough to matter, and it is the interval the
+        # deltas actually cover.
+        t0="$(date +%s.%N)"
+        ingest_totals; local b0=$BYTES c0=$CHUNKS d0=$DROPPED
+
+        f0=0
+        for i in "${!PLACED[@]}"; do
+            local v
+            if [ "$case" = placed ]; then
+                v="$(field_any "${PLACED[$i]}" program_frames 8)"
+            else
+                v="$(field_any "${ROUTED[$i]}" program_frames 8)"
+            fi
+            f0=$(( f0 + ${v:-0} ))
+        done
+
+        cpu_window "$WINDOW"
+
+        f1=0
+        for i in "${!PLACED[@]}"; do
+            local v
+            if [ "$case" = placed ]; then
+                v="$(field_any "${PLACED[$i]}" program_frames 8)"
+            else
+                v="$(field_any "${ROUTED[$i]}" program_frames 8)"
+            fi
+            f1=$(( f1 + ${v:-0} ))
+        done
+
+        ingest_totals || true
+        t1="$(date +%s.%N)"
+        span="$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", b - a }')"
+        frames=$(( f1 - f0 ))
+
+        # the owner's queue and its own dispatch delay, for the first program
+        if [ "$case" = placed ]; then
+            p50="$(owner_percentile "${PLACED[0]}" 50)"
+            p99="$(owner_percentile "${PLACED[0]}" 99)"
+        else
+            p50="$(owner_percentile "${ROUTED[0]}" 50)"
+            p99="$(owner_percentile "${ROUTED[0]}" 99)"
+        fi
+
+        backlog=0
+        for i in "${!PLACED[@]}"; do
+            local u
+            if [ "$case" = placed ]; then
+                u="$(owner_metric "${PLACED[$i]}" nginx_media_stream_feed_units)"
+            else
+                u="$(owner_metric "${ROUTED[$i]}" nginx_media_stream_feed_units)"
+            fi
+            backlog=$(( backlog + ${u:-0} ))
+        done
+
+        printf '   %-7s programs %s  frames/s %s  owner backlog %s units\n' \
+            "$case" "$n" \
+            "$(awk -v f="$frames" -v s="$span" 'BEGIN { printf "%.1f", f / s }')" \
+            "$backlog"
+        printf '   %-7s drained %s chunks/s  %s MiB/s  dropped %s  fanout p50 %sms p99 %sms\n' \
+            "$case" \
+            "$(awk -v c="$(( CHUNKS - c0 ))" -v s="$span" 'BEGIN { printf "%d", c / s }')" \
+            "$(awk -v b="$(( BYTES - b0 ))" -v s="$span" 'BEGIN { printf "%.1f", b / 1048576 / s }')" \
+            "$(( DROPPED - d0 ))" "${p50:-?}" "${p99:-?}"
+
+        detail_rows "$case"
+
+        if [ "$case" = placed ]; then
+            placed_owner="$(owner_of "${PLACED[0]}")"
+            placed_routed="$(grep -c 'srt publisher routed to the owner stream=live/p' \
+                             "$RUN/logs/error.log" 2>/dev/null || true)"
+        else
+            routed_owner="$(owner_of "${ROUTED[0]}")"
+            routed_log="$(grep -c 'srt publisher routed to the owner stream=live/r' \
+                          "$RUN/logs/error.log" 2>/dev/null || true)"
+        fi
+
+        kill_pubs
+        sleep 1
+    done
+
+    echo
+    echo "   owner from the graph: placed=$placed_owner routed=$routed_owner"
+    echo "   routed sessions logged: ${routed_log:-0} of $n in the routed case," \
+         "${placed_routed:-0} of $n in the placed case"
+    echo "   placed: endpoint ${SRT_PORTS[0]} is worker 0's, so every publisher"
+    echo "           is accepted by the worker that owns its program"
+    echo "   routed: endpoint ${SRT_PORTS[1]} is worker 1's, so every frame"
+    echo "           crosses the SOCK_SEQPACKET transport to worker 0"
+
+    return 0
+}
+
+# --- run --------------------------------------------------------------------
+
+rm -rf "$RUN"
+mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/media"
+
+for p in $(pgrep -f "nginx: master process .* -p $RUN" 2>/dev/null || true); do
+    echo "   stopping a leftover master $p from this RUN"
+    for c in $(pgrep -P "$p" 2>/dev/null); do kill -KILL "$c" 2>/dev/null; done
+    kill -KILL "$p" 2>/dev/null
+done
+
+echo "== host"
+echo "   $(uname -srm), $(nproc) cpus"
+echo "   net.core.rmem_max $(sysctl -n net.core.rmem_max 2>/dev/null || echo '?')"
+echo "   nginx $(basename "$NGINX") built $(stat -c %y "$NGINX" | cut -d. -f1)"
+echo
+
+make_source "$RUN/media/lo.ts" "$LO_BITRATE"
+
+for phase in $PHASES; do
+    case "$phase" in
+        floor)    phase_floor ;;
+        ingest)
+            phase_ingest_high
+            phase_ingest_publishers
+            phase_ingest_endpoints
+            phase_ingest_one_port
+            ;;
+        egress)
+            phase_egress_hls
+            phase_egress_live
+            ;;
+        misplace) phase_misplace ;;
+    esac
+done
+
+trap - EXIT
+cleanup
+
+echo
+echo "== conditions"
+echo "   source:     pre-encoded 720p25 mpegts, publishers use -c copy"
+echo "   endpoints:  one media_srt_listen per worker, worker i binds entry i"
+echo "   api:        listen ... reuseport; mutations retried until the owner"
+echo "               answers, metrics read on the owner's own connection"
+echo "   throughput: chunks/s and bytes/s are the workers' own drained totals"
+echo "   cpu:        per thread, percent of one core, over the measured window"
+echo "   labels:     SRT:* from comm; this module's threads from a stack" \
+     "backtrace ($([ "$LABELLED" = 1 ] && echo 'attached and labelled' \
+                                || echo 'NOT AVAILABLE: comm names only'))"
+echo "   host:       single host, no netem, $(nproc) cpus"
+echo "== ingest/egress fanout done"
