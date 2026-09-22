@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
+.PHONY: unit nginx smoke test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -76,6 +76,31 @@ fault:
 
 netns:
 	tests/integration/netns_nginx.sh
+
+# The integration suite's own environment, and the one CI runs it in, so a
+# failure on a runner can be reproduced here instead of guessed at.
+#
+#   make test-in-container                          everything
+#   make test-in-container TEST_TARGETS="api-graph" one target
+#
+# The image is the Containerfile's test stage: the build stage plus ffmpeg.
+#
+# netns is deliberately not in the list.  It builds a topology of network
+# namespaces, and doing that inside a container needs privileges and a
+# fragile docker-in-docker-shaped setup for no gain - the namespace suite
+# runs on the host, and on the CI runner, where namespaces are ordinary.
+DOCKER ?= $(shell docker info >/dev/null 2>&1 && echo docker || echo "sudo -n docker")
+TEST_IMAGE ?= nginx-media:test
+TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
+    api-switch api-graph failover hls hls-push hls-pull hls-ingest \
+    hls-profile file-source churn rtmp rtmp-hevc rtmps srt-output \
+    srt-crypto multi-worker soak fault
+
+test-image:
+	$(DOCKER) build -f Containerfile --target test -t $(TEST_IMAGE) .
+
+test-in-container: test-image
+	$(DOCKER) run --rm $(TEST_IMAGE) make $(TEST_TARGETS)
 
 srt-crypto:
 	tests/integration/srt_crypto.sh

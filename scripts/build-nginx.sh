@@ -32,10 +32,15 @@ cd "$SRC"
 # tree that already has an objs/Makefile.
 SRT_BACKEND="${MEDIA_SRT_BACKEND:-srt}"
 SRT_STAMP="$BUILD/.srt-backend"
+# The prefix is compiled into the binary, so changing it has to reconfigure
+# just as an edited config does.  Without it in the stamp, a tree already
+# configured for one prefix silently keeps it and installs somewhere else.
+PREFIX_STAMP="$BUILD/.prefix"
 
 if [ ! -f objs/Makefile ] || [ "$ROOT/config" -nt objs/Makefile ] \
    || [ "${BASH_SOURCE[0]}" -nt objs/Makefile ] \
-   || [ ! -f "$SRT_STAMP" ] || [ "$(cat "$SRT_STAMP" 2>/dev/null)" != "$SRT_BACKEND" ]; then
+   || [ ! -f "$SRT_STAMP" ] || [ "$(cat "$SRT_STAMP" 2>/dev/null)" != "$SRT_BACKEND" ] \
+   || [ ! -f "$PREFIX_STAMP" ] || [ "$(cat "$PREFIX_STAMP" 2>/dev/null)" != "$PREFIX" ]; then
     echo "== configuring nginx $VERSION with the nginx-media module"
     if ! ./configure \
             --prefix="$PREFIX" \
@@ -52,6 +57,7 @@ if [ ! -f objs/Makefile ] || [ "$ROOT/config" -nt objs/Makefile ] \
     fi
 
     echo "$SRT_BACKEND" > "$SRT_STAMP"
+    echo "$PREFIX" > "$PREFIX_STAMP"
 fi
 
 echo "== building nginx"

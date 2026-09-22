@@ -188,7 +188,13 @@ bond_skip() { # <reason>
 }
 
 priv() {
-    sudo -n "$@"
+    # Inside a container the suite runs as root and sudo may not exist at all,
+    # which is how this has to work in all three environments.
+    if [ "$(id -u)" = "0" ]; then
+        "$@"
+    else
+        sudo -n "$@"
+    fi
 }
 
 ns_exists() {

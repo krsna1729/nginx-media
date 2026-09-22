@@ -60,7 +60,23 @@ main(void)
     TEST_ASSERT_EQ_INT(parse("r=live/", &id), NGX_ERROR);
     TEST_ASSERT_EQ_INT(parse("r=live/ne ws", &id), NGX_ERROR);
     TEST_ASSERT_EQ_INT(parse("r=live/news\r\n", &id), NGX_ERROR);
-    TEST_ASSERT_EQ_INT(parse("r=live%2Fnews", &id), NGX_ERROR);
+    /* an escape that is not hex is left alone, and % is not a character the
+     * resource accepts, so this stays rejected */
+    TEST_ASSERT_EQ_INT(parse("r=live%ZZnews", &id), NGX_ERROR);
+
+    TEST_CASE("a percent-encoded stream id is decoded before parsing");
+    /* ffmpeg 6.1.1 passes what follows streamid= verbatim, so a caller that
+     * wrote the conventional escaped form arrives escaped; later ffmpeg
+     * decodes it first.  Both have to parse - a stream id that cannot be
+     * parsed is a publisher that cannot connect. */
+    TEST_ASSERT_EQ_INT(parse("#!::r%3Dlive%2Fnews%2Cm%3Dpublish%2Cs%3Dencoder-a",
+                             &id), NGX_OK);
+    TEST_ASSERT(streq(&id.application, "live"));
+    TEST_ASSERT(streq(&id.stream, "news"));
+    TEST_ASSERT(streq(&id.source, "encoder-a"));
+    TEST_ASSERT(streq(&id.mode, "publish"));
+    TEST_ASSERT_EQ_U64(id.mode_kind, NGX_MEDIA_SRT_MODE_PUBLISH);
+    TEST_ASSERT_EQ_U64(id.pairs, 3);
 
     TEST_CASE("duplicate keys are rejected");
     TEST_ASSERT_EQ_INT(parse("r=live/news,r=live/other", &id), NGX_ERROR);

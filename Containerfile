@@ -55,14 +55,16 @@
 # API only, SRT ingest, RTMP ingest, a relay, an SRT sink, recording, and a
 # full one for testing.
 #
-# Two stages, and the split is the point.  The build stage has the toolchain,
-# the pinned nginx source and the module.  The runtime stage has the runtime
-# libraries and the installed prefix and nothing else: no compiler, no source
-# tree, no headers.  ffmpeg is deliberately absent from both - the media core
-# does not decode, and an image that carries a decoder invites a deployment
-# that uses one.
+# Three stages.  The build stage has the toolchain, the pinned nginx source
+# and the module.  The runtime stage has the runtime libraries and the
+# installed prefix and nothing else: no compiler, no source tree, no headers.
+# The test stage is the build stage plus what the integration suite needs, and
+# it is what runs the suite in CI so that a local run and a CI run are the
+# same run.  ffmpeg is deliberately absent from the runtime stage - the media
+# core does not decode, and an image that carries a decoder invites a
+# deployment that uses one.
 
-FROM ubuntu:24.04 AS build
+FROM debian:trixie AS build
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -88,7 +90,38 @@ ENV NGINX_PREFIX=/usr/local/nginx
 RUN bash /src/scripts/build-nginx.sh
 
 
-FROM ubuntu:24.04 AS runtime
+# The integration suite's environment.  This is the same stage CI runs the
+# suite in, so a failure here is reproducible locally with
+# `make test-in-container` and not only on a runner.
+FROM build AS test
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ffmpeg is the publisher the suite drives, iproute2 is what the namespace
+# topology uses, and the rest is what the scripts assume is present.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg iproute2 procps ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# The suite drives the nginx this stage builds, and it looks for it under
+# .build/nginx-install rather than the /usr/local/nginx the runtime image
+# uses.  The build script treats the prefix as part of what invalidates a
+# configure, so this rebuilds rather than silently reusing the other layout.
+ENV NGINX_PREFIX=
+RUN bash /src/scripts/build-nginx.sh
+
+COPY Makefile /src/Makefile
+COPY tests /src/tests
+COPY container /src/container
+
+WORKDIR /src
+
+# Overridden by the caller with the targets to run.
+CMD ["make", "unit"]
+
+
+FROM debian:trixie AS runtime
 
 # Provenance, in the OCI standard labels rather than in a tag per build.  A
 # tag per commit is a tag explosion that gets worse the longer the project
