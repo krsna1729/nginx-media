@@ -388,7 +388,6 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
     ngx_int_t   fd, rc;
     ngx_uint_t  tls = 0;
     void       *ssl = NULL;
-    struct sockaddr_in  addr;
     ngx_int_t   file_fd;
     off_t       sent = 0, offset = 0;
     ssize_t     n;
@@ -396,6 +395,7 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
     int         header_len;
     u_char      response[512];
     ssize_t     rn;
+    u_char      full[NGX_MEDIA_HTTP_PATH_MAX];
 
     rc = ngx_media_http_split(url, &host, &port, &target, &tls, log);
 
@@ -405,7 +405,6 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
 
     /* the destination directory is the endpoint's prefix */
     {
-        u_char  full[NGX_MEDIA_HTTP_PATH_MAX];
         u_char *base = (u_char *) strrchr((char *) path, '/');
 
         if (target.len + 1 + (base != NULL ? strlen((char *) base + 1) : 0)

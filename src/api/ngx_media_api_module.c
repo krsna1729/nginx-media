@@ -263,11 +263,26 @@ ngx_media_hls_ingest_ready(ngx_http_request_t *r)
     name.data = (slash != NULL) ? slash + 1 : r->uri.data;
     name.len = r->uri.len - (size_t) (name.data - r->uri.data);
 
-    if (name.len == 0) {
+    if (name.len < 4
+        || ngx_memcmp(name.data + name.len - 3, ".ts", 3) != 0
+        || name.data[0] == '.')
+    {
         ngx_http_finalize_request(r, NGX_HTTP_BAD_REQUEST);
         return;
     }
 
+    {
+        size_t  i;
+        for (i = 0; i < name.len; i++) {
+            u_char c = name.data[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                  || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
+            {
+                ngx_http_finalize_request(r, NGX_HTTP_BAD_REQUEST);
+                return;
+            }
+        }
+    }
     target.len = mlcf->ingest_dir.len + 1 + name.len;
     target.data = ngx_pnalloc(r->pool, target.len + 1);
 

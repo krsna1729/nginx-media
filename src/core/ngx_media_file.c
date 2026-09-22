@@ -101,6 +101,7 @@ ngx_media_file_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     if (source->file.fd == NGX_INVALID_FILE) {
         ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
                       "media: could not open file source \"%V\"", &source->path);
+        ngx_media_file_close(source);
         return NULL;
     }
 

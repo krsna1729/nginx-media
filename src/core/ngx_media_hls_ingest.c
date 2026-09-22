@@ -42,7 +42,7 @@ struct ngx_media_hls_ingest_source_s {
      */
     u_char                   seen[NGX_MEDIA_HLS_INGEST_SEEN][NGX_MEDIA_HLS_INGEST_NAME_MAX];
     ngx_uint_t               nseen;
-
+    ngx_uint_t               seen_next;
     uint64_t                 segments;
     uint64_t                 frames;
     uint64_t                 failures;
@@ -123,13 +123,21 @@ static void
 ngx_media_hls_ingest_record(ngx_media_hls_ingest_source_t *ingest,
     const u_char *name, size_t len)
 {
-    if (ingest->nseen < NGX_MEDIA_HLS_INGEST_SEEN
-        && len < NGX_MEDIA_HLS_INGEST_NAME_MAX)
-    {
-        ngx_memcpy(ingest->seen[ingest->nseen], name, len);
-        ingest->seen[ingest->nseen][len] = '\0';
-        ingest->nseen++;
+    ngx_uint_t  slot;
+
+    if (len >= NGX_MEDIA_HLS_INGEST_NAME_MAX) {
+        return;
     }
+
+    if (ingest->nseen < NGX_MEDIA_HLS_INGEST_SEEN) {
+        slot = ingest->nseen++;
+    } else {
+        slot = ingest->seen_next;
+        ingest->seen_next = (ingest->seen_next + 1) % NGX_MEDIA_HLS_INGEST_SEEN;
+    }
+
+    ngx_memcpy(ingest->seen[slot], name, len);
+    ingest->seen[slot][len] = '\0';
 }
 
 /*
@@ -390,6 +398,7 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     {
         ngx_log_error(NGX_LOG_ERR, log, 0,
                       "media: hls ingest %V could not start its reader", id);
+        ngx_media_hls_ingest_close(ingest);
         return NULL;
     }
 

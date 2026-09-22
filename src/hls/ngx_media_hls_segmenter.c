@@ -235,17 +235,6 @@ ngx_media_hls_add_burst(ngx_media_hls_t *hls,
                 hls->first_dts = slice->dts;
                 hls->last_dts = slice->dts;
 
-                /*
-                 * A segment that starts in the middle of a burst must begin
-                 * with PAT/PMT, otherwise no player can decode it.
-                 */
-                if (burst->psi_len > 0
-                    && ngx_media_hls_piece(hls, burst->backing, 0,
-                                           burst->psi_len) != NGX_OK)
-                {
-                    hls->errors++;
-                }
-
             } else {
                 hls->dropped_frames++;
                 continue;
@@ -285,6 +274,13 @@ ngx_media_hls_add_burst(ngx_media_hls_t *hls,
             hls->dropped_frames++;
             continue;
         }
+        if (hls->npieces == 0 && burst->psi_len > 0) {
+            if (ngx_media_hls_piece(hls, burst->backing, 0,
+                                   burst->psi_len) != NGX_OK)
+            {
+                hls->errors++;
+            }
+        }
 
         if (ngx_media_hls_piece(hls, burst->backing, slice->offset,
                                 slice->len) != NGX_OK)
@@ -293,7 +289,6 @@ ngx_media_hls_add_burst(ngx_media_hls_t *hls,
             continue;
         }
 
-        hls->bytes += slice->len;
         hls->last_dts = slice->dts;
 
         if (hls->bytes > hls->conf.max_segment_bytes) {

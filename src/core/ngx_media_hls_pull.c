@@ -514,6 +514,7 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     {
         ngx_log_error(NGX_LOG_ERR, log, 0,
                       "media: hls pull %V could not start its reader", id);
+        ngx_media_hls_pull_close(pull);
         return NULL;
     }
 
