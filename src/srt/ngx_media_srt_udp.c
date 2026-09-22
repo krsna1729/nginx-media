@@ -97,6 +97,8 @@ static ngx_int_t ngx_media_srt_udp_send(ngx_media_srt_session_t *session,
     const u_char *buf, size_t len, ngx_msec_t timeout_ms);
 static void ngx_media_srt_udp_stats(ngx_media_srt_session_t *session,
     ngx_media_srt_stats_t *out);
+static void ngx_media_srt_udp_session_shutdown(
+    ngx_media_srt_session_t *session);
 static void ngx_media_srt_udp_session_close(
     ngx_media_srt_session_t *session);
 static void ngx_media_srt_udp_shutdown(void);
@@ -135,6 +137,7 @@ ngx_media_srt_ops_t ngx_media_srt_udp_ops = {
     ngx_media_srt_udp_connect,
     ngx_media_srt_udp_send,
     ngx_media_srt_udp_stats,
+    ngx_media_srt_udp_session_shutdown,
     ngx_media_srt_udp_session_close,
     ngx_media_srt_udp_poll_create,
     ngx_media_srt_udp_poll_destroy,
@@ -515,6 +518,19 @@ ngx_media_srt_udp_connect(const u_char *host, ngx_uint_t port,
         return NULL;
     }
 
+    /*
+     * A caller session has exactly one peer for its whole life, so the socket
+     * is connected to it: sends and receives then only ever involve that
+     * peer, and - the reason it is done here - the socket can be shut down,
+     * which is how a stop releases a sender parked in a call on it.
+     * shutdown(2) on an unconnected datagram socket is refused with ENOTCONN
+     * and leaves the socket exactly as it was.
+     */
+    if (connect(fd, (struct sockaddr *) &peer, sizeof(peer)) < 0) {
+        (void) close(fd);
+        return NULL;
+    }
+
     session = ngx_alloc(sizeof(ngx_media_srt_session_t), log);
 
     if (session == NULL) {
@@ -556,6 +572,10 @@ ngx_media_srt_udp_send(ngx_media_srt_session_t *session,
 {
     ssize_t  n;
 
+    /*
+     * The socket is non-blocking, so a send never waits for this timeout: a
+     * full send buffer is reported as backpressure and the caller retries.
+     */
     (void) timeout_ms;
 
     if (session == NULL || buf == NULL || len == 0) {
@@ -631,23 +651,45 @@ ngx_media_srt_udp_session_close(ngx_media_srt_session_t *session)
     }
 
     /*
-     * Known limitation of this double, recorded rather than hidden: closing
-     * the fd here races a sender that is inside sendto on the same fd, and
-     * ThreadSanitizer reports it intermittently.  The race is inherent to the
-     * pattern rather than a mistake - stop closes the session precisely to
-     * make a blocked send return - and the real backend does the same thing
-     * through libsrt's srt_close, which is documented as safe to call while
-     * another thread is sending.  A raw socket has no such guarantee, so this
-     * only ever affects the double.  Fixing it properly means giving the
-     * session a separate fd lifecycle (shutdown here, close once no sender
-     * holds it), which is a change to the double's model rather than a bug
-     * fix, and is left as a known gap instead of being papered over.
+     * The fd is closed here and nowhere else, and only when no thread can be
+     * inside a call on it.  A caller that wants to take a session out of
+     * service while a sender may be using it shuts the socket down first
+     * (ngx_media_srt_udp_session_shutdown) and closes the session once the
+     * threads that use it have been joined: close(2) while another thread is
+     * inside sendto(2) on the same fd is a race ThreadSanitizer reports, and
+     * one a raw socket cannot make safe the way libsrt's srt_close does for
+     * the real backend.
      */
     if (session->caller) {
         (void) close(session->fd);
     }
 
     ngx_free(session);
+}
+
+/*
+ * The caller owns its socket, so it can be shut down while a sender is using
+ * it: sends and receives on it fail at once from then on, instead of being
+ * offered to a session that is on its way out.  (The double's socket is
+ * non-blocking as well, so a send never waits in the kernel to begin with -
+ * see ngx_media_srt_udp_send.)  An accepted session cannot be treated the same
+ * way - every session of one listener shares the listener's socket, and
+ * shutting that down would take the other sessions on that listener with it.
+ * What ends those is the listener's own close, and each receive is a poll with
+ * a bounded timeout, so it returns anyway.
+ *
+ * The session object is untouched here: shutdown and close are separate steps
+ * because the caller must be able to join the threads using the session while
+ * the session is still valid.
+ */
+static void
+ngx_media_srt_udp_session_shutdown(ngx_media_srt_session_t *session)
+{
+    if (session == NULL || !session->caller) {
+        return;
+    }
+
+    (void) shutdown(session->fd, SHUT_RDWR);
 }
 
 static void

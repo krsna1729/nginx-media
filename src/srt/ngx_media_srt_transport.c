@@ -160,6 +160,18 @@ ngx_media_srt_session_stats(ngx_media_srt_session_t *session,
 }
 
 void
+ngx_media_srt_session_shutdown(ngx_media_srt_session_t *session)
+{
+    if (session == NULL || ngx_media_srt_backend() == NULL
+        || ngx_media_srt_backend()->session_shutdown == NULL)
+    {
+        return;
+    }
+
+    ngx_media_srt_backend()->session_shutdown(session);
+}
+
+void
 ngx_media_srt_session_close(ngx_media_srt_session_t *session)
 {
     if (session == NULL || ngx_media_srt_backend() == NULL

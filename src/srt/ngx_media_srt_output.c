@@ -669,12 +669,15 @@ ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
 
         /*
          * A sender is inside a transport call, not waiting on the mutex:
-         * closing the session is what makes that call return, so the join
-         * below cannot wait for a send timeout.
+         * shutting the session down is what makes that call return, so the
+         * join below cannot wait for a send timeout.  The session is not
+         * released here - a sender may still be inside a call on it, and
+         * close(fd) during sendto(fd) is exactly what ThreadSanitizer
+         * reported.  Its fd is released by the close below, once every
+         * sender has been joined.
          */
         if (dest->session != NULL) {
-            ngx_media_srt_session_close(dest->session);
-            dest->session = NULL;
+            ngx_media_srt_session_shutdown(dest->session);
         }
 
         (void) pthread_mutex_unlock(&dest->mutex);
@@ -691,6 +694,11 @@ ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
 
     outs->nthreads = 0;
 
+    /*
+     * No sender can be inside a call on these sessions any more: the ones
+     * shut down above are released here, and a sender that found the session
+     * broken already released its own and cleared the slot.
+     */
     for (i = 0; i < NGX_MEDIA_SRT_MAX_OUTPUTS; i++) {
         ngx_media_srt_output_t  *dest = &outs->destinations[i];
 

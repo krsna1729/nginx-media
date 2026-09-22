@@ -114,6 +114,22 @@ typedef struct {
     void (*stats)(ngx_media_srt_session_t *session,
         ngx_media_srt_stats_t *out);
 
+    /*
+     * Makes a send or receive already in progress on this session return
+     * promptly, without releasing the session, so a sender parked in a
+     * transport call is not left to wait out a send timeout while its thread
+     * is being joined.  The session stays valid and is still the caller's to
+     * close, once no thread can be inside a call on it.  A backend whose
+     * sessions share a socket says in its own comment what it can and cannot
+     * shut down.
+     */
+    void (*session_shutdown)(ngx_media_srt_session_t *session);
+
+    /*
+     * Releases the session.  Only called when no sender or receiver can be
+     * inside a call on it: a caller that has just shut one down closes it
+     * after it has joined the threads that use it.
+     */
     void (*session_close)(ngx_media_srt_session_t *session);
 
     /*
@@ -213,6 +229,12 @@ ngx_int_t ngx_media_srt_session_send(ngx_media_srt_session_t *session,
     const u_char *buf, size_t len, ngx_msec_t timeout_ms);
 void ngx_media_srt_session_stats(ngx_media_srt_session_t *session,
     ngx_media_srt_stats_t *out);
+
+/*
+ * Wakes a call in progress without releasing the session; close it after the
+ * threads that were using it have been joined.
+ */
+void ngx_media_srt_session_shutdown(ngx_media_srt_session_t *session);
 void ngx_media_srt_session_close(ngx_media_srt_session_t *session);
 
 ngx_media_srt_poll_t *ngx_media_srt_poll_create(ngx_log_t *log);

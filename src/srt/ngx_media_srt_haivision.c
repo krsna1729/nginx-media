@@ -37,6 +37,19 @@ struct ngx_media_srt_listener_s {
 
 struct ngx_media_srt_session_s {
     SRTSOCKET                 sock;
+
+    /*
+     * Whether the socket has already been released.  Both shutdown and close
+     * release it and either can be the first: a stopping thread shuts down
+     * the session a sender is parked in, and that sender closes the same
+     * session itself when the woken send reports the socket broken.  The flag
+     * is atomic because those two really do run concurrently, and only one of
+     * them may call srt_close: libsrt is free to hand a released socket id to
+     * a new socket, and a second srt_close on the number would close
+     * something that is not this session's any more.
+     */
+    ngx_atomic_t              closed;
+
     ngx_media_srt_listener_t *listener;
     ngx_media_srt_session_t  *next;
     ngx_log_t                *log;
@@ -137,6 +150,8 @@ static ngx_int_t ngx_media_srt_haivision_send(
     ngx_msec_t timeout_ms);
 static void ngx_media_srt_haivision_stats(ngx_media_srt_session_t *session,
     ngx_media_srt_stats_t *out);
+static void ngx_media_srt_haivision_session_shutdown(
+    ngx_media_srt_session_t *session);
 static void ngx_media_srt_haivision_session_close(
     ngx_media_srt_session_t *session);
 static void ngx_media_srt_haivision_shutdown(void);
@@ -170,6 +185,7 @@ ngx_media_srt_ops_t ngx_media_srt_haivision_ops = {
     ngx_media_srt_haivision_connect,
     ngx_media_srt_haivision_send,
     ngx_media_srt_haivision_stats,
+    ngx_media_srt_haivision_session_shutdown,
     ngx_media_srt_haivision_session_close,
     ngx_media_srt_haivision_poll_create,
     ngx_media_srt_haivision_poll_destroy,
@@ -492,7 +508,12 @@ ngx_media_srt_haivision_listen_close(ngx_media_srt_listener_t *listener)
     /* closing a listener closes every session it accepted */
     for (session = listener->sessions; session != NULL; session = next) {
         next = session->next;
-        (void) srt_close(session->sock);
+
+        /* a session already shut down must not be released a second time */
+        if (ngx_atomic_fetch_add(&session->closed, 1) == 0) {
+            (void) srt_close(session->sock);
+        }
+
         ngx_free(session);
     }
 
@@ -850,6 +871,32 @@ ngx_media_srt_haivision_stats(ngx_media_srt_session_t *session,
     out->mbps_recv_rate = stats.mbpsRecvRate;
 }
 
+/*
+ * libsrt has no shutdown of its own.  A send already in progress returns
+ * either because it hits its own SRTO_SNDTIMEO - the caller session sets one,
+ * see ngx_media_srt_haivision_connect - or because srt_close tears the socket
+ * down, and only srt_close does that: it is what this backend has always used
+ * to release a sender when the pool stops, and it can itself wait for the send
+ * buffer to drain, which is the behaviour this backend had before shutdown and
+ * close were separate steps.  The contract only asks for that release to be
+ * separate from releasing the session, so the caller can join the threads that
+ * use the session while it is still valid.  libsrt keeps a connection alive for
+ * an operation already inside it and finishes the socket off in its own
+ * garbage-collection thread once srt_close returns, so nothing a parked sender
+ * is in the middle of is freed underneath it.
+ */
+static void
+ngx_media_srt_haivision_session_shutdown(ngx_media_srt_session_t *session)
+{
+    if (session == NULL
+        || ngx_atomic_fetch_add(&session->closed, 1) != 0)
+    {
+        return;
+    }
+
+    (void) srt_close(session->sock);
+}
+
 static void
 ngx_media_srt_haivision_session_close(ngx_media_srt_session_t *session)
 {
@@ -859,7 +906,14 @@ ngx_media_srt_haivision_session_close(ngx_media_srt_session_t *session)
         return;
     }
 
-    (void) srt_close(session->sock);
+    /*
+     * The socket is released once, by the shutdown above or here, whichever
+     * runs first; a session that was shut down still has to be unlinked and
+     * freed, and that is all this does for it.
+     */
+    if (ngx_atomic_fetch_add(&session->closed, 1) == 0) {
+        (void) srt_close(session->sock);
+    }
 
     for (pp = (session->listener != NULL) ? &session->listener->sessions
                                           : &ngx_media_srt_callers;
