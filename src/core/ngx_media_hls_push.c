@@ -450,10 +450,17 @@ ngx_media_hls_push_scan(const ngx_str_t *directory, ngx_log_t *log)
 
         size_t  name_len = strlen(de->d_name);
 
-        if (name_len < 4
-            || (strcmp(de->d_name + name_len - 3, ".ts") != 0
-                && strcmp(de->d_name + name_len - 5, ".m3u8") != 0))
+        if (name_len < 4) {
+            continue;
+        }
+
+        if (strcmp(de->d_name + name_len - 3, ".ts") == 0) {
+            /* segment file */
+        } else if (name_len >= 5
+                   && strcmp(de->d_name + name_len - 5, ".m3u8") == 0)
         {
+            /* playlist file */
+        } else {
             continue;
         }
 

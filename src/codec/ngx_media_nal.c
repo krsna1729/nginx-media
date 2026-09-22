@@ -36,37 +36,44 @@ ngx_media_nal_iter_next(ngx_media_nal_iter_t *it, ngx_media_nal_t *nal)
     const u_char  *sc, *nal_start, *next, *nal_end;
     size_t         sc_len = 0;
 
-    if (it->pos == NULL || it->pos >= it->end) {
+    if (it == NULL || nal == NULL) {
         return 0;
     }
 
-    sc = ngx_media_nal_start_code(it->pos, it->end, &sc_len);
-    if (sc == NULL) {
-        it->pos = it->end;
-        return 0;
-    }
+    for ( ;; ) {
+        if (it->pos == NULL || it->pos >= it->end) {
+            return 0;
+        }
 
-    nal_start = sc + sc_len;
+        sc = ngx_media_nal_start_code(it->pos, it->end, &sc_len);
+        if (sc == NULL) {
+            it->pos = it->end;
+            return 0;
+        }
 
-    next = ngx_media_nal_start_code(nal_start, it->end, &sc_len);
+        nal_start = sc + sc_len;
 
-    if (next == NULL) {
-        nal_end = it->end;
-        it->pos = it->end;
+        next = ngx_media_nal_start_code(nal_start, it->end, &sc_len);
 
-    } else {
-        nal_end = next;
-        it->pos = next;
-    }
+        if (next == NULL) {
+            nal_end = it->end;
+            it->pos = it->end;
 
-    /* trailing zero bytes belong to the next start code */
-    while (nal_end > nal_start && nal_end[-1] == 0) {
-        nal_end--;
-    }
+        } else {
+            nal_end = next;
+            it->pos = next;
+        }
 
-    if (nal_end <= nal_start) {
-        /* empty NAL unit: look for the next one */
-        return ngx_media_nal_iter_next(it, nal);
+        /* trailing zero bytes belong to the next start code */
+        while (nal_end > nal_start && nal_end[-1] == 0) {
+            nal_end--;
+        }
+
+        if (nal_end > nal_start) {
+            break;
+        }
+
+        /* empty NAL unit: it->pos already advanced, look for the next one */
     }
 
     nal->data = (u_char *) nal_start;

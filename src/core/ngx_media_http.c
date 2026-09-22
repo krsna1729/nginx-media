@@ -70,6 +70,31 @@ ngx_media_http_split(const ngx_str_t *url, ngx_str_t *host, ngx_int_t *port,
         host->len = slash - host->data;
     }
 
+    /*
+     * The target and host go verbatim into the request line.  Reject
+     * controls and spaces so a configured URL cannot smuggle extra headers
+     * or a second request into the socket write.
+     */
+    {
+        u_char  *p;
+
+        for (p = target->data; p < target->data + target->len; p++) {
+            if (*p <= 0x20 || *p == 0x7F) {
+                return NGX_ERROR;
+            }
+        }
+
+        for (p = host->data; p < host->data + host->len; p++) {
+            if (*p <= 0x20 || *p == 0x7F || *p == '#') {
+                return NGX_ERROR;
+            }
+        }
+
+        if (target->data[0] != '/') {
+            return NGX_ERROR;
+        }
+    }
+
     colon = ngx_strlchr(host->data, host->data + host->len, ':');
 
     if (colon != NULL) {
@@ -83,7 +108,16 @@ ngx_media_http_split(const ngx_str_t *url, ngx_str_t *host, ngx_int_t *port,
         ngx_memcpy(text, colon + 1, len);
         text[len] = '\0';
         *port = atoi((char *) text);
+
+        if (*port <= 0 || *port > 65535) {
+            return NGX_ERROR;
+        }
+
         host->len = colon - host->data;
+    }
+
+    if (host->len == 0) {
+        return NGX_ERROR;
     }
 
     return NGX_OK;

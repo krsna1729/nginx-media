@@ -59,7 +59,21 @@ ngx_media_record_open_part(ngx_media_record_t *rec)
             }
         }
 
-        len = rec->conf.path.len + 16;
+        if (dot != NULL) {
+            size_t  prefix = (size_t) (dot - rec->conf.path.data);
+            size_t  suffix = rec->conf.path.len - prefix;
+
+            /*
+             * The suffix is a slice, not a string: dot points into an
+             * ngx_str_t with no NUL guarantee, so %s would read past
+             * path.len.  Size for the longest uint64 part number.
+             */
+            len = prefix + 1 + 20 + suffix + 1;
+
+        } else {
+            len = rec->conf.path.len + 1 + 20 + 1;
+        }
+
         name = ngx_alloc(len, NULL);
 
         if (name == NULL) {
@@ -68,11 +82,18 @@ ngx_media_record_open_part(ngx_media_record_t *rec)
 
         if (dot != NULL) {
             size_t  prefix = (size_t) (dot - rec->conf.path.data);
+            size_t  suffix = rec->conf.path.len - prefix;
+            int     n;
 
-            snprintf((char *) name, len, "%.*s-%04llu%s", (int) prefix,
-                     (char *) rec->conf.path.data,
-                     (unsigned long long) rec->stats.parts,
-                     (char *) dot);
+            n = snprintf((char *) name, len, "%.*s-%04llu%.*s", (int) prefix,
+                         (char *) rec->conf.path.data,
+                         (unsigned long long) rec->stats.parts,
+                         (int) suffix, (char *) dot);
+
+            if (n < 0 || (size_t) n >= len) {
+                ngx_free(name);
+                return NGX_ERROR;
+            }
 
         } else {
             snprintf((char *) name, len, "%.*s-%04llu",

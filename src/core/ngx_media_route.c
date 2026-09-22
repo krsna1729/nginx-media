@@ -350,6 +350,12 @@ ngx_media_route_open(ngx_cycle_t *cycle, uint32_t hash,
     /* "application/stream/source": exactly two separators */
     len = application->len + stream->len + source_id->len + 2;
 
+    if (len > NGX_MEDIA_IPC_MAX_PAYLOAD) {
+        /* the sink parses one datagram as one message: refuse rather than
+         * truncate into chunked fragments it would misread as new opens */
+        return NGX_ERROR;
+    }
+
     payload = ngx_media_buf_alloc(len);
 
     if (payload == NULL) {
@@ -478,6 +484,13 @@ ngx_media_route_tracks(ngx_cycle_t *cycle, uint32_t hash,
         if (tracks->tracks[i].config != NULL) {
             len += ngx_media_buf_size(tracks->tracks[i].config);
         }
+    }
+
+    if (len > NGX_MEDIA_IPC_MAX_PAYLOAD) {
+        /* same contract as graph_encode and route_open: one datagram, one
+         * message, never chunked fragments the sink would parse as new
+         * track sets */
+        return NGX_ERROR;
     }
 
     payload = ngx_media_buf_alloc(len);

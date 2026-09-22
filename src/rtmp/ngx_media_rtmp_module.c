@@ -581,13 +581,24 @@ ngx_media_rtmp_queue_message(ngx_media_rtmp_session_t *session,
 {
     ngx_media_rtmp_packet_t  packet;
     ngx_buf_t               *head;
-    ngx_uint_t               i, slices;
+    ngx_uint_t               i, chunks;
 
-    slices = (len > 0) ? 1 : 0;
+    /*
+     * The writer splits len into ceil(len/chunk_size) chunks with two parts
+     * each (header + slice).  Reserve for the whole message up front: the
+     * loop below appends one in-flight reference per payload slice with no
+     * other bound, and the ring holds exactly MAX_OUT_QUEUE of them.
+     */
+    chunks = (len + NGX_MEDIA_RTMP_OUT_CHUNK - 1)
+             / NGX_MEDIA_RTMP_OUT_CHUNK;
 
-    if (session->out_queue + slices * 2 + 1
+    if (chunks == 0) {
+        chunks = 1;
+    }
+
+    if (session->out_queue + chunks * 2 + 1
         > NGX_MEDIA_RTMP_MAX_OUT_QUEUE
-        || session->in_flight_count + slices > NGX_MEDIA_RTMP_MAX_OUT_QUEUE)
+        || session->in_flight_count + chunks > NGX_MEDIA_RTMP_MAX_OUT_QUEUE)
     {
         return NGX_AGAIN;
     }
@@ -647,6 +658,11 @@ ngx_media_rtmp_queue_message(ngx_media_rtmp_session_t *session,
             b->pos = b->start;
             b->end = b->start + packet.parts[i].len;
             b->last = b->end;
+
+            if (session->in_flight_count >= NGX_MEDIA_RTMP_MAX_OUT_QUEUE) {
+                ngx_media_rtmp_packet_destroy(&packet);
+                return NGX_ERROR;
+            }
 
             session->in_flight[(session->in_flight_head
                                 + session->in_flight_count)

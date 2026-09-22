@@ -1613,7 +1613,7 @@ ngx_media_api_destination_json(ngx_media_destination_t *destination,
                          destination->enabled ? "true" : "false",
                          destination->revision, tail);
 
-    return NGX_OK;
+    return (*last < end - 1) ? NGX_OK : NGX_ERROR;
 }
 
 /*
@@ -1694,7 +1694,12 @@ ngx_media_api_destination_create(ngx_http_request_t *r,
     destination = ngx_media_destination_find(stream, &id);
 
     if (destination != NULL) {
-        (void) ngx_media_api_destination_json(destination, last, end, 0);
+        if (ngx_media_api_destination_json(destination, last, end, 0)
+            != NGX_OK)
+        {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
         return NGX_HTTP_OK;
     }
 
@@ -1826,7 +1831,11 @@ ngx_media_api_destination_create(ngx_http_request_t *r,
 
     ngx_media_destination_touch(destination);
 
-    (void) ngx_media_api_destination_json(destination, last, end, 1);
+    if (ngx_media_api_destination_json(destination, last, end, 1)
+        != NGX_OK)
+    {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
 
     return NGX_HTTP_CREATED;
 }
@@ -1909,11 +1918,19 @@ ngx_media_api_destinations(ngx_http_request_t *r, ngx_media_stream_t *stream,
                                  first ? "" : ",");
             first = 0;
 
-            (void) ngx_media_api_destination_json(destination, last, end, -1);
+            if (ngx_media_api_destination_json(destination, last, end, -1)
+                != NGX_OK)
+            {
+                return NGX_HTTP_INTERNAL_SERVER_ERROR;
+            }
         }
 
         *last = ngx_snprintf(*last, end - *last, "],\"count\":%ui}",
                              ngx_media_destination_count(stream));
+
+        if (*last >= end - 1) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
 
         return NGX_HTTP_OK;
     }
@@ -1943,7 +1960,12 @@ ngx_media_api_destinations(ngx_http_request_t *r, ngx_media_stream_t *stream,
     }
 
     if (r->method == NGX_HTTP_GET) {
-        (void) ngx_media_api_destination_json(destination, last, end, -1);
+        if (ngx_media_api_destination_json(destination, last, end, -1)
+            != NGX_OK)
+        {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
         return NGX_HTTP_OK;
     }
 
@@ -1987,6 +2009,10 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
                              &stream->name, stream->revision);
         first = 0;
 
+        if (*last >= end - 1) {
+            return NGX_ERROR;
+        }
+
         {
             ngx_uint_t  sfirst = 1;
 
@@ -2005,10 +2031,18 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
                                      source->enabled ? "true" : "false",
                                      source->revision);
                 sfirst = 0;
+
+                if (*last >= end - 1) {
+                    return NGX_ERROR;
+                }
             }
         }
 
         *last = ngx_snprintf(*last, end - *last, "],\"destinations\":[");
+
+        if (*last >= end - 1) {
+            return NGX_ERROR;
+        }
 
         {
             ngx_uint_t  dfirst = 1;
@@ -2035,6 +2069,10 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
                                      destination->enabled ? "true" : "false",
                                      destination->revision);
                 dfirst = 0;
+
+                if (*last >= end - 1) {
+                    return NGX_ERROR;
+                }
             }
         }
 
@@ -2056,12 +2094,16 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
                              ngx_media_feed_fanout_max(&stream->program_feed),
                              ngx_media_feed_fanout_count(
                                  &stream->program_feed));
+
+        if (*last >= end - 1) {
+            return NGX_ERROR;
+        }
     }
 
     *last = ngx_snprintf(*last, end - *last, "],\"count\":%ui}",
                          ngx_media_registry_count(registry));
 
-    return NGX_OK;
+    return (*last < end - 1) ? NGX_OK : NGX_ERROR;
 }
 
 /*
