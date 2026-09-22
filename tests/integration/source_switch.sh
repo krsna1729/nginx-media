@@ -2,9 +2,12 @@
 #
 # Redundant-source switch test (phase 3 exit criteria).
 #
-# Two independent ffmpeg-generated MPEG-TS fixtures are demuxed concurrently
-# into two sources of one logical stream; a manual promotion switches the
-# program at the standby's cached keyframe.
+# Real MPEG-TS fixtures are demuxed concurrently into three sources of one
+# logical stream, registered as three different source types - SRT, RTMP and
+# file.  A manual promotion switches the program at the standby's cached
+# keyframe, and the second switch crosses the source type (RTMP -> file), so
+# the harness proves the three types are interchangeable at the abstraction:
+# one program, one source gate, one promotion path.
 
 set -euo pipefail
 
@@ -57,9 +60,21 @@ generate() {
 generate "$FIX/encoder_a.ts" "testsrc=size=320x240:rate=25" 440
 generate "$FIX/encoder_b.ts" "smptehdbars=size=320x240:rate=25" 880
 
-echo "== switching between two live sources"
-"$BIN" "$FIX/encoder_a.ts" "$FIX/encoder_b.ts" | tee "$LOG"
+echo "== switching between three live sources of three types"
+"$BIN" "$FIX/encoder_a.ts" "$FIX/encoder_b.ts" "$FIX/encoder_a.ts" | tee "$LOG"
 
 grep -q 'RESULT ok' "$LOG" || { echo "source switch failed" >&2; exit 1; }
+
+# SRT, RTMP and file are registered as themselves on the one stream, and both
+# switches happen on that one program.  A build that made one type a special
+# case - or that could not fail over across types - prints different numbers.
+grep -q 'TYPES a=1 b=2 c=3 (srt=1 rtmp=2 file=3)' "$LOG" \
+    || { echo "the three sources are not registered as three types" >&2; exit 1; }
+
+grep -q 'switches=2 generation=3' "$LOG" \
+    || { echo "the program did not switch across the source types" >&2; exit 1; }
+
+grep -q 'keyframe_at_switch=1 keyframe_at_switch2=1' "$LOG" \
+    || { echo "a cross-type switch did not start at a keyframe" >&2; exit 1; }
 
 echo "== source switch ok"

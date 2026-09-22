@@ -102,6 +102,7 @@ main(void)
     ngx_pool_t             *pool;
     ngx_media_stream_t      stream;
     ngx_media_source_t     *a, *b;
+    ngx_media_source_t     *mix_srt, *mix_rtmp, *mix_file;
     ngx_media_feed_conf_t   feed_conf;
     feed_view_t             view;
 
@@ -306,6 +307,138 @@ main(void)
     ngx_media_stream_lease_end(&stream, b);
     ngx_media_stream_switch_resolve(&stream);
     TEST_ASSERT_EQ_U64(ngx_media_stream_source_count(&stream), 0);
+
+    TEST_CASE("srt, rtmp and file sources share one program and switch "
+              "across types");
+    {
+        ngx_uint_t  generation, switches;
+
+        mix_srt = ngx_media_stream_source_add(&stream, S("mix-srt"),
+                                              NGX_MEDIA_SOURCE_SRT, 100, NULL);
+        mix_rtmp = ngx_media_stream_source_add(&stream, S("mix-rtmp"),
+                                               NGX_MEDIA_SOURCE_RTMP, 90,
+                                               NULL);
+        mix_file = ngx_media_stream_source_add(&stream, S("mix-file"),
+                                               NGX_MEDIA_SOURCE_FILE, 80,
+                                               NULL);
+
+        TEST_ASSERT_NOT_NULL(mix_srt);
+        TEST_ASSERT_NOT_NULL(mix_rtmp);
+        TEST_ASSERT_NOT_NULL(mix_file);
+
+        /* the abstraction keeps the declared type, and nothing else gates on
+         * it: one program, one source gate, one promotion path */
+        TEST_ASSERT_EQ_U64(mix_srt->type, NGX_MEDIA_SOURCE_SRT);
+        TEST_ASSERT_EQ_U64(mix_rtmp->type, NGX_MEDIA_SOURCE_RTMP);
+        TEST_ASSERT_EQ_U64(mix_file->type, NGX_MEDIA_SOURCE_FILE);
+        TEST_ASSERT_EQ_U64(ngx_media_stream_source_count(&stream), 3);
+
+        mix_srt->has_video = 1;
+        mix_rtmp->has_video = 1;
+        mix_file->has_video = 1;
+
+        generation = stream.generation;
+        switches = stream.switches;
+
+        /* an SRT source takes the idle program through the normal gate */
+        TEST_ASSERT_EQ_INT(publish(&stream, mix_srt, NGX_MEDIA_TYPE_VIDEO, 100000,
+                                   1, 40), NGX_OK);
+        TEST_ASSERT_EQ_INT(ngx_media_stream_promote(&stream, mix_srt), NGX_OK);
+        TEST_ASSERT(stream.active == mix_srt);
+
+        /* an RTMP source switches in over the same path */
+        TEST_ASSERT_EQ_INT(publish(&stream, mix_rtmp, NGX_MEDIA_TYPE_VIDEO, 170000,
+                                   1, 40), NGX_OK);
+        TEST_ASSERT_EQ_INT(ngx_media_stream_promote(&stream, mix_rtmp), NGX_OK);
+        TEST_ASSERT(stream.active == mix_rtmp);
+        TEST_ASSERT_EQ_U64(stream.generation, generation + 1);
+        TEST_ASSERT_EQ_U64(stream.switches, switches + 1);
+        TEST_ASSERT_EQ_U64(mix_srt->state, NGX_MEDIA_SOURCE_STANDBY);
+
+        /* and a file source switches in over the same path */
+        TEST_ASSERT_EQ_INT(publish(&stream, mix_file, NGX_MEDIA_TYPE_VIDEO, 190000,
+                                   1, 40), NGX_OK);
+        TEST_ASSERT_EQ_INT(ngx_media_stream_promote(&stream, mix_file), NGX_OK);
+        TEST_ASSERT(stream.active == mix_file);
+        TEST_ASSERT_EQ_U64(stream.generation, generation + 2);
+        TEST_ASSERT_EQ_U64(stream.switches, switches + 2);
+        TEST_ASSERT_EQ_U64(mix_rtmp->state, NGX_MEDIA_SOURCE_STANDBY);
+
+        /* a demoted source of a different type keeps caching like any other */
+        TEST_ASSERT_EQ_INT(publish(&stream, mix_srt, NGX_MEDIA_TYPE_VIDEO, 110000,
+                                   1, 40), NGX_OK);
+        TEST_ASSERT_EQ_U64(ngx_media_source_preroll_units(mix_srt), 1);
+
+        /* the file source writes the one program like the others */
+        TEST_ASSERT_EQ_INT(publish(&stream, mix_file, NGX_MEDIA_TYPE_VIDEO, 191000,
+                                   0, 40), NGX_OK);
+
+        /* the program stayed monotonic across both type changes */
+        ngx_memzero(&view, sizeof(view));
+        drain_program(&stream, &view);
+        TEST_ASSERT_EQ_U64(view.regressions, 0);
+        TEST_ASSERT(view.frames > 0);
+    }
+
+    TEST_CASE("the program feed evicts a lagging consumer's units instead of "
+              "growing");
+    {
+        ngx_media_cursor_t  cursor;
+        ngx_media_frame_t   out[STREAM_UNITS];
+        ngx_uint_t          i, count, status;
+        uint64_t            before, frames = 0;
+
+        before = stream.program_frames;
+
+        /* file is active: publish far more than the feed can retain */
+        for (i = 0; i < 500; i++) {
+            TEST_ASSERT_EQ_INT(publish(&stream, mix_file, NGX_MEDIA_TYPE_VIDEO,
+                                       200000 + (int64_t) i * 100, 0, 40),
+                               NGX_OK);
+        }
+
+        TEST_ASSERT_EQ_U64(stream.program_frames - before, 500);
+
+        /* the retained window is the ceiling, not the burst */
+        TEST_ASSERT_EQ_U64(ngx_media_feed_units(&stream.program_feed),
+                           STREAM_UNITS);
+        TEST_ASSERT_EQ_U64(ngx_media_feed_bytes(&stream.program_feed),
+                           STREAM_UNITS * 40);
+        TEST_ASSERT_EQ_U64(ngx_media_feed_head(&stream.program_feed)
+                           - ngx_media_feed_tail(&stream.program_feed),
+                           STREAM_UNITS);
+
+        /* a consumer that fell behind is told, and recovers explicitly */
+        ngx_media_feed_cursor_init(&stream.program_feed, &cursor);
+        cursor.next_sequence = 0;
+
+        TEST_ASSERT_EQ_U64(ngx_media_feed_read(&stream.program_feed, &cursor,
+                                               STREAM_UNITS, 0, 0, out, &count),
+                           NGX_MEDIA_FEED_OVERRUN);
+
+        /* the overrun leaves the cursor untouched, so recovery is a choice */
+        TEST_ASSERT_EQ_U64(cursor.next_sequence, 0);
+
+        TEST_ASSERT_EQ_INT(ngx_media_feed_resync(&stream.program_feed, &cursor,
+                                                 NGX_MEDIA_FEED_RESYNC_LATEST),
+                           NGX_OK);
+        TEST_ASSERT_EQ_U64(cursor.next_sequence,
+                           ngx_media_feed_head(&stream.program_feed));
+
+        /* recovery reads exactly the retained window, never the whole burst */
+        cursor.next_sequence = ngx_media_feed_tail(&stream.program_feed);
+
+        while ((status = ngx_media_feed_read(&stream.program_feed, &cursor,
+                                             STREAM_UNITS, 0, 0, out, &count))
+               == NGX_MEDIA_FEED_BATCH)
+        {
+            frames += count;
+            ngx_media_feed_release(out, count);
+        }
+
+        TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_EMPTY);
+        TEST_ASSERT_EQ_U64(frames, STREAM_UNITS);
+    }
 
     TEST_CASE("NULL tolerance");
     TEST_ASSERT_EQ_INT(ngx_media_stream_publish(NULL, NULL, NULL, 0), NGX_ERROR);

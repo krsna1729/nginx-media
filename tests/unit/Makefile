@@ -30,6 +30,7 @@ CORE := ../../src/core/ngx_media_buffer.c \
         ../../src/srt/ngx_media_srt_transport.c \
         ../../src/srt/ngx_media_srt_udp.c \
         ../../src/srt/ngx_media_srt_output_queue.c \
+        ../../src/srt/ngx_media_srt_output.c \
         ../../src/hls/ngx_media_hls_segmenter.c \
         ../../src/record/ngx_media_record.c \
         ../../src/rtmp/ngx_media_rtmp_wire.c \

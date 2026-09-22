@@ -2,6 +2,10 @@
 #include "ngx_media_feed.h"
 #include "ngx_media_frame.h"
 
+/* NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK: the per-visit frame budget the runtime
+ * hands ngx_media_feed_read() (goal doc 34 item 13) */
+#include "ngx_media_runtime.h"
+
 static ngx_media_frame_t
 make_frame(size_t len, int64_t pts, unsigned keyframe)
 {
@@ -177,6 +181,106 @@ main(void)
     status = ngx_media_feed_read(&feed, &cursor, 8, 40, 1000, out, &count);
     TEST_ASSERT_EQ_U64(count, 2);
     ngx_media_feed_release(out, count);
+
+    /*
+     * Item 13: fanout work is bounded per scheduler visit.
+     *
+     * No consumer reads the feed with an unbounded budget.  The output drain
+     * passes NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK frames and 512 KiB, the RTMP
+     * player pump has its own batch ceiling, and what makes those budgets
+     * mean anything is the property asserted here: one read never returns
+     * more than the budget it was given, so a backlog deeper than the budget
+     * costs several reads -- several visits -- and never one unbounded pass.
+     *
+     * A read that ignored max_units or max_bytes would drain the whole
+     * backlog in its first call, and the read count below would be 1.
+     */
+    TEST_CASE("a per-visit budget bounds one read; a deep backlog takes "
+              "several");
+
+    {
+        const size_t       frame_len = 4096;
+        /* the output drain's byte budget (ngx_media_runtime_outputs_drain) */
+        const size_t       byte_budget = 512 * 1024;
+        ngx_media_frame_t  batch[NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK];
+        ngx_uint_t         deep = NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK * 6;
+        ngx_uint_t         reads = 0, frames_read = 0, widest = 0, j;
+        size_t             widest_bytes = 0;
+
+        TEST_ASSERT_EQ_INT(feed_reset(&feed, deep + 8, 0, 0), 0);
+        TEST_ASSERT_EQ_INT(publish_n(&feed, deep, frame_len, 0, 1, 0), 0);
+        TEST_ASSERT_EQ_U64(ngx_media_feed_units(&feed), deep);
+
+        cursor_from_tail(&feed, &cursor);
+
+        for ( ;; ) {
+            size_t  batch_bytes = 0;
+
+            status = ngx_media_feed_read(&feed, &cursor,
+                                         NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK,
+                                         byte_budget, 1000, batch, &count);
+
+            if (status != NGX_MEDIA_FEED_BATCH) {
+                break;
+            }
+
+            for (j = 0; j < count; j++) {
+                batch_bytes += ngx_media_buf_size(batch[j].payload);
+            }
+
+            TEST_ASSERT(count <= NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK);
+            TEST_ASSERT(batch_bytes <= byte_budget);
+
+            reads++;
+            frames_read += count;
+
+            if (count > widest) {
+                widest = count;
+            }
+
+            if (batch_bytes > widest_bytes) {
+                widest_bytes = batch_bytes;
+            }
+
+            ngx_media_feed_release(batch, count);
+        }
+
+        /* every unit came out exactly once, and the reader is now empty */
+        TEST_ASSERT_EQ_U64(frames_read, deep);
+        TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_EMPTY);
+        TEST_ASSERT_EQ_U64(cursor.next_sequence, ngx_media_feed_head(&feed));
+
+        /* the frame budget is what binds: each read filled it exactly */
+        TEST_ASSERT_EQ_U64(widest, NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK);
+        TEST_ASSERT_EQ_U64(widest_bytes,
+                           (size_t) NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK
+                           * frame_len);
+
+        /* and the backlog took exactly ceil(deep / budget) reads, never one */
+        TEST_ASSERT_EQ_U64(reads, deep / NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK);
+        TEST_ASSERT(reads > 1);
+
+        /* the byte budget binds independently of the frame budget: under an
+         * 8 KiB budget only two 4 KiB units may leave per read */
+        TEST_ASSERT_EQ_INT(feed_reset(&feed, 32, 0, 0), 0);
+        TEST_ASSERT_EQ_INT(publish_n(&feed, 16, frame_len, 0, 1, 0), 0);
+        cursor_from_tail(&feed, &cursor);
+
+        status = ngx_media_feed_read(&feed, &cursor,
+                                     NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK,
+                                     8192, 1000, batch, &count);
+        TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_BATCH);
+        TEST_ASSERT_EQ_U64(count, 2);
+        TEST_ASSERT_EQ_U64(cursor.next_sequence, 2);
+        ngx_media_feed_release(batch, count);
+
+        status = ngx_media_feed_read(&feed, &cursor,
+                                     NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK,
+                                     8192, 1000, batch, &count);
+        TEST_ASSERT_EQ_U64(count, 2);
+        TEST_ASSERT_EQ_U64(cursor.next_sequence, 4);
+        ngx_media_feed_release(batch, count);
+    }
 
     TEST_CASE("unit ceiling evicts the oldest media");
     TEST_ASSERT_EQ_INT(feed_reset(&feed, 4, 0, 0), 0);

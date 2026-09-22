@@ -29,6 +29,47 @@
 #      back on the normal priority/recovery path
 #   4  the active path is impaired past usefulness (80% loss) while its
 #      publisher is still alive: a second failover through the selector
+#   5  SRT bonding (goal doc 11.4): one bonded publisher carries its media over
+#      two impaired paths at once and is registered as ONE source; taking one
+#      of its paths away leaves that one source carrying media
+#
+# Phase 5 is the bond.  A bond is one logical connection carried over two
+# paths, and it has to stay below ngx_media_source_t: the selector must see one
+# source and never select an individual leg.  Both ends of it need something
+# this machine's distro libsrt does not have, so the phase says exactly what it
+# needs and how to get it rather than pretending:
+#
+#   the caller    ffmpeg's libsrt binding has no group option, so ffmpeg
+#                 cannot express a bond at all.  The phase therefore builds a
+#                 small group caller (srt_group_send, from a C file this script
+#                 writes into its own scratch directory) that joins two legs
+#                 into one broadcast group and reads the MPEG-TS ffmpeg
+#                 produces on a fifo.
+#   both ends     Arch's libsrt, like the Debian and Ubuntu packages, ships the
+#                 public group declarations but compiles bonding out
+#                 (ENABLE_BONDING defaults to OFF upstream): srt_create_group()
+#                 fails and SRTO_GROUPCONNECT is an unknown option.  The phase
+#                 uses a bonding-enabled libsrt when one is present, and skips
+#                 with that reason when it is not.  To build one, in a prefix
+#                 this phase defaults to:
+#
+#                   git clone --depth 1 -b v1.5.6 \
+#                       https://github.com/Haivision/srt.git .build/srt-src
+#                   cmake -S .build/srt-src -B .build/srt-bonding-build \
+#                       -DCMAKE_BUILD_TYPE=Release -DENABLE_BONDING=ON \
+#                       -DENABLE_TESTING=OFF -DUSE_ENCLIB=openssl-evp \
+#                       -DCMAKE_INSTALL_PREFIX="$PWD/.build/srt-bonding"
+#                   cmake --build .build/srt-bonding-build -j
+#                   cmake --install .build/srt-bonding-build
+#
+#                 NETNS_BOND_SRT_PREFIX names a different prefix and
+#                 NETNS_REQUIRE_BONDING=1 turns the skip into a failure, so a
+#                 run that is meant to gate bonding cannot pass by skipping it.
+#
+# Because an SRT group is one process, the two legs of the bond are the two
+# uplinks of one encoder: one namespace with two veth pairs, each with its own
+# netem, which is what the two ISP paths of goal doc 29 are - the legs of one
+# bonded source, not two sources.
 #
 # Every qdisc is read back out of the kernel before it is relied on, so a run
 # that silently failed to install netem fails instead of passing.
@@ -61,19 +102,34 @@ RUN="$ROOT/.build/netns"
 BASE=$(( 20100 + ($$ % 80) * 4 ))
 SRT_PORT="${NETNS_SRT_PORT:-$BASE}"
 HTTP_PORT="${NETNS_HTTP_PORT:-$(( BASE + 1 ))}"
+BOND_SRT_PORT="${NETNS_BOND_SRT_PORT:-$(( BASE + 2 ))}"
+BOND_HTTP_PORT="${NETNS_BOND_HTTP_PORT:-$(( BASE + 3 ))}"
 
 TAG="$$"
 NSA="mnetns-a-$TAG"
 NSB="mnetns-b-$TAG"
 NSV="mnetns-v-$TAG"
+NS_BOND="mnetns-bond-$TAG"
 
 # host end of each pair, and the name the other end gets inside its namespace
 HV_A="mvh-a-$TAG"; HV_B="mvh-b-$TAG"; HV_V="mvh-v-$TAG"
 NV_A="mvn-a";     NV_B="mvn-b";     NV_V="mvn-v"
 
+# the bonded publisher has one namespace and two uplinks (see the header)
+BHV_1="mvb1-$TAG"; BHV_2="mvb2-$TAG"
+BNV_1="mnb1";      BNV_2="mnb2"
+
 IP_A_HOST=10.77.0.1;  IP_A_NS=10.77.0.2
 IP_B_HOST=10.77.0.5;  IP_B_NS=10.77.0.6
 IP_V_HOST=10.77.0.9;  IP_V_NS=10.77.0.10
+
+IP_B1_HOST=10.78.0.1; IP_B1_NS=10.78.0.2
+IP_B2_HOST=10.78.0.5; IP_B2_NS=10.78.0.6
+
+# host-side interface names of every path this run creates, for the firewall
+# rules and for the teardown checks
+HOST_IFACES="$HV_A $HV_B $HV_V $BHV_1 $BHV_2"
+ALL_NS="$NSA $NSB $NSV $NS_BOND"
 
 # The impairment per path.  "<up>" is what the far side sends - the media - and
 # "<down>" is what comes back to it, which is where SRT's acknowledgements and
@@ -86,18 +142,49 @@ NETEM_B_DOWN="delay 40ms loss 1%"
 NETEM_V_DOWN="delay 40ms 10ms loss 2% duplicate 1% reorder 1% 50% rate 1mbit"
 NETEM_V_UP="delay 40ms 10ms loss 1%"
 
+# the bonded publisher's two uplinks (see phase 5)
+NETEM_B1_UP="delay 30ms 5ms loss 1%"
+NETEM_B1_DOWN="delay 30ms 5ms loss 1%"
+NETEM_B2_UP="delay 45ms 8ms loss 1%"
+NETEM_B2_DOWN="delay 45ms loss 1%"
+
 # the rate above, which the viewer's fetch time is checked against
 V_RATE_BPS=1000000
 
 STREAMID='%23!::r%3Dlive%2Fnetns%2Cm%3Dpublish%2Cs%3D'
 API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
 
+# The bonded publisher of phase 5.  Its stream id is handed to libsrt
+# literally: the listener's parser does not decode percent escapes, and only
+# ffmpeg's URL syntax needs them.
+BOND_STREAMID='#!::r=live/bond,m=publish,s=encoder-bond'
+BOND_API="http://127.0.0.1:$BOND_HTTP_PORT/media/api/v1"
+BOND_PREFIX="${NETNS_BOND_SRT_PREFIX:-$ROOT/.build/srt-bonding}"
+BOND_SENDER_BIN="$RUN/srt_group_send"
+
 PUB_A=0
 PUB_B=0
+
+# the bonded phase: ffmpeg feeding the group caller, and the group caller
+BOND_FFMPEG=0
+BOND_SENDER=0
+BOND_STARTED=0
 
 fail() {
     echo "$*" >&2
     exit 1
+}
+
+# The bonding phase needs a libsrt with bonding compiled in, which no
+# distribution package ships.  Skipping says so and names the build, because a
+# silent pass would read as "bonding works here" when nothing was exercised.
+bond_skip() { # <reason>
+    if [ "${NETNS_REQUIRE_BONDING:-0}" = "1" ]; then
+        fail "SRT bonding is required but $1"
+    fi
+
+    echo "   SKIPPED (SRT bonding): $1"
+    echo "   the bonded listener and the bonded publisher are not exercised; set NETNS_REQUIRE_BONDING=1 to make that a failure"
 }
 
 priv() {
@@ -113,12 +200,12 @@ ns_exists() {
 # the qdiscs, and they are removed with them.
 FIREWALL_IFACES=""
 
-firewall_open() {
+firewall_open() { # <host-interface>...
     local iface
 
     command -v iptables >/dev/null 2>&1 || return 0
 
-    for iface in "$HV_A" "$HV_B" "$HV_V"; do
+    for iface in "$@"; do
         if priv iptables -w -C INPUT -i "$iface" -j ACCEPT 2>/dev/null; then
             continue
         fi
@@ -147,7 +234,7 @@ netns_down() {
 
     firewall_close
 
-    for ns in "$NSA" "$NSB" "$NSV"; do
+    for ns in $ALL_NS; do
         ns_exists "$ns" || continue
 
         for pid in $(priv ip netns pids "$ns" 2>/dev/null || true); do
@@ -157,7 +244,7 @@ netns_down() {
         priv ip netns del "$ns" 2>/dev/null || true
     done
 
-    for iface in "$HV_A" "$HV_B" "$HV_V"; do
+    for iface in $HOST_IFACES; do
         priv ip link del "$iface" 2>/dev/null || true
     done
 }
@@ -167,6 +254,20 @@ cleanup() {
 
     [ "$PUB_A" != "0" ] && kill -KILL "$PUB_A" 2>/dev/null || true
     [ "$PUB_B" != "0" ] && kill -KILL "$PUB_B" 2>/dev/null || true
+    # reaped, so bash does not announce them as killed on the way out
+    if [ "$BOND_FFMPEG" != "0" ]; then
+        kill -KILL "$BOND_FFMPEG" 2>/dev/null || true
+        wait "$BOND_FFMPEG" 2>/dev/null || true
+    fi
+
+    if [ "$BOND_SENDER" != "0" ]; then
+        kill -KILL "$BOND_SENDER" 2>/dev/null || true
+        wait "$BOND_SENDER" 2>/dev/null || true
+    fi
+
+    if [ "$BOND_STARTED" = "1" ]; then
+        "$NGINX" -p "$RUN/bond" -c conf/nginx.conf -s quit 2>/dev/null || true
+    fi
 
     master="$(cat "$RUN/logs/nginx.pid" 2>/dev/null || true)"
 
@@ -225,6 +326,22 @@ link_up() { # <ns> <host-dev> <ns-dev> <host-ip> <ns-ip>
     priv ip netns exec "$ns" ip route add default via "$hip"
 }
 
+# One more uplink for a namespace that already exists.  The bonded publisher is
+# a single process and so a single namespace (see the header), and its second
+# path is reached by the connected route its own address installs.
+uplink_up() { # <ns> <host-dev> <ns-dev> <host-ip> <ns-ip>
+    local ns="$1" hdev="$2" ndev="$3" hip="$4" nip="$5"
+
+    priv ip link add "$hdev" type veth peer name "$ndev"
+    priv ip link set "$ndev" netns "$ns"
+
+    priv ip addr add "$hip/30" dev "$hdev"
+    priv ip link set "$hdev" up
+
+    priv ip netns exec "$ns" ip addr add "$nip/30" dev "$ndev"
+    priv ip netns exec "$ns" ip link set "$ndev" up
+}
+
 # <ns|-> <dev> <netem arguments...>; "-" means the host namespace
 netem_set() {
     local ns="$1" dev="$2"
@@ -264,7 +381,7 @@ link_up "$NSA" "$HV_A" "$NV_A" "$IP_A_HOST" "$IP_A_NS"
 link_up "$NSB" "$HV_B" "$NV_B" "$IP_B_HOST" "$IP_B_NS"
 link_up "$NSV" "$HV_V" "$NV_V" "$IP_V_HOST" "$IP_V_NS"
 
-firewall_open
+firewall_open "$HV_A" "$HV_B" "$HV_V"
 echo "   input rules added:${FIREWALL_IFACES:- none}"
 
 netem_set "$NSA" "$NV_A" $NETEM_A_UP
@@ -298,6 +415,32 @@ netem_has v-down 'duplicate 1%'
 netem_has v-down 'reorder 1% 50%'
 netem_has v-down 'rate 1Mbit'
 netem_has v-up 'netem.*delay 40ms +10ms'
+
+# The bonded publisher's two uplinks.  An SRT group caller is one process, so
+# the two legs of the bond are two interfaces of one namespace rather than two
+# namespaces: they are the two ISP paths of goal doc 29, not two publishers.
+echo "== the bonded publisher's two uplinks"
+link_up   "$NS_BOND" "$BHV_1" "$BNV_1" "$IP_B1_HOST" "$IP_B1_NS"
+uplink_up "$NS_BOND" "$BHV_2" "$BNV_2" "$IP_B2_HOST" "$IP_B2_NS"
+
+firewall_open "$BHV_1" "$BHV_2"
+
+netem_set "$NS_BOND" "$BNV_1" $NETEM_B1_UP
+netem_set -         "$BHV_1" $NETEM_B1_DOWN
+netem_set "$NS_BOND" "$BNV_2" $NETEM_B2_UP
+netem_set -         "$BHV_2" $NETEM_B2_DOWN
+
+netem_report b1-up   "$NS_BOND" "$BNV_1"
+netem_report b1-down -          "$BHV_1"
+netem_report b2-up   "$NS_BOND" "$BNV_2"
+netem_report b2-down -          "$BHV_2"
+
+netem_has b1-up 'netem.*delay 30ms +5ms'
+netem_has b1-up 'loss 1%'
+netem_has b1-down 'netem.*delay 30ms +5ms'
+netem_has b2-up 'netem.*delay 45ms +8ms'
+netem_has b2-up 'loss 1%'
+netem_has b2-down 'netem.*delay 45ms'
 
 # --------------------------------------------------------------------------
 # host nginx
@@ -492,6 +635,116 @@ worker_up() {
     [ -n "$master" ] || return 1
     kill -0 "$master" 2>/dev/null || return 1
     [ -n "$(pgrep -P "$master" 2>/dev/null || true)" ]
+}
+
+# ---- the bonded publisher (phase 5) ----
+#
+# A bond is one source, so what these read is how many sources one bonded
+# publisher produced.  If the listener ever went back to treating each leg as
+# its own connection, this number would be two: the same encoder would appear
+# twice and the selector would be free to pick between the legs of one bond,
+# which is exactly what goal doc 11.4 forbids.
+
+bond_sources() {
+    curl -fsS "$BOND_API/streams/live/bond/sources" 2>/dev/null || true
+}
+
+bond_source_count() {
+    bond_sources | python3 -c '
+import json, sys
+try:
+    print(len(json.load(sys.stdin)["sources"]))
+except Exception:
+    print(0)
+' 2>/dev/null || echo 0
+}
+
+bond_source_ids() { # every registered identity, or "missing"
+    bond_sources | python3 -c '
+import json, sys
+try:
+    sources = json.load(sys.stdin)["sources"]
+except Exception:
+    sources = []
+print(",".join(sorted(s["id"] for s in sources)) if sources else "missing")
+' 2>/dev/null || echo missing
+}
+
+bond_source_in() {
+    bond_sources | python3 -c '
+import json, sys
+try:
+    sources = json.load(sys.stdin)["sources"]
+except Exception:
+    sources = []
+print(sources[0]["frames_in"] if sources else 0)
+' 2>/dev/null || echo 0
+}
+
+bond_program_frames() {
+    curl -fsS "$BOND_API/streams/live/bond" 2>/dev/null | python3 -c '
+import json, sys
+print(json.load(sys.stdin)["program_frames"])
+' 2>/dev/null || echo 0
+}
+
+# the group caller is fed by ffmpeg on a fifo, so its pid and ffmpeg's are both
+# this script's to stop
+publish_bond() { # <seconds>
+    local fifo="$RUN/bond-in"
+
+    rm -f "$fifo"
+    mkfifo "$fifo"
+
+    priv ip netns exec "$NS_BOND" "$BOND_SENDER_BIN" "$BOND_STREAMID" \
+        "$IP_B2_HOST:$BOND_SRT_PORT" "$IP_B1_HOST:$BOND_SRT_PORT" \
+        <"$fifo" >>"$RUN/bond-pub.log" 2>&1 &
+    BOND_SENDER=$!
+
+    ffmpeg -hide_banner -loglevel error -y -re \
+        -f lavfi -i "testsrc2=size=320x240:rate=25" \
+        -f lavfi -i "sine=frequency=1320:sample_rate=48000" -ac 2 \
+        -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
+        -c:a aac -b:a 96k \
+        -t "$1" -f mpegts "$fifo" >>"$RUN/bond-pub.log" 2>&1 &
+    BOND_FFMPEG=$!
+}
+
+# the publisher process is inside its namespace, which is also how the run
+# stops it, so this is what says "the path failed, not the encoder"
+bond_sender_alive() {
+    [ -n "$(priv ip netns pids "$NS_BOND" 2>/dev/null || true)" ]
+}
+
+bond_worker_up() {
+    local master
+
+    master="$(cat "$RUN/bond/logs/nginx.pid" 2>/dev/null || true)"
+    [ -n "$master" ] || return 1
+    kill -0 "$master" 2>/dev/null || return 1
+    [ -n "$(pgrep -P "$master" 2>/dev/null || true)" ]
+}
+
+bond_worker_survived() { # <what happened>
+    bond_worker_up || fail "the bonded worker died when $1"
+    grep -aqE 'signal [0-9]+ \(core dumped\)|exited on signal' \
+        "$RUN/bond/logs/error.log" \
+        && fail "the bonded worker crashed when $1"
+    return 0
+}
+
+bond_frames_grow() { # <description> <floor over four seconds>
+    local what="$1" floor="$2" before after
+
+    before="$(number "bonded program_frames" "$(bond_program_frames)")"
+    sleep 4
+    after="$(number "bonded program_frames" "$(bond_program_frames)")"
+
+    echo "   $what: program frames $before -> $after"
+    [ "$after" -gt "$before" ] \
+        || fail "$what: the program stopped publishing frames ($before -> $after)"
+    [ $(( after - before )) -ge "$floor" ] \
+        || fail "$what: only $(( after - before )) frames in four seconds"
 }
 
 worker_survived() { # <what happened>
@@ -709,6 +962,367 @@ worker_survived "the active path was impaired past usefulness"
 wait_for_frames "on the standby after the second failover" 25
 
 # --------------------------------------------------------------------------
+# 5. SRT bonding
+# --------------------------------------------------------------------------
+
+# Goal doc 11.4: the selector sees one source and never an individual bond
+# member.  What this phase asserts is that number: one source before and after
+# a path is taken away, carrying media, while the publisher keeps both legs
+# alive.  A regression that accepted the legs as separate connections would
+# show two sources with one identity here, and a listener that lost group
+# acceptance entirely would show none at all.
+
+if ! command -v cc >/dev/null 2>&1; then
+    bond_skip "there is no C compiler to build the group caller with"
+    echo "   (final phase; 1-4 above still hold)"
+
+elif [ ! -f "$BOND_PREFIX/lib/libsrt.so" ] \
+     || [ ! -f "$BOND_PREFIX/include/srt/srt.h" ]; then
+    bond_skip "no bonding-enabled libsrt is installed at $BOND_PREFIX, and a distribution libsrt compiles bonding out (ENABLE_BONDING defaults to OFF upstream), so srt_create_group() fails and SRTO_GROUPCONNECT is unknown to the library"
+
+else
+    echo "== a bonded publisher: two impaired paths, one source"
+    echo "   both ends use the bonding-enabled libsrt in $BOND_PREFIX"
+
+    mkdir -p "$RUN/bond/logs" "$RUN/bond/conf" "$RUN/bond/hls"
+
+    # ffmpeg's libsrt binding has no option for a group, so the caller is
+    # built here: one broadcast group, one connection per leg.
+    cat > "$RUN/srt_group_send.c" <<'CEOF'
+/*
+ * An SRT group (bonded) caller (goal doc 11.4).
+ *
+ * ffmpeg's libsrt binding cannot express a group, so the bonding case needs a
+ * caller that can: a broadcast group whose legs are separate connections, all
+ * fed the same MPEG-TS.  MPEG-TS is read on stdin so the test can keep using
+ * ffmpeg to produce it.
+ *
+ * usage: srt_group_send <streamid> <host:port> [host:port ...]
+ */
+
+#include <srt/srt.h>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#define MAX_LEGS  4
+#define PAYLOAD   1316   /* SRT_LIVE_DEF_PLSIZE: seven TS packets */
+
+static int
+parse_target(const char *text, struct sockaddr_in *out)
+{
+    const char  *colon;
+    char         host[64];
+    size_t       len;
+    long         port;
+
+    colon = strrchr(text, ':');
+    if (colon == NULL) {
+        return -1;
+    }
+
+    len = (size_t) (colon - text);
+    if (len == 0 || len >= sizeof(host)) {
+        return -1;
+    }
+
+    memcpy(host, text, len);
+    host[len] = '\0';
+
+    port = strtol(colon + 1, NULL, 10);
+    if (port < 1 || port > 65535) {
+        return -1;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->sin_family = AF_INET;
+    out->sin_port = htons((uint16_t) port);
+
+    return (inet_pton(AF_INET, host, &out->sin_addr) == 1) ? 0 : -1;
+}
+
+int
+main(int argc, char **argv)
+{
+    SRT_SOCKGROUPCONFIG  targets[MAX_LEGS];
+    struct sockaddr_in   addr[MAX_LEGS];
+    SRTSOCKET            group;
+    char                 buf[PAYLOAD];
+    int                  legs, i, timeout = 1000;
+    ssize_t              n;
+
+    if (argc < 3 || argc - 2 > MAX_LEGS) {
+        fprintf(stderr, "usage: %s <streamid> <host:port> [host:port ...]\n",
+                argv[0]);
+        return 2;
+    }
+
+    legs = argc - 2;
+
+    for (i = 0; i < legs; i++) {
+        if (parse_target(argv[i + 2], &addr[i]) != 0) {
+            fprintf(stderr, "GROUP_SEND bad target %s\n", argv[i + 2]);
+            return 2;
+        }
+    }
+
+    if (srt_startup() == SRT_ERROR) {
+        fprintf(stderr, "GROUP_SEND srt_startup: %s\n", srt_getlasterror_str());
+        return 1;
+    }
+
+    group = srt_create_group(SRT_GTYPE_BROADCAST);
+    if (group == SRT_INVALID_SOCK) {
+        fprintf(stderr, "GROUP_SEND srt_create_group: %s\n",
+                srt_getlasterror_str());
+        return 3;
+    }
+
+    if (srt_setsockopt(group, 0, SRTO_STREAMID, argv[1],
+                       (int) strlen(argv[1]) + 1) == SRT_ERROR
+        || srt_setsockopt(group, 0, SRTO_SNDTIMEO, &timeout,
+                          sizeof(timeout)) == SRT_ERROR)
+    {
+        fprintf(stderr, "GROUP_SEND srt_setsockopt: %s\n",
+                srt_getlasterror_str());
+        return 1;
+    }
+
+    for (i = 0; i < legs; i++) {
+        targets[i] = srt_prepare_endpoint(NULL, (struct sockaddr *) &addr[i],
+                                          sizeof(addr[i]));
+    }
+
+    if (srt_connect_group(group, targets, legs) == SRT_ERROR) {
+        fprintf(stderr, "GROUP_SEND srt_connect_group: %s\n",
+                srt_getlasterror_str());
+        return 1;
+    }
+
+    /* Every leg has to be up: a group that silently lost one would still look
+     * like one source to the listener, and the case would prove nothing. */
+    for (i = 0; i < legs; i++) {
+        if (targets[i].errorcode != SRT_SUCCESS) {
+            fprintf(stderr, "GROUP_SEND leg %d (%s) did not connect: error %d\n",
+                    i, argv[i + 2], targets[i].errorcode);
+            return 1;
+        }
+    }
+
+    fprintf(stderr, "GROUP_SEND connected legs=%d\n", legs);
+    fflush(stderr);
+
+    while ((n = read(STDIN_FILENO, buf, sizeof(buf))) > 0) {
+        ssize_t written = 0;
+
+        while (written < n) {
+            int sent = srt_sendmsg(group, buf + written,
+                                   (int) (n - written), -1, 1);
+
+            if (sent > 0) {
+                written += sent;
+                continue;
+            }
+
+            if (sent == SRT_ERROR) {
+                int err = srt_getlasterror(NULL);
+
+                /* backpressure, not a broken session: keep the buffer */
+                if (err == SRT_ETIMEOUT || err == SRT_EASYNCSND) {
+                    continue;
+                }
+
+                fprintf(stderr, "GROUP_SEND srt_sendmsg: %s\n",
+                        srt_getlasterror_str());
+                goto done;
+            }
+        }
+    }
+
+done:
+    fprintf(stderr, "GROUP_SEND closing\n");
+    srt_close(group);
+    srt_cleanup();
+
+    return 0;
+}
+CEOF
+
+    # the rpath is what lets the caller find the bonding-enabled library when
+    # it is started inside its namespace as root
+    cc -O1 -g -Wall -Wextra -Werror -std=c11 \
+        -I"$BOND_PREFIX/include" -L"$BOND_PREFIX/lib" \
+        -Wl,-rpath,"$BOND_PREFIX/lib" \
+        -o "$BOND_SENDER_BIN" "$RUN/srt_group_send.c" -lsrt -lpthread
+
+    cat > "$RUN/bond/conf/nginx.conf" <<EOF
+worker_processes 1;
+daemon on;
+error_log logs/error.log info;
+pid logs/nginx.pid;
+
+events {
+    worker_connections 256;
+}
+
+media_failover_failure_timeout 1200;
+media_failover_recovery_timeout 400;
+media_failover_switchback auto;
+
+media_hls $RUN/bond/hls;
+
+# the two local addresses of the bonded listener: the two uplinks of the
+# bonded publisher arrive on one of each
+media_srt_listen $IP_B1_HOST:$BOND_SRT_PORT;
+media_srt_listen_bond $IP_B2_HOST;
+media_srt_source_priority encoder-bond 100;
+
+http {
+    access_log off;
+
+    server {
+        listen 127.0.0.1:$BOND_HTTP_PORT;
+
+        location /media/api/ {
+            media_api;
+        }
+    }
+}
+EOF
+
+    echo "== starting the bonded nginx"
+    LD_LIBRARY_PATH="$BOND_PREFIX/lib" \
+        "$NGINX" -p "$RUN/bond" -c conf/nginx.conf -t
+    LD_LIBRARY_PATH="$BOND_PREFIX/lib" \
+        "$NGINX" -p "$RUN/bond" -c conf/nginx.conf
+    BOND_STARTED=1
+
+    for _ in $(seq 1 200); do
+        grep -q 'srt listener ready' "$RUN/bond/logs/error.log" 2>/dev/null \
+            && break
+        sleep 0.05
+    done
+
+    # both addresses have to be bound before the bonds below mean anything
+    grep -q "srt listener ready on $IP_B1_HOST:$BOND_SRT_PORT bonded with $IP_B2_HOST" \
+        "$RUN/bond/logs/error.log" \
+        || fail "the bonded listener did not come up on both addresses: $(tail -3 "$RUN/bond/logs/error.log")"
+
+    echo "   listening on $IP_B1_HOST:$BOND_SRT_PORT and $IP_B2_HOST:$BOND_SRT_PORT"
+
+    echo "== one bonded publisher over both impaired paths"
+    publish_bond 600
+    sleep 1
+
+    for _ in $(seq 1 250); do
+        [ "$(bond_source_count)" = "1" ] && [ "$(bond_source_in)" -gt 0 ] \
+            && break
+        sleep 0.1
+    done
+
+    BOND_COUNT="$(bond_source_count)"
+    [ "$BOND_COUNT" = "1" ] \
+        || fail "the bonded publisher registered $BOND_COUNT sources, not one: the legs of the bond reached the core as separate sources, which is what goal doc 11.4 forbids ($(bond_source_ids))"
+
+    BOND_ID="$(bond_source_ids)"
+    [ "$BOND_ID" = "encoder-bond" ] \
+        || fail "the bonded publisher registered as \"$BOND_ID\", not one encoder-bond source"
+
+    BOND_IN="$(number "encoder-bond frames_in" "$(bond_source_in)")"
+    [ "$BOND_IN" -gt 0 ] \
+        || fail "the bonded source carried no media over either path: $(tail -3 "$RUN/bond-pub.log")"
+
+    echo "   one source: $BOND_ID, frames in=$BOND_IN"
+
+    bond_frames_grow "with both bonded paths impaired" 25
+
+    echo "== one of the bonded paths is taken away"
+    priv ip netns exec "$NS_BOND" ip link set "$BNV_1" down
+    priv ip netns exec "$NS_BOND" ip link show "$BNV_1" \
+        > "$RUN/bond-link-1-down.txt"
+    cat "$RUN/bond-link-1-down.txt"
+
+    grep -q 'state DOWN' "$RUN/bond-link-1-down.txt" \
+        || fail "the carrier on the bonded path 1 was not actually taken down"
+
+    # the bond is transport redundancy: losing one leg must not turn one source
+    # into two, into none, or into a stall
+    BOND_IN_BEFORE="$BOND_IN"
+
+    for _ in $(seq 1 150); do
+        [ "$(bond_source_count)" = "1" ] \
+            && [ "$(bond_source_in)" -gt "$BOND_IN_BEFORE" ] \
+            && break
+        sleep 0.1
+    done
+
+    BOND_COUNT_AFTER="$(bond_source_count)"
+    [ "$BOND_COUNT_AFTER" = "1" ] \
+        || fail "the bonded publisher became $BOND_COUNT_AFTER sources when one path was lost ($(bond_source_ids))"
+
+    BOND_IN_AFTER="$(number "encoder-bond frames_in" "$(bond_source_in)")"
+    [ "$BOND_IN_AFTER" -gt "$BOND_IN_BEFORE" ] \
+        || fail "the bonded source stopped carrying media when one path was lost ($BOND_IN_BEFORE -> $BOND_IN_AFTER): $(tail -3 "$RUN/bond-pub.log")"
+
+    echo "   still one source, frames in $BOND_IN_BEFORE -> $BOND_IN_AFTER"
+
+    bond_sender_alive \
+        || fail "the bonded publisher itself died when one of its paths was lost: this was meant to be a path failure, not an encoder failure"
+
+    bond_worker_survived "one of the bonded paths was lost"
+
+    bond_frames_grow "on the surviving bonded path" 25
+
+    grep -q 'GROUP_SEND connected legs=2' "$RUN/bond-pub.log" \
+        || fail "the group caller did not report both legs up, so the bond was never actually carried over two paths: $(tail -3 "$RUN/bond-pub.log")"
+
+    echo "   the group caller connected both legs"
+
+    # the bonded instance is stopped here rather than left for the teardown of
+    # the other one: it is this phase's, and its assertion is its own
+    echo "== stop the bonded instance"
+
+    # reaping them here is also what keeps bash's "Killed" notice for them out
+    # of this run's output
+    if [ "$BOND_FFMPEG" != "0" ]; then
+        kill -KILL "$BOND_FFMPEG" 2>/dev/null || true
+        wait "$BOND_FFMPEG" 2>/dev/null || true
+        BOND_FFMPEG=0
+    fi
+
+    if [ "$BOND_SENDER" != "0" ]; then
+        kill -KILL "$BOND_SENDER" 2>/dev/null || true
+        wait "$BOND_SENDER" 2>/dev/null || true
+        BOND_SENDER=0
+    fi
+
+    BOND_PID="$(cat "$RUN/bond/logs/nginx.pid")"
+    LD_LIBRARY_PATH="$BOND_PREFIX/lib" \
+        "$NGINX" -p "$RUN/bond" -c conf/nginx.conf -s quit
+
+    for _ in $(seq 1 400); do
+        kill -0 "$BOND_PID" 2>/dev/null || break
+        sleep 0.05
+    done
+
+    if kill -0 "$BOND_PID" 2>/dev/null; then
+        kill -9 "$BOND_PID" || true
+        fail "the bonded nginx did not shut down"
+    fi
+
+    BOND_STARTED=0
+
+    grep -aq 'exited with code 0' "$RUN/bond/logs/error.log" \
+        || fail "the bonded worker did not exit cleanly"
+
+    echo "== bonded source: one source through both paths and through a lost path"
+fi
+
+# --------------------------------------------------------------------------
 # teardown
 # --------------------------------------------------------------------------
 
@@ -737,21 +1351,22 @@ grep -aq 'exited with code 0' "$RUN/logs/error.log" \
 echo "== tear down the topology"
 cleanup
 
-for ns in "$NSA" "$NSB" "$NSV"; do
+for ns in $ALL_NS; do
     ns_exists "$ns" && fail "namespace $ns survived the run"
 done
 
-for iface in "$HV_A" "$HV_B" "$HV_V"; do
-    priv ip link show "$iface" >/dev/null 2>&1 && fail "interface $iface survived the run"
+for iface in $HOST_IFACES; do
+    priv ip link show "$iface" >/dev/null 2>&1 \
+        && fail "interface $iface survived the run"
 done
 
-for addr in "$IP_A_HOST" "$IP_B_HOST" "$IP_V_HOST"; do
+for addr in "$IP_A_HOST" "$IP_B_HOST" "$IP_V_HOST" "$IP_B1_HOST" "$IP_B2_HOST"; do
     priv ip -4 addr show | grep -q "$addr/" \
         && fail "address $addr survived the run"
 done
 
 if command -v iptables >/dev/null 2>&1; then
-    for iface in "$HV_A" "$HV_B" "$HV_V"; do
+    for iface in $HOST_IFACES; do
         priv iptables -w -C INPUT -i "$iface" -j ACCEPT 2>/dev/null \
             && fail "the input rule for $iface survived the run"
     done

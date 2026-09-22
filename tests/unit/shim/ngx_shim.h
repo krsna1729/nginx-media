@@ -10,6 +10,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <errno.h>
 #include <string.h>
 
 typedef intptr_t                    ngx_int_t;
@@ -90,6 +91,25 @@ extern size_t ngx_media_test_frees;
 
 /* set to 1 to make every allocation fail, for NULL handling tests */
 extern int ngx_media_test_fail_alloc;
+
+/*
+ * Logging: portable core sources call ngx_log_error.  A unit build has no log
+ * target, so the level constants exist and the call is a no-op - tests assert
+ * behaviour, never log text.
+ */
+#define NGX_LOG_EMERG   1
+#define NGX_LOG_ALERT   2
+#define NGX_LOG_CRIT    3
+#define NGX_LOG_ERR     4
+#define NGX_LOG_WARN    5
+#define NGX_LOG_NOTICE  6
+#define NGX_LOG_INFO    7
+#define NGX_LOG_DEBUG   8
+
+#define ngx_errno       errno
+
+void ngx_log_error(ngx_uint_t level, ngx_log_t *log, int err,
+    const char *fmt, ...);
 
 void *ngx_media_test_alloc(size_t size, ngx_log_t *log);
 void ngx_media_test_free(void *ptr);

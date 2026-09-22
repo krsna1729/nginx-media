@@ -3,15 +3,19 @@
 /*
  * Redundant-source switch harness (phase 3 exit criteria).
  *
- * Two real MPEG-TS fixtures are demuxed concurrently into two sources of one
- * logical stream.  Both stay hot; a manual promotion switches the program at
- * the standby's cached keyframe.  The harness proves:
+ * Real MPEG-TS fixtures are demuxed concurrently into three sources of one
+ * logical stream, each registered as a different source type: SRT, RTMP and
+ * file.  All three stay hot and a manual promotion switches the program at
+ * the standby's cached keyframe - including a switch that crosses the source
+ * type.  The harness proves:
  *
  *   - the program timeline is monotonic (and strictly so for video) across
- *     the switch
- *   - the switch happens exactly once and bumps the generation
- *   - the first program frame after the switch is a keyframe
- *   - the demoted source stops writing to the program but keeps its GOP cache
+ *     both switches
+ *   - each switch happens exactly once and bumps the generation
+ *   - the first program frame after each switch is a keyframe
+ *   - the source type does not gate any of it: SRT, RTMP and file sources are
+ *     activated by the same promotion path and write the same program
+ *   - a demoted source stops writing to the program but keeps its GOP cache
  *     hot, inside its hard ceilings
  *   - readers holding a pre-switch cursor see the generation change
  */
@@ -98,16 +102,17 @@ main(int argc, char **argv)
 {
     ngx_pool_t          *pool;
     ngx_media_stream_t   stream;
-    ngx_media_source_t  *a, *b;
+    ngx_media_source_t  *a, *b, *c;
     ngx_media_feed_conf_t    feed_conf;
     ngx_media_cursor_t       pre_cursor;
-    endpoint_t               ep_a, ep_b;
-    char                     buf_a[4096], buf_b[4096];
-    FILE                    *fa, *fb;
-    size_t                   na, nb;
-    ngx_uint_t               switched = 0, mismatch_seen = 0;
+    endpoint_t               ep_a, ep_b, ep_c;
+    char                     buf_a[4096], buf_b[4096], buf_c[4096];
+    FILE                    *fa, *fb, *fc;
+    size_t                   na, nb, nc;
+    ngx_uint_t               switched = 0, switched2 = 0, mismatch_seen = 0;
     uint64_t                 a_frames_at_switch = 0;
-    uint64_t                 switch_seq = 0;
+    uint64_t                 b_frames_at_switch = 0;
+    uint64_t                 switch_seq = 0, switch_seq2 = 0;
     int                      rc = 1;
 
     if (argc < 3) {
@@ -118,7 +123,10 @@ main(int argc, char **argv)
     fa = fopen(argv[1], "rb");
     fb = fopen(argv[2], "rb");
 
-    if (fa == NULL || fb == NULL) {
+    /* the file source reads its own copy of the first fixture */
+    fc = fopen(argc > 3 ? argv[3] : argv[1], "rb");
+
+    if (fa == NULL || fb == NULL || fc == NULL) {
         fprintf(stderr, "cannot open fixtures\n");
         return 1;
     }
@@ -144,15 +152,19 @@ main(int argc, char **argv)
                                     NGX_MEDIA_SOURCE_SRT, 100, NULL);
     b = ngx_media_stream_source_add(&stream,
                                     &(ngx_str_t) { 9, (u_char *) "encoder-b" },
-                                    NGX_MEDIA_SOURCE_SRT, 90, NULL);
+                                    NGX_MEDIA_SOURCE_RTMP, 90, NULL);
+    c = ngx_media_stream_source_add(&stream,
+                                    &(ngx_str_t) { 9, (u_char *) "encoder-c" },
+                                    NGX_MEDIA_SOURCE_FILE, 80, NULL);
 
-    if (a == NULL || b == NULL) {
+    if (a == NULL || b == NULL || c == NULL) {
         fprintf(stderr, "source registration failed\n");
         return 1;
     }
 
     endpoint_init(&ep_a, &stream, a);
     endpoint_init(&ep_b, &stream, b);
+    endpoint_init(&ep_c, &stream, c);
 
     /* bootstrap: the first source becomes active at its first keyframe */
     if (ngx_media_stream_promote(&stream, a) != NGX_OK) {
@@ -174,7 +186,12 @@ main(int argc, char **argv)
             (void) ngx_media_ts_demux_feed(&ep_b.demux, (u_char *) buf_b, nb);
         }
 
-        if (na == 0 && nb == 0) {
+        nc = fread(buf_c, 1, sizeof(buf_c), fc);
+        if (nc > 0) {
+            (void) ngx_media_ts_demux_feed(&ep_c.demux, (u_char *) buf_c, nc);
+        }
+
+        if (na == 0 && nb == 0 && nc == 0) {
             break;
         }
 
@@ -183,6 +200,7 @@ main(int argc, char **argv)
             /* the first program frame of the new generation gets this */
             switch_seq = ngx_media_feed_head(&stream.program_feed);
 
+            /* SRT -> RTMP: a switch that crosses the source type */
             if (ngx_media_stream_promote(&stream, b) != NGX_OK) {
                 fprintf(stderr, "promotion failed\n");
                 return 1;
@@ -191,10 +209,26 @@ main(int argc, char **argv)
             switched = 1;
             a_frames_at_switch = a->frames_out;
         }
+
+        if (switched && !switched2
+            && stream.program_frames >= 2 * SWITCH_AFTER_FRAMES)
+        {
+            switch_seq2 = ngx_media_feed_head(&stream.program_feed);
+
+            /* RTMP -> file: the third type over the same path */
+            if (ngx_media_stream_promote(&stream, c) != NGX_OK) {
+                fprintf(stderr, "second promotion failed\n");
+                return 1;
+            }
+
+            switched2 = 1;
+            b_frames_at_switch = b->frames_out;
+        }
     }
 
     ngx_media_ts_demux_flush(&ep_a.demux);
     ngx_media_ts_demux_flush(&ep_b.demux);
+    ngx_media_ts_demux_flush(&ep_c.demux);
 
     {
         ngx_media_frame_t  out[8];
@@ -209,12 +243,19 @@ main(int argc, char **argv)
         }
     }
 
+    printf("TYPES a=%lu b=%lu c=%lu (srt=%d rtmp=%d file=%d)\n",
+           (unsigned long) a->type, (unsigned long) b->type,
+           (unsigned long) c->type, NGX_MEDIA_SOURCE_SRT,
+           NGX_MEDIA_SOURCE_RTMP, NGX_MEDIA_SOURCE_FILE);
+
     printf("SOURCES a_frames_in=%llu a_frames_out=%llu b_frames_in=%llu "
-           "b_frames_out=%llu\n",
+           "b_frames_out=%llu c_frames_in=%llu c_frames_out=%llu\n",
            (unsigned long long) a->frames_in,
            (unsigned long long) a->frames_out,
            (unsigned long long) b->frames_in,
-           (unsigned long long) b->frames_out);
+           (unsigned long long) b->frames_out,
+           (unsigned long long) c->frames_in,
+           (unsigned long long) c->frames_out);
 
     printf("PROGRAM frames=%llu switches=%llu generation=%llu "
            "switched=%llu switch_seq=%llu\n",
@@ -225,20 +266,25 @@ main(int argc, char **argv)
            (unsigned long long) switch_seq);
 
     printf("PREROLL a_units=%llu a_bytes=%llu a_overflows=%llu "
-           "b_units=%llu b_bytes=%llu b_overflows=%llu\n",
+           "b_units=%llu b_bytes=%llu b_overflows=%llu "
+           "c_units=%llu c_bytes=%llu c_overflows=%llu\n",
            (unsigned long long) ngx_media_source_preroll_units(a),
            (unsigned long long) ngx_media_source_preroll_bytes(a),
            (unsigned long long) a->preroll.overflows,
            (unsigned long long) ngx_media_source_preroll_units(b),
            (unsigned long long) ngx_media_source_preroll_bytes(b),
-           (unsigned long long) b->preroll.overflows);
+           (unsigned long long) b->preroll.overflows,
+           (unsigned long long) ngx_media_source_preroll_units(c),
+           (unsigned long long) ngx_media_source_preroll_bytes(c),
+           (unsigned long long) c->preroll.overflows);
 
     {
         ngx_media_cursor_t  cursor;
         ngx_media_frame_t   out[64];
         ngx_uint_t          count, i, status;
         uint64_t            frames = 0, regressions = 0, video_regressions = 0;
-        uint64_t            video_frames = 0, keyframe_at_switch = 0;
+        uint64_t            video_frames = 0;
+        uint64_t            keyframe_at_switch = 0, keyframe_at_switch2 = 0;
         int64_t             first_dts = 0, last_dts = 0, last = 0;
         int64_t             last_video = 0;
 
@@ -278,6 +324,10 @@ main(int argc, char **argv)
                     keyframe_at_switch = 1;
                 }
 
+                if (abs_seq == switch_seq2 && out[i].keyframe) {
+                    keyframe_at_switch2 = 1;
+                }
+
                 last = out[i].dts;
                 last_dts = out[i].dts;
                 frames++;
@@ -288,19 +338,38 @@ main(int argc, char **argv)
 
         printf("TIMELINE frames=%llu regressions=%llu video_frames=%llu "
                "video_regressions=%llu first_dts=%lld last_dts=%lld "
-               "keyframe_at_switch=%llu\n",
+               "keyframe_at_switch=%llu keyframe_at_switch2=%llu\n",
                (unsigned long long) frames,
                (unsigned long long) regressions,
                (unsigned long long) video_frames,
                (unsigned long long) video_regressions,
                (long long) first_dts,
                (long long) last_dts,
-               (unsigned long long) keyframe_at_switch);
+               (unsigned long long) keyframe_at_switch,
+               (unsigned long long) keyframe_at_switch2);
 
         rc = 0;
 
-        if (!switched || stream.switches != 1 || stream.generation != 2) {
-            fprintf(stderr, "expected exactly one switch to generation 2\n");
+        if (!switched || !switched2 || stream.switches != 2
+            || stream.generation != 3)
+        {
+            fprintf(stderr,
+                    "expected two switches (srt->rtmp->file) to generation 3\n");
+            rc = 1;
+        }
+
+        /* the same promotion path, crossing the source type each time */
+        if (a->type != NGX_MEDIA_SOURCE_SRT || b->type != NGX_MEDIA_SOURCE_RTMP
+            || c->type != NGX_MEDIA_SOURCE_FILE)
+        {
+            fprintf(stderr, "the sources are not one of each type\n");
+            rc = 1;
+        }
+
+        if (c->state != NGX_MEDIA_SOURCE_ACTIVE || b->state
+            != NGX_MEDIA_SOURCE_STANDBY)
+        {
+            fprintf(stderr, "the file source did not take over the program\n");
             rc = 1;
         }
 
@@ -309,18 +378,24 @@ main(int argc, char **argv)
             rc = 1;
         }
 
-        if (!keyframe_at_switch) {
-            fprintf(stderr, "the switch did not start at a keyframe\n");
+        if (!keyframe_at_switch || !keyframe_at_switch2) {
+            fprintf(stderr, "a switch did not start at a keyframe\n");
             rc = 1;
         }
 
         if (a->frames_out != a_frames_at_switch) {
-            fprintf(stderr, "the demoted source kept writing to the program\n");
+            fprintf(stderr, "the demoted srt source kept writing\n");
             rc = 1;
         }
 
-        if (b->frames_out == 0) {
-            fprintf(stderr, "the promoted source never wrote to the program\n");
+        if (b->frames_out != b_frames_at_switch) {
+            fprintf(stderr, "the demoted rtmp source kept writing\n");
+            rc = 1;
+        }
+
+        if (b->frames_out == 0 || c->frames_out == 0) {
+            fprintf(stderr,
+                    "an rtmp or file source never wrote to the program\n");
             rc = 1;
         }
 
@@ -332,18 +407,24 @@ main(int argc, char **argv)
         if (ngx_media_source_preroll_units(a) > PREROLL_UNITS
             || ngx_media_source_preroll_bytes(a) > PREROLL_BYTES
             || ngx_media_source_preroll_units(b) > PREROLL_UNITS
-            || ngx_media_source_preroll_bytes(b) > PREROLL_BYTES)
+            || ngx_media_source_preroll_bytes(b) > PREROLL_BYTES
+            || ngx_media_source_preroll_units(c) > PREROLL_UNITS
+            || ngx_media_source_preroll_bytes(c) > PREROLL_BYTES)
         {
             fprintf(stderr, "a standby cache exceeded its ceiling\n");
             rc = 1;
         }
 
-        if (ngx_media_source_preroll_units(a) == 0) {
-            fprintf(stderr, "the demoted source stopped caching a hot GOP\n");
+        if (ngx_media_source_preroll_units(a) == 0
+            || ngx_media_source_preroll_units(b) == 0)
+        {
+            fprintf(stderr, "a demoted source stopped caching a hot GOP\n");
             rc = 1;
         }
 
-        if (a->preroll.overflows != 0 || b->preroll.overflows != 0) {
+        if (a->preroll.overflows != 0 || b->preroll.overflows != 0
+            || c->preroll.overflows != 0)
+        {
             fprintf(stderr, "a standby cache overflowed during the run\n");
             rc = 1;
         }
@@ -353,11 +434,13 @@ main(int argc, char **argv)
 
     ngx_media_ts_demux_destroy(&ep_a.demux);
     ngx_media_ts_demux_destroy(&ep_b.demux);
+    ngx_media_ts_demux_destroy(&ep_c.demux);
     ngx_media_stream_destroy(&stream);
     ngx_destroy_pool(pool);
 
     fclose(fa);
     fclose(fb);
+    fclose(fc);
 
     return rc;
 }

@@ -144,3 +144,13 @@ ngx_destroy_pool(ngx_pool_t *pool)
 
     ngx_media_test_free(pool);
 }
+
+/* see ngx_shim.h: the unit build has no log target */
+void
+ngx_log_error(ngx_uint_t level, ngx_log_t *log, int err, const char *fmt, ...)
+{
+    (void) level;
+    (void) log;
+    (void) err;
+    (void) fmt;
+}

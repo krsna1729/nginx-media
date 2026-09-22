@@ -771,6 +771,175 @@ test_fanout(void)
     ngx_media_rtmp_fanout_destroy(&fan);
 }
 
+/*
+ * Item 15 of the definition of done: RTMP fanout shares payloads rather than
+ * copying media per connection.
+ *
+ * A program frame becomes exactly one FLV unit in the shared ring.  Each
+ * player then builds its own chunk headers around *that* buffer: the writer
+ * slices the payload as a scatter/gather list and takes one reference, so a
+ * connection costs headers and a reference, never a copy of the media.
+ *
+ * These are the assertions a per-connection copy cannot satisfy: every
+ * player's packet points at the same payload allocation, every media slice
+ * points inside it, the reference count grows by exactly one per player, and
+ * the ring accounts the payload once however many players read it.
+ */
+static void
+test_player_sharing(void)
+{
+    static ngx_media_rtmp_packet_t  packets[8];
+
+    const ngx_uint_t                players = 8;
+    ngx_media_rtmp_prepare_t        prep;
+    ngx_media_rtmp_writer_t         writer;
+    ngx_media_trackset_t            tracks;
+    ngx_media_track_t               track;
+    ngx_media_buf_t                *config, *payload;
+    ngx_media_frame_t               frame;
+    const ngx_media_rtmp_media_t   *unit;
+    const u_char                   *base;
+    size_t                          shared_len, retained;
+    ngx_uint_t                      i, j, media_parts;
+    size_t                          media_bytes;
+    u_char                         *p;
+
+    TEST_CASE("every rtmp player shares one payload; none copies it");
+
+    ngx_media_rtmp_prepare_init(&prep, 8, 0);
+
+    CHECK(ngx_media_trackset_init(&tracks, 4, NULL) == NGX_OK,
+          "trackset initialised");
+
+    config = ngx_media_buf_alloc(4 + sizeof(sps) + 4 + sizeof(pps));
+    p = ngx_media_buf_data(config);
+    p[0] = 0; p[1] = 0; p[2] = 0; p[3] = 1;
+    ngx_memcpy(p + 4, sps, sizeof(sps));
+    p[4 + sizeof(sps)] = 0;
+    p[5 + sizeof(sps)] = 0;
+    p[6 + sizeof(sps)] = 0;
+    p[7 + sizeof(sps)] = 1;
+    ngx_memcpy(p + 8 + sizeof(sps), pps, sizeof(pps));
+    (void) ngx_media_buf_freeze(config, 4 + sizeof(sps) + 4 + sizeof(pps));
+
+    ngx_memzero(&track, sizeof(track));
+    track.media_type = NGX_MEDIA_TYPE_VIDEO;
+    track.codec = NGX_MEDIA_CODEC_H264;
+    track.payload_format = NGX_MEDIA_PAYLOAD_ANNEXB;
+    track.config = config;
+
+    CHECK(ngx_media_trackset_add(&tracks, &track) >= 0, "video track added");
+    ngx_media_buf_unref(config);
+
+    CHECK(ngx_media_rtmp_prepare_announce(&prep, &tracks) == NGX_OK,
+          "sequence headers announced");
+
+    /*
+     * A media frame several chunks long, so the packet really is a
+     * scatter/gather list of slices into the shared buffer rather than one
+     * contiguous reference.
+     */
+    payload = ngx_media_buf_alloc(6 * 520);
+    p = ngx_media_buf_data(payload);
+
+    for (i = 0; i < 5; i++) {
+        p[0] = 0; p[1] = 0; p[2] = 0; p[3] = 1;
+        memset(p + 4, 0x41 + i, 512);
+        p += 4 + 512;
+    }
+
+    (void) ngx_media_buf_freeze(payload, 6 * 520);
+
+    ngx_media_frame_init(&frame);
+    frame.media_type = NGX_MEDIA_TYPE_VIDEO;
+    frame.codec = NGX_MEDIA_CODEC_H264;
+    frame.payload_format = NGX_MEDIA_PAYLOAD_ANNEXB;
+    frame.pts = frame.dts = 90 * 40;
+    frame.keyframe = 1;
+    ngx_media_frame_adopt(&frame, payload);
+
+    CHECK(ngx_media_rtmp_prepare_frame(&prep, &frame) == NGX_OK,
+          "program frame prepared");
+    ngx_media_frame_release(&frame);
+
+    /* unit 0 is the sequence header, unit 1 is the media frame */
+    unit = ngx_media_rtmp_fanout_next(&prep.fan, 1);
+    CHECK(unit != NULL && unit->config == 0, "the media unit");
+    CHECK(unit != NULL && ngx_media_buf_size(unit->payload) > 128 * 4,
+          "the media unit is several chunks long");
+
+    if (unit == NULL) {
+        ngx_media_rtmp_prepare_destroy(&prep);
+        ngx_media_trackset_destroy(&tracks);
+        return;
+    }
+
+    base = ngx_media_buf_data(unit->payload);
+    shared_len = ngx_media_buf_size(unit->payload);
+    retained = prep.fan.bytes;
+
+    CHECK(ngx_media_buf_refs(unit->payload) == 1,
+          "the ring holds the only reference before anyone reads it");
+
+    ngx_media_rtmp_writer_init(&writer, NGX_MEDIA_RTMP_DEFAULT_CHUNK,
+                               NGX_MEDIA_RTMP_MAX_MESSAGE);
+
+    for (i = 0; i < players; i++) {
+        ngx_media_rtmp_packet_init(&packets[i]);
+
+        CHECK(ngx_media_rtmp_writer_message(&writer, &packets[i], 4,
+                                            unit->type, 1, unit->timestamp,
+                                            unit->payload, 0, shared_len)
+              == NGX_OK, "player %lu built its packet", i);
+
+        CHECK(packets[i].payload == unit->payload,
+              "player %lu references the shared payload, not a copy", i);
+
+        media_parts = 0;
+        media_bytes = 0;
+
+        for (j = 0; j < packets[i].nparts; j++) {
+            const u_char  *d = packets[i].parts[j].data;
+            size_t         l = packets[i].parts[j].len;
+
+            if (d >= packets[i].head
+                && d < packets[i].head + packets[i].head_len)
+            {
+                /* a chunk header, owned by this packet and this player */
+                continue;
+            }
+
+            media_parts++;
+            media_bytes += l;
+
+            CHECK(d >= base && d + l <= base + shared_len,
+                  "player %lu slice %lu lies inside the shared payload", i, j);
+        }
+
+        CHECK(media_parts > 4,
+              "player %lu slices the shared buffer: %lu parts", i, media_parts);
+        CHECK(media_bytes == shared_len,
+              "player %lu carries every shared byte once", i);
+        CHECK(ngx_media_buf_refs(unit->payload) == 1 + i + 1,
+              "one reference per player, no copy: %lu players", i + 1);
+    }
+
+    /* reading is free: the ring still accounts the payload exactly once */
+    CHECK(prep.fan.bytes == retained,
+          "players added %lu bytes to the ring",
+          (unsigned long) (prep.fan.bytes - retained));
+
+    for (i = 0; i < players; i++) {
+        ngx_media_rtmp_packet_destroy(&packets[i]);
+    }
+
+    CHECK(ngx_media_buf_refs(unit->payload) == 1,
+          "the ring is the only holder once the players are gone");
+
+    ngx_media_rtmp_prepare_destroy(&prep);
+    ngx_media_trackset_destroy(&tracks);
+}
+
 static void
 test_prepare(void)
 {
@@ -938,6 +1107,7 @@ main(void)
     test_publisher();
     test_enhanced_rtmp();
     test_fanout();
+    test_player_sharing();
     test_prepare();
 
     TEST_LEAKS();

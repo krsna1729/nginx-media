@@ -2,15 +2,25 @@
  * Bounded subscriber queue for one SRT destination: unit and byte ceilings,
  * whole-burst drops under overrun, and keyframe resync so a slow receiver
  * never resumes in the middle of a GOP (goal doc 34 items 11 and 12).
+ *
+ * The destination runtime itself is exercised too: one sender pool serves
+ * every destination of a program, so several SRT destinations cost one
+ * schedulable sender, not one thread each (goal doc 11.3, 34 item 16).
  */
 
-#define _DEFAULT_SOURCE 1
+/*
+ * The output header sets _POSIX_C_SOURCE itself for a unit build, so it has
+ * to come first: defining _DEFAULT_SOURCE here would collide with it.
+ */
+#include "ngx_media_srt_output.h"
 
 #include "ngx_media_test.h"
 
 #include "ngx_media_srt_output_queue.h"
 
+#include <dirent.h>
 #include <stdio.h>
+#include <time.h>
 
 #define CHECK(cond, fmt, ...)                                                 \
     do {                                                                      \
@@ -238,6 +248,148 @@ test_references(void)
     ngx_media_srt_queue_destroy(&q);
 }
 
+static ngx_uint_t
+thread_count(void)
+{
+    DIR           *dir;
+    struct dirent *ent;
+    ngx_uint_t     n = 0;
+
+    dir = opendir("/proc/self/task");
+
+    if (dir == NULL) {
+        return 0;
+    }
+
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] != '.') {
+            n++;
+        }
+    }
+
+    closedir(dir);
+
+    return n;
+}
+
+/*
+ * Several SRT destinations of one program are served by one shared sender
+ * pool.  The observable is the thread count: destinations added at runtime
+ * are picked up by senders that already exist, so the process gains no thread
+ * per destination.  A per-destination sender would add one thread per add()
+ * here and per destination in the integration run.
+ */
+static void
+test_shared_sender_pool(void)
+{
+    ngx_media_srt_listener_t    *listener;
+    ngx_media_srt_outputs_t     *outs = NULL;
+    ngx_media_srt_output_conf_t  conf;
+    ngx_media_srt_out_event_t    events[16];
+    ngx_media_buf_t             *b;
+    ngx_uint_t                   seen[4] = { 0, 0, 0, 0 };
+    ngx_uint_t                   connected, i, n, tries;
+    ngx_uint_t                   base, after_start, after_adds, after_media;
+
+    TEST_CASE("one sender pool serves every destination, no thread per "
+              "destination");
+
+    listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", 24590, NULL,
+                                    NULL);
+    CHECK(listener != NULL, "listener created");
+
+    base = thread_count();
+    CHECK(base > 0, "thread count readable: %lu", (unsigned long) base);
+
+    memset(&conf, 0, sizeof(conf));
+    conf.application.len = 4;
+    conf.application.data = (u_char *) "live";
+    conf.stream.len = 4;
+    conf.stream.data = (u_char *) "news";
+    conf.host.len = 9;
+    conf.host.data = (u_char *) "127.0.0.1";
+    conf.port = 24590;
+    conf.max_units = 64;
+    conf.max_bytes = 256 * 1024;
+    conf.connect_timeout = 1000;
+    conf.send_timeout = 1000;
+
+    /* one declared destination: the pool starts with exactly one sender */
+    CHECK(ngx_media_srt_outputs_start(&outs, &conf, 1, 16, NULL) == NGX_OK,
+          "outputs started");
+
+    after_start = thread_count();
+
+    for (i = 0; i < 3; i++) {
+        CHECK(ngx_media_srt_outputs_add(outs, &conf, NULL, NULL) == NGX_OK,
+              "runtime destination %lu added", i + 1);
+    }
+
+    after_adds = thread_count();
+
+    /*
+     * The senders belong to the pool and walk the whole table, so three more
+     * destinations are served by the thread that already exists.  An
+     * implementation that gave each destination its own sender shows four
+     * threads at this point.
+     */
+    CHECK(after_adds == after_start,
+          "adding destinations created no sender: %lu -> %lu",
+          (unsigned long) after_start, (unsigned long) after_adds);
+
+    /* and all four are bound to the same application/stream */
+    b = burst(1024);
+    CHECK(b != NULL, "burst allocated");
+
+    for (i = 0; i < 8; i++) {
+        CHECK(ngx_media_srt_outputs_push(outs, &conf.application, &conf.stream,
+                                         b, 1024, 1) == NGX_OK,
+              "burst offered to every destination");
+    }
+
+    ngx_media_buf_unref(b);
+
+    connected = 0;
+    tries = 0;
+
+    while (connected < 4 && tries < 500) {
+        n = ngx_media_srt_outputs_event_read(outs, events, 16);
+
+        for (i = 0; i < n; i++) {
+            if (events[i].type == NGX_MEDIA_SRT_OUT_EVENT_CONNECTED
+                && events[i].index < 4)
+            {
+                seen[events[i].index] = 1;
+            }
+        }
+
+        connected = seen[0] + seen[1] + seen[2] + seen[3];
+
+        if (connected < 4) {
+            struct timespec  ts = { 0, 10 * 1000 * 1000 };
+
+            (void) nanosleep(&ts, NULL);
+            tries++;
+        }
+    }
+
+    CHECK(connected == 4,
+          "all four destinations are served by the pool: %lu",
+          (unsigned long) connected);
+
+    after_media = thread_count();
+
+    CHECK(after_media == after_adds,
+          "serving media grew no senders: %lu -> %lu",
+          (unsigned long) after_adds, (unsigned long) after_media);
+
+    ngx_media_srt_outputs_stop(outs);
+    ngx_media_srt_listen_close(listener);
+
+    CHECK(thread_count() == base, "stopping joined every sender: %lu -> %lu",
+          (unsigned long) after_media, (unsigned long) thread_count());
+}
+
 int
 main(void)
 {
@@ -248,6 +400,7 @@ main(void)
     test_byte_ceiling();
     test_keyframe_resync();
     test_references();
+    test_shared_sender_pool();
 
     TEST_LEAKS();
     TEST_MAIN_END();

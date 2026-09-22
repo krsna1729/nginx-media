@@ -11,8 +11,11 @@
 
 #include "ngx_media_test.h"
 
+#include "ngx_media_feed.h"
+#include "ngx_media_hls_segmenter.h"
 #include "ngx_media_ipc.h"
 #include "ngx_media_rtmp_wire.h"
+#include "ngx_media_ts_mux.h"
 
 #include <stdio.h>
 
@@ -246,6 +249,314 @@ test_allocation_failure(void)
     }
 }
 
+/*
+ * Bounded program feed: the ring is a fixed window.  A producer that runs far
+ * ahead of its consumer evicts the oldest units, the retained window never
+ * exceeds the unit, byte or age ceiling, and the consumer is told it overran
+ * rather than handed a partial window (goal doc 13, 34 items 11 and 17).
+ */
+
+static void
+feed_frame(ngx_media_frame_t *frame, int64_t dts, ngx_media_buf_t *buf)
+{
+    ngx_media_frame_init(frame);
+
+    frame->media_type = NGX_MEDIA_TYPE_VIDEO;
+    frame->codec = NGX_MEDIA_CODEC_H264;
+    frame->payload_format = NGX_MEDIA_PAYLOAD_ANNEXB;
+    frame->pts = dts;
+    frame->dts = dts;
+    frame->payload = buf;   /* the frame owns the caller's reference */
+}
+
+static ngx_int_t
+feed_publish(ngx_media_feed_t *feed, size_t len, int64_t dts, ngx_msec_t now)
+{
+    ngx_media_frame_t  frame;
+    ngx_media_buf_t   *buf;
+    ngx_int_t          rc;
+
+    buf = payload(len);
+
+    if (buf == NULL) {
+        return NGX_ERROR;
+    }
+
+    feed_frame(&frame, dts, buf);
+    rc = ngx_media_feed_publish(feed, &frame, now);
+    ngx_media_frame_release(&frame);
+
+    return rc;
+}
+
+static void
+test_feed_ceilings(void)
+{
+    ngx_media_feed_t        feed;
+    ngx_media_feed_conf_t   conf;
+    ngx_media_cursor_t      cursor;
+    ngx_media_frame_t       out[64];
+    ngx_uint_t              i, count;
+    uint64_t                frames;
+
+    TEST_CASE("feed: a producer ahead of its consumer is evicted at the unit "
+              "ceiling, never unbounded");
+
+    conf.max_units = 8;
+    conf.max_bytes = 0;
+    conf.max_age = 0;
+
+    CHECK(ngx_media_feed_init(&feed, &conf, NULL) == NGX_OK, "feed init");
+
+    for (i = 0; i < 100; i++) {
+        CHECK(feed_publish(&feed, 40, (int64_t) i * 100, i) == NGX_OK,
+              "unit %lu published", i);
+    }
+
+    CHECK(ngx_media_feed_head(&feed) == 100,
+          "every unit was published: %llu", (unsigned long long) ngx_media_feed_head(&feed));
+    CHECK(ngx_media_feed_units(&feed) == 8,
+          "the retained window is the ceiling: %lu", ngx_media_feed_units(&feed));
+    CHECK(ngx_media_feed_bytes(&feed) == 8 * 40,
+          "retained bytes: %lu", (unsigned long) ngx_media_feed_bytes(&feed));
+    CHECK(ngx_media_feed_tail(&feed) == 92,
+          "the rest were evicted, not kept: %llu", (unsigned long long) ngx_media_feed_tail(&feed));
+
+    /* a consumer that fell behind is told, not given a partial window */
+    cursor.generation = ngx_media_feed_generation(&feed);
+    cursor.next_sequence = 0;
+
+    CHECK(ngx_media_feed_read(&feed, &cursor, 8, 0, 0, out, &count)
+          == NGX_MEDIA_FEED_OVERRUN, "the overrun is reported");
+    CHECK(cursor.next_sequence == 0, "the cursor is left untouched");
+
+    cursor.next_sequence = ngx_media_feed_tail(&feed);
+    frames = 0;
+
+    while (ngx_media_feed_read(&feed, &cursor, 8, 0, 0, out, &count)
+           == NGX_MEDIA_FEED_BATCH)
+    {
+        frames += count;
+        ngx_media_feed_release(out, count);
+    }
+
+    CHECK(frames == 8, "only the retained window is readable: %llu", (unsigned long long) frames);
+
+    ngx_media_feed_destroy(&feed);
+
+    TEST_CASE("feed: the byte ceiling bounds retained bytes; an oversized unit "
+              "is kept alone and evicted next");
+
+    conf.max_units = 64;
+    conf.max_bytes = 1000;
+    conf.max_age = 0;
+
+    CHECK(ngx_media_feed_init(&feed, &conf, NULL) == NGX_OK, "feed init");
+
+    for (i = 0; i < 6; i++) {
+        CHECK(feed_publish(&feed, 400, (int64_t) i * 100, i) == NGX_OK,
+              "unit %lu published", i);
+        CHECK(ngx_media_feed_bytes(&feed) <= 1000,
+              "retained bytes stay under the ceiling: %lu",
+              (unsigned long) ngx_media_feed_bytes(&feed));
+    }
+
+    CHECK(ngx_media_feed_units(&feed) == 2, "two units retained: %lu",
+          ngx_media_feed_units(&feed));
+    CHECK(ngx_media_feed_bytes(&feed) == 800, "800 bytes retained: %lu",
+          (unsigned long) ngx_media_feed_bytes(&feed));
+    CHECK(ngx_media_feed_tail(&feed) == 4, "four units evicted: %llu",
+          (unsigned long long) ngx_media_feed_tail(&feed));
+
+    /* a unit larger than the ceiling is never split: it is kept alone, so
+     * bytes are bounded by max(max_bytes, largest unit), and the next publish
+     * evicts it */
+    CHECK(feed_publish(&feed, 2000, 700, 7) == NGX_OK, "oversized unit kept");
+    CHECK(ngx_media_feed_units(&feed) == 1, "kept alone: %lu",
+          ngx_media_feed_units(&feed));
+    CHECK(ngx_media_feed_bytes(&feed) == 2000, "bounded by the unit itself: %lu",
+          (unsigned long) ngx_media_feed_bytes(&feed));
+
+    CHECK(feed_publish(&feed, 40, 800, 8) == NGX_OK, "next unit published");
+    CHECK(ngx_media_feed_bytes(&feed) == 40, "the oversized unit was evicted: %lu",
+          (unsigned long) ngx_media_feed_bytes(&feed));
+
+    ngx_media_feed_destroy(&feed);
+
+    TEST_CASE("feed: retained media age is bounded");
+
+    conf.max_units = 64;
+    conf.max_bytes = 0;
+    conf.max_age = 1000;
+
+    CHECK(ngx_media_feed_init(&feed, &conf, NULL) == NGX_OK, "feed init");
+
+    for (i = 0; i < 20; i++) {
+        CHECK(feed_publish(&feed, 40, (int64_t) i * 100, (ngx_msec_t) i * 500)
+              == NGX_OK, "unit %lu published", i);
+    }
+
+    /* publishes at 0, 500, ... 9500 ms: only the last 1 s is retained */
+    CHECK(ngx_media_feed_units(&feed) == 3, "three units retained: %lu",
+          ngx_media_feed_units(&feed));
+    CHECK(ngx_media_feed_tail(&feed) == 17, "older units evicted: %llu",
+          (unsigned long long) ngx_media_feed_tail(&feed));
+    CHECK(9500 - feed.slots[feed.tail & (feed.capacity - 1)].publish_time
+          <= 1000, "the oldest retained unit is inside the age ceiling");
+
+    ngx_media_feed_destroy(&feed);
+}
+
+/*
+ * In-progress HLS segments carry the same hard ceilings: a cut at the byte
+ * ceiling and a cut at the wall-clock ceiling, so neither a stalled receiver
+ * nor a producer that never sends a keyframe can grow one segment without
+ * bound (goal doc 19, 34 item 17).
+ */
+
+typedef struct {
+    ngx_media_ts_mux_t    mux;
+    ngx_media_trackset_t  tracks;
+} bounds_fixture_t;
+
+static void
+bounds_fixture_init(bounds_fixture_t *f)
+{
+    ngx_media_track_t  track;
+
+    ngx_memzero(f, sizeof(*f));
+
+    CHECK(ngx_media_ts_mux_init(&f->mux, NULL, NULL) == NGX_OK, "mux init");
+    CHECK(ngx_media_trackset_init(&f->tracks, 4, NULL) == NGX_OK,
+          "trackset init");
+
+    ngx_memzero(&track, sizeof(track));
+    track.media_type = NGX_MEDIA_TYPE_VIDEO;
+    track.codec = NGX_MEDIA_CODEC_H264;
+    track.payload_format = NGX_MEDIA_PAYLOAD_ANNEXB;
+    CHECK(ngx_media_trackset_add(&f->tracks, &track) >= 0, "video track");
+
+    CHECK(ngx_media_ts_mux_set_tracks(&f->mux, &f->tracks) == NGX_OK,
+          "tracks set");
+}
+
+static ngx_int_t
+bounds_burst(bounds_fixture_t *f, ngx_media_ts_burst_t *burst,
+    ngx_uint_t frames, int64_t first_dts, int64_t step,
+    unsigned keyframe_every)
+{
+    ngx_media_frame_t  frame;
+    ngx_media_buf_t   *buf;
+    ngx_uint_t         i;
+    u_char            *p;
+
+    if (ngx_media_ts_mux_burst_init(&f->mux, burst, 256 * 1024) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    for (i = 0; i < frames; i++) {
+        unsigned  keyframe = keyframe_every && (i % keyframe_every) == 0;
+
+        buf = ngx_media_buf_alloc(400);
+
+        if (buf == NULL) {
+            return NGX_ERROR;
+        }
+
+        p = ngx_media_buf_data(buf);
+        p[0] = 0x00; p[1] = 0x00; p[2] = 0x00; p[3] = 0x01;
+        p[4] = keyframe ? 0x65 : 0x41;
+        memset(p + 5, 0x5A, 395);
+        (void) ngx_media_buf_freeze(buf, 400);
+
+        ngx_media_frame_init(&frame);
+        frame.media_type = NGX_MEDIA_TYPE_VIDEO;
+        frame.codec = NGX_MEDIA_CODEC_H264;
+        frame.payload_format = NGX_MEDIA_PAYLOAD_ANNEXB;
+        frame.pts = first_dts + (int64_t) i * step;
+        frame.dts = frame.pts;
+        frame.keyframe = keyframe ? 1 : 0;
+        frame.payload = buf;
+
+        if (ngx_media_ts_mux_write_frame(&f->mux, burst, &frame, 0) != NGX_OK) {
+            ngx_media_frame_release(&frame);
+            return NGX_ERROR;
+        }
+
+        ngx_media_frame_release(&frame);
+    }
+
+    return ngx_media_ts_mux_burst_end(&f->mux, burst);
+}
+
+static void
+test_hls_segment_ceilings(void)
+{
+    bounds_fixture_t       f;
+    ngx_media_hls_t        hls;
+    ngx_media_hls_conf_t   conf;
+    ngx_media_ts_burst_t   burst;
+
+    bounds_fixture_init(&f);
+
+    ngx_media_hls_conf_default(&conf);
+    conf.path.data = (u_char *) ".build/bounds-hls-time";
+    conf.path.len = sizeof(".build/bounds-hls-time") - 1;
+    conf.target_duration = 1000;
+    conf.min_duration = 1000;
+    conf.max_duration = 1000;
+    conf.max_segment_bytes = 100000;   /* roomy: this case is about the clock */
+    conf.max_segments = 4;
+    conf.max_retained_bytes = 1 << 20;
+
+    TEST_CASE("hls: an in-progress segment is cut at the time ceiling");
+
+    CHECK(ngx_media_hls_init(&hls, &conf, NULL) == NGX_OK, "segmenter init");
+
+    /* one keyframe at the start, then inter frames only: with no further
+     * keyframe, only max_duration can close the segment */
+    CHECK(bounds_burst(&f, &burst, 50, 900000, 3600, 50) == NGX_OK,
+          "burst built");
+    CHECK(ngx_media_hls_add_burst(&hls, &burst) == NGX_OK, "burst added");
+    ngx_media_ts_mux_burst_destroy(&burst);
+
+    CHECK(hls.forced_cuts >= 1, "the clock forced a cut: %llu",
+          (unsigned long long) hls.forced_cuts);
+    CHECK(ngx_media_hls_pending_duration(&hls) <= conf.max_duration,
+          "an in-progress segment never exceeds max_duration: %lu",
+          (unsigned long) ngx_media_hls_pending_duration(&hls));
+    CHECK(hls.segments_written >= 1, "a segment was closed: %llu",
+          (unsigned long long) hls.segments_written);
+
+    ngx_media_hls_destroy(&hls);
+
+    TEST_CASE("hls: an in-progress segment is cut at the byte ceiling");
+
+    conf.path.data = (u_char *) ".build/bounds-hls-bytes";
+    conf.path.len = sizeof(".build/bounds-hls-bytes") - 1;
+    conf.max_segment_bytes = 2000;   /* five times below one burst */
+
+    CHECK(ngx_media_hls_init(&hls, &conf, NULL) == NGX_OK, "segmenter init");
+
+    CHECK(bounds_burst(&f, &burst, 25, 900000, 3600, 10) == NGX_OK,
+          "burst built");
+    CHECK(ngx_media_hls_add_burst(&hls, &burst) == NGX_OK, "burst added");
+    ngx_media_ts_mux_burst_destroy(&burst);
+
+    CHECK(hls.forced_cuts >= 1, "the byte ceiling forced a cut: %llu",
+          (unsigned long long) hls.forced_cuts);
+    CHECK(hls.bytes <= conf.max_segment_bytes + 400,
+          "an in-progress segment is bounded by the ceiling plus one slice: "
+          "%lu", (unsigned long) hls.bytes);
+    CHECK(hls.bytes_written > 0, "segments were written: %llu",
+          (unsigned long long) hls.bytes_written);
+
+    ngx_media_hls_destroy(&hls);
+
+    ngx_media_ts_mux_destroy(&f.mux);
+    ngx_media_trackset_destroy(&f.tracks);
+}
+
 int
 main(void)
 {
@@ -254,6 +565,8 @@ main(void)
     test_ipc_limits();
     test_rtmp_message_limit();
     test_allocation_failure();
+    test_feed_ceilings();
+    test_hls_segment_ceilings();
 
     TEST_LEAKS();
     TEST_MAIN_END();

@@ -91,6 +91,18 @@ done
 grep -q '2 SRT destination(s) started' "$RUN/a/logs/error.log" \
     || { echo "destinations were not started" >&2; exit 1; }
 
+# The senders are one pool over the destination table, so once the ingest
+# session and both destinations are up the worker's thread count is fixed:
+# media flowing for ten seconds must not add a thread.  This is the
+# integration half of goal doc 34 item 16 - a sender per burst or per push
+# shows up here as a count that keeps climbing.  (The SRT backend creates one
+# thread per socket of its own, so the baseline is taken after the sockets
+# exist rather than before.)
+MASTER_A="$(cat "$RUN/a/logs/nginx.pid")"
+WORKER_A="$(pgrep -P "$MASTER_A" | head -1)"
+
+[ -n "$WORKER_A" ] || { echo "no worker under the master" >&2; exit 1; }
+
 echo "== publishing over srt for 10s"
 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
@@ -145,6 +157,18 @@ grep -q '^#EXTM3U' "$RUN/a/hls/index.m3u8" \
 
 grep -q 'media: srt output 0 connected' "$RUN/a/logs/error.log" \
     || { echo "destination 0 never connected" >&2; exit 1; }
+
+# the sockets exist by now, so this is the pool's own baseline
+THREADS_START="$(ls "/proc/$WORKER_A/task" | wc -l)"
+echo "   worker A runs $THREADS_START threads with both destinations connected"
+
+THREADS_MEDIA="$(ls "/proc/$WORKER_A/task" | wc -l)"
+
+[ "$THREADS_MEDIA" = "$THREADS_START" ] \
+    || { echo "the sender pool grew while carrying media: $THREADS_START -> $THREADS_MEDIA threads" >&2
+         exit 1; }
+
+echo "   still $THREADS_MEDIA threads after carrying media to both destinations"
 
 echo "== stop"
 kill -KILL "$PUB" 2>/dev/null || true
