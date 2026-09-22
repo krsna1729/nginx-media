@@ -1,7 +1,7 @@
 /*
  * nginx-media SRT ingest module (goal doc 11.2, 11.3).
  *
- * Static configuration for now is a single listener capability:
+ * Static configuration for now is a listening capability:
  *
  *     media_srt_listen 127.0.0.1:9000;
  *
@@ -10,13 +10,21 @@
  *
  *     media_srt_listen_bond 127.0.0.2;
  *
- * Worker 0 owns the listener (goal doc 22).  The transport helper thread runs
- * one shared poll over the listener and every session, and hands compact
- * events plus raw MPEG-TS chunks (tagged with their session) to the worker
- * through an eventfd.  The worker parses and validates the Stream ID,
- * registers the publisher as a source of a logical stream, demuxes its
- * MPEG-TS into encoded frames and publishes them through the activation gate
- * into the program feed.
+ * One listening endpoint per worker (goal doc 22).  The directive may be
+ * given once per worker and worker i binds the i-th entry, so a publisher
+ * that connects to entry i is accepted by worker i and only routed to the
+ * program's owner when that is a different worker.  A single entry keeps the
+ * original shape: worker 0 owns the listener, and routing is the only path
+ * for a publisher whose program lives elsewhere.  libsrt has no reuseport of
+ * its own, so one endpoint per worker is what replaces it - a single shared
+ * endpoint would funnel every publisher through the worker that bound it.
+ *
+ * Each worker's transport helper thread runs one shared poll over its
+ * listener and every session, and hands compact events plus raw MPEG-TS
+ * chunks (tagged with their session) to the worker through an eventfd.  The
+ * worker parses and validates the Stream ID, registers the publisher as a
+ * source of a logical stream, demuxes its MPEG-TS into encoded frames and
+ * publishes them through the activation gate into the program feed.
  */
 
 #include "ngx_media_platform.h"
@@ -73,9 +81,17 @@ typedef struct {
     ngx_media_srt_crypto_conf_t    crypto;
 } ngx_media_srt_stream_crypto_t;
 
+/*
+ * One listening endpoint.  media_srt_listen may be repeated, once per worker:
+ * worker i binds the i-th entry, and this worker's endpoint is the only one
+ * it ever binds.
+ */
 typedef struct {
-    ngx_str_t                listen;
-    unsigned                 listen_set:1;
+    ngx_str_t   endpoint;   /* host:port as written in the configuration */
+} ngx_media_srt_listen_t;
+
+typedef struct {
+    ngx_array_t              *listens;   /* ngx_media_srt_listen_t */
 
     /*
      * The second local address of a bonded listener (goal doc 11.4).  Bonding
@@ -1147,6 +1163,18 @@ ngx_media_srt_create_conf(ngx_cycle_t *cycle)
         return NULL;
     }
 
+    /*
+     * One entry per media_srt_listen, so the directive can be given once per
+     * worker.  Created here rather than at first use because the directive
+     * handler only pushes.
+     */
+    mcf->listens = ngx_array_create(cycle->pool, 4,
+                                    sizeof(ngx_media_srt_listen_t));
+
+    if (mcf->listens == NULL) {
+        return NULL;
+    }
+
     return mcf;
 }
 
@@ -1154,13 +1182,10 @@ static char *
 ngx_media_srt_listen_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     ngx_media_srt_main_conf_t  *mcf = conf;
+    ngx_media_srt_listen_t     *listen;
     ngx_str_t                  *value;
 
     (void) cmd;
-
-    if (mcf->listen_set) {
-        return "is duplicate";
-    }
 
     value = cf->args->elts;
 
@@ -1168,8 +1193,12 @@ ngx_media_srt_listen_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_ERROR;
     }
 
-    mcf->listen = value[1];
-    mcf->listen_set = 1;
+    listen = ngx_array_push(mcf->listens);
+    if (listen == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    listen->endpoint = value[1];
 
     return NGX_CONF_OK;
 }
@@ -1199,60 +1228,133 @@ ngx_media_srt_listen_bond_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 /*
- * A bonded listener is two addresses of one port, so the second address only
- * makes sense beside a specific media_srt_listen: a wildcard listen already
- * owns every address, the same address cannot be bound twice, and the second
- * address has to be an address the transport can parse.  Checking here is
- * what turns each of those into a configuration error naming the directive
- * instead of a startup failure about an address in use.
+ * The checks that have to happen before a worker binds anything.
+ *
+ * A bonded listener is two addresses of one port, so media_srt_listen_bond
+ * only makes sense beside a specific media_srt_listen: a wildcard listen
+ * already owns every address, the same address cannot be bound twice, and the
+ * second address has to be an address the transport can parse.  Each endpoint
+ * gets the same treatment, because a bonded listener per worker is one bond
+ * address published on every worker's port rather than a different rule.
+ *
+ * Two further rules follow from one endpoint per worker:
+ *
+ * - an endpoint given twice would have two workers bind one address, which
+ *   the second would report only as a startup failure about an address in
+ *   use;
+ * - more endpoints than workers is refused rather than trimmed.  A worker
+ *   binds one endpoint, so the extra entries would never accept anything, and
+ *   an operator who wrote them would be wrong about how many publishers their
+ *   configuration can take.  Fewer endpoints than workers stays legal: the
+ *   remaining workers own programs without accepting publishers, which is the
+ *   shape a deployment adding ingest ports one at a time has.
+ *
+ * Checking here is what turns each of those into a configuration error naming
+ * the directive instead of a startup failure about an address in use.
  */
 static char *
 ngx_media_srt_init_main_conf(ngx_cycle_t *cycle, void *conf)
 {
     ngx_media_srt_main_conf_t  *mcf = conf;
+    ngx_media_srt_listen_t     *listens;
+    ngx_uint_t                  i, j, n, workers;
     u_char                     *colon;
     size_t                      host_len;
     const char                 *problem;
 
-    if (!mcf->bond_set) {
-        return NGX_CONF_OK;
+    listens = (mcf->listens != NULL) ? mcf->listens->elts : NULL;
+    n = (mcf->listens != NULL) ? mcf->listens->nelts : 0;
+
+    if (mcf->bond_set) {
+        problem = NULL;
+
+        if (n == 0) {
+            problem = "needs media_srt_listen: both leg addresses are "
+                      "published on its port";
+
+        } else if (ngx_inet_addr(mcf->bond.data, mcf->bond.len) == INADDR_NONE)
+        {
+            problem = "needs an IPv4 address";
+        }
+
+        if (problem != NULL) {
+            /*
+             * init_conf can only report an error, so the reason goes through
+             * the log: without it the operator sees a failed configuration
+             * and no statement of which rule was broken.
+             */
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                          "media: media_srt_listen_bond %V %s", &mcf->bond,
+                          problem);
+
+            return NGX_CONF_ERROR;
+        }
     }
 
-    colon = ngx_strlchr(mcf->listen.data,
-                        mcf->listen.data + mcf->listen.len, ':');
-    host_len = (colon != NULL) ? (size_t) (colon - mcf->listen.data)
-                               : mcf->listen.len;
+    for (i = 0; i < n; i++) {
+        for (j = i + 1; j < n; j++) {
+            if (listens[j].endpoint.len == listens[i].endpoint.len
+                && ngx_memcmp(listens[j].endpoint.data,
+                              listens[i].endpoint.data,
+                              listens[i].endpoint.len) == 0)
+            {
+                ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                              "media: media_srt_listen %V is duplicate: one "
+                              "endpoint per worker, and two workers cannot "
+                              "bind one address",
+                              &listens[i].endpoint);
 
-    problem = NULL;
-
-    if (!mcf->listen_set) {
-        problem = "needs media_srt_listen: both leg addresses are published "
-                  "on its port";
-
-    } else if (host_len == sizeof("0.0.0.0") - 1
-               && ngx_strncmp(mcf->listen.data, "0.0.0.0", host_len) == 0)
-    {
-        problem = "needs a specific media_srt_listen address: a wildcard "
-                  "listen already covers every address";
-
-    } else if (ngx_inet_addr(mcf->bond.data, mcf->bond.len) == INADDR_NONE) {
-        problem = "needs an IPv4 address";
-
-    } else if (host_len == mcf->bond.len
-               && ngx_strncmp(mcf->listen.data, mcf->bond.data, host_len) == 0)
-    {
-        problem = "must differ from the media_srt_listen address";
+                return NGX_CONF_ERROR;
+            }
+        }
     }
 
-    if (problem != NULL) {
+    for (i = 0; i < n && mcf->bond_set; i++) {
         /*
-         * init_conf can only report an error, so the reason goes through the
-         * log: without it the operator sees a failed configuration and no
-         * statement of which of the four rules was broken.
+         * Both remaining rules are about the address, not the port, so the
+         * host is the part before the colon.
          */
+        colon = ngx_strlchr(listens[i].endpoint.data,
+                            listens[i].endpoint.data + listens[i].endpoint.len,
+                            ':');
+        host_len = (colon != NULL)
+                       ? (size_t) (colon - listens[i].endpoint.data)
+                       : listens[i].endpoint.len;
+
+        problem = NULL;
+
+        if (host_len == sizeof("0.0.0.0") - 1
+            && ngx_strncmp(listens[i].endpoint.data, "0.0.0.0", host_len) == 0)
+        {
+            problem = "needs a specific address: a wildcard listen already "
+                      "covers every address, the bonded leg included";
+
+        } else if (host_len == mcf->bond.len
+                   && ngx_strncmp(listens[i].endpoint.data, mcf->bond.data,
+                                  host_len) == 0)
+        {
+            problem = "must differ from the media_srt_listen_bond address";
+        }
+
+        if (problem == NULL) {
+            continue;
+        }
+
         ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                      "media: media_srt_listen_bond %V %s", &mcf->bond,
+                      "media: media_srt_listen %V %s", &listens[i].endpoint,
                       problem);
+
+        return NGX_CONF_ERROR;
+    }
+
+    workers = ngx_media_owner_worker_count(cycle);
+
+    if (n > workers) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "media: media_srt_listen has %ui endpoint(s) and there "
+                      "are %ui worker(s): a worker binds one endpoint, so the "
+                      "extra %ui would accept nothing",
+                      n, workers, n - workers);
 
         return NGX_CONF_ERROR;
     }
@@ -1304,6 +1406,7 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
 {
     ngx_media_srt_main_conf_t   *mcf;
     ngx_media_srt_ingest_conf_t  conf;
+    ngx_media_srt_listen_t      *listen;
     ngx_connection_t            *c;
     ngx_str_t                    host;
     ngx_uint_t                   port;
@@ -1425,16 +1528,26 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     }
 
     /*
-     * Transport sockets stay with worker 0 (goal doc 22).  The check is
-     * ngx_worker, not ngx_process_slot: the slot is the position in the
-     * process table, which a reload changes - the respawned worker took a
-     * different slot, so with the slot the listener was never started again
-     * and no worker was left accepting publishers.
+     * This worker's ingest endpoint.  media_srt_listen may be given once per
+     * worker and worker i binds the i-th entry, so a publisher that connects
+     * to entry i is accepted by worker i: the receive path of a publisher is
+     * the worker that carries it whenever the publisher was placed there, and
+     * a session is routed to the program's owner only when that is a
+     * different worker.  With one entry this is exactly the single-listener
+     * shape - worker 0 binds it, every other worker returns here.
+     *
+     * The index is ngx_worker, not ngx_process_slot: the slot is the position
+     * in the process table, which a reload changes - the respawned worker
+     * took a different slot, so with the slot the wrong endpoint was bound
+     * after a reload.  A worker with no endpoint of its own owns programs
+     * without accepting publishers, which is what fewer entries than workers
+     * means: it still owns the programs its hash selects.
      */
-    if (ngx_worker != 0) {
+    if (mcf->listens == NULL || (ngx_uint_t) ngx_worker >= mcf->listens->nelts) {
         return NGX_OK;
     }
 
+    listen = &((ngx_media_srt_listen_t *) mcf->listens->elts)[ngx_worker];
 
     /*
      * The listener is optional.  An instance whose destinations all point
@@ -1442,15 +1555,13 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
      * start its destinations because it has no listener would be exactly the
      * bug this ordering fixes.
      */
-    if (!mcf->listen_set) {
-        return NGX_OK;
-    }
-
-    if (ngx_media_srt_parse_endpoint(cycle->pool, &mcf->listen, &host, &port)
+    if (ngx_media_srt_parse_endpoint(cycle->pool, &listen->endpoint, &host,
+                                     &port)
         != NGX_OK)
     {
         ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                      "media: invalid media_srt_listen \"%V\"", &mcf->listen);
+                      "media: invalid media_srt_listen \"%V\"",
+                      &listen->endpoint);
         return NGX_ERROR;
     }
 
@@ -1520,7 +1631,8 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
                   NGX_MEDIA_SRT_SHUTDOWN_INTERVAL);
 
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                  "media: SRT ingest runtime started for %V", &mcf->listen);
+                  "media: SRT ingest runtime started for %V",
+                  &listen->endpoint);
 
     return NGX_OK;
 }

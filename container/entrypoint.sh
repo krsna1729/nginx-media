@@ -8,21 +8,19 @@
 
 set -eu
 
-# Workers.  One by default, and the default is a correctness decision rather
-# than a conservative one: the media graph is per-worker state and the control
-# API does not route an operation to the worker that owns a stream, so a
-# program created through the API is visible to whichever worker answered and
-# invisible to the rest.  Measured with two workers: 4 of 20 requests for a
-# stream that had just been created returned stream_not_found.  Publishing is
-# routed between workers; the API is not.  Scale by running more containers.
+# Workers.  The graph is replicated across them, so any worker answers any
+# request; what more workers buy is room for more programs, not more fanout for
+# one.  Each program is owned by a single worker - whichever created it - and
+# that worker does all of the fanout for it, so one program's cost does not
+# spread however many workers there are.
+#
+# One is the default because it is the predictable one: with a single worker
+# every program is carried by the same process, ownership is not a question,
+# and the numbers in the documentation were measured that way.  Raise it for
+# program count, and read "How many workers, and what they buy" in
+# docs/operations.md first.
 : "${NGINX_WORKER_PROCESSES:=1}"
 export NGINX_WORKER_PROCESSES
-
-if [ "$NGINX_WORKER_PROCESSES" != "1" ]; then
-    echo "nginx-media: NGINX_WORKER_PROCESSES=$NGINX_WORKER_PROCESSES, but the" \
-         "control API is not worker-aware: programs created through it will" \
-         "be visible to some requests and not others." >&2
-fi
 
 # Which configuration to run.  The default is the image's own; point it at a
 # mounted directory to keep a configuration outside the image:

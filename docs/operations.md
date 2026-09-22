@@ -344,15 +344,55 @@ else.  And the document does not carry `enabled`: a source disabled out of band
 stays disabled through a replay, which is intended (enable and disable are
 desired state) but surprises a controller that expects the document to win.
 
-Two more limits that bite during a reconcile with several workers: the API acts
-on the registry of the worker that accepted the connection, and it starts
-whatever destinations the document names.  With `worker_processes 1` — what the
-graph tests use — this is a non-issue.  With several, a create lands in one
-worker's registry while the media for that program is routed to whichever worker
-the hash selects, so the stream the API reports and the stream carrying media can
-be two different objects.  Manage the graph on a single-worker instance;
-`tests/integration/multi_worker_nginx.sh` exercises two workers for transport
-routing, not for graph management.
+One limit that bites during a reconcile: the API starts whatever destinations
+the document names, and a destination is materialised by the program's owner.
+On a worker that does not own a program the document is refused with
+`409 destination_needs_owner` rather than accepted and silently ignored.
+
+## How many workers, and what they buy
+
+The graph is replicated and the program is not.  Every worker holds a copy of
+every stream, its sources and its destinations, so any worker can answer any
+read and apply any mutation.  Exactly one worker owns each program, and that
+worker runs the tick which drives selection, fanout and outputs - so a source
+that carries its own reader, a file or an origin or a directory, is opened only
+there and not once per worker.
+
+That distinction is what the worker count buys, and it is not "more throughput
+per stream":
+
+- **More programs, not more fanout.** One program's fanout is done by its
+  owner, so that cost does not spread over workers at all. Adding workers adds
+  room for more programs.
+- **Ownership follows the worker that created the program.** The graph is
+  replicated, but who owns what is decided when the program is created, so the
+  spread of programs over workers follows the spread of the requests that
+  created them.
+
+`make bench-worker-scaling` reports the first of those, and
+`make bench-ingest-egress` the second: eight programs created over four
+workers landed on two of them.  That is not our bug and nginx says so itself -
+its accept code notes that with `EPOLLEXCLUSIVE` "most of the connections are
+handled by the first worker process", which is why it re-adds the listening
+socket periodically.  Its answer is `reuseport`, and measured on the same
+listener the eight programs spread across all four workers.  Put it on any
+listener nginx creates:
+
+```nginx
+server {
+    listen 8080 reuseport;
+    ...
+}
+```
+
+Which mechanism applies depends on the protocol, because it depends on who owns
+the socket:
+
+| listener | protocol | how connections are spread |
+|---|---|---|
+| control API, HLS | TCP, nginx's socket | `listen ... reuseport`; the kernel hashes each connection and there is no accept mutex |
+| RTMP ingest | TCP, this module's socket | `SO_REUSEPORT` on the socket, one listener per worker |
+| SRT ingest | UDP, libsrt's socket | one listening endpoint per worker: libsrt exposes no reuseport of its own, and a single endpoint means every publisher arrives at worker 0 |
 
 ## What is bounded, and by what
 

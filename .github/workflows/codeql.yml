@@ -1,0 +1,67 @@
+name: codeql
+
+# Static analysis for the C in this repository.
+#
+# Runs on every pull request and on every push to main, so a finding lands on
+# the change that introduced it, and on a weekly schedule so a change in the
+# query packs is noticed without a code change.  The weekly run is the one
+# worth keeping even when nothing is being merged: the queries improve, and a
+# project that only scans on push never learns that.
+#
+# C and C++ are compiled rather than parsed, so this builds nginx with the
+# module between init and analyze - the same build the rest of CI uses, so a
+# green CodeQL run and a green build mean the same thing.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 5 * * 1'
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    permissions:
+      contents: read
+      # to upload the findings
+      security-events: write
+      # to fetch the query packs
+      packages: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: c-cpp
+          build-mode: manual
+          # security-extended adds the lower-severity security queries on top
+          # of the default set.  security-and-quality adds maintainability
+          # queries too, which is a different argument to have and one worth
+          # having separately.
+          queries: security-extended
+
+      - name: Install the build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config \
+            libpcre2-dev zlib1g-dev libssl-dev libsrt-openssl-dev
+
+      - name: Build nginx with the module
+        run: make nginx
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:c-cpp"

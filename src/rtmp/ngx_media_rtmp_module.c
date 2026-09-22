@@ -20,6 +20,35 @@
  * payloads, adding only its own chunk headers (goal doc 12.1).
  */
 
+/*
+ * Whether every worker may hold the ingest socket itself.
+ *
+ * SO_REUSEPORT lets bind() succeed in each worker and leaves the choice of
+ * worker to the kernel's hash of the arriving connection, so a publisher is
+ * accepted by the worker the kernel picks and the program's owner is reached
+ * through routing only when the two differ (goal doc 22: "use internal routing
+ * only as an escape hatch").  configure reports the option as
+ * NGX_HAVE_REUSEPORT.
+ *
+ * Where it is missing, the port can be bound only once, so the arrangement
+ * that works without it stays: worker 0 listens and every other worker takes
+ * routed publishers, players and API traffic.  A build never fails for the
+ * want of the option.
+ */
+#if (NGX_HAVE_REUSEPORT)
+#define NGX_MEDIA_RTMP_SHARED_LISTENER  1
+#else
+#define NGX_MEDIA_RTMP_SHARED_LISTENER  0
+#endif
+
+/*
+ * The session table is per process, so with a shared listener this is the
+ * ceiling per worker: 32 x worker_processes in total (128 at four workers,
+ * docs/operations.md), and the number a publisher sees depends on which
+ * worker the kernel placed it on.  Where the listener is not shared every
+ * session in the instance lives in worker 0, so the instance-wide ceiling is
+ * this number.
+ */
 #define NGX_MEDIA_RTMP_MAX_SESSIONS      32
 #define NGX_MEDIA_RTMP_DEFAULT_PRIORITY  50
 #define NGX_MEDIA_RTMP_OUT_CHUNK         4096
@@ -129,6 +158,12 @@ static void ngx_media_rtmp_listener_handler(ngx_event_t *ev);
 static ngx_int_t ngx_media_rtmp_listener_open(ngx_log_t *log);
 static void ngx_media_rtmp_listener_stop(void);
 
+/*
+ * Per process, and per-worker state rather than instance state: a session
+ * exists in the worker that accepted its connection and nowhere else, which is
+ * what makes a shared listener work at all - two workers never allocate the
+ * same slot, and a session is closed in the worker that owns its socket.
+ */
 static ngx_media_rtmp_session_t  ngx_media_rtmp_sessions[
     NGX_MEDIA_RTMP_MAX_SESSIONS];
 
@@ -1915,11 +1950,6 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
         return NGX_OK;
     }
 
-    /* transport sockets stay with worker 0 (goal doc 22) */
-    if (ngx_worker != 0) {
-        return NGX_OK;
-    }
-
     /*
      * The RTMP destination backend is registered before the listener is
      * considered.  A destination is created through the control API at
@@ -1927,8 +1957,13 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
      * media_rtmp_listen: refusing to register it there would make the API
      * answer destination_start_failed forever, which is exactly the bug this
      * ordering fixes (goal doc 16).
+     *
+     * Outbound push destinations stay with worker 0, which is where they have
+     * always been materialised and is not what the ingest socket moving
+     * changes: what is shared below is where publishers are *accepted*, not
+     * which worker opens a destination's socket.
      */
-    {
+    if (ngx_worker == 0) {
         static ngx_media_destination_ops_t  rtmp_destination_ops = {
             NGX_MEDIA_DEST_RTMP,
             ngx_media_rtmp_destination_add,
@@ -1936,16 +1971,43 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
         };
 
         (void) ngx_media_destination_register(&rtmp_destination_ops);
+
+        ngx_media_rtmp_destinations_started = 1;
+
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                      "media: rtmp destination backend ready");
     }
 
-    ngx_media_rtmp_destinations_started = 1;
-
-    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                  "media: rtmp destination backend ready");
+#if (NGX_HAVE_REUSEPORT)
+    /*
+     * Every worker opens the ingest socket on the configured address, with
+     * SO_REUSEPORT set, so the kernel decides per connection which worker
+     * accepts it and ingest work - handshake, chunk reader, FLV parse - is
+     * spread over the workers instead of landing on worker 0.  The internal
+     * routing layer then carries a publisher only when the accepting worker is
+     * not the program's owner (goal doc 22).
+     */
+#else
+    /*
+     * No SO_REUSEPORT: the port can be bound once, so the listener stays on
+     * worker 0 and the others serve routed publishers, players and API
+     * traffic, which is what this did before the socket could be shared.
+     */
+    if (ngx_worker != 0) {
+        return NGX_OK;
+    }
+#endif
 
     if (!mcf->listen_set) {
         return NGX_OK;
     }
+
+#if (NGX_HAVE_REUSEPORT)
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                  "media: rtmp listener %V is shared with every worker "
+                  "(SO_REUSEPORT): the kernel places each publisher",
+                  &mcf->listen);
+#endif
 
     /*
      * The listener is opened here, but a failure is not fatal and never was
@@ -1956,6 +2018,14 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
      * again, and if the arrival of the new configuration is unlucky enough
      * the instance ends up with no worker at all.  Instead the bind is
      * retried on a timer until it succeeds.
+     *
+     * A shared listener needs none of that grace - the new worker's bind
+     * succeeds while the old worker still holds its own socket, and the
+     * kernel hashes connections onto both until the old worker releases its
+     * copy on shutdown - but the retry stays, because a port held by a socket
+     * that cannot be shared (another process, or a binary from before this
+     * build during an upgrade) is still a bind that must be tried again
+     * rather than a worker that must die.
      */
     ngx_memzero(&ngx_media_rtmp_listener_ev, sizeof(ngx_event_t));
 
@@ -2068,6 +2138,33 @@ ngx_media_rtmp_listener_open(ngx_log_t *log)
                           sizeof(int));
     }
 
+#if (NGX_HAVE_REUSEPORT)
+    /*
+     * Every worker holds this socket, and the kernel picks one of them for
+     * each arriving connection by hashing its 4-tuple - so the publishers are
+     * distributed and no worker is the funnel.  The option has to be set
+     * before bind(), and on every socket in the group: one member without it
+     * makes every other member's bind fail.
+     *
+     * A failure here is not fatal.  It means this worker takes the port rather
+     * than sharing it - it still binds if the port is free, and the retry
+     * below eventually gives it the port once whoever holds it lets go - so it
+     * is logged and the worker carries on.
+     */
+    {
+        int  on = 1;
+
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (const void *) &on,
+                       sizeof(int)) == -1)
+        {
+            ngx_log_error(NGX_LOG_NOTICE, log, ngx_socket_errno,
+                          "media: rtmp cannot share the listener "
+                          "(SO_REUSEPORT failed): this worker will take the "
+                          "port on its own");
+        }
+    }
+#endif
+
     rc = bind(fd, &sa.sockaddr, socklen);
 
     if (rc == -1) {
@@ -2148,10 +2245,17 @@ ngx_media_rtmp_listener_stop(void)
  * attempt can legitimately find the port bound by the old listener.  Once the
  * listener is up, the same timer watches for the start of a graceful
  * shutdown, which no module callback reports - nginx sets ngx_exiting in its
- * own worker loop - and hands the port over there and then instead of leaving
- * the replacement to wait for this worker's drain to end.  That is the order
- * nginx itself uses: a worker closes its listening sockets when it begins to
- * shut down and still drains the connections it accepted.
+ * own worker loop - and closes this worker's copy of the listener there and
+ * then.  That is the order nginx itself uses: a worker closes its listening
+ * sockets when it begins to shut down and still drains the connections it
+ * accepted.
+ *
+ * Where the listener is shared, closing this worker's copy neither frees the
+ * port nor interrupts the media: the other workers keep accepting on their own
+ * sockets, and this worker's accepted publishers keep carrying until the drain
+ * ends.  Where it is not shared, the close is what lets the replacement bind,
+ * which is why it happens at the first sign of shutdown rather than at the end
+ * of the drain.
  *
  * The timer is re-armed only while the worker is alive, so it never holds the
  * exit up.
