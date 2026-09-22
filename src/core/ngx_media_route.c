@@ -88,7 +88,7 @@ ngx_media_route_owner(ngx_cycle_t *cycle, uint32_t hash)
 ngx_uint_t
 ngx_media_route_is_owner(ngx_cycle_t *cycle, uint32_t hash)
 {
-    return (ngx_media_route_owner(cycle, hash) == (ngx_uint_t) ngx_process_slot);
+    return (ngx_media_route_owner(cycle, hash) == (ngx_uint_t) ngx_worker);
 }
 
 /* feeds frames received from another worker into the local program */
@@ -130,7 +130,7 @@ ngx_media_route_worker_init(ngx_cycle_t *cycle, ngx_log_t *log)
     ngx_connection_t          *c;
     ngx_uint_t                 slot, i;
 
-    slot = (ngx_uint_t) ngx_process_slot;
+    slot = (ngx_uint_t) ngx_worker;
 
     if (ngx_media_route_workers < 2 || slot >= ngx_media_route_workers) {
         return NGX_OK;

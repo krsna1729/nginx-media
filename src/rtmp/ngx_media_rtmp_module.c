@@ -1047,7 +1047,7 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
         if (dir != NULL) {
             (void) ngx_media_owner_dir_claim(dir,
                                              ngx_media_owner_hash(app, name),
-                                             (ngx_uint_t) ngx_process_slot);
+                                             (ngx_uint_t) ngx_worker);
         }
     }
 
@@ -1911,7 +1911,7 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
     }
 
     /* transport sockets stay with worker 0 (goal doc 22) */
-    if (ngx_process_slot != 0) {
+    if (ngx_worker != 0) {
         return NGX_OK;
     }
 

@@ -5,6 +5,11 @@
  *
  *     media_srt_listen 127.0.0.1:9000;
  *
+ * and, when that listener must also accept group (bonded) callers, the second
+ * local address the other leg arrives on (goal doc 11.4):
+ *
+ *     media_srt_listen_bond 127.0.0.2;
+ *
  * Worker 0 owns the listener (goal doc 22).  The transport helper thread runs
  * one shared poll over the listener and every session, and hands compact
  * events plus raw MPEG-TS chunks (tagged with their session) to the worker
@@ -71,6 +76,15 @@ typedef struct {
 typedef struct {
     ngx_str_t                listen;
     unsigned                 listen_set:1;
+
+    /*
+     * The second local address of a bonded listener (goal doc 11.4).  Bonding
+     * is transport-internal: this address is bound with group acceptance
+     * enabled so a group caller's legs become one session, and nothing above
+     * the transport ever sees a bond member.
+     */
+    ngx_str_t                bond;
+    unsigned                 bond_set:1;
     ngx_media_srt_priority_t priorities[NGX_MEDIA_SRT_MAX_PRIORITIES];
     ngx_uint_t               npriorities;
 
@@ -105,7 +119,10 @@ typedef struct {
 } ngx_media_srt_slot_t;
 
 static void *ngx_media_srt_create_conf(ngx_cycle_t *cycle);
+static char *ngx_media_srt_init_main_conf(ngx_cycle_t *cycle, void *conf);
 static char *ngx_media_srt_listen_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_media_srt_listen_bond_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_media_srt_crypto_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
@@ -178,6 +195,13 @@ static ngx_command_t ngx_media_srt_commands[] = {
       0,
       NULL },
 
+    { ngx_string("media_srt_listen_bond"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_srt_listen_bond_cmd,
+      0,
+      0,
+      NULL },
+
     { ngx_string("media_srt_source_priority"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2,
       ngx_media_srt_priority_cmd,
@@ -221,7 +245,7 @@ static ngx_command_t ngx_media_srt_commands[] = {
 static ngx_core_module_t ngx_media_srt_module_ctx = {
     ngx_string("media_srt"),
     ngx_media_srt_create_conf,
-    NULL
+    ngx_media_srt_init_main_conf
 };
 
 ngx_module_t ngx_media_srt_module = {
@@ -487,7 +511,7 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
 
         if (dir != NULL) {
             (void) ngx_media_owner_dir_claim(dir, session->hash,
-                                             (ngx_uint_t) ngx_process_slot);
+                                             (ngx_uint_t) ngx_worker);
         }
     }
 
@@ -1140,6 +1164,92 @@ ngx_media_srt_listen_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     return NGX_CONF_OK;
 }
 
+static char *
+ngx_media_srt_listen_bond_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_media_srt_main_conf_t  *mcf = conf;
+    ngx_str_t                  *value;
+
+    (void) cmd;
+
+    if (mcf->bond_set) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    if (value[1].len == 0) {
+        return NGX_CONF_ERROR;
+    }
+
+    mcf->bond = value[1];
+    mcf->bond_set = 1;
+
+    return NGX_CONF_OK;
+}
+
+/*
+ * A bonded listener is two addresses of one port, so the second address only
+ * makes sense beside a specific media_srt_listen: a wildcard listen already
+ * owns every address, the same address cannot be bound twice, and the second
+ * address has to be an address the transport can parse.  Checking here is
+ * what turns each of those into a configuration error naming the directive
+ * instead of a startup failure about an address in use.
+ */
+static char *
+ngx_media_srt_init_main_conf(ngx_cycle_t *cycle, void *conf)
+{
+    ngx_media_srt_main_conf_t  *mcf = conf;
+    u_char                     *colon;
+    size_t                      host_len;
+    const char                 *problem;
+
+    if (!mcf->bond_set) {
+        return NGX_CONF_OK;
+    }
+
+    colon = ngx_strlchr(mcf->listen.data,
+                        mcf->listen.data + mcf->listen.len, ':');
+    host_len = (colon != NULL) ? (size_t) (colon - mcf->listen.data)
+                               : mcf->listen.len;
+
+    problem = NULL;
+
+    if (!mcf->listen_set) {
+        problem = "needs media_srt_listen: both leg addresses are published "
+                  "on its port";
+
+    } else if (host_len == sizeof("0.0.0.0") - 1
+               && ngx_strncmp(mcf->listen.data, "0.0.0.0", host_len) == 0)
+    {
+        problem = "needs a specific media_srt_listen address: a wildcard "
+                  "listen already covers every address";
+
+    } else if (ngx_inet_addr(mcf->bond.data, mcf->bond.len) == INADDR_NONE) {
+        problem = "needs an IPv4 address";
+
+    } else if (host_len == mcf->bond.len
+               && ngx_strncmp(mcf->listen.data, mcf->bond.data, host_len) == 0)
+    {
+        problem = "must differ from the media_srt_listen address";
+    }
+
+    if (problem != NULL) {
+        /*
+         * init_conf can only report an error, so the reason goes through the
+         * log: without it the operator sees a failed configuration and no
+         * statement of which of the four rules was broken.
+         */
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "media: media_srt_listen_bond %V %s", &mcf->bond,
+                      problem);
+
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
+}
+
 static ngx_int_t
 ngx_media_srt_parse_endpoint(ngx_pool_t *pool, const ngx_str_t *endpoint,
     ngx_str_t *host, ngx_uint_t *port)
@@ -1224,11 +1334,6 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
         return NGX_OK;
     }
 
-    /* transport sockets stay with worker 0 (goal doc 22) */
-    if (ngx_process_slot != 0) {
-        return NGX_OK;
-    }
-
     /*
      * The SRT destination subsystem is started even with nothing declared:
      * destinations can be added through the control API at runtime, and they
@@ -1310,6 +1415,18 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     }
 
     /*
+     * Transport sockets stay with worker 0 (goal doc 22).  The check is
+     * ngx_worker, not ngx_process_slot: the slot is the position in the
+     * process table, which a reload changes - the respawned worker took a
+     * different slot, so with the slot the listener was never started again
+     * and no worker was left accepting publishers.
+     */
+    if (ngx_worker != 0) {
+        return NGX_OK;
+    }
+
+
+    /*
      * The listener is optional.  An instance whose destinations all point
      * outward publishes without ever accepting a publisher, and refusing to
      * start its destinations because it has no listener would be exactly the
@@ -1336,6 +1453,22 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     conf.max_events = 64;
     conf.max_sessions = NGX_MEDIA_SRT_MAX_SESSIONS;
     conf.params = ngx_media_srt_crypto_params(mcf, NULL, &mcf->crypto_params);
+
+    if (mcf->bond_set) {
+        /*
+         * The transport hands this to inet_pton(), which needs a NUL, and the
+         * configured value is only a slice of the configuration.
+         */
+        conf.bond_host.len = mcf->bond.len;
+        conf.bond_host.data = ngx_pnalloc(cycle->pool, mcf->bond.len + 1);
+
+        if (conf.bond_host.data == NULL) {
+            return NGX_ERROR;
+        }
+
+        ngx_memcpy(conf.bond_host.data, mcf->bond.data, mcf->bond.len);
+        conf.bond_host.data[mcf->bond.len] = '\0';
+    }
 
     if (ngx_media_srt_ingest_start(&ngx_media_srt_ingest, &conf, cycle->log)
         != NGX_OK)
@@ -1411,12 +1544,31 @@ ngx_media_srt_handler(ngx_event_t *ev)
             switch (events[i].type) {
 
             case NGX_MEDIA_SRT_EVENT_READY:
+                if (ingest->conf.bond_host.len > 0) {
+                    ngx_log_error(NGX_LOG_NOTICE, ev->log, 0,
+                                  "media: srt listener ready on %V:%ui bonded "
+                                  "with %V",
+                                  &ingest->conf.host, ingest->conf.port,
+                                  &ingest->conf.bond_host);
+                    break;
+                }
+
                 ngx_log_error(NGX_LOG_NOTICE, ev->log, 0,
                               "media: srt listener ready on %V:%ui",
                               &ingest->conf.host, ingest->conf.port);
                 break;
 
             case NGX_MEDIA_SRT_EVENT_FAILED:
+                if (ingest->conf.bond_host.len > 0) {
+                    ngx_log_error(NGX_LOG_EMERG, ev->log, 0,
+                                  "media: srt listener failed on %V:%ui bonded "
+                                  "with %V (%s)",
+                                  &ingest->conf.host, ingest->conf.port,
+                                  &ingest->conf.bond_host,
+                                  ngx_media_srt_last_error());
+                    break;
+                }
+
                 ngx_log_error(NGX_LOG_EMERG, ev->log, 0,
                               "media: srt listener failed on %V:%ui (%s)",
                               &ingest->conf.host, ingest->conf.port,

@@ -630,7 +630,7 @@ ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
         /* the owner claims the stream in the shared directory */
         if (ngx_media_runtime_owners != NULL) {
             (void) ngx_media_owner_dir_claim(ngx_media_runtime_owners, hash,
-                                             (ngx_uint_t) ngx_process_slot);
+                                             (ngx_uint_t) ngx_worker);
         }
 
         ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
@@ -1104,7 +1104,7 @@ ngx_media_runtime_tick(ngx_log_t *log)
             (void) ngx_media_owner_dir_heartbeat(
                 ngx_media_runtime_owners, hash,
                 ngx_media_owner_dir_slot(ngx_media_runtime_owners, hash,
-                                         (ngx_uint_t) ngx_process_slot),
+                                         (ngx_uint_t) ngx_worker),
                 stream->generation, stream->program_frames,
                 ngx_media_stream_source_count(stream));
         }
