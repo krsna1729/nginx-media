@@ -74,6 +74,14 @@ typedef struct {
     uint64_t   dropped_frames;
     uint64_t   bytes_written;
     uint64_t   errors;
+
+    /*
+     * Where a failure is reported.  The segmenter used to take a log and
+     * discard it, so a write that failed - a full disk, a directory the
+     * worker cannot write into - was counted in `errors` and dropped in
+     * silence.  From outside, the output simply stopped appearing.
+     */
+    ngx_log_t *log;
 } ngx_media_hls_t;
 
 void ngx_media_hls_conf_default(ngx_media_hls_conf_t *conf);

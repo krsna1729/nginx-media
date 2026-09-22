@@ -73,13 +73,14 @@ ngx_media_hls_init(ngx_media_hls_t *hls, const ngx_media_hls_conf_t *conf,
     ngx_uint_t  capacity;
     ngx_str_t   dir;
 
-    (void) log;
-
     if (hls == NULL || conf == NULL || conf->path.len == 0) {
         return NGX_ERROR;
     }
 
     ngx_memzero(hls, sizeof(ngx_media_hls_t));
+
+    /* after the memzero: setting it first is how it gets wiped */
+    hls->log = log;
 
     hls->conf = *conf;
 
@@ -375,10 +376,13 @@ ngx_media_hls_cut(ngx_media_hls_t *hls)
     segment->discontinuity = hls->discontinuity_next ? 1 : 0;
 
     segment->name.len = hls->conf.segment_prefix.len + 6 + 3;
-    segment->name.data = ngx_alloc(segment->name.len + 1, NULL);
+    segment->name.data = ngx_alloc(segment->name.len + 1, hls->log);
 
     if (segment->name.data == NULL) {
         hls->errors++;
+        ngx_log_error(NGX_LOG_ERR, hls->log, 0,
+                      "media: hls could not allocate a segment name; "
+                      "%uL segment(s) dropped so far", hls->errors);
         goto reset;
     }
 
@@ -390,6 +394,10 @@ ngx_media_hls_cut(ngx_media_hls_t *hls)
 
     if (ngx_media_hls_write_file(hls, &segment->name) != NGX_OK) {
         hls->errors++;
+        ngx_log_error(NGX_LOG_ERR, hls->log, ngx_errno,
+                      "media: hls could not write %V into %V; %uL segment(s) "
+                      "dropped so far", &segment->name, &hls->conf.path,
+                      hls->errors);
         ngx_free(segment->name.data);
         segment->name.data = NULL;
         goto reset;
