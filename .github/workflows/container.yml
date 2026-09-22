@@ -2,15 +2,15 @@ name: container
 
 # Publishes the image to GHCR.
 #
-#   push to main    -> latest, main, sha-<short>   the newest build of main
-#   push of a v* tag -> <version>, latest          a release
-#   pull request    -> build and smoke only, no push
+#   push to main     -> latest, sha-<short>
+#   push of a v* tag -> <version> only
+#   pull request     -> build and smoke, no push
 #
-# `latest` follows the newest publish of either kind: it tracks main HEAD
-# between releases and moves to a release when one is tagged.  That is a
-# deliberate choice, not an accident - it means `latest` is unreleased code
-# most of the time.  Pin `sha-<short>` or a version tag when you need a build
-# that does not move.
+# `latest` tracks main HEAD and nothing else.  A release tag publishes its
+# version and deliberately does not move `latest`: pulling `latest` gets you
+# the newest build of main, pulling a version gets you that release, and
+# neither can surprise you by becoming the other.  Pin `sha-<short>` when you
+# need a build that does not move at all.
 #
 # Authentication is GITHUB_TOKEN, which the workflow already has; nothing here
 # needs a stored credential.
@@ -28,18 +28,12 @@ on:
       - 'config'
       - 'scripts/build-nginx.sh'
 
-# Publishes share one group so two of them cannot race on `latest` - a branch
-# build and a tag build landing together could otherwise leave the older
-# commit holding the tag.  They queue rather than cancel, because cancelling a
-# run mid-push is worse than waiting.  Pull request builds are per-ref and do
-# cancel each other.
+# Pull request builds cancel each other; publishes queue.  Cancelling a run
+# mid-push leaves a half-written tag, which is worse than waiting a minute for
+# the one ahead of it.
 concurrency:
-  group: >-
-    container-${{
-      (github.ref_type == 'tag' || github.ref_name == 'main')
-        && 'publish' || github.ref
-    }}
-  cancel-in-progress: false
+  group: container-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   image:
@@ -85,9 +79,11 @@ jobs:
           IMAGE="ghcr.io/${{ github.repository }}"
 
           if [ "${{ github.ref_type }}" = "tag" ]; then
-            TAGS="${GITHUB_REF_NAME#v} latest"
+            # A release: its version, and nothing else.  latest is not
+            # touched here on purpose - it belongs to main.
+            TAGS="${GITHUB_REF_NAME#v}"
           else
-            TAGS="latest main sha-$(git rev-parse --short HEAD)"
+            TAGS="latest sha-$(git rev-parse --short HEAD)"
           fi
 
           echo "publishing $GITHUB_SHA as: $TAGS"
