@@ -43,9 +43,9 @@ sources, the SRT backend selection and the libraries, and it is what
 
 ## Threads
 
-NGINX workers own media state.  Threads exist only where a blocking call would
-otherwise stall an event loop, and most of them hand work back to a worker
-through an eventfd rather than touching worker state directly:
+NGINX workers own media state.  The threads the module creates exist only where
+a blocking call would otherwise stall an event loop, and most of them hand work
+back to a worker through an eventfd rather than touching worker state directly:
 
 | Thread | Created by | Talks to the worker through |
 |---|---|---|
@@ -71,6 +71,69 @@ shutdown: a reader is stopped and joined before the source it publishes into is
 torn down, and the recording writer is started and stopped repeatedly with work
 queued and in flight, under ThreadSanitizer.
 
+### The library's own threads
+
+The SRT transport is libsrt, and libsrt runs threads of its own inside every
+worker process.  They are not created or joined by this module.  They are also
+where a publisher's bytes are actually received: data does not arrive on the
+ingest thread, it arrives on a thread libsrt owns and is handed to us already
+demultiplexed through `srt_recvmsg`.
+
+| Thread | One per | What it does |
+|---|---|---|
+| `SRT:GC` | process | started by `srt_startup()`; reaps broken and closed sockets |
+| `SRT:RcvQ:wN` | bound UDP port | reads the UDP socket, demultiplexes each packet to its session by destination socket id, and runs the whole per-packet receive path |
+| `SRT:SndQ:wN` | bound UDP port | packs data packets at their pacing time, retransmits, and writes the UDP socket |
+| `SRT:TsbPd` | live session | decides when the head of a session's receive buffer is old enough to play; spawned lazily by the first data packet |
+
+```mermaid
+flowchart LR
+    UDP(["UDP port - one per bound endpoint"])
+
+    subgraph L["libsrt's threads, inside one worker process"]
+        RCQ["SRT:RcvQ:wN<br/>recvfrom, demux by destination socket id,<br/>reassembly, loss detection"]
+        SNDQ["SRT:SndQ:wN<br/>pacing, retransmission, sendto"]
+        TSB["SRT:TsbPd<br/>one per live session - decides<br/>when the head of the buffer may play"]
+    end
+
+    UDP --> RCQ
+    RCQ -->|"handed to us already demultiplexed"| ING["our ingest thread<br/>srt_recvmsg - this is the copy"]
+    ING --> Q["bounded raw-TS queue<br/>+ eventfd"]
+    Q --> WK["worker event loop<br/>demux, gate, select, fanout"]
+    WK --> SNDQ
+    SNDQ --> UDP
+    TSB -.->|"wakes the reader"| ING
+```
+
+The unit is the **port**, not the socket.  `srt_bind()` installs a multiplexer —
+one UDP socket, one receive queue, one send queue — and every session accepted
+on that port is served by that same pair of threads; a second socket bound to
+the same port in the same process shares them, which is what
+`CUDTUnited::updateMux` (`srtcore/api.cpp`) looks for.  The exception is a bind
+that hands the library a socket it did not open (`srt_bind_acquire`), which
+always builds a new multiplexer.  An outgoing connection is autobound to its
+own ephemeral port, so it gets a muxer of its own and therefore a receive *and*
+a send queue thread of its own (`CUDTUnited::connectIn`).
+
+That places the work like this.  The socket read, the demultiplexing of a
+packet to its session, reassembly, loss detection and the receive buffer all
+run on `SRT:RcvQ:wN` — `CRcvQueue::worker` calls `worker_ProcessAddressedPacket`,
+which looks the destination socket id up in the queue's hash and calls
+`CUDT::processData`.  Pacing, retransmission and the UDP writes run on
+`SRT:SndQ:wN`; control packets are the exception and go out on whichever thread
+generated them, which is how an ACK is sent from the receive thread.  The
+play-time decision for timestamp-based delivery runs on the session's
+`SRT:TsbPd` thread.  What runs on **our** thread is the copy: `srt_recvmsg`
+moves a packet out of the session's receive buffer and `srt_sendmsg` moves one
+into the send buffer.  Our ingest thread reads data libsrt has already
+received, demultiplexed and buffered; it never touches the UDP socket.
+
+`SRT:RcvQ` is single-threaded per bound port, and that is the shape of the
+scaling limit: one SRT listening port cannot use more than one core for
+receiving and per-session packet processing, however many nginx workers are
+configured or publishers connected to it.  `operations.md` has the measured
+thread budget and the options that bound throughput.
+
 ## Ownership
 
 A logical program has **one owner worker**, chosen by consistent hashing over
@@ -86,6 +149,58 @@ worker is routed to the owner over a bounded internal transport (Unix
 `SOCK_SEQPACKET` by default).  That routing is the escape hatch, for routing
 only, not a second data path — which is why the ingest endpoints are per
 worker rather than one shared endpoint that would make routing the rule.
+
+```mermaid
+flowchart TB
+    subgraph W0["worker 0 - owner of live/news: hash % workers"]
+        L0["media_srt_listen 127.0.0.1:9000"]
+        P0["sources, selector, timeline,<br/>program feed, HLS state, PROGRAM recording"]
+    end
+
+    subgraph W1["worker 1"]
+        L1["media_srt_listen 127.0.0.1:9001"]
+        R1["route: OPEN, TRACKS,<br/>VIDEO / AUDIO / DATA, CLOSE"]
+    end
+
+    A["encoder A - placed on its owner"] --> L0 --> P0
+    B["encoder B - placed elsewhere"] --> L1 --> R1
+    R1 -->|"bounded SOCK_SEQPACKET:<br/>the escape hatch"| P0
+
+    P0 --> TAP["taps: HLS, recording, RTMP, SRT"]
+    TAP --> SHM[("shared segment store")]
+    SHM --> ANY["any worker serves HLS from it"]
+```
+
+The worker that accepts a misplaced publisher does **not** register the source
+at all: it opens the stream on its owner, then demuxes and forwards frames.  So
+the gate, the selector, the timeline and the fanout all run where the program
+lives, and the accepting worker's job is transport, demux and routing.
+
+```mermaid
+sequenceDiagram
+    participant E as encoder at 9001
+    participant W1 as worker 1 - accepted the socket
+    participant W0 as worker 0 - owner of live/news
+
+    E->>W1: SRT session, identity from the stream id
+    W1->>W1: owner = hash(application/stream) % workers, and it is not this worker
+    W1->>W0: OPEN, then TRACKS with the source's track contract
+    loop media
+        W1->>W0: VIDEO / AUDIO / DATA frames, already demuxed
+    end
+    W0->>W0: gate, select, timeline, fanout
+    Note over W0: what goes to air, HLS, recording
+    W1->>W0: CLOSE when the session ends
+```
+
+What travels on that transport is exactly two things, and both are one-way:
+one stream's session and media to its owner (`OPEN`, `TRACKS`, `VIDEO`,
+`AUDIO`, `DATA`, `CLOSE`), and the shape of the graph to every worker
+(`GRAPH`).  Control needs no message of its own — a selection change is a
+mutation of the graph and travels as one — and a routed source's owner learns
+the source ended from its session's `CLOSE` rather than from a health or EOF
+message.  Types 7, 8 and 9 are reserved in `ngx_media_ipc.h` and sent by
+neither side.
 
 ### The graph is replicated, the program is not
 
@@ -157,9 +272,11 @@ build can carry.
 
 ## Data flow
 
-Ingest (SRT): transport thread accepts, reads a stream id, pushes raw TS into a
-bounded queue; the worker parses the stream id into an identity, registers the
-source, drains the queue, demuxes TS into frames, and feeds the source gate.
+Ingest (SRT): libsrt's receive-queue thread reads the UDP socket and
+demultiplexes each packet to its session; the transport thread accepts, reads a
+stream id, pushes raw TS into a bounded queue; the worker parses the stream id
+into an identity, registers the source, drains the queue, demuxes TS into
+frames, and feeds the source gate.
 
 Selection: health is layered evidence (transport up, data flowing, container
 valid, timestamps advancing, media valid, tracks compatible, source eligible) —
@@ -301,7 +418,11 @@ The SRT transport is a contract (`ngx_media_srt_ops_t` in
 `src/srt/ngx_media_srt_transport.h`), not a library call.  Haivision/srt is the
 reference implementation and the production default; robotweax/srt exposes the
 same C API, so it is selected by pointing the build at its headers and library
-with no code change.  A UDP implementation of the same contract exists purely
-as a test double so the qualification suite can run one scenario against two
-implementations; it is not an SRT implementation and is not built by default.
-See `configuration.md` for the build and runtime switches.
+with no code change.  The two differ underneath in one way that matters here:
+robotweax runs its transport on a fixed, process-wide pool instead of a thread
+pair per bound port and a timestamp thread per session, so the thread map above
+is Haivision's, and `operations.md` carries the comparison.  A UDP
+implementation of the same contract exists purely as a test double so the
+qualification suite can run one scenario against two implementations; it is not
+an SRT implementation and is not built by default.  See `configuration.md` for
+the build and runtime switches.

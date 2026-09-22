@@ -30,9 +30,18 @@
 #define NGX_MEDIA_IPC_MSG_VIDEO      4
 #define NGX_MEDIA_IPC_MSG_AUDIO      5
 #define NGX_MEDIA_IPC_MSG_DATA       6
-#define NGX_MEDIA_IPC_MSG_HEALTH     7
-#define NGX_MEDIA_IPC_MSG_SWITCH     8
-#define NGX_MEDIA_IPC_MSG_EOF        9
+
+/*
+ * 7, 8 and 9 are reserved and not sent by either side.  Control does not need
+ * a message of its own: a selection change is a mutation of the graph, which
+ * travels as NGX_MEDIA_IPC_MSG_GRAPH to every worker, and the owner of a
+ * routed source learns that it ended from the CLOSE of its session rather than
+ * from a health or EOF message.  The numbers are kept so a version 1 peer is
+ * never handed a type it would have to interpret.
+ */
+#define NGX_MEDIA_IPC_MSG_RESERVED7  7
+#define NGX_MEDIA_IPC_MSG_RESERVED8  8
+#define NGX_MEDIA_IPC_MSG_RESERVED9  9
 
 /*
  * A graph operation: one desired-state mutation of the control API, broadcast
