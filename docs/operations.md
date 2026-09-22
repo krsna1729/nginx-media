@@ -252,9 +252,12 @@ Both transports are bounded by slots, and running out is a create that fails
 rather than a silently dead destination: SRT has 8 destination slots per worker
 shared by `media_srt_output` and runtime destinations, and a create when they
 are full returns `500 {"error":"destination_start_failed"}` and leaves no object
-behind.  SRT ingest is 16 concurrent sessions and RTMP is 32; a publisher over
-the limit is refused with `media: no free ingest session slot` and
-`media: rtmp: no free session slot` in the log.
+behind.  SRT ingest is 16 concurrent sessions per worker and RTMP is 32 per
+worker, so the ceiling an instance offers is that number times the worker count
+(128 RTMP sessions at four workers); a publisher over the limit is refused by
+the worker that accepted it, which is the worker the kernel placed it on, with
+`media: no free ingest session slot` and `media: rtmp: no free session slot` in
+the log.
 
 ### A worker that has stopped owning a program
 
@@ -404,6 +407,44 @@ as before.  With one entry there is no placement to make and every publisher
 arrives at worker 0, which is what a single-worker deployment and an existing
 configuration already do.
 
+### One shared SRT port, and what it costs
+
+The port-per-worker mode above is one way.  There is another, and an earlier
+version of this document got it badly wrong: it said libsrt could not share a
+port between processes.  It can, and the public API for it is in the header
+and exported from the shipped library:
+
+```c
+SRT_API int srt_bind_acquire(SRTSOCKET u, UDPSOCKET sys_udp_sock);
+```
+
+The application creates the UDP socket itself, sets `SO_REUSEPORT` on it, and
+hands it to libsrt.  That needs no patch to libsrt and no BPF program.
+
+**Measured** with four processes on one port and eight publishers: the
+sessions distribute across the processes, and every session's bytes arrive at
+exactly one of them - no gaps, no loss, no retransmits, no session ever split.
+The kernel's own hashing is sufficient, and it is worth saying why a BPF
+program of the kind nginx uses for QUIC is not only unnecessary but would be
+**wrong** here: the destination socket id is zero in a caller's first packets
+and only becomes the listener-chosen id afterwards, whereas the source address
+and port never change for the life of a session.  The address is the stable
+identity for SRT; the socket id is not.
+
+**What it costs is reload.**  `SO_REUSEPORT` re-hashes a flow when the set of
+sockets bound to the port changes, and that set changes on every nginx reload,
+because the new generation's workers bind before the old generation's exit.
+A flow re-hashed onto a process that has no session state dies.  Measured: on
+the set growing, four of six live sessions died immediately; when an *idle*
+listener left the port, six of six died and never recovered.  In this mode a
+reload ends every publisher's session.
+
+That is a property of sharing a port between processes with long-lived flows,
+not something to engineer around, and it is why the port-per-worker mode is
+the default.  Placement survives a reload - the new generation binds the same
+endpoints and retries until the old generation releases them - and a shared
+port cannot.
+
 ## What is bounded, and by what
 
 Everything that could grow without limit is bounded, and the bounds are
@@ -419,7 +460,7 @@ approached is a reading, not a directive.
 | SRT sender queue | 256 units / 8 MiB per destination | drop count in the `srt output` log lines |
 | SRT ingest sessions | 16 per worker | `media: no free ingest session slot` |
 | SRT ingest queue | 256 chunks / 8 MiB | new chunks dropped and counted; demuxer counts the continuity damage |
-| RTMP sessions | 32 per worker | `media: rtmp: no free session slot` |
+| RTMP sessions | 32 per worker, so 32 × workers in the instance | `media: rtmp: no free session slot` |
 | RTMP destination queue | 128 messages | drops to the next sync boundary |
 | HLS push queue | 64 entries per destination, pool of 4 | internal counters only; nothing published |
 | HLS output window | 6 segments, 8 MiB per segment, 64 MiB retained | evicted segments are deleted from disk, so the directory does not grow |
