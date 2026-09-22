@@ -41,7 +41,7 @@ SHIM := shim/ngx_shim.c
 TESTS := test_buffer test_frame test_feed test_track test_timeline \
          test_stream test_health test_compat test_selector test_codec \
          test_srt_streamid test_ts_ingest test_ts_demux test_ts_mux test_hls test_record \
-         test_rtmp_wire test_rtmp_flv test_srt_output test_owner test_ipc test_lifecycle test_fuzz test_bounds test_srt_udp
+         test_rtmp_wire test_rtmp_flv test_srt_output test_owner test_ipc test_lifecycle test_fuzz test_bounds test_srt_udp test_security
 BINS  := $(addprefix build/,$(TESTS))
 
 .PHONY: all test tsan clean
