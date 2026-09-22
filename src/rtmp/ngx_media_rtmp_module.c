@@ -34,6 +34,10 @@
  * that works without it stays: worker 0 listens and every other worker takes
  * routed publishers, players and API traffic.  A build never fails for the
  * want of the option.
+ *
+ * NGX_MEDIA_RTMP_SHARED_LISTENER is the one place that decides, and the rest
+ * of the module reads it: the worker-0 gate, the socket option and the
+ * startup notice are all the same question.
  */
 #if (NGX_HAVE_REUSEPORT)
 #define NGX_MEDIA_RTMP_SHARED_LISTENER  1
@@ -1978,7 +1982,7 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
                       "media: rtmp destination backend ready");
     }
 
-#if (NGX_HAVE_REUSEPORT)
+#if (NGX_MEDIA_RTMP_SHARED_LISTENER)
     /*
      * Every worker opens the ingest socket on the configured address, with
      * SO_REUSEPORT set, so the kernel decides per connection which worker
@@ -2002,7 +2006,7 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
         return NGX_OK;
     }
 
-#if (NGX_HAVE_REUSEPORT)
+#if (NGX_MEDIA_RTMP_SHARED_LISTENER)
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
                   "media: rtmp listener %V is shared with every worker "
                   "(SO_REUSEPORT): the kernel places each publisher",
@@ -2138,7 +2142,7 @@ ngx_media_rtmp_listener_open(ngx_log_t *log)
                           sizeof(int));
     }
 
-#if (NGX_HAVE_REUSEPORT)
+#if (NGX_MEDIA_RTMP_SHARED_LISTENER)
     /*
      * Every worker holds this socket, and the kernel picks one of them for
      * each arriving connection by hashing its 4-tuple - so the publishers are

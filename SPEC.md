@@ -1,8 +1,14 @@
-# NGINX Media Implementation Agent Goal
-## Build a production-grade media subsystem for NGINX
+# nginx-media specification
 
-**Status:** implementation brief  
-**Primary goal:** implement a media subsystem that accepts redundant live/file inputs, selects one logical program, and distributes it through SRT, RTMP, HLS and recording while remaining bounded, deadline-aware and horizontally scalable across NGINX workers.
+The specification this repository is built to.  It is the authority on what the
+implementation must do: when the code and this document disagree, one of them
+is a bug, and the section numbers are referenced from the source comments so
+the two can be checked against each other.
+
+**Primary goal:** a media subsystem that accepts redundant live and file
+inputs, selects one logical program, and distributes it through SRT, RTMP, HLS
+and recording while remaining bounded, deadline-aware and horizontally
+scalable across NGINX workers.
 
 ---
 

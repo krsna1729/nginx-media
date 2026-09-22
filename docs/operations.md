@@ -392,7 +392,17 @@ the socket:
 |---|---|---|
 | control API, HLS | TCP, nginx's socket | `listen ... reuseport`; the kernel hashes each connection and there is no accept mutex |
 | RTMP ingest | TCP, this module's socket | `SO_REUSEPORT` on the socket, one listener per worker |
-| SRT ingest | UDP, libsrt's socket | one listening endpoint per worker: libsrt exposes no reuseport of its own, and a single endpoint means every publisher arrives at worker 0 |
+| SRT ingest | UDP, libsrt's socket | one listening endpoint per worker: libsrt exposes no reuseport of its own, so the endpoint is what is spread, and `media_srt_listen` is given once per worker (worker i binds the i-th entry).  A single entry puts every publisher on worker 0 |
+
+An SRT publisher is placed, not hashed: it connects to an endpoint, so the
+worker that accepts it is the worker whose entry it was given.  Placing it on
+the worker that owns its program is therefore an operator's choice - the owner
+is deterministic (`hash % workers`) and the graph reports it as `owner`, so
+which entry to point an encoder at is a lookup rather than a guess - and a
+publisher placed elsewhere is routed to the owner over the internal transport
+as before.  With one entry there is no placement to make and every publisher
+arrives at worker 0, which is what a single-worker deployment and an existing
+configuration already do.
 
 ## What is bounded, and by what
 

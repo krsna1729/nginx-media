@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke bench-worker-scaling bench-ingest-egress test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps srt-output srt-crypto multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
+.PHONY: unit nginx smoke bench-worker-scaling bench-ingest-egress test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -62,6 +62,9 @@ rtmp-hevc:
 rtmps:
 	tests/integration/rtmps_nginx.sh
 
+rtmp-workers:
+	tests/integration/rtmp_workers_nginx.sh
+
 srt-output:
 	tests/integration/srt_output_nginx.sh
 
@@ -96,8 +99,8 @@ TEST_IMAGE ?= nginx-media:test
 BASE ?= debian:trixie
 TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
-    hls-profile file-source churn rtmp rtmp-hevc rtmps srt-output \
-    srt-crypto multi-worker soak fault
+    hls-profile file-source churn rtmp rtmp-hevc rtmps rtmp-workers \
+    srt-output srt-crypto srt-worker-ports multi-worker soak fault
 
 test-image:
 	$(DOCKER) build -f Containerfile --target test --build-arg BASE=$(BASE) \
@@ -108,6 +111,13 @@ test-in-container: test-image
 
 srt-crypto:
 	tests/integration/srt_crypto.sh
+
+# One SRT ingest endpoint per worker: media_srt_listen may be given once per
+# worker, worker i binds the i-th entry, and a publisher placed on a worker's
+# endpoint is accepted by that worker instead of funnelling every publisher
+# through worker 0.
+srt-worker-ports:
+	tests/integration/srt_worker_ports_nginx.sh
 
 bench-hls:
 	tests/bench/hls_serve.sh

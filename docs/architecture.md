@@ -78,10 +78,14 @@ A logical program has **one owner worker**, chosen by consistent hashing over
 timeline, program feed, HLS state and program recording.
 
 Shared memory holds only small metadata — stream hash, owner worker/pid/cycle,
-generation, state, heartbeat — never mutable media state.  A publisher that
-lands on a non-owner worker is routed to the owner over a bounded internal
-transport (Unix `SOCK_SEQPACKET` by default); that escape hatch is for routing
-only, not a second data path.
+generation, state, heartbeat — never mutable media state.  Transport socket
+ownership may differ from program ownership, and where it can, it does: each
+worker accepts on its own ingest endpoint, so a publisher is normally carried
+by the worker that accepted it, and a publisher that lands on a non-owner
+worker is routed to the owner over a bounded internal transport (Unix
+`SOCK_SEQPACKET` by default).  That routing is the escape hatch, for routing
+only, not a second data path — which is why the ingest endpoints are per
+worker rather than one shared endpoint that would make routing the rule.
 
 ### The graph is replicated, the program is not
 

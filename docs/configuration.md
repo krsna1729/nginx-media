@@ -75,10 +75,49 @@ returns (`never`).
 
 ### `media_srt_listen <host:port>;`
 
-Accepts SRT publishers.  The listener belongs to worker 0; accepted publishers
-are routed to the worker that owns their program.  A publisher's identity comes
-from its stream id (`#!::r=<app>/<stream>,m=publish,s=<identity>`), never from
-a trusted field: `s=` is only a label.
+Accepts SRT publishers.  The directive may be given once per worker, and
+**worker i binds the i-th entry**, so a publisher that connects to entry i is
+accepted by worker i and its receive path is the worker that carries it:
+
+```nginx
+worker_processes 4;
+
+media_srt_listen 127.0.0.1:9000;   # worker 0
+media_srt_listen 127.0.0.1:9001;   # worker 1
+media_srt_listen 127.0.0.1:9002;   # worker 2
+media_srt_listen 127.0.0.1:9003;   # worker 3
+```
+
+Order is the worker order: entry i is what worker i binds, so the list is
+written in worker order.  libsrt exposes no `SO_REUSEPORT` of its own, so one
+endpoint per worker is what replaces it — with a single shared endpoint the
+worker that bound it receives every publisher, which makes worker 0 the whole
+ingest path and routing the rule rather than the exception.  A publisher is
+still routed over the internal transport to the worker that owns its program
+(goal doc 22) whenever that is a different worker; that path is unchanged.
+
+* **One entry** is the single-listener shape: worker 0 binds it, and every
+  other worker owns programs without accepting publishers.
+* **Fewer entries than workers** keeps that: the remaining workers do not
+  listen, and still own the programs their hash selects.
+* **More entries than workers** is a configuration error naming both counts.
+  A worker binds one endpoint, so the extras would never accept anything, and
+  a configuration that says otherwise is one an operator would read wrongly:
+  `worker_processes 1` with two endpoints is an error, not two endpoints on
+  one worker.
+
+The same endpoint twice is refused as well: two workers cannot bind one
+address, and without the check that surfaces later as a startup failure about
+an address in use.
+
+Every endpoint accepts with the listener's one passphrase (see
+`media_srt_crypto`), and `media_srt_listen_bond` applies to all of them: the
+same second leg address published on each endpoint's own port, so a bonded
+listener per worker obeys the same address rules as a single one.
+
+A publisher's identity comes from its stream id
+(`#!::r=<app>/<stream>,m=publish,s=<identity>`), never from a trusted field:
+`s=` is only a label.
 
 ### `media_srt_source_priority <identity> <number>;`
 
