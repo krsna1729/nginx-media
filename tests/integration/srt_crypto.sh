@@ -25,11 +25,38 @@ WRONG="wrong-horse-battery"
 rm -rf "$RUN"
 mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/hls"
 
+# The master is stopped and waited for, and its children are then killed by
+# parent: nginx rewrites a worker's argv to "nginx: worker process", so a
+# pattern that matches the configuration path matches the master only, and a
+# worker whose master was killed outright is reparented to init and keeps the
+# ports the next case needs.
+stop_instance() {
+    local prefix="$1" pid child
+
+    [ -f "$prefix/logs/nginx.pid" ] || return 0
+
+    pid="$(cat "$prefix/logs/nginx.pid")"
+
+    kill -QUIT "$pid" 2>/dev/null
+
+    for _ in $(seq 1 100); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.05
+    done
+
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill -KILL "$child" 2>/dev/null
+    done
+
+    kill -KILL "$pid" 2>/dev/null
+
+    return 0
+}
+
 cleanup() {
-    if [ -f "$RUN/logs/nginx.pid" ]; then
-        kill -KILL "$(cat "$RUN/logs/nginx.pid")" 2>/dev/null
-    fi
-    pkill -KILL -f "$RUN/conf/nginx.conf" 2>/dev/null
+    stop_instance "$RUN"
+    stop_instance "$RUN/a"
+    stop_instance "$RUN/b"
     return 0
 }
 
@@ -83,7 +110,7 @@ start_nginx() {
 # belongs to this test, so tear the whole set down the way the other
 # integration tests do.
 stop_nginx() {
-    pkill -KILL -f 'nginx: ' 2>/dev/null
+    stop_instance "$1"
     sleep 0.4
     return 0
 }
@@ -132,7 +159,7 @@ if ! grep -q 'srt source open app=live stream=crypto source=encoder-a' \
     exit 1
 fi
 
-SEGMENTS=$(ls "$RUN/hls"/*.ts 2>/dev/null | wc -l)
+SEGMENTS=$(ls "$RUN/hls/live/crypto"/*.ts 2>/dev/null | wc -l)
 
 if [ "$SEGMENTS" -eq 0 ]; then
     echo "FAIL: encrypted ingest produced no HLS segments"
@@ -144,7 +171,7 @@ fi
 # one closed segment has to decode without errors.
 GOOD=""
 
-for SEG in "$RUN"/hls/*.ts; do
+for SEG in "$RUN"/hls/live/crypto/*.ts; do
     if [ -z "$(ffmpeg -hide_banner -v error -i "$SEG" -f null - 2>&1)" ]; then
         GOOD="$SEG"
         break
@@ -164,7 +191,7 @@ stop_nginx "$RUN"
 # case 2: wrong passphrase
 # ---------------------------------------------------------------------------
 
-rm -f "$RUN/hls"/*.ts "$RUN/hls"/*.m3u8
+rm -f "$RUN/hls/live/crypto"/*.ts "$RUN/hls/live/crypto"/*.m3u8
 start_nginx "$RUN" 'srt listener ready' || exit 1
 
 publish "$WRONG" "$RUN/case2.log" 4 &
@@ -183,7 +210,7 @@ if grep -q 'srt source open' "$RUN/logs/error.log"; then
     exit 1
 fi
 
-if ls "$RUN/hls"/*.ts >/dev/null 2>&1; then
+if ls "$RUN/hls/live/crypto"/*.ts >/dev/null 2>&1; then
     echo "FAIL: a rejected publisher still produced media"
     exit 1
 fi
@@ -323,7 +350,7 @@ if ! grep -q 'srt source open app=live stream=crypto source=qualify-out' \
 fi
 
 GOOD=""
-for SEG in "$RUN"/b/hls/*.ts; do
+for SEG in "$RUN"/b/hls/live/crypto/*.ts; do
     if [ -z "$(ffmpeg -hide_banner -v error -i "$SEG" -f null - 2>&1)" ]; then
         GOOD="$SEG"
         break

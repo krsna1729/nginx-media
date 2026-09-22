@@ -30,10 +30,10 @@ ngx_int_t ngx_media_route_worker_init(ngx_cycle_t *cycle, ngx_log_t *log);
 void ngx_media_route_worker_shutdown(ngx_log_t *log);
 
 /* the slot that owns a stream, from the shared directory when it knows */
-ngx_uint_t ngx_media_route_owner(ngx_cycle_t *cycle, uint32_t hash);
+ngx_uint_t ngx_media_route_owner(ngx_cycle_t *cycle, uint64_t hash);
 
 /* true when this worker owns the stream */
-ngx_uint_t ngx_media_route_is_owner(ngx_cycle_t *cycle, uint32_t hash);
+ngx_uint_t ngx_media_route_is_owner(ngx_cycle_t *cycle, uint64_t hash);
 
 /*
  * Forwards one frame to the owner.  OPEN/CLOSE are sent by the transport when
@@ -41,23 +41,23 @@ ngx_uint_t ngx_media_route_is_owner(ngx_cycle_t *cycle, uint32_t hash);
  * owner is behind, so the caller drops to the next sync boundary instead of
  * queueing without bound.
  */
-ngx_int_t ngx_media_route_open(ngx_cycle_t *cycle, uint32_t hash,
+ngx_int_t ngx_media_route_open(ngx_cycle_t *cycle, uint64_t hash,
     const ngx_str_t *application, const ngx_str_t *stream,
     const ngx_str_t *source_id, ngx_uint_t source_type, ngx_uint_t priority);
-ngx_int_t ngx_media_route_close(ngx_cycle_t *cycle, uint32_t hash);
+ngx_int_t ngx_media_route_close(ngx_cycle_t *cycle, uint64_t hash);
 
 /*
  * Forwards the track contract of a routed source.  The owner needs it before
  * the program can mux or segment anything, so the transport sends it as soon
  * as the source announces its tracks.
  */
-ngx_int_t ngx_media_route_tracks(ngx_cycle_t *cycle, uint32_t hash,
+ngx_int_t ngx_media_route_tracks(ngx_cycle_t *cycle, uint64_t hash,
     const ngx_media_trackset_t *tracks);
-ngx_int_t ngx_media_route_frame(ngx_cycle_t *cycle, uint32_t hash,
+ngx_int_t ngx_media_route_frame(ngx_cycle_t *cycle, uint64_t hash,
     const ngx_media_frame_t *frame, uint64_t sequence);
 
 /* frames received from other workers, handed to the program owner */
-typedef ngx_int_t (*ngx_media_route_frame_pt)(void *ctx, uint32_t hash,
+typedef ngx_int_t (*ngx_media_route_frame_pt)(void *ctx, uint64_t hash,
     const ngx_media_ipc_header_t *header, ngx_media_buf_t *payload);
 
 void ngx_media_route_set_sink(ngx_media_route_frame_pt cb, void *ctx);

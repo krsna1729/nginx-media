@@ -212,7 +212,7 @@ if [ "$GROWTH" -gt 65536 ]; then
 fi
 
 # and the program still produced output after all that churn
-SEGMENTS="$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" 2>/dev/null || echo 0)"
+SEGMENTS="$(grep -c '^#EXTINF' "$RUN/hls/live/soak/index.m3u8" 2>/dev/null || echo 0)"
 echo "   hls segments: $SEGMENTS"
 [ "$SEGMENTS" -ge 1 ] || { echo "no hls output after the soak" >&2; exit 1; }
 
@@ -285,12 +285,12 @@ storm_start() {
     for i in $(seq 1 "$STORM_CONSUMERS"); do
         (
             while :; do
-                for name in $(grep -v '^#' "$RUN/hls/index.m3u8" 2>/dev/null \
+                for name in $(grep -v '^#' "$RUN/hls/live/soak/index.m3u8" 2>/dev/null \
                               | grep '\.ts$' || true); do
                     # a rate limit keeps a fetcher on the wire: the storm is
                     # many slow receivers, not many fast ones
                     curl -fsS --limit-rate "$STORM_RATE" -o /dev/null \
-                        "http://127.0.0.1:$HTTP_PORT/hls/$name" 2>/dev/null \
+                        "http://127.0.0.1:$HTTP_PORT/hls/live/soak/$name" 2>/dev/null \
                         && echo "$name" >> "$RUN/fetches"
                 done
                 sleep 0.1
@@ -327,7 +327,7 @@ PUB_B="$(start_publisher encoder-b 120 "smptehdbars=size=320x240:rate=25" pub_b)
 wait_for_active encoder-b
 
 for _ in $(seq 1 400); do
-    have="$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" 2>/dev/null || true)"
+    have="$(grep -c '^#EXTINF' "$RUN/hls/live/soak/index.m3u8" 2>/dev/null || true)"
     [ "${have:-0}" -ge 1 ] && break
     sleep 0.1
 done

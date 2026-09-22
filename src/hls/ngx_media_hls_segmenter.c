@@ -66,12 +66,63 @@ ngx_media_hls_conf_default(ngx_media_hls_conf_t *conf)
     conf->max_retained_bytes = 64 * 1024 * 1024;
 }
 
+/*
+ * Creates the directory the playlist and the segments are written to, and every
+ * directory above it.
+ *
+ * One mkdir() is not enough once a program's output is a directory of its own
+ * under the configured root: the root may not exist yet either, and a failure
+ * to create the program's directory would show up as a playlist that never
+ * appears rather than as an error.
+ */
+static void
+ngx_media_hls_mkdir_p(const ngx_str_t *path, ngx_log_t *log)
+{
+    u_char  *dir;
+    size_t   i;
+
+    if (path->len == 0) {
+        return;
+    }
+
+    /*
+     * The configured directory is an ngx_str_t, not a C string: build a
+     * terminated copy before handing components to mkdir().
+     */
+    dir = ngx_alloc(path->len + 1, log);
+
+    if (dir == NULL) {
+        return;
+    }
+
+    ngx_memcpy(dir, path->data, path->len);
+    dir[path->len] = '\0';
+
+    for (i = 1; i <= path->len; i++) {
+
+        if (i < path->len && dir[i] != '/') {
+            continue;
+        }
+
+        dir[i] = '\0';
+
+        if (dir[0] != '\0') {
+            (void) mkdir((const char *) dir, 0755);
+        }
+
+        if (i < path->len) {
+            dir[i] = '/';
+        }
+    }
+
+    ngx_free(dir);
+}
+
 ngx_int_t
 ngx_media_hls_init(ngx_media_hls_t *hls, const ngx_media_hls_conf_t *conf,
     ngx_log_t *log)
 {
     ngx_uint_t  capacity;
-    ngx_str_t   dir;
 
     if (hls == NULL || conf == NULL || conf->path.len == 0) {
         return NGX_ERROR;
@@ -121,21 +172,7 @@ ngx_media_hls_init(ngx_media_hls_t *hls, const ngx_media_hls_conf_t *conf,
 
     hls->segments_capacity = capacity;
 
-    /*
-     * The configured directory is an ngx_str_t, not a C string: build a
-     * terminated copy before handing it to mkdir().
-     */
-    dir.len = hls->conf.path.len;
-    dir.data = ngx_alloc(dir.len + 1, NULL);
-
-    if (dir.data != NULL) {
-        ngx_memcpy(dir.data, hls->conf.path.data, dir.len);
-        dir.data[dir.len] = '\0';
-
-        (void) mkdir((const char *) dir.data, 0755);
-
-        ngx_free(dir.data);
-    }
+    ngx_media_hls_mkdir_p(&hls->conf.path, log);
 
     return NGX_OK;
 }
@@ -467,7 +504,7 @@ ngx_media_hls_evict(ngx_media_hls_t *hls)
 static ngx_int_t
 ngx_media_hls_write_file(ngx_media_hls_t *hls, const ngx_str_t *name)
 {
-    ngx_str_t   path;
+    ngx_str_t   path, tmp;
     ngx_int_t   rc = NGX_ERROR;
     int         fd;
     ngx_uint_t  i;
@@ -476,9 +513,32 @@ ngx_media_hls_write_file(ngx_media_hls_t *hls, const ngx_str_t *name)
         return NGX_ERROR;
     }
 
-    fd = open((const char *) path.data, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    /*
+     * The file is written under a temporary name and renamed into place, the
+     * way the playlist is.  A segment's final name is what a watcher reacts to
+     * - an HLS push destination uploads the file it sees, and a viewer fetches
+     * the name the playlist lists - and a reader that arrives while the file
+     * is being written would otherwise get a truncated segment: the upload
+     * would carry half a segment to the remote, and a player would fail on it.
+     * rename() is atomic within a directory, so the name appears complete or
+     * not at all.
+     */
+    tmp.len = path.len + sizeof(".tmp") - 1;
+    tmp.data = ngx_alloc(tmp.len + 1, NULL);
+
+    if (tmp.data == NULL) {
+        ngx_free(path.data);
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(tmp.data, path.data, path.len);
+    ngx_memcpy(tmp.data + path.len, ".tmp", sizeof(".tmp") - 1);
+    tmp.data[tmp.len] = '\0';
+
+    fd = open((const char *) tmp.data, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 
     if (fd == -1) {
+        ngx_free(tmp.data);
         ngx_free(path.data);
         return NGX_ERROR;
     }
@@ -504,11 +564,31 @@ ngx_media_hls_write_file(ngx_media_hls_t *hls, const ngx_str_t *name)
         }
     }
 
+    if (close(fd) != 0) {
+        fd = -1;
+        goto done;
+    }
+
+    fd = -1;
+
+    if (rename((const char *) tmp.data, (const char *) path.data) != 0) {
+        goto done;
+    }
+
     rc = NGX_OK;
 
 done:
 
-    (void) close(fd);
+    if (rc != NGX_OK) {
+        /* a failed segment leaves nothing behind, not even its temporary */
+        (void) unlink((const char *) tmp.data);
+    }
+
+    if (fd != -1) {
+        (void) close(fd);
+    }
+
+    ngx_free(tmp.data);
     ngx_free(path.data);
 
     return rc;

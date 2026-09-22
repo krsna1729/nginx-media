@@ -36,6 +36,12 @@ typedef struct {
      * a second sender would pick the same unit up and interleave the session.
      */
     ngx_uint_t                   sending;
+    /*
+     * Set while a sender owns the slot for a connect call.  Connecting is
+     * deliberately outside the mutex because the transport handshake can
+     * block for the configured timeout just like send().
+     */
+    ngx_uint_t                   connecting;
 
     /*
      * Bumped whenever the slot changes owner.  A sender that is outside the
@@ -217,6 +223,8 @@ ngx_media_srt_out_thread(void *data)
     ngx_media_buf_t          *burst;
     ngx_msec_t                timeout;
     uint64_t                  epoch, sequence;
+    ngx_media_srt_output_conf_t connect_conf;
+    uint64_t                     connect_epoch;
     size_t                    len, off;
     ngx_uint_t                i;
     ngx_int_t                 rc;
@@ -255,7 +263,7 @@ ngx_media_srt_out_thread(void *data)
 
             have_dest = 1;
 
-            if (!dest->running || dest->sending) {
+            if (!dest->running || dest->sending || dest->connecting) {
                 (void) pthread_mutex_unlock(&dest->mutex);
                 continue;
             }
@@ -273,19 +281,52 @@ ngx_media_srt_out_thread(void *data)
                                                   &ts);
                 }
 
-                if (!dest->running) {
+                if (!dest->running || !dest->used) {
                     (void) pthread_mutex_unlock(&dest->mutex);
                     continue;
                 }
 
-                dest->session = ngx_media_srt_connect(
-                    dest->conf.host.data, dest->conf.port,
-                    dest->conf.streamid.len ? dest->conf.streamid.data : NULL,
-                    dest->conf.streamid.len, dest->conf.connect_timeout,
-                    dest->conf.params, outs->log);
+                dest->connecting = 1;
+                connect_conf = dest->conf;
+                connect_epoch = dest->epoch;
 
-                if (dest->session == NULL) {
+                /*
+                 * The handshake is transport work and may block for the
+                 * configured timeout.  No worker or sender operation should
+                 * wait behind it; epoch validation below handles remove/add
+                 * while this call is in flight.
+                 */
+                (void) pthread_mutex_unlock(&dest->mutex);
+
+                session = ngx_media_srt_connect(
+                    connect_conf.host.data, connect_conf.port,
+                    connect_conf.streamid.len ? connect_conf.streamid.data
+                                              : NULL,
+                    connect_conf.streamid.len, connect_conf.connect_timeout,
+                    connect_conf.params, outs->log);
+
+                (void) pthread_mutex_lock(&dest->mutex);
+
+                if (dest->epoch != connect_epoch
+                    || !dest->used || !dest->running)
+                {
+                    if (dest->epoch == connect_epoch) {
+                        dest->connecting = 0;
+                    }
+
+                    if (session != NULL) {
+                        ngx_media_srt_session_close(session);
+                    }
+
+                    (void) pthread_mutex_unlock(&dest->mutex);
+                    continue;
+                }
+
+                dest->connecting = 0;
+
+                if (session == NULL) {
                     dest->reconnects++;
+                    (void) pthread_cond_broadcast(&dest->cond);
 
                     (void) pthread_mutex_unlock(&dest->mutex);
                     ngx_media_srt_out_report(outs, i,
@@ -293,6 +334,7 @@ ngx_media_srt_out_thread(void *data)
                     continue;
                 }
 
+                dest->session = session;
                 dest->reconnects++;
                 dest->cursor = 0;
 
@@ -301,6 +343,7 @@ ngx_media_srt_out_thread(void *data)
                  * the middle of a GOP (goal doc 34 item 6).
                  */
                 ngx_media_srt_queue_resync(&dest->queue);
+                (void) pthread_cond_broadcast(&dest->cond);
 
                 (void) pthread_mutex_unlock(&dest->mutex);
                 ngx_media_srt_out_report(outs, i,
@@ -636,6 +679,7 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
     dest->sent_bytes = 0;
     dest->sent_bursts = 0;
     dest->reconnects = 0;
+    dest->connecting = 0;
     dest->epoch++;
 
     (void) pthread_mutex_unlock(&dest->mutex);

@@ -146,7 +146,7 @@ done
 echo "== adding an HLS PUT destination while live"
 STATUS="$(curl -sS -o "$RUN/dest.json" -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' \
-    -d "{\"id\":\"cdn\",\"type\":\"hls_push\",\"host\":\"http://127.0.0.1:$SINK_PORT/\",\"path\":\"$RUN/hls\"}" \
+    -d "{\"id\":\"cdn\",\"type\":\"hls_push\",\"host\":\"http://127.0.0.1:$SINK_PORT/\",\"path\":\"$RUN/hls/live/push\"}" \
     "$API/streams/live/push/destinations")"
 
 cat "$RUN/dest.json"; echo
@@ -194,7 +194,7 @@ sleep 0.5
 
 STATUS="$(curl -sS -o "$RUN/dest-tls.json" -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' \
-    -d "{\"id\":\"cdn-tls\",\"type\":\"hls_push\",\"host\":\"https://127.0.0.1:$TLS_SINK_PORT/\",\"path\":\"$RUN/hls\",\"ca_file\":\"$RUN/cert.pem\"}" \
+    -d "{\"id\":\"cdn-tls\",\"type\":\"hls_push\",\"host\":\"https://127.0.0.1:$TLS_SINK_PORT/\",\"path\":\"$RUN/hls/live/push\",\"ca_file\":\"$RUN/cert.pem\"}" \
     "$API/streams/live/push/destinations")"
 
 cat "$RUN/dest-tls.json"; echo

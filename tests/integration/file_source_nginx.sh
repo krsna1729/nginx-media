@@ -98,14 +98,14 @@ echo "   program frames: ${FRAMES:-0}"
          tail -5 "$RUN/logs/error.log" >&2; exit 1; }
 
 for _ in $(seq 1 200); do
-    [ -f "$RUN/hls/index.m3u8" ] && break
+    [ -f "$RUN/hls/live/slate/index.m3u8" ] && break
     sleep 0.1
 done
 
-[ -f "$RUN/hls/index.m3u8" ] \
+[ -f "$RUN/hls/live/slate/index.m3u8" ] \
     || { echo "the file source produced no hls output" >&2; exit 1; }
 
-SEG="$(ls "$RUN"/hls/*.ts 2>/dev/null | head -1)"
+SEG="$(ls "$RUN"/hls/live/slate/*.ts 2>/dev/null | head -1)"
 
 [ -n "$SEG" ] || { echo "no segments" >&2; exit 1; }
 

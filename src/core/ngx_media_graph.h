@@ -133,6 +133,10 @@ ngx_int_t ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
  * plain label everywhere else.  Shared by the API request that creates a
  * source and by the replica that applies it.
  */
+/*
+ * log is kept by the reader this may open, which outlives the request that
+ * asked for it: pass the worker's log, never a connection's.
+ */
 ngx_media_source_t *ngx_media_graph_source_open(ngx_media_stream_t *stream,
     const ngx_str_t *id, ngx_uint_t type, ngx_uint_t priority,
     const ngx_str_t *path, const ngx_str_t *ca_file, ngx_log_t *log);

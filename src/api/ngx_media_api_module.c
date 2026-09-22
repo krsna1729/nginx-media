@@ -97,6 +97,13 @@ static ngx_int_t ngx_media_api_send(ngx_http_request_t *r, ngx_int_t status,
     ngx_str_t *body);
 static ngx_int_t ngx_media_api_arg(ngx_http_request_t *r, const char *name,
     ngx_str_t *value);
+static ngx_int_t ngx_media_api_json_string(u_char **last, u_char *end,
+    const ngx_str_t *value);
+static ngx_int_t ngx_media_api_prom_prefix(u_char **last, u_char *end,
+    const char *metric, const ngx_str_t *application, const ngx_str_t *name,
+    const ngx_str_t *source, const char *percentile);
+static ngx_int_t ngx_media_api_json_stream_name(u_char **last, u_char *end,
+    const ngx_str_t *application, const ngx_str_t *name);
 
 static ngx_command_t ngx_media_api_commands[] = {
 
@@ -368,6 +375,236 @@ ngx_media_api_state_name(ngx_uint_t state)
 }
 
 static ngx_int_t
+ngx_media_api_put_bytes(u_char **last, u_char *end, const u_char *data,
+    size_t len)
+{
+    if ((size_t) (end - *last) < len) {
+        return NGX_ERROR;
+    }
+
+    *last = ngx_cpymem(*last, data, len);
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_media_api_json_string(u_char **last, u_char *end, const ngx_str_t *value)
+{
+    static const u_char  hex[] = "0123456789abcdef";
+    u_char                escaped[6];
+    u_char                c;
+    size_t                i;
+
+    if (ngx_media_api_put_bytes(last, end, (u_char *) "\"", 1) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    for (i = 0; i < value->len; i++) {
+        c = value->data[i];
+
+        switch (c) {
+        case '"':
+            if (ngx_media_api_put_bytes(last, end, (u_char *) "\\\"", 2)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            break;
+
+        case '\\':
+            if (ngx_media_api_put_bytes(last, end, (u_char *) "\\\\", 2)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            break;
+
+        case '\b':
+            if (ngx_media_api_put_bytes(last, end, (u_char *) "\\b", 2)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            break;
+
+        case '\f':
+            if (ngx_media_api_put_bytes(last, end, (u_char *) "\\f", 2)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            break;
+
+        case '\n':
+            if (ngx_media_api_put_bytes(last, end, (u_char *) "\\n", 2)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            break;
+
+        case '\r':
+            if (ngx_media_api_put_bytes(last, end, (u_char *) "\\r", 2)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            break;
+
+        case '\t':
+            if (ngx_media_api_put_bytes(last, end, (u_char *) "\\t", 2)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            break;
+
+        default:
+            if (c < 0x20) {
+                escaped[0] = '\\';
+                escaped[1] = 'u';
+                escaped[2] = '0';
+                escaped[3] = '0';
+                escaped[4] = hex[c >> 4];
+                escaped[5] = hex[c & 0x0f];
+
+                if (ngx_media_api_put_bytes(last, end, escaped,
+                                            sizeof(escaped))
+                    != NGX_OK)
+                {
+                    return NGX_ERROR;
+                }
+                break;
+            }
+
+            if (ngx_media_api_put_bytes(last, end, &c, 1) != NGX_OK) {
+                return NGX_ERROR;
+            }
+            break;
+        }
+    }
+
+    return ngx_media_api_put_bytes(last, end, (u_char *) "\"", 1);
+}
+
+static ngx_int_t
+ngx_media_api_json_stream_name(u_char **last, u_char *end,
+    const ngx_str_t *application, const ngx_str_t *name)
+{
+    u_char  *name_start;
+    size_t   name_len;
+
+    if (ngx_media_api_json_string(last, end, application) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    (*last)--;
+
+    if (ngx_media_api_put_bytes(last, end, (u_char *) "/", 1) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    name_start = *last;
+
+    if (ngx_media_api_json_string(last, end, name) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    name_len = *last - name_start;
+    ngx_memmove(name_start, name_start + 1, name_len - 1);
+    (*last)--;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_media_api_prom_string(u_char **last, u_char *end, const ngx_str_t *value)
+{
+    u_char  c, slash = '\\';
+    size_t  i;
+
+    for (i = 0; i < value->len; i++) {
+        c = value->data[i];
+
+        if (c == '\\' || c == '"') {
+            if (ngx_media_api_put_bytes(last, end, &slash, 1) != NGX_OK
+                || ngx_media_api_put_bytes(last, end, &c, 1) != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+
+        } else if (c == '\n') {
+            if (ngx_media_api_put_bytes(last, end, (u_char *) "\\n", 2)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+
+        } else if (c < 0x20) {
+            return NGX_ERROR;
+
+        } else if (ngx_media_api_put_bytes(last, end, &c, 1) != NGX_OK) {
+            return NGX_ERROR;
+        }
+    }
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_media_api_prom_prefix(u_char **last, u_char *end, const char *metric,
+    const ngx_str_t *application, const ngx_str_t *name,
+    const ngx_str_t *source, const char *percentile)
+{
+    ngx_str_t  text;
+
+    text.data = (u_char *) metric;
+    text.len = strlen(metric);
+
+    if (ngx_media_api_put_bytes(last, end, text.data, text.len) != NGX_OK
+        || ngx_media_api_put_bytes(last, end,
+                                   (u_char *) "{application=\"", 14)
+           != NGX_OK
+        || ngx_media_api_prom_string(last, end, application) != NGX_OK
+        || ngx_media_api_put_bytes(last, end, (u_char *) "\",name=\"", 8)
+           != NGX_OK
+        || ngx_media_api_prom_string(last, end, name) != NGX_OK
+        || ngx_media_api_put_bytes(last, end, (u_char *) "\"", 1) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    if (source != NULL) {
+        if (ngx_media_api_put_bytes(last, end, (u_char *) ",source=\"", 9)
+                != NGX_OK
+            || ngx_media_api_prom_string(last, end, source) != NGX_OK
+            || ngx_media_api_put_bytes(last, end, (u_char *) "\"", 1)
+                   != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+    }
+
+    if (percentile != NULL) {
+        text.data = (u_char *) percentile;
+        text.len = strlen(percentile);
+
+        if (ngx_media_api_put_bytes(last, end, (u_char *) ",percentile=\"",
+                                    13)
+                != NGX_OK
+            || ngx_media_api_put_bytes(last, end, text.data, text.len)
+                   != NGX_OK
+            || ngx_media_api_put_bytes(last, end, (u_char *) "\"", 1)
+                   != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+    }
+
+    return NGX_OK;
+}
+
+static ngx_int_t
 ngx_media_api_sources_json(u_char **last, u_char *end,
     ngx_media_stream_t *stream)
 {
@@ -383,18 +620,22 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
     {
         source = ngx_queue_data(q, ngx_media_source_t, queue);
 
+        *last = ngx_snprintf(*last, end - *last, "%s{\"id\":",
+                             first ? "" : ",");
+
+        if (ngx_media_api_json_string(last, end, &source->id) != NGX_OK) {
+            return NGX_ERROR;
+        }
+
         *last = ngx_snprintf(*last, end - *last,
-                             "%s{\"id\":\"%V\",\"type\":%ui,\"state\":\"%s\","
-                             "\"priority\":%ui,\"healthy\":%s,\"eligible\":%s,"
-                             "\"active\":%s,\"compat\":\"%s\","
+                             ",\"type\":%ui,\"state\":\"%s\","
+                             "\"priority\":%ui,\"healthy\":%s,"
+                             "\"eligible\":%s,\"active\":%s,\"compat\":\"%s\","
                              "\"evidence\":%ui,\"health_transitions\":%uL,"
-                             "\"container_errors\":%uL,"
-                             "\"frames_in\":%uL,"
+                             "\"container_errors\":%uL,\"frames_in\":%uL,"
                              "\"frames_out\":%uL,\"writers\":%ui,"
                              "\"preroll_units\":%ui,\"preroll_bytes\":%uz,"
                              "\"preroll_overflows\":%uL}",
-                             first ? "" : ",",
-                             &source->id,
                              source->type,
                              ngx_media_api_state_name(source->state),
                              source->priority,
@@ -429,38 +670,44 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
 {
     ngx_media_runtime_progress_t  progress;
 
-    /*
-     * Generation and program frames describe the media a program carried, and
-     * a program has one driver.  On the worker that drives it they are the
-     * local numbers; on a replica they are the numbers the owner published,
-     * with the owner named, so a read never mixes "this program is not here"
-     * into a field that means "the program has carried nothing".
-     */
     ngx_media_runtime_progress(&stream->application, &stream->name,
                                stream->generation, stream->program_frames,
                                &progress);
 
+    *last = ngx_snprintf(*last, end - *last, "{\"application\":");
+
+    if (ngx_media_api_json_string(last, end, &stream->application) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last, ",\"name\":");
+
+    if (ngx_media_api_json_string(last, end, &stream->name) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
     *last = ngx_snprintf(*last, end - *last,
-                         "{\"application\":\"%V\",\"name\":\"%V\","
-                         "\"owner\":%ui,\"observed_here\":%s,"
+                         ",\"owner\":%ui,\"observed_here\":%s,"
+                         "\"revision\":%uL,"
                          "\"generation\":%ui,\"switches\":%uL,"
                          "\"emergency_switches\":%uL,"
                          "\"failure_timeout_ms\":%ui,"
-                         "\"recovery_timeout_ms\":%ui,"
-                         "\"switchback\":%ui,"
+                         "\"recovery_timeout_ms\":%ui,\"switchback\":%ui,"
                          "\"program_frames\":%uL,\"active\":",
-                         &stream->application, &stream->name,
-                         progress.owner,
-                         progress.local ? "true" : "false",
+                         progress.owner, progress.local ? "true" : "false",
+                         stream->revision,
                          progress.generation, stream->switches,
                          stream->emergency_switches,
                          stream->selector.failure_timeout,
                          stream->selector.recovery_timeout,
-                         stream->selector.switchback,
-                         progress.frames);
+                         stream->selector.switchback, progress.frames);
 
     if (stream->active != NULL) {
-        *last = ngx_snprintf(*last, end - *last, "\"%V\"", &stream->active->id);
+        if (ngx_media_api_json_string(last, end, &stream->active->id)
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
 
     } else {
         *last = ngx_snprintf(*last, end - *last, "null");
@@ -472,12 +719,6 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
         return NGX_ERROR;
     }
 
-    /*
-     * A program's destinations belong to the same read as its sources: they
-     * are the other half of "what is this stream attached to", and the
-     * collection route has always reported them.  The endpoint is redacted
-     * exactly as everywhere else -- a destination host may carry a credential.
-     */
     *last = ngx_snprintf(*last, end - *last, ",\"destinations\":[");
 
     {
@@ -496,21 +737,19 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
             }
 
             first = 0;
-            (void) ngx_media_api_destination_json(destination, last, end, -1);
+
+            if (ngx_media_api_destination_json(destination, last, end, -1)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
         }
     }
 
     *last = ngx_snprintf(*last, end - *last, "]");
-
-    /*
-     * fanout_delay percentiles (goal doc 32): how long a unit of media waits
-     * after the program publishes it before a consumer takes it.  This is the
-     * number an operator can feel, and the one that says whether the
-     * deployment still has headroom.
-     */
     *last = ngx_snprintf(*last, end - *last,
-                         ",\"fanout_ms\":{\"p50\":%M,\"p95\":%M,\"p99\":%M,"
-                         "\"max\":%uL},\"dispatched\":%uL}",
+                         ",\"fanout_ms\":{\"p50\":%M,\"p95\":%M,"
+                         "\"p99\":%M,\"max\":%uL},\"dispatched\":%uL}",
                          ngx_media_feed_fanout_percentile(&stream->program_feed,
                                                           500),
                          ngx_media_feed_fanout_percentile(&stream->program_feed,
@@ -597,6 +836,7 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
     ngx_media_stream_t             *stream;
     ngx_media_source_t             *source;
     ngx_media_runtime_stats_t       stats;
+    ngx_media_runtime_progress_t    progress;
 
     ngx_media_runtime_stats_get(&stats);
 
@@ -639,6 +879,10 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "# HELP nginx_media_runtime_outputs "
                          "runtime output slots in use\n"
                          "# TYPE nginx_media_runtime_outputs gauge\n"
+                         "# HELP nginx_media_streams_draining "
+                         "deleted streams whose memory is still held by a "
+                         "reader that is stopping\n"
+                         "# TYPE nginx_media_streams_draining gauge\n"
                          "# HELP nginx_media_worker_event_loop_delay_ms "
                          "interval between the last two runtime ticks, which "
                          "the timer asks to be 100ms\n"
@@ -650,6 +894,7 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "ticks that missed their interval by more than half\n"
                          "# TYPE nginx_media_worker_late_ticks_total counter\n"
                          "nginx_media_runtime_outputs %ui\n"
+                         "nginx_media_streams_draining %ui\n"
                          "nginx_media_worker_event_loop_delay_ms %M\n"
                          "nginx_media_worker_event_loop_max_delay_ms %M\n"
                          "nginx_media_worker_late_ticks_total %uL\n"
@@ -673,6 +918,7 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "nginx_media_reconnecting_sources %ui\n"
                          "nginx_media_graph_undelivered_total %uL\n",
                          ngx_media_runtime_outputs_active(),
+                         ngx_media_registry_draining_count(registry),
                          stats.last_gap, stats.max_gap, stats.late_ticks,
                          stats.last_service, stats.max_service,
                          stats.reconnecting,
@@ -682,64 +928,106 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
          q != (ngx_queue_t *) &registry->entries;
          q = q->next)
     {
-        ngx_media_runtime_progress_t  progress;
-
         entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
         stream = &entry->stream;
 
-        /*
-         * Generation and program frames are the program's, not a replica's:
-         * they are read the same way the stream document reads them, so a
-         * scrape of any worker reports the same figures.
-         */
         ngx_media_runtime_progress(&stream->application, &stream->name,
                                    stream->generation, stream->program_frames,
                                    &progress);
 
-        *last = ngx_snprintf(*last, end - *last,
-                             "nginx_media_stream_generation"
-                             "{application=\"%V\",name=\"%V\"} %ui\n"
-                             "nginx_media_stream_switches"
-                             "{application=\"%V\",name=\"%V\"} %uL\n"
-                             "nginx_media_stream_program_frames"
-                             "{application=\"%V\",name=\"%V\"} %uL\n"
-                             "nginx_media_stream_fanout_delay_ms"
-                             "{application=\"%V\",name=\"%V\",percentile=\"50\"} %M\n"
-                             "nginx_media_stream_fanout_delay_ms"
-                             "{application=\"%V\",name=\"%V\",percentile=\"95\"} %M\n"
-                             "nginx_media_stream_fanout_delay_ms"
-                             "{application=\"%V\",name=\"%V\",percentile=\"99\"} %M\n"
-                             "nginx_media_stream_fanout_delay_ms"
-                             "{application=\"%V\",name=\"%V\",percentile=\"99.9\"} %M\n"
-                             "nginx_media_stream_dispatched_total"
-                             "{application=\"%V\",name=\"%V\"} %uL\n"
-                             "nginx_media_stream_feed_units"
-                             "{application=\"%V\",name=\"%V\"} %ui\n"
-                             "nginx_media_stream_feed_bytes"
-                             "{application=\"%V\",name=\"%V\"} %uz\n",
-                             &stream->application, &stream->name,
-                             progress.generation,
-                             &stream->application, &stream->name,
-                             stream->switches,
-                             &stream->application, &stream->name,
-                             progress.frames,
-                             &stream->application, &stream->name,
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_generation",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %ui\n",
+                             progress.generation);
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_switches",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %uL\n", stream->switches);
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_program_frames",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                             progress.frames);
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_fanout_delay_ms",
+                &stream->application, &stream->name, NULL, "50") != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %M\n",
                              ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 500),
-                             &stream->application, &stream->name,
+                                 &stream->program_feed, 500));
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_fanout_delay_ms",
+                &stream->application, &stream->name, NULL, "95") != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %M\n",
                              ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 950),
-                             &stream->application, &stream->name,
+                                 &stream->program_feed, 950));
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_fanout_delay_ms",
+                &stream->application, &stream->name, NULL, "99") != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %M\n",
                              ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 990),
-                             &stream->application, &stream->name,
+                                 &stream->program_feed, 990));
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_fanout_delay_ms",
+                &stream->application, &stream->name, NULL, "99.9")
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %M\n",
                              ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 999),
-                             &stream->application, &stream->name,
-                             ngx_media_feed_fanout_count(&stream->program_feed),
-                             &stream->application, &stream->name,
-                             ngx_media_feed_units(&stream->program_feed),
-                             &stream->application, &stream->name,
+                                 &stream->program_feed, 999));
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_dispatched_total",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                             ngx_media_feed_fanout_count(
+                                 &stream->program_feed));
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_feed_units",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %ui\n",
+                             ngx_media_feed_units(&stream->program_feed));
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_feed_bytes",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %uz\n",
                              ngx_media_feed_bytes(&stream->program_feed));
 
         for (sq = ngx_queue_head(&stream->sources);
@@ -748,31 +1036,45 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
         {
             source = ngx_queue_data(sq, ngx_media_source_t, queue);
 
-            *last = ngx_snprintf(*last, end - *last,
-                                 "nginx_media_source_frames_in"
-                                 "{application=\"%V\",name=\"%V\","
-                                 "source=\"%V\"} %uL\n"
-                                 "nginx_media_source_frames_out"
-                                 "{application=\"%V\",name=\"%V\","
-                                 "source=\"%V\"} %uL\n"
-                                 "nginx_media_source_healthy"
-                                 "{application=\"%V\",name=\"%V\","
-                                 "source=\"%V\"} %d\n"
-                                 "nginx_media_source_active"
-                                 "{application=\"%V\",name=\"%V\","
-                                 "source=\"%V\"} %d\n",
-                                 &stream->application, &stream->name,
-                                 &source->id, source->frames_in,
-                                 &stream->application, &stream->name,
-                                 &source->id, source->frames_out,
-                                 &stream->application, &stream->name,
-                                 &source->id, source->health.healthy ? 1 : 0,
-                                 &stream->application, &stream->name,
-                                 &source->id, source->active ? 1 : 0);
-
-            if (*last >= end - 1) {
+            if (ngx_media_api_prom_prefix(
+                    last, end, "nginx_media_source_frames_in",
+                    &stream->application, &stream->name, &source->id, NULL)
+                != NGX_OK)
+            {
                 return NGX_ERROR;
             }
+            *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                                 source->frames_in);
+
+            if (ngx_media_api_prom_prefix(
+                    last, end, "nginx_media_source_frames_out",
+                    &stream->application, &stream->name, &source->id, NULL)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                                 source->frames_out);
+
+            if (ngx_media_api_prom_prefix(
+                    last, end, "nginx_media_source_healthy",
+                    &stream->application, &stream->name, &source->id, NULL)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            *last = ngx_snprintf(*last, end - *last, "} %d\n",
+                                 source->health.healthy ? 1 : 0);
+
+            if (ngx_media_api_prom_prefix(
+                    last, end, "nginx_media_source_active",
+                    &stream->application, &stream->name, &source->id, NULL)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            *last = ngx_snprintf(*last, end - *last, "} %d\n",
+                                 source->active ? 1 : 0);
         }
     }
 
@@ -845,15 +1147,187 @@ ngx_media_api_read_body(ngx_http_request_t *r, ngx_pool_t *pool,
     return NGX_OK;
 }
 
+/* Decode one JSON string.  `out` may alias the input because escapes shrink. */
+static ngx_int_t
+ngx_media_api_json_parse_string(u_char *p, u_char *end, u_char **next,
+    u_char *out, size_t cap, ngx_str_t *value)
+{
+    u_char       *q;
+    ngx_uint_t    code, low;
+    size_t        i;
+
+    q = out;
+
+    while (p < end) {
+        if (*p == '"') {
+            value->data = out;
+            value->len = q - out;
+            *next = p + 1;
+            return NGX_OK;
+        }
+
+        if (*p != '\\') {
+            if (*p < 0x20 || (size_t) (out + cap - q) < 1) {
+                return NGX_ERROR;
+            }
+
+            *q++ = *p++;
+            continue;
+        }
+
+        p++;
+
+        if (p == end) {
+            return NGX_ERROR;
+        }
+
+        switch (*p++) {
+        case '"':
+            code = '"';
+            break;
+
+        case '\\':
+            code = '\\';
+            break;
+
+        case '/':
+            code = '/';
+            break;
+
+        case 'b':
+            code = '\b';
+            break;
+
+        case 'f':
+            code = '\f';
+            break;
+
+        case 'n':
+            code = '\n';
+            break;
+
+        case 'r':
+            code = '\r';
+            break;
+
+        case 't':
+            code = '\t';
+            break;
+
+        case 'u':
+            if ((size_t) (end - p) < 4) {
+                return NGX_ERROR;
+            }
+
+            code = 0;
+
+            for (i = 0; i < 4; i++) {
+                if (*p >= '0' && *p <= '9') {
+                    code = (code << 4) | (*p - '0');
+
+                } else if (*p >= 'a' && *p <= 'f') {
+                    code = (code << 4) | (*p - 'a' + 10);
+
+                } else if (*p >= 'A' && *p <= 'F') {
+                    code = (code << 4) | (*p - 'A' + 10);
+
+                } else {
+                    return NGX_ERROR;
+                }
+
+                p++;
+            }
+
+            if (code >= 0xD800 && code <= 0xDBFF) {
+                if ((size_t) (end - p) < 6 || p[0] != '\\' || p[1] != 'u') {
+                    return NGX_ERROR;
+                }
+
+                p += 2;
+                low = 0;
+
+                for (i = 0; i < 4; i++) {
+                    if (*p >= '0' && *p <= '9') {
+                        low = (low << 4) | (*p - '0');
+
+                    } else if (*p >= 'a' && *p <= 'f') {
+                        low = (low << 4) | (*p - 'a' + 10);
+
+                    } else if (*p >= 'A' && *p <= 'F') {
+                        low = (low << 4) | (*p - 'A' + 10);
+
+                    } else {
+                        return NGX_ERROR;
+                    }
+
+                    p++;
+                }
+
+                if (low < 0xDC00 || low > 0xDFFF) {
+                    return NGX_ERROR;
+                }
+
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+
+            } else if (code >= 0xDC00 && code <= 0xDFFF) {
+                return NGX_ERROR;
+            }
+            break;
+
+        default:
+            return NGX_ERROR;
+        }
+
+        if (code <= 0x7F) {
+            if ((size_t) (out + cap - q) < 1) {
+                return NGX_ERROR;
+            }
+
+            *q++ = (u_char) code;
+
+        } else if (code <= 0x7FF) {
+            if ((size_t) (out + cap - q) < 2) {
+                return NGX_ERROR;
+            }
+
+            *q++ = (u_char) (0xC0 | (code >> 6));
+            *q++ = (u_char) (0x80 | (code & 0x3F));
+
+        } else if (code <= 0xFFFF) {
+            if ((size_t) (out + cap - q) < 3) {
+                return NGX_ERROR;
+            }
+
+            *q++ = (u_char) (0xE0 | (code >> 12));
+            *q++ = (u_char) (0x80 | ((code >> 6) & 0x3F));
+            *q++ = (u_char) (0x80 | (code & 0x3F));
+
+        } else {
+            if ((size_t) (out + cap - q) < 4) {
+                return NGX_ERROR;
+            }
+
+            *q++ = (u_char) (0xF0 | (code >> 18));
+            *q++ = (u_char) (0x80 | ((code >> 12) & 0x3F));
+            *q++ = (u_char) (0x80 | ((code >> 6) & 0x3F));
+            *q++ = (u_char) (0x80 | (code & 0x3F));
+        }
+    }
+
+    return NGX_ERROR;
+}
+
 /* "key": "value"  |  "key": 123   -- the first match, or NGX_DECLINED */
 static ngx_int_t
 ngx_media_api_json_field(const ngx_str_t *body, const char *key,
     ngx_str_t *value)
 {
-    u_char     *p, *end, *start;
-    size_t      key_len = strlen(key);
+    u_char       *p, *end, *next, *start;
+    u_char        key_data[64];
+    ngx_str_t     parsed_key, parsed_value;
+    size_t        key_len = strlen(key);
 
-    if (body->data == NULL) {
+    if (body->data == NULL || key_len >= sizeof(key_data)) {
         return NGX_DECLINED;
     }
 
@@ -861,33 +1335,40 @@ ngx_media_api_json_field(const ngx_str_t *body, const char *key,
     end = body->data + body->len;
 
     while (p < end) {
-        if (*p != '"') {
-            p++;
-            continue;
-        }
-
-        if ((size_t) (end - p) < key_len + 3
-            || ngx_strncmp(p + 1, key, key_len) != 0
-            || p[1 + key_len] != '"')
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r'
+                           || *p == '\n' || *p == '{' || *p == ','))
         {
             p++;
-            continue;
         }
 
-        p += key_len + 2;
+        if (p == end) {
+            break;
+        }
 
-        while (p < end && (*p == ' ' || *p == '\t')) {
+        if (*p != '"'
+            || ngx_media_api_json_parse_string(p + 1, end, &next,
+                                               key_data, sizeof(key_data),
+                                               &parsed_key)
+               != NGX_OK)
+        {
+            return NGX_DECLINED;
+        }
+
+        p = next;
+
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r'
+                           || *p == '\n'))
+        {
             p++;
         }
 
-        if (p == end || *p != ':') {
-            p++;
-            continue;
+        if (p == end || *p++ != ':') {
+            return NGX_DECLINED;
         }
 
-        p++;
-
-        while (p < end && (*p == ' ' || *p == '\t')) {
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r'
+                           || *p == '\n'))
+        {
             p++;
         }
 
@@ -896,30 +1377,46 @@ ngx_media_api_json_field(const ngx_str_t *body, const char *key,
         }
 
         if (*p == '"') {
-            start = ++p;
+            start = p + 1;
 
-            while (p < end && *p != '"') {
-                p++;
-            }
-
-            if (p == end) {
+            if (ngx_media_api_json_parse_string(start, end, &next, start,
+                                                end - start, &parsed_value)
+                != NGX_OK)
+            {
                 return NGX_DECLINED;
             }
 
-            value->data = start;
-            value->len = p - start;
-            return NGX_OK;
+            p = next;
+
+            if (parsed_key.len == key_len
+                && ngx_memcmp(parsed_key.data, key, key_len) == 0)
+            {
+                *value = parsed_value;
+                return NGX_OK;
+            }
+
+            continue;
         }
 
         start = p;
 
-        while (p < end && *p != ',' && *p != '}' && *p != ' ') {
+        while (p < end && *p != ',' && *p != '}') {
             p++;
         }
 
-        value->data = start;
-        value->len = p - start;
-        return NGX_OK;
+        while (p > start && (p[-1] == ' ' || p[-1] == '\t'
+                             || p[-1] == '\r' || p[-1] == '\n'))
+        {
+            p--;
+        }
+
+        if (parsed_key.len == key_len
+            && ngx_memcmp(parsed_key.data, key, key_len) == 0)
+        {
+            value->data = start;
+            value->len = p - start;
+            return NGX_OK;
+        }
     }
 
     return NGX_DECLINED;
@@ -978,8 +1475,16 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
     feed_conf.max_bytes = NGX_MEDIA_API_FEED_BYTES;
     feed_conf.max_age = NGX_MEDIA_API_FEED_AGE;
 
+    /*
+     * The stream outlives this request, and so does everything the registry
+     * builds from it: its pool, its sources and the readers those open.  The
+     * log has to outlive the request too - the connection's dies with the
+     * connection, and a reader logging through it afterwards reads freed
+     * memory - so what is kept is the worker's.
+     */
     stream = ngx_media_registry_stream_create(registry, &application, &name,
-                                              &feed_conf, r->connection->log);
+                                              &feed_conf,
+                                              ((ngx_cycle_t *) ngx_cycle)->log);
 
     /*
      * The worker that creates a stream owns it.
@@ -1021,11 +1526,21 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
      */
     (void) ngx_media_graph_stream_set(stream);
 
+    *last = ngx_snprintf(*last, end - *last, "{\"application\":");
+
+    if (ngx_media_api_json_string(last, end, &stream->application) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last, ",\"name\":");
+
+    if (ngx_media_api_json_string(last, end, &stream->name) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     *last = ngx_snprintf(*last, end - *last,
-                         "{\"application\":\"%V\",\"name\":\"%V\","
-                         "\"revision\":%uL,\"created\":%s}",
-                         &stream->application, &stream->name, stream->revision,
-                         existed ? "false" : "true");
+                         ",\"revision\":%uL,\"created\":%s}",
+                         stream->revision, existed ? "false" : "true");
 
     return existed ? NGX_HTTP_OK : NGX_HTTP_CREATED;
 }
@@ -1045,21 +1560,21 @@ ngx_media_api_stream_delete(ngx_http_request_t *r,
     ngx_media_stream_t  *stream;
     ngx_str_t            revision_text;
     ngx_int_t            revision;
+    ngx_uint_t           stated = 0;
+    uint64_t             op_revision;
 
     stream = ngx_media_registry_stream(registry, application, name);
-
-    if (stream == NULL) {
-        *last = ngx_snprintf(*last, end - *last,
-                             "{\"application\":\"%V\",\"name\":\"%V\","
-                             "\"deleted\":false,\"reason\":\"absent\"}",
-                             application, name);
-        return NGX_HTTP_OK;
-    }
 
     if (ngx_media_api_arg(r, "revision", &revision_text) == NGX_OK) {
         revision = ngx_atoi(revision_text.data, revision_text.len);
 
-        if (revision >= 0 && (uint64_t) revision != stream->revision) {
+        if (revision >= 0) {
+            stated = 1;
+        }
+
+        if (stream != NULL && stated
+            && (uint64_t) revision != stream->revision)
+        {
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"stale_revision\","
                                  "\"revision\":%uL}",
@@ -1068,15 +1583,71 @@ ngx_media_api_stream_delete(ngx_http_request_t *r,
         }
     }
 
+    if (stream == NULL) {
+        /*
+         * Deleting what is not here still has to reach the workers that do
+         * have it: a delete that lands on a worker which has not yet received
+         * the stream's creation is the ordinary race between a controller's
+         * two requests, and answering "absent" without telling anyone would
+         * leave the stream running everywhere else.
+         *
+         * The operation carries the next revision of the shared sequence when
+         * the caller stated none, which makes the delete the newest operation
+         * there is: an operation that was in flight when it was issued is
+         * older than it, so no replica resurrects the stream afterwards.  A
+         * caller that stated a revision gets that number instead, and the
+         * replicas that have moved past it keep their newer state.
+         */
+        op_revision = stated ? (uint64_t) revision
+                             : ngx_media_revision_next(0);
+
+        ngx_media_registry_tombstone(
+            registry, ngx_media_owner_hash(application, name), op_revision);
+
+        (void) ngx_media_graph_stream_delete(application, name, op_revision);
+
+        *last = ngx_snprintf(*last, end - *last, "{\"application\":");
+
+        if (ngx_media_api_json_string(last, end, application) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        *last = ngx_snprintf(*last, end - *last, ",\"name\":");
+
+        if (ngx_media_api_json_string(last, end, name) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        *last = ngx_snprintf(*last, end - *last,
+                             ",\"deleted\":false,\"reason\":\"absent\","
+                             "\"revision\":%uL}", op_revision);
+        return NGX_HTTP_OK;
+    }
+
+    if (!stated) {
+        /*
+         * An unconditional delete is the newest operation: taking the next
+         * revision makes it newer than the number this worker last knew, so a
+         * replica that has moved past that number removes the stream too, and
+         * the tombstone the delete leaves behind is above every operation that
+         * raced it.
+         */
+        ngx_media_stream_touch(stream);
+    }
+
+    op_revision = stream->revision;
+
     ngx_media_runtime_release(&stream->application, &stream->name);
 
     /*
      * The replicas drop it too, before this worker's copy goes away: the
-     * operation carries the revision the stream had, so a replica that has
-     * already moved past it keeps the newer object instead of deleting it.
+     * operation carries the revision the deletion moved past, so a replica
+     * that has already moved past it keeps the newer object instead of
+     * deleting it, and one that has not removes the stream.  Without this the
+     * stream only disappears here.
      */
     (void) ngx_media_graph_stream_delete(&stream->application, &stream->name,
-                                         stream->revision);
+                                         op_revision);
 
     if (ngx_media_registry_stream_destroy(registry, stream) != NGX_OK) {
         *last = ngx_snprintf(*last, end - *last,
@@ -1084,9 +1655,20 @@ ngx_media_api_stream_delete(ngx_http_request_t *r,
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
+    *last = ngx_snprintf(*last, end - *last, "{\"application\":");
+
+    if (ngx_media_api_json_string(last, end, application) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last, ",\"name\":");
+
+    if (ngx_media_api_json_string(last, end, name) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     *last = ngx_snprintf(*last, end - *last,
-                         "{\"application\":\"%V\",\"name\":\"%V\","
-                         "\"deleted\":true}", application, name);
+                         ",\"deleted\":true,\"revision\":%uL}", op_revision);
 
     return NGX_HTTP_OK;
 }
@@ -1138,11 +1720,11 @@ ngx_media_api_stream_patch(ngx_http_request_t *r,
         n = ngx_atoi(value.data, value.len);
 
         if (n < 1) {
+
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"bad_failure_timeout\"}");
             return NGX_HTTP_BAD_REQUEST;
         }
-
         stream->selector.failure_timeout = (ngx_msec_t) n;
         ngx_media_stream_touch(stream);
     }
@@ -1165,10 +1747,20 @@ ngx_media_api_stream_patch(ngx_http_request_t *r,
     /* the desired-state change reaches the replicas, policy fields included */
     (void) ngx_media_graph_stream_set(stream);
 
-    *last = ngx_snprintf(*last, end - *last,
-                         "{\"application\":\"%V\",\"name\":\"%V\","
-                         "\"revision\":%uL}", &stream->application,
-                         &stream->name, stream->revision);
+    *last = ngx_snprintf(*last, end - *last, "{\"application\":");
+
+    if (ngx_media_api_json_string(last, end, application) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last, ",\"name\":");
+
+    if (ngx_media_api_json_string(last, end, name) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last, ",\"revision\":%uL}",
+                         stream->revision);
 
     return NGX_HTTP_OK;
 }
@@ -1267,11 +1859,16 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
     }
 
     source = ngx_media_stream_source_find(stream, &id);
-
     if (source != NULL) {
+
+        *last = ngx_snprintf(*last, end - *last, "{\"id\":");
+
+        if (ngx_media_api_json_string(last, end, &source->id) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
         *last = ngx_snprintf(*last, end - *last,
-                             "{\"id\":\"%V\",\"revision\":%uL,"
-                             "\"created\":false}", &source->id,
+                             ",\"revision\":%uL,\"created\":false}",
                              source->revision);
         return NGX_HTTP_OK;
     }
@@ -1325,9 +1922,10 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
      * the owner open it, so one program reads a file once rather than once per
      * worker.
      */
+    /* the reader this may open keeps the log, so it must outlive the request */
     source = ngx_media_graph_source_open(stream, &id, type, priority,
                                          &source_path, &source_ca,
-                                         r->connection->log);
+                                         ((ngx_cycle_t *) ngx_cycle)->log);
 
     if (source == NULL) {
 
@@ -1356,9 +1954,15 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
     (void) ngx_media_graph_source_set(stream, source, &source_path,
                                       &source_ca);
 
+    *last = ngx_snprintf(*last, end - *last, "{\"id\":");
+
+    if (ngx_media_api_json_string(last, end, &source->id) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     *last = ngx_snprintf(*last, end - *last,
-                         "{\"id\":\"%V\",\"revision\":%uL,"
-                         "\"created\":true}", &source->id, source->revision);
+                         ",\"revision\":%uL,\"created\":true}",
+                         source->revision);
 
     return NGX_HTTP_CREATED;
 }
@@ -1379,19 +1983,27 @@ ngx_media_api_source_delete(ngx_media_stream_t *stream, ngx_str_t *source_id,
     source = ngx_media_stream_source_find(stream, source_id);
 
     if (source == NULL) {
+        *last = ngx_snprintf(*last, end - *last, "{\"id\":");
+
+        if (ngx_media_api_json_string(last, end, source_id) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
         *last = ngx_snprintf(*last, end - *last,
-                             "{\"id\":\"%V\",\"deleted\":false,"
-                             "\"reason\":\"absent\"}", source_id);
+                             ",\"deleted\":false,\"reason\":\"absent\"}");
         return NGX_HTTP_OK;
     }
 
-    ngx_media_stream_source_remove(stream, source);
-    ngx_media_stream_touch(stream);
 
     (void) ngx_media_graph_source_delete(stream, source_id, stream->revision);
 
-    *last = ngx_snprintf(*last, end - *last,
-                         "{\"id\":\"%V\",\"deleted\":true}", source_id);
+    *last = ngx_snprintf(*last, end - *last, "{\"id\":");
+
+    if (ngx_media_api_json_string(last, end, source_id) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last, ",\"deleted\":true}");
 
     return NGX_HTTP_OK;
 }
@@ -1430,11 +2042,15 @@ ngx_media_api_source_set_enabled(ngx_media_stream_t *stream,
      */
     (void) ngx_media_graph_source_set(stream, source, NULL, NULL);
 
+    *last = ngx_snprintf(*last, end - *last, "{\"id\":");
+
+    if (ngx_media_api_json_string(last, end, &source->id) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
     *last = ngx_snprintf(*last, end - *last,
-                         "{\"id\":\"%V\",\"enabled\":%s,"
-                         "\"revision\":%uL}",
-                         &source->id, enabled ? "true" : "false",
-                         source->revision);
+                         ",\"enabled\":%s,\"revision\":%uL}",
+                         enabled ? "true" : "false", source->revision);
 
     return NGX_HTTP_OK;
 }
@@ -1504,11 +2120,17 @@ ngx_media_api_sources(ngx_http_request_t *r, ngx_media_stream_t *stream,
                 return NGX_HTTP_NOT_FOUND;
             }
 
+            *last = ngx_snprintf(*last, end - *last, "{\"id\":");
+
+            if (ngx_media_api_json_string(last, end, &source->id) != NGX_OK) {
+                return NGX_HTTP_INTERNAL_SERVER_ERROR;
+            }
+
             *last = ngx_snprintf(*last, end - *last,
-                                 "{\"id\":\"%V\",\"type\":%ui,"
-                                 "\"priority\":%ui,\"enabled\":%s,"
-                                 "\"state\":\"%s\",\"revision\":%uL}",
-                                 &source->id, source->type, source->priority,
+                                 ",\"type\":%ui,\"priority\":%ui,"
+                                 "\"enabled\":%s,\"state\":\"%s\","
+                                 "\"revision\":%uL}",
+                                 source->type, source->priority,
                                  source->enabled ? "true" : "false",
                                  ngx_media_api_state_name(source->state),
                                  source->revision);
@@ -1593,25 +2215,36 @@ static ngx_int_t
 ngx_media_api_destination_json(ngx_media_destination_t *destination,
     u_char **last, u_char *end, ngx_int_t created)
 {
-    u_char     *tail = (u_char *) "}";
-    u_char      safe[512];
-    ngx_str_t   host;
-
-    if (created >= 0) {
-        tail = (u_char *) (created ? ",\"created\":true}"
-                                   : ",\"created\":false}");
-    }
+    u_char     safe[512];
+    ngx_str_t  host;
 
     host = ngx_media_api_safe_host(destination, safe, sizeof(safe));
 
+    *last = ngx_snprintf(*last, end - *last, "{\"id\":");
+
+    if (ngx_media_api_json_string(last, end, &destination->id) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last, ",\"type\":%ui,\"host\":",
+                         destination->type);
+
+    if (ngx_media_api_json_string(last, end, &host) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
     *last = ngx_snprintf(*last, end - *last,
-                         "{\"id\":\"%V\",\"type\":%ui,\"host\":\"%V\","
-                         "\"port\":%ui,\"enabled\":%s,"
-                         "\"revision\":%uL%s",
-                         &destination->id, destination->type,
-                         &host, destination->port,
+                         ",\"port\":%ui,\"enabled\":%s,\"revision\":%uL",
+                         destination->port,
                          destination->enabled ? "true" : "false",
-                         destination->revision, tail);
+                         destination->revision);
+
+    if (created >= 0) {
+        *last = ngx_snprintf(*last, end - *last, ",\"created\":%s",
+                             created ? "true" : "false");
+    }
+
+    *last = ngx_snprintf(*last, end - *last, "}");
 
     return (*last < end - 1) ? NGX_OK : NGX_ERROR;
 }
@@ -1849,16 +2482,26 @@ ngx_media_api_destination_delete(ngx_media_stream_t *stream,
     destination = ngx_media_destination_find(stream, id);
 
     if (destination == NULL) {
+        *last = ngx_snprintf(*last, end - *last, "{\"id\":");
+
+        if (ngx_media_api_json_string(last, end, id) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
         *last = ngx_snprintf(*last, end - *last,
-                             "{\"id\":\"%V\",\"deleted\":false,"
-                             "\"reason\":\"absent\"}", id);
+                             ",\"deleted\":false,\"reason\":\"absent\"}");
         return NGX_HTTP_OK;
     }
 
     ngx_media_destination_remove(stream, destination);
 
-    *last = ngx_snprintf(*last, end - *last,
-                         "{\"id\":\"%V\",\"deleted\":true}", id);
+    *last = ngx_snprintf(*last, end - *last, "{\"id\":");
+
+    if (ngx_media_api_json_string(last, end, id) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last, ",\"deleted\":true}");
 
     return NGX_HTTP_OK;
 }
@@ -1986,12 +2629,12 @@ static ngx_int_t
 ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
     u_char *end)
 {
-    ngx_queue_t              *q, *sq;
+    ngx_queue_t                 *q, *sq;
     ngx_media_registry_entry_t  *entry;
-    ngx_media_stream_t       *stream;
-    ngx_media_source_t       *source;
-    ngx_media_destination_t  *destination;
-    ngx_uint_t                first = 1;
+    ngx_media_stream_t          *stream;
+    ngx_media_source_t          *source;
+    ngx_media_destination_t     *destination;
+    ngx_uint_t                   first = 1;
 
     *last = ngx_snprintf(*last, end - *last, "{\"streams\":[");
 
@@ -2002,16 +2645,25 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
         entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
         stream = &entry->stream;
 
-        *last = ngx_snprintf(*last, end - *last,
-                             "%s{\"application\":\"%V\",\"name\":\"%V\","
-                             "\"revision\":%uL,\"sources\":[",
-                             first ? "" : ",", &stream->application,
-                             &stream->name, stream->revision);
-        first = 0;
+        *last = ngx_snprintf(*last, end - *last, "%s{\"application\":",
+                             first ? "" : ",");
 
-        if (*last >= end - 1) {
+        if (ngx_media_api_json_string(last, end, &stream->application)
+            != NGX_OK)
+        {
             return NGX_ERROR;
         }
+
+        *last = ngx_snprintf(*last, end - *last, ",\"name\":");
+
+        if (ngx_media_api_json_string(last, end, &stream->name) != NGX_OK) {
+            return NGX_ERROR;
+        }
+
+        *last = ngx_snprintf(*last, end - *last,
+                             ",\"revision\":%uL,\"sources\":[",
+                             stream->revision);
+        first = 0;
 
         {
             ngx_uint_t  sfirst = 1;
@@ -2023,26 +2675,25 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
                 source = ngx_queue_data(sq, ngx_media_source_t, queue);
 
                 *last = ngx_snprintf(*last, end - *last,
-                                     "%s{\"id\":\"%V\",\"type\":%ui,"
-                                     "\"priority\":%ui,\"enabled\":%s,"
-                                     "\"revision\":%uL}",
-                                     sfirst ? "" : ",", &source->id,
+                                     "%s{\"id\":", sfirst ? "" : ",");
+
+                if (ngx_media_api_json_string(last, end, &source->id)
+                    != NGX_OK)
+                {
+                    return NGX_ERROR;
+                }
+
+                *last = ngx_snprintf(*last, end - *last,
+                                     ",\"type\":%ui,\"priority\":%ui,"
+                                     "\"enabled\":%s,\"revision\":%uL}",
                                      source->type, source->priority,
                                      source->enabled ? "true" : "false",
                                      source->revision);
                 sfirst = 0;
-
-                if (*last >= end - 1) {
-                    return NGX_ERROR;
-                }
             }
         }
 
         *last = ngx_snprintf(*last, end - *last, "],\"destinations\":[");
-
-        if (*last >= end - 1) {
-            return NGX_ERROR;
-        }
 
         {
             ngx_uint_t  dfirst = 1;
@@ -2055,33 +2706,36 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
             {
                 destination = ngx_queue_data(sq, ngx_media_destination_t,
                                              queue);
-
                 host = ngx_media_api_safe_host(destination, safe,
                                                sizeof(safe));
 
                 *last = ngx_snprintf(*last, end - *last,
-                                     "%s{\"id\":\"%V\",\"type\":%ui,"
-                                     "\"host\":\"%V\",\"port\":%ui,"
-                                     "\"enabled\":%s,\"revision\":%uL}",
-                                     dfirst ? "" : ",", &destination->id,
-                                     destination->type, &host,
+                                     "%s{\"id\":", dfirst ? "" : ",");
+
+                if (ngx_media_api_json_string(last, end, &destination->id)
+                    != NGX_OK)
+                {
+                    return NGX_ERROR;
+                }
+
+                *last = ngx_snprintf(*last, end - *last,
+                                     ",\"type\":%ui,\"host\":",
+                                     destination->type);
+
+                if (ngx_media_api_json_string(last, end, &host) != NGX_OK) {
+                    return NGX_ERROR;
+                }
+
+                *last = ngx_snprintf(*last, end - *last,
+                                     ",\"port\":%ui,\"enabled\":%s,"
+                                     "\"revision\":%uL}",
                                      destination->port,
                                      destination->enabled ? "true" : "false",
                                      destination->revision);
                 dfirst = 0;
-
-                if (*last >= end - 1) {
-                    return NGX_ERROR;
-                }
             }
         }
 
-        /*
-         * fanout_delay percentiles (goal doc 32): how long a unit of media
-         * waits after the program publishes it before a consumer takes it.
-         * This is the number an operator can feel, and the one that says
-         * whether the deployment still has headroom.
-         */
         *last = ngx_snprintf(*last, end - *last,
                              "],\"fanout_ms\":{\"p50\":%M,\"p95\":%M,"
                              "\"p99\":%M,\"max\":%uL},\"dispatched\":%uL}",
@@ -2565,7 +3219,8 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
 
         stream = ngx_media_registry_stream_create(registry, &application,
                                                   &name, &feed_conf,
-                                                  r->connection->log);
+                                                  ((ngx_cycle_t *) ngx_cycle)
+                                                      ->log);
 
         if (stream == NULL) {
             *last = ngx_snprintf(*last, end - *last,
@@ -2585,12 +3240,20 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
              */
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"destination_needs_owner\","
-                                 "\"owner\":%ui,\"stream\":\"%V/%V\"}",
+                                 "\"owner\":%ui,\"stream\":",
                                  ngx_media_route_owner(
                                      (ngx_cycle_t *) ngx_cycle,
                                      ngx_media_owner_hash(
-                                         &stream->application, &stream->name)),
-                                 &stream->application, &stream->name);
+                                         &stream->application, &stream->name)));
+
+            if (ngx_media_api_json_stream_name(
+                    last, end, &stream->application, &stream->name)
+                != NGX_OK)
+            {
+                return NGX_HTTP_INTERNAL_SERVER_ERROR;
+            }
+
+            *last = ngx_snprintf(*last, end - *last, "}");
             return NGX_HTTP_CONFLICT;
         }
 
@@ -2809,7 +3472,13 @@ ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
         if (source == NULL) {
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"source_not_found\","
-                                 "\"source\":\"%V\"}", &source_id);
+                                 "\"source\":");
+
+            if (ngx_media_api_json_string(last, end, &source_id) != NGX_OK) {
+                return NGX_HTTP_INTERNAL_SERVER_ERROR;
+            }
+
+            *last = ngx_snprintf(*last, end - *last, "}");
             return NGX_HTTP_NOT_FOUND;
         }
 
@@ -2823,13 +3492,28 @@ ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
                       "media: api switch stream=%V/%V source=%V",
                       &application, &name, &source_id);
 
-        *last = ngx_snprintf(*last, end - *last,
-                             "{\"stream\":\"%V/%V\",\"requested\":\"%V\","
-                             "\"active\":", &application, &name, &source_id);
+        *last = ngx_snprintf(*last, end - *last, "{\"stream\":");
+
+        if (ngx_media_api_json_stream_name(last, end, &application, &name)
+            != NGX_OK)
+        {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        *last = ngx_snprintf(*last, end - *last, ",\"requested\":");
+
+        if (ngx_media_api_json_string(last, end, &source_id) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        *last = ngx_snprintf(*last, end - *last, ",\"active\":");
 
         if (stream->active != NULL) {
-            *last = ngx_snprintf(*last, end - *last, "\"%V\"",
-                                 &stream->active->id);
+            if (ngx_media_api_json_string(last, end, &stream->active->id)
+                != NGX_OK)
+            {
+                return NGX_HTTP_INTERNAL_SERVER_ERROR;
+            }
 
         } else {
             *last = ngx_snprintf(*last, end - *last, "null");
@@ -2879,13 +3563,22 @@ ngx_media_api_dispatch(ngx_http_request_t *r, ngx_media_registry_t *registry,
                       stream->active != NULL ? &stream->active->id
                                              : &ngx_media_api_none);
 
-        *last = ngx_snprintf(*last, end - *last,
-                             "{\"stream\":\"%V/%V\",\"active\":", &application,
-                             &name);
+        *last = ngx_snprintf(*last, end - *last, "{\"stream\":");
+
+        if (ngx_media_api_json_stream_name(last, end, &application, &name)
+            != NGX_OK)
+        {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        *last = ngx_snprintf(*last, end - *last, ",\"active\":");
 
         if (stream->active != NULL) {
-            *last = ngx_snprintf(*last, end - *last, "\"%V\"",
-                                 &stream->active->id);
+            if (ngx_media_api_json_string(last, end, &stream->active->id)
+                != NGX_OK)
+            {
+                return NGX_HTTP_INTERNAL_SERVER_ERROR;
+            }
 
         } else {
             *last = ngx_snprintf(*last, end - *last, "null");

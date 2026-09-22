@@ -249,8 +249,8 @@ grep -q 'srt source open app=live stream=news' "$RUN/logs/error.log" \
 # the playlist only appears once a segment closes, so this is checked while
 # the publisher is still running
 for _ in $(seq 1 200); do
-    [ -f "$RUN/hls/index.m3u8" ] \
-        && [ "$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" || true)" -ge 1 ] \
+    [ -f "$RUN/hls/live/news/index.m3u8" ] \
+        && [ "$(grep -c '^#EXTINF' "$RUN/hls/live/news/index.m3u8" || true)" -ge 1 ] \
         && break
     sleep 0.1
 done
@@ -487,7 +487,7 @@ echo "   deleted, and deleting again is a no-op"
 # requirement, so it is a defect rather than a test artefact: the segmenter
 # is started for this stream and then never fed.  Remove this block once the
 # cause is found; do not paper over it.
-if [ ! -f "$RUN/hls/index.m3u8" ]; then
+if [ ! -f "$RUN/hls/live/news/index.m3u8" ]; then
     echo "FAIL: an api-created stream produced no hls output" >&2
     echo "      (program ran: $(grep -c 'srt program stream=live/news frames' \
         "$RUN/logs/error.log") ticks; hls started: $(grep -c 'hls output started' \
@@ -776,8 +776,8 @@ PZ="$(publish encoder-z 12)"
 sleep 4
 
 for _ in $(seq 1 200); do
-    [ -f "$RUN/hls/index.m3u8" ] \
-        && [ "$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" || true)" -ge 1 ] \
+    [ -f "$RUN/hls/live/news/index.m3u8" ] \
+        && [ "$(grep -c '^#EXTINF' "$RUN/hls/live/news/index.m3u8" || true)" -ge 1 ] \
         && break
     sleep 0.1
 done
@@ -785,7 +785,7 @@ done
 kill -KILL "$PZ" 2>/dev/null
 wait "$PZ" 2>/dev/null
 
-[ -f "$RUN/hls/index.m3u8" ] \
+[ -f "$RUN/hls/live/news/index.m3u8" ] \
     || { echo "no outputs after the churn: the table was exhausted" >&2
          exit 1; }
 

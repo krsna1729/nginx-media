@@ -6,6 +6,15 @@
 #define S(lit) (&(ngx_str_t) { .len = sizeof(lit) - 1, \
                                .data = (u_char *) (lit) })
 
+/* stands in for the worker's shared revision sequence */
+static uint64_t  shared_next;
+
+static uint64_t
+shared_revision(void)
+{
+    return ++shared_next;
+}
+
 static ngx_media_frame_t
 make_frame(ngx_uint_t media_type, int64_t dts, unsigned keyframe, size_t len)
 {
@@ -451,6 +460,47 @@ main(void)
     ngx_media_stream_switch_resolve(NULL);
     ngx_media_stream_lease_end(NULL, NULL);
     ngx_media_source_preroll_replay(NULL, NULL, NULL);
+
+    TEST_CASE("a mutation takes the shared revision sequence");
+    {
+        /*
+         * With a provider registered - the worker's shared directory - two
+         * workers' mutations are comparable, which is what lets every replica
+         * resolve a conflict the same way.  The provider here stands in for
+         * that sequence; the numbers it hands out are the ones the objects
+         * have to carry, including for a source, whose operations travel in
+         * the same graph operation.
+         */
+        ngx_media_source_t  *source;
+
+        ngx_media_revision_provider(shared_revision);
+        shared_next = 40;
+
+        source = ngx_media_stream_source_add(&stream, S("revision-probe"),
+                                            NGX_MEDIA_SOURCE_SRT, 0, NULL);
+        TEST_ASSERT_NOT_NULL(source);
+
+        ngx_media_stream_touch(&stream);
+        ngx_media_source_touch(source);
+
+        TEST_ASSERT_EQ_U64(stream.revision, 41);
+        TEST_ASSERT_EQ_U64(source->revision, 42);
+
+        /*
+         * A sequence that is behind the object - a reload rebuilt the shared
+         * directory - must not move it backwards: a replica would drop the
+         * operation as stale.  The object's own number carries on instead.
+         */
+        stream.revision = 100;
+        ngx_media_stream_touch(&stream);
+        TEST_ASSERT_EQ_U64(stream.revision, 101);
+
+        ngx_media_revision_provider(NULL);
+        ngx_media_stream_touch(&stream);
+        TEST_ASSERT_EQ_U64(stream.revision, 102);
+
+        ngx_media_stream_source_remove(&stream, source);
+    }
 
     TEST_CASE("teardown");
     ngx_media_stream_destroy(&stream);

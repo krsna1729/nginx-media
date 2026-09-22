@@ -47,12 +47,21 @@ typedef struct {
 } ngx_media_hls_push_seen_t;
 
 struct ngx_media_hls_push_t {
+    /*
+     * The object outlives the stream that created it.  An upload runs on a
+     * pool thread with the destination list lock released, so the stream's
+     * pool cannot carry this: deleting the stream would free a destination an
+     * uploader is still reading its endpoint and its watched directory out of.
+     * It has its own pool instead, and a reference for every holder - the list
+     * plus one per upload in flight - so the last one out frees it.
+     */
+    ngx_pool_t              *pool;
+    ngx_atomic_t             refs;
+
     ngx_str_t                directory;    /* watched output directory */
     ngx_str_t                url;          /* remote endpoint, with trailing / */
     ngx_str_t                ca_file;      /* TLS trust anchor, empty for the
                                             * system store */
-    ngx_media_stream_t      *stream;
-    ngx_media_destination_t *destination;  /* owner, for teardown */
 
     ngx_media_hls_push_item_t  queue[NGX_MEDIA_HLS_PUSH_QUEUE];
     ngx_uint_t               head, tail, count;
@@ -85,6 +94,48 @@ static ngx_uint_t              ngx_media_hls_push_stopping;
 static ngx_log_t              *ngx_media_hls_push_log;
 
 /* --- queue --------------------------------------------------------------- */
+
+/*
+ * One reference on the object.  The list holds one, every upload in flight
+ * holds one, and the last release destroys the pool - which is what makes a
+ * delete safe while an uploader is still inside the destination.
+ */
+static void
+ngx_media_hls_push_release(ngx_media_hls_push_t *push)
+{
+    if (ngx_atomic_fetch_add(&push->refs, -1) != 1) {
+        return;
+    }
+
+    (void) pthread_cond_destroy(&push->cond);
+    (void) pthread_mutex_destroy(&push->mutex);
+
+    ngx_destroy_pool(push->pool);
+}
+
+/* a pool copy of one field, because the stream's pool is not ours to hold */
+static ngx_int_t
+ngx_media_hls_push_strdup(ngx_pool_t *pool, const ngx_str_t *src,
+    ngx_str_t *dst)
+{
+    dst->len = src->len;
+
+    if (src->len == 0) {
+        dst->data = NULL;
+        return NGX_OK;
+    }
+
+    dst->data = ngx_pnalloc(pool, src->len + 1);
+
+    if (dst->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(dst->data, src->data, src->len);
+    dst->data[src->len] = '\0';
+
+    return NGX_OK;
+}
 
 static ngx_int_t
 ngx_media_hls_push_enqueue(ngx_media_hls_push_t *push, const u_char *path,
@@ -165,6 +216,14 @@ ngx_media_hls_push_thread(void *data)
             work_push[nwork] = push;
             nwork++;
 
+            /*
+             * Taken under the destination list lock, which the delete also
+             * holds while it unlinks: a destination this loop can still see is
+             * one the delete has not released yet, and from here the upload
+             * keeps it alive on its own.
+             */
+            (void) ngx_atomic_fetch_add(&push->refs, 1);
+
             push->head = (push->head + 1) % NGX_MEDIA_HLS_PUSH_QUEUE;
             push->count--;
 
@@ -187,6 +246,9 @@ ngx_media_hls_push_thread(void *data)
             } else {
                 work_push[i]->failed++;
             }
+
+            /* last holder out frees the destination, uploads included */
+            ngx_media_hls_push_release(work_push[i]);
         }
 
         if (got == 0) {
@@ -208,6 +270,7 @@ ngx_media_hls_push_add(ngx_media_stream_t *stream,
     ngx_media_destination_t *destination, ngx_log_t *log)
 {
     ngx_media_hls_push_t  *push;
+    ngx_pool_t            *pool;
 
     if (destination->path.len == 0 || destination->host.len == 0) {
         ngx_log_error(NGX_LOG_WARN, log, 0,
@@ -217,16 +280,28 @@ ngx_media_hls_push_add(ngx_media_stream_t *stream,
         return NGX_ERROR;
     }
 
-    push = ngx_pcalloc(stream->pool, sizeof(ngx_media_hls_push_t));
-    if (push == NULL) {
+    pool = ngx_create_pool(4096, log);
+
+    if (pool == NULL) {
         return NGX_ERROR;
     }
 
-    push->directory = destination->path;
-    push->url = destination->host;    /* the endpoint URL */
-    push->ca_file = destination->ca_file;
-    push->stream = stream;
-    push->destination = destination;
+    push = ngx_pcalloc(pool, sizeof(ngx_media_hls_push_t));
+
+    if (push == NULL
+        || ngx_media_hls_push_strdup(pool, &destination->path,
+                                     &push->directory) != NGX_OK
+        || ngx_media_hls_push_strdup(pool, &destination->host,
+                                     &push->url) != NGX_OK
+        || ngx_media_hls_push_strdup(pool, &destination->ca_file,
+                                     &push->ca_file) != NGX_OK)
+    {
+        ngx_destroy_pool(pool);
+        return NGX_ERROR;
+    }
+
+    push->pool = pool;
+    push->refs = 1;                    /* the destination list's reference */
 
     (void) pthread_mutex_init(&push->mutex, NULL);
     (void) pthread_cond_init(&push->cond, NULL);
@@ -274,9 +349,10 @@ ngx_media_hls_push_remove(ngx_media_stream_t *stream,
 
     /*
      * Unlink first, then stop: the pool holds the list mutex while it
-     * dequeues, so after this returns no uploader can be inside this
-     * destination.  Nothing it queued outlives it, which is what the
-     * acceptance contract asks of a delete with work in flight.
+     * dequeues, so after this returns no uploader can take a new reference to
+     * this destination.  One already in flight holds its own and keeps the
+     * object alive until it finishes, which is why the release below is the
+     * list's reference and not the last word on the object.
      */
     (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
 
@@ -297,6 +373,8 @@ ngx_media_hls_push_remove(ngx_media_stream_t *stream,
     (void) pthread_mutex_unlock(&push->mutex);
 
     destination->impl = NULL;
+
+    ngx_media_hls_push_release(push);
 }
 
 static ngx_media_destination_ops_t  ngx_media_hls_push_ops = {

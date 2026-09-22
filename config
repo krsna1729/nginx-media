@@ -128,6 +128,7 @@ ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/core/ngx_media_hls_profile.c \
                  $ngx_addon_dir/src/core/ngx_media_stream.c \
                  $ngx_addon_dir/src/core/ngx_media_registry.c \
+                 $ngx_addon_dir/src/core/ngx_media_tombstone.c \
                  $ngx_addon_dir/src/core/ngx_media_policy.c \
                  $ngx_addon_dir/src/core/ngx_media_health.c \
                  $ngx_addon_dir/src/core/ngx_media_compat.c \

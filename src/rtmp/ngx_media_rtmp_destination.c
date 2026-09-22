@@ -34,6 +34,7 @@
 #define NGX_MEDIA_RTMP_DEST_CHUNK        4096
 #define NGX_MEDIA_RTMP_DEST_READ_BUFFER  16384
 #define NGX_MEDIA_RTMP_DEST_MAX_QUEUE    128
+#define NGX_MEDIA_RTMP_DEST_MAX_BYTES    (512 * 1024)
 #define NGX_MEDIA_RTMP_DEST_MAX_BATCH    32
 #define NGX_MEDIA_RTMP_DEST_TICK         40
 #define NGX_MEDIA_RTMP_DEST_RETRY        1000
@@ -100,6 +101,7 @@ struct ngx_media_rtmp_dest_s {
     ngx_chain_t                 *out;
     ngx_chain_t                 *out_last;
     ngx_uint_t                   out_queue;
+    size_t                        out_bytes;
 
     ngx_media_buf_t             *in_flight[NGX_MEDIA_RTMP_DEST_MAX_QUEUE];
     ngx_uint_t                   in_flight_head;
@@ -189,6 +191,7 @@ ngx_media_rtmp_dest_chain(ngx_media_rtmp_dest_t *d, ngx_buf_t *b)
 
     d->out_last = cl;
     d->out_queue++;
+    d->out_bytes += (size_t) (b->last - b->pos);
 
     return cl;
 }
@@ -199,8 +202,10 @@ ngx_media_rtmp_dest_queue_raw(ngx_media_rtmp_dest_t *d, const u_char *data,
     size_t len)
 {
     ngx_buf_t  *b;
-
-    if (d->out_queue + 1 > NGX_MEDIA_RTMP_DEST_MAX_QUEUE) {
+    if (d->out_queue + 1 > NGX_MEDIA_RTMP_DEST_MAX_QUEUE
+        || len > NGX_MEDIA_RTMP_DEST_MAX_BYTES
+        || d->out_bytes > NGX_MEDIA_RTMP_DEST_MAX_BYTES - len)
+    {
         return NGX_AGAIN;
     }
 
@@ -233,8 +238,11 @@ ngx_media_rtmp_dest_queue_message(ngx_media_rtmp_dest_t *d, ngx_uint_t csid,
     ngx_media_buf_t *payload, size_t len)
 {
     ngx_media_rtmp_packet_t  packet;
+    ngx_media_rtmp_writer_t  writer;
     ngx_buf_t               *head;
-    ngx_uint_t               i, chunks;
+    ngx_chain_t             *pending, *pending_last, *cl;
+    ngx_uint_t               i, chunks, pending_queue;
+    size_t                    wire_bytes;
 
     chunks = (len + NGX_MEDIA_RTMP_DEST_CHUNK - 1)
              / NGX_MEDIA_RTMP_DEST_CHUNK;
@@ -250,12 +258,32 @@ ngx_media_rtmp_dest_queue_message(ngx_media_rtmp_dest_t *d, ngx_uint_t csid,
     }
 
     ngx_media_rtmp_packet_init(&packet);
+    writer = d->writer;
 
-    if (ngx_media_rtmp_writer_message(&d->writer, &packet, csid, type,
+    if (ngx_media_rtmp_writer_message(&writer, &packet, csid, type,
                                       stream_id, timestamp, payload, 0, len)
         != NGX_OK)
     {
         return NGX_ERROR;
+    }
+
+    wire_bytes = 0;
+
+    for (i = 0; i < packet.nparts; i++) {
+        if (packet.parts[i].len > NGX_MEDIA_RTMP_DEST_MAX_BYTES
+            || wire_bytes > NGX_MEDIA_RTMP_DEST_MAX_BYTES
+                              - packet.parts[i].len)
+        {
+            ngx_media_rtmp_packet_destroy(&packet);
+            return NGX_AGAIN;
+        }
+
+        wire_bytes += packet.parts[i].len;
+    }
+
+    if (d->out_bytes > NGX_MEDIA_RTMP_DEST_MAX_BYTES - wire_bytes) {
+        ngx_media_rtmp_packet_destroy(&packet);
+        return NGX_AGAIN;
     }
 
     /* one buffer holds every chunk header of this message */
@@ -267,10 +295,17 @@ ngx_media_rtmp_dest_queue_message(ngx_media_rtmp_dest_t *d, ngx_uint_t csid,
     }
 
     head->last = ngx_cpymem(head->last, packet.head, packet.head_len);
+    pending = NULL;
+    pending_last = NULL;
+    pending_queue = 0;
 
+    /*
+     * Build the message on a private chain.  Nothing becomes visible in the
+     * destination queue, and no payload reference enters the ring, until
+     * every part has an allocated buffer and chain link.
+     */
     for (i = 0; i < packet.nparts; i++) {
-        ngx_buf_t    *b;
-        ngx_chain_t  *cl;
+        ngx_buf_t  *b;
 
         b = ngx_calloc_buf(d->pool);
 
@@ -296,29 +331,53 @@ ngx_media_rtmp_dest_queue_message(ngx_media_rtmp_dest_t *d, ngx_uint_t csid,
             b->pos = b->start;
             b->end = b->start + packet.parts[i].len;
             b->last = b->end;
-
-            if (d->in_flight_count >= NGX_MEDIA_RTMP_DEST_MAX_QUEUE) {
-                ngx_media_rtmp_packet_destroy(&packet);
-                return NGX_ERROR;
-            }
-
-            d->in_flight[(d->in_flight_head + d->in_flight_count)
-                         % NGX_MEDIA_RTMP_DEST_MAX_QUEUE] =
-                ngx_media_buf_ref(packet.payload);
-            d->in_flight_count++;
         }
 
-        cl = ngx_media_rtmp_dest_chain(d, b);
+        cl = ngx_alloc_chain_link(d->pool);
 
         if (cl == NULL) {
             ngx_media_rtmp_packet_destroy(&packet);
             return NGX_ERROR;
         }
+
+        cl->buf = b;
+        cl->next = NULL;
+
+        if (pending_last != NULL) {
+            pending_last->next = cl;
+
+        } else {
+            pending = cl;
+        }
+
+        pending_last = cl;
+        pending_queue++;
     }
 
     if (d->out_last != NULL) {
-        d->out_last->buf->flush = 1;
+        d->out_last->next = pending;
+
+    } else {
+        d->out = pending;
     }
+
+    d->out_last = pending_last;
+    d->out_queue += pending_queue;
+    d->out_bytes += wire_bytes;
+
+    for (i = 0; i < packet.nparts; i++) {
+        if (packet.parts[i].data < packet.head
+            || packet.parts[i].data >= packet.head + packet.head_len)
+        {
+            d->in_flight[(d->in_flight_head + d->in_flight_count)
+                         % NGX_MEDIA_RTMP_DEST_MAX_QUEUE] =
+                ngx_media_buf_ref(packet.payload);
+            d->in_flight_count++;
+        }
+    }
+
+    d->writer = writer;
+    d->out_last->buf->flush = 1;
 
     ngx_media_rtmp_packet_destroy(&packet);
 
@@ -330,6 +389,7 @@ ngx_media_rtmp_dest_flush(ngx_media_rtmp_dest_t *d)
 {
     ngx_connection_t  *c = d->connection;
     ngx_chain_t       *sent_tail, *cl, *next;
+    size_t             remaining_bytes;
 
     if (c == NULL || d->out == NULL) {
         return;
@@ -355,6 +415,15 @@ ngx_media_rtmp_dest_flush(ngx_media_rtmp_dest_t *d)
 
         d->out_queue--;
     }
+    remaining_bytes = 0;
+
+    for (cl = sent_tail; cl != NULL; cl = cl->next) {
+        if (cl->buf->pos < cl->buf->last) {
+            remaining_bytes += (size_t) (cl->buf->last - cl->buf->pos);
+        }
+    }
+
+    d->out_bytes = remaining_bytes;
 
     d->out = sent_tail;
     d->out_last = sent_tail;
@@ -936,6 +1005,7 @@ ngx_media_rtmp_dest_release(ngx_media_rtmp_dest_t *d)
     d->out = NULL;
     d->out_last = NULL;
     d->out_queue = 0;
+    d->out_bytes = 0;
 
     if (d->pool != NULL) {
         ngx_reset_pool(d->pool);

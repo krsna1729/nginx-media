@@ -28,7 +28,14 @@
 #include <unistd.h>
 
 #define NGX_MEDIA_SRT_REFERENCE_MAX_SESSIONS 32
+#define NGX_MEDIA_SRT_REFERENCE_MAX_PACKET   65536
+#define NGX_MEDIA_SRT_REFERENCE_PENDING      16
 #define NGX_MEDIA_SRT_REFERENCE_STREAMID_MAGIC 0x53494431u   /* "SID1" */
+
+typedef struct {
+    u_char  *data;
+    size_t   len;
+} ngx_media_srt_udp_datagram_t;
 
 struct ngx_media_srt_listener_s {
     int                        fd;
@@ -48,6 +55,11 @@ struct ngx_media_srt_session_s {
     unsigned                   have_streamid:1;
     unsigned                   caller:1;
 
+    ngx_media_srt_udp_datagram_t pending[
+        NGX_MEDIA_SRT_REFERENCE_PENDING];
+    ngx_uint_t                 pending_head;
+    ngx_uint_t                 pending_count;
+
     uint64_t                   bytes_received;
     uint64_t                   bytes_sent;
     uint64_t                   packets_received;
@@ -56,7 +68,8 @@ struct ngx_media_srt_session_s {
 
 struct ngx_media_srt_poll_s {
     ngx_media_srt_listener_t  *listener;
-    ngx_media_srt_session_t   *session;
+    ngx_media_srt_session_t   *sessions[NGX_MEDIA_SRT_REFERENCE_MAX_SESSIONS];
+    ngx_uint_t                 session_count;
     /* poll(2) is used directly, so the type never shadows it */
 };
 
@@ -101,6 +114,12 @@ static void ngx_media_srt_udp_session_shutdown(
     ngx_media_srt_session_t *session);
 static void ngx_media_srt_udp_session_close(
     ngx_media_srt_session_t *session);
+static void ngx_media_srt_udp_pending_clear(
+    ngx_media_srt_session_t *session);
+static ngx_int_t ngx_media_srt_udp_pending_push(
+    ngx_media_srt_session_t *session, const u_char *data, size_t len);
+static ngx_int_t ngx_media_srt_udp_pending_pop(
+    ngx_media_srt_session_t *session, u_char *buf, size_t cap);
 static void ngx_media_srt_udp_shutdown(void);
 
 /* the double is not SRT and says so wherever the implementation is reported */
@@ -254,7 +273,7 @@ ngx_media_srt_udp_listen_close(ngx_media_srt_listener_t *listener)
 
     for (session = listener->sessions; session != NULL; session = next) {
         next = session->next;
-        (void) close(session->fd);
+        ngx_media_srt_udp_pending_clear(session);
         ngx_free(session);
     }
 
@@ -367,6 +386,93 @@ ngx_media_srt_udp_session_for(ngx_media_srt_listener_t *listener,
 
     return NULL;
 }
+static void
+ngx_media_srt_udp_pending_clear(ngx_media_srt_session_t *session)
+{
+    ngx_uint_t  i;
+
+    if (session == NULL) {
+        return;
+    }
+
+    for (i = 0; i < NGX_MEDIA_SRT_REFERENCE_PENDING; i++) {
+        if (session->pending[i].data != NULL) {
+            ngx_free(session->pending[i].data);
+            session->pending[i].data = NULL;
+            session->pending[i].len = 0;
+        }
+    }
+
+    session->pending_head = 0;
+    session->pending_count = 0;
+}
+
+static ngx_int_t
+ngx_media_srt_udp_pending_push(ngx_media_srt_session_t *session,
+    const u_char *data, size_t len)
+{
+    ngx_media_srt_udp_datagram_t  *slot;
+    u_char                        *copy;
+    ngx_uint_t                     index;
+
+    if (session == NULL || data == NULL || len == 0) {
+        return NGX_ERROR;
+    }
+
+    if (session->pending_count >= NGX_MEDIA_SRT_REFERENCE_PENDING) {
+        session->packets_lost++;
+        return NGX_AGAIN;
+    }
+
+    copy = ngx_alloc(len, NULL);
+    if (copy == NULL) {
+        session->packets_lost++;
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(copy, data, len);
+
+    index = (session->pending_head + session->pending_count)
+            % NGX_MEDIA_SRT_REFERENCE_PENDING;
+    slot = &session->pending[index];
+    slot->data = copy;
+    slot->len = len;
+    session->pending_count++;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_media_srt_udp_pending_pop(ngx_media_srt_session_t *session, u_char *buf,
+    size_t cap)
+{
+    ngx_media_srt_udp_datagram_t  *slot;
+    size_t                         take;
+
+    if (session == NULL || buf == NULL || cap == 0
+        || session->pending_count == 0)
+    {
+        return NGX_AGAIN;
+    }
+
+    slot = &session->pending[session->pending_head];
+    take = (slot->len < cap) ? slot->len : cap;
+
+    if (take > 0) {
+        ngx_memcpy(buf, slot->data, take);
+    }
+
+    ngx_free(slot->data);
+    slot->data = NULL;
+    slot->len = 0;
+    session->pending_head = (session->pending_head + 1)
+                            % NGX_MEDIA_SRT_REFERENCE_PENDING;
+    session->pending_count--;
+    session->bytes_received += (uint64_t) take;
+    session->packets_received++;
+
+    return (ngx_int_t) take;
+}
 
 static ngx_media_srt_session_t *
 ngx_media_srt_udp_accept_ready(ngx_media_srt_listener_t *listener,
@@ -444,11 +550,14 @@ ngx_media_srt_udp_recv(ngx_media_srt_session_t *session, u_char *buf,
     size_t cap, ngx_msec_t timeout_ms)
 {
     struct pollfd  pfd;
-    ssize_t        n;
     int            rc;
 
-    if (session == NULL) {
+    if (session == NULL || buf == NULL || cap == 0) {
         return -1;
+    }
+
+    if (session->pending_count > 0) {
+        return ngx_media_srt_udp_pending_pop(session, buf, cap);
     }
 
     pfd.fd = session->fd;
@@ -465,35 +574,87 @@ ngx_media_srt_udp_recv(ngx_media_srt_session_t *session, u_char *buf,
         return (errno == EINTR) ? 0 : -1;
     }
 
-    for ( ;; ) {
-        struct sockaddr_in  from;
-        socklen_t           from_len = sizeof(from);
+    if (session->listener == NULL) {
+        ssize_t  n;
 
-        n = recvfrom(session->fd, buf, cap, 0, (struct sockaddr *) &from,
-                     &from_len);
+        n = recv(session->fd, buf, cap, 0);
 
         if (n < 0) {
             return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
         }
 
-        /* every session shares the listener socket: keep only our peer */
+        if (n == 0) {
+            return 0;
+        }
+
+        session->bytes_received += (uint64_t) n;
+        session->packets_received++;
+
+        return (ngx_int_t) n;
+    }
+
+    for ( ;; ) {
+        struct sockaddr_in  from;
+        socklen_t           from_len = sizeof(from);
+        u_char              packet[NGX_MEDIA_SRT_REFERENCE_MAX_PACKET];
+        ssize_t             n;
+        ngx_media_srt_session_t *other;
+        size_t              take;
+
+        /*
+         * Do not consume a new peer's handshake here.  accept_ready() owns
+         * that datagram; consuming it would make the peer undiscoverable.
+         */
+        if (recvfrom(session->fd, packet, 1, MSG_PEEK,
+                     (struct sockaddr *) &from, &from_len) < 0)
+        {
+            return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+        }
+
         if (from.sin_addr.s_addr != session->peer.sin_addr.s_addr
             || from.sin_port != session->peer.sin_port)
         {
+            other = ngx_media_srt_udp_session_for(session->listener, &from);
+
+            if (other == NULL) {
+                return 0;
+            }
+
+            from_len = sizeof(from);
+            n = recvfrom(session->fd, packet, sizeof(packet), 0,
+                         (struct sockaddr *) &from, &from_len);
+
+            if (n < 0) {
+                return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+            }
+
+            if (n > 0) {
+                (void) ngx_media_srt_udp_pending_push(other, packet,
+                                                       (size_t) n);
+            }
+
             continue;
         }
 
-        break;
+        from_len = sizeof(from);
+        n = recvfrom(session->fd, packet, sizeof(packet), 0,
+                     (struct sockaddr *) &from, &from_len);
+
+        if (n < 0) {
+            return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+        }
+
+        if (n == 0) {
+            return 0;
+        }
+
+        take = ((size_t) n < cap) ? (size_t) n : cap;
+        ngx_memcpy(buf, packet, take);
+        session->bytes_received += (uint64_t) take;
+        session->packets_received++;
+
+        return (ngx_int_t) take;
     }
-
-    if (n == 0) {
-        return 0;
-    }
-
-    session->bytes_received += (uint64_t) n;
-    session->packets_received++;
-
-    return (ngx_int_t) n;
 }
 
 static ngx_media_srt_session_t *
@@ -665,6 +826,7 @@ ngx_media_srt_udp_session_close(ngx_media_srt_session_t *session)
         (void) close(session->fd);
     }
 
+    ngx_media_srt_udp_pending_clear(session);
     ngx_free(session);
 }
 
@@ -766,11 +928,23 @@ static ngx_int_t
 ngx_media_srt_udp_poll_add_session(ngx_media_srt_poll_t *scheduler,
     ngx_media_srt_session_t *session)
 {
+    ngx_uint_t  i;
+
     if (scheduler == NULL || session == NULL) {
         return NGX_ERROR;
     }
 
-    scheduler->session = session;
+    for (i = 0; i < scheduler->session_count; i++) {
+        if (scheduler->sessions[i] == session) {
+            return NGX_OK;
+        }
+    }
+
+    if (scheduler->session_count >= NGX_MEDIA_SRT_REFERENCE_MAX_SESSIONS) {
+        return NGX_ERROR;
+    }
+
+    scheduler->sessions[scheduler->session_count++] = session;
 
     return NGX_OK;
 }
@@ -779,90 +953,174 @@ static void
 ngx_media_srt_udp_poll_remove_session(ngx_media_srt_poll_t *scheduler,
     ngx_media_srt_session_t *session)
 {
-    if (scheduler != NULL && scheduler->session == session) {
-        scheduler->session = NULL;
+    ngx_uint_t  i;
+
+    if (scheduler == NULL || session == NULL) {
+        return;
+    }
+
+    for (i = 0; i < scheduler->session_count; i++) {
+        if (scheduler->sessions[i] != session) {
+            continue;
+        }
+
+        scheduler->session_count--;
+        scheduler->sessions[i] =
+            scheduler->sessions[scheduler->session_count];
+        scheduler->sessions[scheduler->session_count] = NULL;
+        return;
     }
 }
 
 /*
- * The reference transport keeps its sessions on the listener socket, so the
- * runtime only ever polls one listener and one session: that is all the ingest
- * path asks of a backend.
+ * The listener socket is shared by every accepted peer.  poll_wait therefore
+ * drains established-peer datagrams into per-session bounded queues before it
+ * reports readiness; otherwise one busy peer can consume and discard another
+ * peer's packet.
  */
 static ngx_int_t
 ngx_media_srt_udp_poll_wait(ngx_media_srt_poll_t *scheduler,
     ngx_msec_t timeout_ms, ngx_media_srt_poll_event_t *events, ngx_uint_t max,
     ngx_uint_t *count)
 {
-    struct pollfd  pfd[2];
-    ngx_uint_t     n = 0, at;
-    int            rc;
+    struct pollfd               pfd[
+        NGX_MEDIA_SRT_REFERENCE_MAX_SESSIONS + 1];
+    ngx_media_srt_session_t     *fd_sessions[
+        NGX_MEDIA_SRT_REFERENCE_MAX_SESSIONS + 1];
+    ngx_uint_t                   n, i, listener_at, pending;
+    int                          rc;
+    ngx_msec_t                   wait_ms;
 
     if (scheduler == NULL || events == NULL || count == NULL || max == 0) {
         return NGX_ERROR;
     }
 
     *count = 0;
+    n = 0;
+    listener_at = NGX_MEDIA_SRT_REFERENCE_MAX_SESSIONS + 1;
+    pending = 0;
+    wait_ms = timeout_ms;
+    ngx_memzero(fd_sessions, sizeof(fd_sessions));
 
     if (scheduler->listener != NULL) {
+        listener_at = n;
         pfd[n].fd = scheduler->listener->fd;
         pfd[n].events = POLLIN;
         pfd[n].revents = 0;
         n++;
     }
 
-    if (scheduler->session != NULL) {
-        pfd[n].fd = scheduler->session->fd;
+    for (i = 0; i < scheduler->session_count; i++) {
+        ngx_media_srt_session_t  *session = scheduler->sessions[i];
+
+        if (session->pending_count > 0) {
+            pending = 1;
+        }
+
+        /*
+         * Accepted sessions share the listener fd and are represented by
+         * pending queues.  Only caller sessions contribute another poll fd.
+         */
+        if (session->listener != NULL) {
+            continue;
+        }
+
+        pfd[n].fd = session->fd;
         pfd[n].events = POLLIN;
         pfd[n].revents = 0;
+        fd_sessions[n] = session;
         n++;
     }
 
-    if (n == 0) {
-        return NGX_OK;
+    if (pending) {
+        wait_ms = 0;
     }
 
-    rc = poll(pfd, n, (timeout_ms > (ngx_msec_t) INT_MAX) ? INT_MAX
-                                                         : (int) timeout_ms);
+    if (n > 0) {
+        rc = poll(pfd, n, (wait_ms > (ngx_msec_t) INT_MAX)
+                              ? INT_MAX : (int) wait_ms);
 
-    if (rc <= 0) {
-        return (rc < 0 && errno != EINTR) ? NGX_ERROR : NGX_OK;
-    }
-
-    if (scheduler->listener != NULL && (pfd[0].revents & POLLIN)) {
-        struct sockaddr_in  peer;
-        socklen_t           peer_len = sizeof(peer);
-        u_char              probe[1];
-        ngx_uint_t          known = 0;
-
-        if (recvfrom(scheduler->listener->fd, probe, sizeof(probe), MSG_PEEK,
-                     (struct sockaddr *) &peer, &peer_len) >= 0)
-        {
-            known = (ngx_media_srt_udp_session_for(scheduler->listener,
-                                                         &peer) != NULL);
+        if (rc < 0 && errno != EINTR) {
+            return NGX_ERROR;
         }
+    }
 
-        if (known && scheduler->session != NULL) {
-            /* media from the established peer: report its session */
+    if (listener_at < n && (pfd[listener_at].revents & POLLIN)) {
+        for (i = 0; i < NGX_MEDIA_SRT_REFERENCE_MAX_SESSIONS; i++) {
+            struct sockaddr_in       peer;
+            socklen_t                 peer_len = sizeof(peer);
+            u_char                    probe[1];
+            u_char                    packet[NGX_MEDIA_SRT_REFERENCE_MAX_PACKET];
+            ssize_t                   peeked, received;
+            ngx_media_srt_session_t  *session;
+
+            peeked = recvfrom(scheduler->listener->fd, probe, sizeof(probe),
+                              MSG_PEEK, (struct sockaddr *) &peer, &peer_len);
+
+            if (peeked < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;
+                }
+
+                return NGX_ERROR;
+            }
+
+            session = ngx_media_srt_udp_session_for(scheduler->listener, &peer);
+
+            if (session == NULL) {
+                if (*count < max) {
+                    events[*count].listener = scheduler->listener;
+                    events[*count].session = NULL;
+                    (*count)++;
+                }
+
+                /*
+                 * Leave a new peer's stream-id datagram at the head for
+                 * accept_ready(); later established packets cannot pass it.
+                 */
+                break;
+            }
+
+            peer_len = sizeof(peer);
+            received = recvfrom(scheduler->listener->fd, packet,
+                                sizeof(packet), 0,
+                                (struct sockaddr *) &peer, &peer_len);
+
+            if (received < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;
+                }
+
+                return NGX_ERROR;
+            }
+
+            if (received > 0) {
+                (void) ngx_media_srt_udp_pending_push(session, packet,
+                                                       (size_t) received);
+            }
+        }
+    }
+
+    /*
+     * A poll event can have queued several peers.  Emit one event per ready
+     * session so the event loop drains each peer without another demux pass.
+     */
+    for (i = 0; i < scheduler->session_count && *count < max; i++) {
+        ngx_media_srt_session_t  *session = scheduler->sessions[i];
+
+        if (session->pending_count > 0) {
             events[*count].listener = NULL;
-            events[*count].session = scheduler->session;
-            (*count)++;
-
-        } else {
-            events[*count].listener = scheduler->listener;
-            events[*count].session = NULL;
+            events[*count].session = session;
             (*count)++;
         }
     }
 
-    at = (scheduler->listener != NULL) ? 1 : 0;
-
-    if (scheduler->session != NULL && *count < max
-        && (pfd[at].revents & POLLIN))
-    {
-        events[*count].listener = NULL;
-        events[*count].session = scheduler->session;
-        (*count)++;
+    for (i = 0; i < n && *count < max; i++) {
+        if (fd_sessions[i] != NULL && (pfd[i].revents & POLLIN)) {
+            events[*count].listener = NULL;
+            events[*count].session = fd_sessions[i];
+            (*count)++;
+        }
     }
 
     return NGX_OK;

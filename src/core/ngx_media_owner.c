@@ -12,29 +12,29 @@
  * identical in every worker and across restarts, so it is deliberately simple
  * and dependency free.
  */
-uint32_t
+uint64_t
 ngx_media_owner_hash(const ngx_str_t *application, const ngx_str_t *stream)
 {
-    uint32_t  hash = 2166136261u;
+    uint64_t  hash = 14695981039346656037ull;   /* FNV-1a 64 offset basis */
     size_t    i;
 
     if (application != NULL) {
 
         for (i = 0; i < application->len; i++) {
-            hash ^= (uint32_t) application->data[i];
-            hash *= 16777619u;
+            hash ^= (uint64_t) application->data[i];
+            hash *= 1099511628211ull;
         }
     }
 
     if (stream != NULL) {
 
         /* the separator keeps "ab" + "c" distinct from "a" + "bc" */
-        hash ^= (uint32_t) '/';
-        hash *= 16777619u;
+        hash ^= (uint64_t) '/';
+        hash *= 1099511628211ull;
 
         for (i = 0; i < stream->len; i++) {
-            hash ^= (uint32_t) stream->data[i];
-            hash *= 16777619u;
+            hash ^= (uint64_t) stream->data[i];
+            hash *= 1099511628211ull;
         }
     }
 
@@ -42,7 +42,7 @@ ngx_media_owner_hash(const ngx_str_t *application, const ngx_str_t *stream)
 }
 
 ngx_uint_t
-ngx_media_owner_slot(uint32_t hash, ngx_uint_t workers)
+ngx_media_owner_slot(uint64_t hash, ngx_uint_t workers)
 {
     if (workers == 0) {
         return 0;
@@ -72,7 +72,7 @@ ngx_media_owner_worker_count(ngx_cycle_t *cycle)
 }
 
 ngx_uint_t
-ngx_media_owner_for(ngx_cycle_t *cycle, uint32_t hash)
+ngx_media_owner_for(ngx_cycle_t *cycle, uint64_t hash)
 {
     return ngx_media_owner_slot(hash, ngx_media_owner_worker_count(cycle));
 }

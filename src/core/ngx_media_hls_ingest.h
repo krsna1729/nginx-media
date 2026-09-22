@@ -28,6 +28,10 @@ typedef struct ngx_media_hls_ingest_source_s ngx_media_hls_ingest_source_t;
  * Watches directory and publishes what appears, in name order.  Returns NULL
  * if the directory cannot be read.
  */
+/*
+ * log is kept by the reader thread, so it has to outlive the request: pass the
+ * worker's log, never a connection's.
+ */
 ngx_media_hls_ingest_source_t *ngx_media_hls_ingest_open(
     ngx_media_stream_t *stream, const ngx_str_t *id, const ngx_str_t *directory,
     ngx_log_t *log);
@@ -41,6 +45,17 @@ void ngx_media_hls_ingest_close(ngx_media_hls_ingest_source_t *source);
  * has to take the reader with it, and the reader holds a thread.
  */
 void ngx_media_hls_ingest_reap(ngx_log_t *log);
+
+/*
+ * How many ingest readers still reference this stream, which is the
+ * pool-release gate: a reader is unlinked by its close, and close() joins its
+ * thread first, so a count of zero means no thread can still be reading the
+ * stream's memory.
+ */
+ngx_uint_t ngx_media_hls_ingest_stream_readers(
+    const ngx_media_stream_t *stream);
+/* transfers queued reader events to the owning worker; called from its tick */
+void ngx_media_hls_ingest_drain_all(void);
 
 /* stops and joins every reader; called at shutdown */
 void ngx_media_hls_ingest_stop_all(void);

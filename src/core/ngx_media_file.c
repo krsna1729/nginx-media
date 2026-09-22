@@ -273,6 +273,47 @@ ngx_media_file_close(ngx_media_file_source_t *source)
 }
 
 void
+ngx_media_file_close_stream(ngx_media_stream_t *stream)
+{
+    ngx_media_file_source_t  *source, *found;
+
+    if (stream == NULL) {
+        return;
+    }
+
+    for ( ;; ) {
+        found = NULL;
+
+        (void) pthread_mutex_lock(&ngx_media_file_mutex);
+
+        for (source = ngx_media_file_all; source != NULL;
+             source = source->next)
+        {
+            if (source->stream == stream) {
+                found = source;
+                break;
+            }
+        }
+
+        (void) pthread_mutex_unlock(&ngx_media_file_mutex);
+
+        if (found == NULL) {
+            return;
+        }
+
+        /*
+         * close() unlinks the reader, so the next pass finds the rest rather
+         * than the one just released.
+         */
+        ngx_log_error(NGX_LOG_NOTICE, found->file.log, 0,
+                      "media: file source %V removed with its stream, "
+                      "closing its reader", &found->path);
+
+        ngx_media_file_close(found);
+    }
+}
+
+void
 ngx_media_file_advance_all(ngx_log_t *log)
 {
     ngx_media_file_source_t **link;

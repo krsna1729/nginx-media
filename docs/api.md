@@ -127,18 +127,34 @@ directly.
 Both fields are optional, each must be at least `1`, and a bad value is `400`
 with `bad_failure_timeout` or `bad_recovery_timeout`.  `DELETE` answers even
 when the stream is gone, with `{"deleted":false,"reason":"absent"}`, because the
-caller asked for an end state that already holds.
+caller asked for an end state that already holds.  Deleting a stream that is
+not on this worker still tells the workers that do have it: the two requests of
+a controller — add a source, remove the stream — can land on different workers,
+and the delete is authoritative for the deployment, not for the worker that
+happened to answer it.  The response carries the revision the deletion moved
+past (`"revision":N`), so a caller can tell a delete that was superseded by a
+newer write from one that was applied and then recreated.
 
 ### Revisions
 
-Every object carries a `revision`, incremented by every mutation of it or of a
-child that belongs to it.  A mutation may state the revision the caller last
-saw — `?revision=N` on `DELETE`, `"revision":N` in a `PATCH` body — and a
-mismatch is refused with `409` and `{"error":"stale_revision","revision":N}`
-rather than overwriting a newer desired state.  This is compare-and-set, not a
-version history: only the current number is kept, which is exactly what a
-controller needs to notice that someone else has written.  A mutation that
-carries no revision is applied unconditionally.
+Every object carries a `revision`, taken from one sequence shared by every
+worker and advanced by every mutation of the object or of a child that belongs
+to it.  A mutation may state the revision the caller last saw — `?revision=N`
+on `DELETE`, `"revision":N` in a `PATCH` body — and a mismatch is refused with
+`409` and `{"error":"stale_revision","revision":N}` rather than overwriting a
+newer desired state.  This is compare-and-set, not a version history: only the
+current number is kept, which is exactly what a controller needs to notice that
+someone else has written.  A mutation that carries no revision is applied
+unconditionally.
+
+Because the sequence is shared, the numbers mean the same thing on every worker,
+which is what a deployment with more than one of them needs: two writes to one
+stream that race are ordered by revision, every worker ends up holding the newer
+one, and the loser's revision is gone from the graph.  So an unconditional write
+that loses a race does not come back with an error — it is simply superseded —
+and a controller that wants to be told about the race states the revision it
+last saw and gets `409` instead.  The revision is reported by
+`GET .../streams/{app}/{stream}` and by `GET /desired`.
 
 ## Sources
 
@@ -162,7 +178,9 @@ reader:
 - `file` needs `path`, the MPEG-TS file to read.  The file is opened by the
   create call and read one bounded chunk per runtime tick, so a large file
   cannot stall a worker.
-- `hls_push` needs `path`, the directory an uploader writes segments into.
+- `hls_push` needs `path`, the directory an uploader watches.  A program's HLS
+  output is `<media_hls>/<application>/<name>`, so that is the directory a
+  destination for one program is pointed at.
 - `hls_pull` needs `path`, the playlist URL to fetch, and accepts an optional
   `ca_file` for an HTTPS origin whose certificate is not in the system store.
 
@@ -229,7 +247,7 @@ output directory it watches; there is no port:
 ```json
 {"id":"cdn","type":"hls_push",
  "host":"http://origin.example/live/news/",
- "path":"/var/lib/nginx/media/hls"}
+ "path":"/var/lib/nginx/media/hls/live/news"}
 ```
 
 A destination is answered as `{"id","type","host","port","enabled","revision"}`
@@ -368,6 +386,7 @@ nginx_media_source_healthy{application="live",name="news",source="encoder-a"} 1
 nginx_media_source_active{application="live",name="news",source="encoder-a"} 0
 nginx_media_source_active{application="live",name="news",source="encoder-b"} 1
 nginx_media_runtime_outputs 3
+nginx_media_streams_draining 0
 nginx_media_worker_event_loop_delay_ms 100
 nginx_media_worker_event_loop_max_delay_ms 143
 nginx_media_worker_late_ticks_total 2
@@ -398,4 +417,7 @@ Three groups are worth knowing:
   `_late_ticks_total` counts ticks that missed their interval by more than
   half.  `nginx_media_runtime_outputs` is the number of per-stream output slots
   in use; it is bounded, and a count that does not fall after streams are
-  deleted means teardown is leaking a slot.
+  deleted means teardown is leaking a slot.  `nginx_media_streams_draining`
+  counts deleted streams whose memory is still held by a reader that owns a
+  thread and is stopping: it returns to zero on its own within a tick or two,
+  and a value that stays up is a reader that will not leave.

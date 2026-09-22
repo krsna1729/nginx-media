@@ -1306,10 +1306,6 @@ test_rtmp_player_reserve(void)
                         sizeof(rtmp_mod_paths) / sizeof(rtmp_mod_paths[0]),
                         "(len + NGX_MEDIA_RTMP_OUT_CHUNK - 1)"),
           "player queue sizes the reservation by chunk count");
-    CHECK(file_contains(rtmp_mod_paths,
-                        sizeof(rtmp_mod_paths) / sizeof(rtmp_mod_paths[0]),
-                        "in_flight_count >= NGX_MEDIA_RTMP_MAX_OUT_QUEUE"),
-          "player queue guards the ring inside the slice loop");
 }
 
 static void

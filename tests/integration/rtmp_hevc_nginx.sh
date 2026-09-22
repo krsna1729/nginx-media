@@ -101,8 +101,8 @@ echo "   publisher registered"
 # segmenter only writes HEVC if the source was modelled as HEVC rather than
 # read as a legacy codec id, which is what the old parser would have done.
 for _ in $(seq 1 200); do
-    [ -f "$RUN/hls/index.m3u8" ] \
-        && [ "$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" || true)" -ge 1 ] \
+    [ -f "$RUN/hls/live/hevc/index.m3u8" ] \
+        && [ "$(grep -c '^#EXTINF' "$RUN/hls/live/hevc/index.m3u8" || true)" -ge 1 ] \
         && break
     sleep 0.1
 done
@@ -116,7 +116,7 @@ timeout 60 ffmpeg -hide_banner -loglevel error -y \
 PLAY=$!
 
 SEG=""
-for candidate in "$RUN"/hls/*.ts; do
+for candidate in "$RUN"/hls/live/hevc/*.ts; do
     [ -e "$candidate" ] || continue
 
     if ffprobe -hide_banner -loglevel error -select_streams v:0 \

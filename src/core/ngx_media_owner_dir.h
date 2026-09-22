@@ -29,22 +29,30 @@ ngx_media_owner_dir_t *ngx_media_owner_dir_attach(ngx_cycle_t *cycle,
 
 /* the record for a stream, created when requested */
 ngx_media_owner_record_t *ngx_media_owner_dir_get(ngx_media_owner_dir_t *dir,
-    uint32_t hash, ngx_uint_t create);
+    uint64_t hash, ngx_uint_t create);
 
 /* publishes this worker as the owner of a stream */
 ngx_media_owner_record_t *ngx_media_owner_dir_claim(
-    ngx_media_owner_dir_t *dir, uint32_t hash, ngx_uint_t slot);
+    ngx_media_owner_dir_t *dir, uint64_t hash, ngx_uint_t slot);
 
 /* drops a stream's record (owner shutdown or stream removal) */
-void ngx_media_owner_dir_release(ngx_media_owner_dir_t *dir, uint32_t hash,
+void ngx_media_owner_dir_release(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_uint_t slot);
 
+/*
+ * The next revision of the one sequence every worker mutates from.  Two
+ * workers' operations on one stream are then comparable, which is what lets
+ * each replica resolve a conflict the same way; a counter per worker cannot,
+ * because both workers call their own next number the same thing.
+ */
+uint64_t ngx_media_owner_dir_revision_next(ngx_media_owner_dir_t *dir);
+
 /* refreshes liveness and progress for a stream this worker owns */
-void ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint32_t hash,
+void ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_uint_t slot, uint64_t generation, uint64_t frames, ngx_uint_t sources);
 
 /* the owner slot recorded for a stream, or the worker count when unknown */
-ngx_uint_t ngx_media_owner_dir_slot(ngx_media_owner_dir_t *dir, uint32_t hash,
+ngx_uint_t ngx_media_owner_dir_slot(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_uint_t fallback);
 
 /*
@@ -54,7 +62,7 @@ ngx_uint_t ngx_media_owner_dir_slot(ngx_media_owner_dir_t *dir, uint32_t hash,
  * owner is not reporting" from "the program has carried nothing yet".
  */
 ngx_int_t ngx_media_owner_dir_observe(ngx_media_owner_dir_t *dir,
-    uint32_t hash, ngx_media_owner_record_t *out);
+    uint64_t hash, ngx_media_owner_record_t *out);
 
 /* copies up to max records; returns how many were written */
 ngx_uint_t ngx_media_owner_dir_list(ngx_media_owner_dir_t *dir,

@@ -111,11 +111,14 @@ void ngx_media_runtime_stats_get(ngx_media_runtime_stats_t *out);
 void ngx_media_runtime_shutdown(ngx_log_t *log);
 
 /*
- * Ordered teardown for one stream's runtime outputs (HLS, recording): flush,
- * finalize and free the slot.  Must run before the stream's feed is
- * destroyed, because the flush reads it.
+ * Ordered teardown for everything the runtime keys by one stream: the outputs
+ * (HLS, recording) flush and free their slots, the player preparation drops
+ * the FLV conversion of the program, and the routed slots that would publish
+ * into the stream are cleared, so a frame that arrives after the delete is
+ * dropped instead of reaching memory that is going away.  Must run before the
+ * stream's feed is destroyed, because the flush reads it.
  */
-void ngx_media_runtime_outputs_release(ngx_media_stream_t *stream);
+void ngx_media_runtime_stream_release(ngx_media_stream_t *stream);
 
 /* runtime output slots in use; a leak in ordered teardown shows up here */
 ngx_uint_t ngx_media_runtime_outputs_active(void);

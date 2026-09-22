@@ -49,6 +49,10 @@ typedef struct ngx_media_file_source_s {
  * in health before any media arrives, which is what makes a file slate a
  * normal source rather than a special case.
  */
+/*
+ * log is kept by the reader and used by every read it performs, so it has to
+ * outlive the request: pass the worker's log, never a connection's.
+ */
 ngx_media_file_source_t *ngx_media_file_open(ngx_media_stream_t *stream,
     const ngx_str_t *id, const ngx_str_t *path, ngx_uint_t mode,
     ngx_log_t *log);
@@ -62,6 +66,14 @@ ngx_int_t ngx_media_file_advance(ngx_media_file_source_t *source,
     ngx_log_t *log);
 
 void ngx_media_file_close(ngx_media_file_source_t *source);
+
+/*
+ * Closes every file reader reading this stream.  A file reader has no thread
+ * - the tick paces it - so this is a close, not a wait: each reader is
+ * unlinked, its descriptor released and its source removed, which is what has
+ * to happen before the stream's memory goes away.
+ */
+void ngx_media_file_close_stream(ngx_media_stream_t *stream);
 
 /*
  * Advances every open file source by one bounded chunk.  Called from the

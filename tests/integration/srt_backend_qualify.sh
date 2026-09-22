@@ -157,27 +157,27 @@ PY
     # both receivers must produce a decodable segment
     for dir in a b; do
         for _ in $(seq 1 300); do
-            [ -f "$RUN/$dir/hls/index.m3u8" ] \
-                && [ "$(grep -c '^#EXTINF' "$RUN/$dir/hls/index.m3u8" || true)" -ge 1 ] \
+            [ -f "$RUN/$dir/hls/live/qualify/index.m3u8" ] \
+                && [ "$(grep -c '^#EXTINF' "$RUN/$dir/hls/live/qualify/index.m3u8" || true)" -ge 1 ] \
                 && break
             sleep 0.1
         done
 
-        grep -q '^#EXTM3U' "$RUN/$dir/hls/index.m3u8" \
+        grep -q '^#EXTM3U' "$RUN/$dir/hls/live/qualify/index.m3u8" \
             || { echo "$backend: $dir produced no hls" >&2; exit 1; }
 
-        SEGMENT="$(grep '\.ts$' "$RUN/$dir/hls/index.m3u8" | head -1)"
+        SEGMENT="$(grep '\.ts$' "$RUN/$dir/hls/live/qualify/index.m3u8" | head -1)"
         [ -n "$SEGMENT" ] || { echo "$backend: $dir produced no segment" >&2; exit 1; }
 
         PROBE="$(ffprobe -hide_banner -loglevel error -show_entries \
-            stream=codec_name,codec_type -of csv "$RUN/$dir/hls/$SEGMENT" 2>&1)"
+            stream=codec_name,codec_type -of csv "$RUN/$dir/hls/live/qualify/$SEGMENT" 2>&1)"
 
         printf '%s' "$PROBE" | grep -q ',h264,video' \
             || { echo "$backend: $dir segment has no H.264" >&2; printf '%s\n' "$PROBE" >&2; exit 1; }
         printf '%s' "$PROBE" | grep -q ',aac,audio' \
             || { echo "$backend: $dir segment has no AAC" >&2; printf '%s\n' "$PROBE" >&2; exit 1; }
 
-        echo "   $backend: $dir segment ok ($(stat -c %s "$RUN/$dir/hls/$SEGMENT") bytes)"
+        echo "   $backend: $dir segment ok ($(stat -c %s "$RUN/$dir/hls/live/qualify/$SEGMENT") bytes)"
     done
 
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null || true

@@ -161,7 +161,7 @@ typedef struct {
 
     /* set when this worker does not own the stream and routes to the owner */
     unsigned               routed:1;
-    uint32_t               hash;
+    uint64_t               hash;
     uint64_t               routed_sequence;
     ngx_media_ts_demux_t   demux;
     ngx_uint_t             demux_ready;
@@ -543,9 +543,15 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
         return;
     }
 
+    /*
+     * The stream outlives the publisher's connection, so the log it keeps has
+     * to be the worker's: a connection log dies with the connection, and a
+     * reader or a pool logging through it afterwards reads freed memory.
+     */
     stream = ngx_media_registry_stream_create(registry, &id->application,
                                               &id->stream,
-                                              &ngx_media_srt_feed_conf, log);
+                                              &ngx_media_srt_feed_conf,
+                                              ((ngx_cycle_t *) ngx_cycle)->log);
 
     if (stream == NULL) {
         ngx_log_error(NGX_LOG_ERR, log, 0,

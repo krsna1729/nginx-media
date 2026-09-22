@@ -142,6 +142,32 @@ Each script binds fixed ports and several of them clean up with `pkill -KILL -f
 first, and in practice ffmpeg, curl and libsrt; the TLS cases generate their own
 certificates with openssl.
 
+A script that has to prove something about memory — a delete that must not free
+a pool under a reader thread, a teardown that must not touch a destination an
+uploader is inside — is worth running against a sanitized nginx.  The build
+script takes the flags and stamps them like every other input, so a second tree
+can hold a second build without disturbing the plain one:
+
+```sh
+BUILD_DIR=$PWD/.build-asan NGINX_PREFIX=$PWD/.build-asan/nginx-install \
+NGINX_CC_OPT='-fsanitize=address -fno-omit-frame-pointer -g' \
+NGINX_LD_OPT='-fsanitize=address' scripts/build-nginx.sh
+
+# ASan writes to the process's stderr, which a daemonized worker does not have:
+# log_path puts the report somewhere the test can read it.
+ASAN_OPTIONS='detect_leaks=0:log_path=/tmp/asan-report' \
+NGINX_BIN=$PWD/.build-asan/nginx-install/sbin/nginx \
+tests/integration/stream_delete_nginx.sh
+```
+
+`detect_leaks=0` because a worker's exit is not a leak-free path by design.  The
+scripts take the binary through `NGINX_BIN` and not `NGINX`, which nginx reads
+itself and takes for a socket.  `make stream-delete` is the case built for this:
+it deletes a stream while a file reader, an ingest reader thread and an
+in-flight upload are all looking at it, and asserts the draining gauge returns
+to zero — under ASan, an unguarded free shows up as a report instead of as a
+silent corruption.
+
 There is no umbrella `make all`.  The Makefile exposes one target per script
 (`make srt-ingest`, `make rtmp`, `make srt-output`… — the full list is the
 Makefile's `.PHONY` line), and the authoritative "everything" is `make

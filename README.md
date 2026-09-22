@@ -44,7 +44,7 @@ ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=25" \
   -c:v libx264 -preset ultrafast -g 50 -pix_fmt yuv420p \
   -f mpegts "srt://127.0.0.1:9000?streamid=#!::r=live/demo,m=publish"
 
-curl http://127.0.0.1:8080/hls/index.m3u8
+curl http://127.0.0.1:8080/hls/live/demo/index.m3u8
 ```
 
 `docs/quickstart.md` walks through this with the output each command gives.

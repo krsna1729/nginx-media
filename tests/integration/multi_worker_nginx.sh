@@ -130,20 +130,20 @@ grep -q "routed source opened stream=live/$OWNER1" "$RUN/logs/error.log" \
     || { echo "the owner did not open the routed source" >&2; exit 1; }
 
 for _ in $(seq 1 300); do
-    [ -f "$RUN/hls/index.m3u8" ] \
-        && [ "$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" || true)" -ge 1 ] \
+    [ -f "$RUN/hls/live/$OWNER1/index.m3u8" ] \
+        && [ "$(grep -c '^#EXTINF' "$RUN/hls/live/$OWNER1/index.m3u8" || true)" -ge 1 ] \
         && break
     sleep 0.1
 done
 
-grep -q '^#EXTM3U' "$RUN/hls/index.m3u8" \
+grep -q '^#EXTM3U' "$RUN/hls/live/$OWNER1/index.m3u8" \
     || { echo "the routed program produced no hls output" >&2; exit 1; }
 
-SEGMENT="$(grep '\.ts$' "$RUN/hls/index.m3u8" | head -1)"
+SEGMENT="$(grep '\.ts$' "$RUN/hls/live/$OWNER1/index.m3u8" | head -1)"
 [ -n "$SEGMENT" ] || { echo "no segment was written" >&2; exit 1; }
 
 PROBE="$(ffprobe -hide_banner -loglevel error -show_entries \
-    stream=codec_name,codec_type -of csv "$RUN/hls/$SEGMENT" 2>&1)"
+    stream=codec_name,codec_type -of csv "$RUN/hls/live/$OWNER1/$SEGMENT" 2>&1)"
 
 printf '%s\n' "$PROBE"
 

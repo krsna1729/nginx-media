@@ -129,20 +129,20 @@ grep -q 'media: srt source open app=live stream=news source=srt-out-a' \
 # and it must carry media: a closed segment appears at the first keyframe
 # boundary after the segmenter's minimum duration
 for _ in $(seq 1 300); do
-    [ -f "$RUN/b/hls/index.m3u8" ] \
-        && [ "$(grep -c '^#EXTINF' "$RUN/b/hls/index.m3u8" || true)" -ge 1 ] \
+    [ -f "$RUN/b/hls/live/news/index.m3u8" ] \
+        && [ "$(grep -c '^#EXTINF' "$RUN/b/hls/live/news/index.m3u8" || true)" -ge 1 ] \
         && break
     sleep 0.1
 done
 
-grep -q '^#EXTM3U' "$RUN/b/hls/index.m3u8" \
+grep -q '^#EXTM3U' "$RUN/b/hls/live/news/index.m3u8" \
     || { echo "the destination produced no hls playlist" >&2; exit 1; }
 
-SEGMENT="$(grep '\.ts$' "$RUN/b/hls/index.m3u8" | head -1)"
+SEGMENT="$(grep '\.ts$' "$RUN/b/hls/live/news/index.m3u8" | head -1)"
 [ -n "$SEGMENT" ] || { echo "the destination produced no segment" >&2; exit 1; }
 
 PROBE="$(ffprobe -hide_banner -loglevel error -show_entries \
-    stream=codec_name,codec_type -of csv "$RUN/b/hls/$SEGMENT" 2>&1)"
+    stream=codec_name,codec_type -of csv "$RUN/b/hls/live/news/$SEGMENT" 2>&1)"
 
 printf '%s\n' "$PROBE"
 
@@ -152,7 +152,7 @@ printf '%s' "$PROBE" | grep -q ',aac,audio' \
     || { echo "the destination segment has no AAC" >&2; exit 1; }
 
 # the same preparation also feeds HLS on the sender
-grep -q '^#EXTM3U' "$RUN/a/hls/index.m3u8" \
+grep -q '^#EXTM3U' "$RUN/a/hls/live/news/index.m3u8" \
     || { echo "no hls output alongside the srt destinations" >&2; exit 1; }
 
 grep -q 'media: srt output 0 connected' "$RUN/a/logs/error.log" \

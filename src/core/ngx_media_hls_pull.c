@@ -12,6 +12,27 @@
 #define NGX_MEDIA_HLS_PULL_SEGMENT_MAX   (8 * 1024 * 1024)
 #define NGX_MEDIA_HLS_PULL_NAMES         64
 #define NGX_MEDIA_HLS_PULL_NAME_MAX      256
+#define NGX_MEDIA_HLS_EVENT_CAPACITY     128
+#define NGX_MEDIA_HLS_EVENT_MAX_TRACKS   NGX_MEDIA_TS_DEFAULT_TRACKS
+
+enum {
+    NGX_MEDIA_HLS_EVENT_TRACKS = 1,
+    NGX_MEDIA_HLS_EVENT_FRAME,
+    NGX_MEDIA_HLS_EVENT_TRANSPORT
+};
+typedef struct {
+    ngx_uint_t  type;
+
+    union {
+        struct {
+            ngx_media_track_t  tracks[NGX_MEDIA_HLS_EVENT_MAX_TRACKS];
+            ngx_uint_t          count;
+        } trackset;
+
+        ngx_media_frame_t  frame;
+        ngx_uint_t          healthy;
+    } data;
+} ngx_media_hls_event_t;
 
 /*
  * One segment name already fetched.  The name is stored as it came from the
@@ -30,15 +51,32 @@ typedef struct ngx_media_hls_pull_s {
     ngx_media_source_t      *source;
     ngx_media_ts_demux_t     demux;
 
+    /* set once, by the reader, when a segment carried nothing carryable */
+    ngx_uint_t               input_reported;
+
+    ngx_str_t                id;
     ngx_str_t                url;         /* the playlist */
     ngx_str_t                base;        /* everything up to the last / */
     ngx_str_t                ca_file;     /* TLS trust anchor, empty for the
                                            * system store */
     ngx_log_t               *log;
 
+    u_char                  *playlist;
+    u_char                  *segment;
+    u_char                  *segment_url;
+    size_t                   segment_url_capacity;
+
+    ngx_media_hls_event_t   *events;
+    ngx_uint_t               events_capacity;
+    uint64_t                 events_head;
+    uint64_t                 events_tail;
+    pthread_mutex_t          events_mutex;
+    ngx_uint_t               events_mutex_initialized;
+    ngx_atomic_t             events_dropped;
+
     pthread_t                thread;
     ngx_uint_t               thread_started;
-    ngx_uint_t               stopping;
+    ngx_atomic_t             stopping;
 
     /*
      * Set by the reader thread as its last act, after the loop and before it
@@ -70,6 +108,20 @@ typedef struct ngx_media_hls_pull_s {
 
 static ngx_media_hls_pull_t  *ngx_media_hls_pull_all;
 static pthread_mutex_t        ngx_media_hls_pull_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void ngx_media_hls_pull_event_release(
+    ngx_media_hls_event_t *event);
+static ngx_int_t ngx_media_hls_pull_event_push(
+    ngx_media_hls_pull_t *pull, ngx_media_hls_event_t *event);
+static ngx_int_t ngx_media_hls_pull_event_pop(
+    ngx_media_hls_pull_t *pull, ngx_media_hls_event_t *event);
+static void ngx_media_hls_pull_event_clear(
+    ngx_media_hls_pull_t *pull);
+static void ngx_media_hls_pull_event_drain(
+    ngx_media_hls_pull_t *pull);
+static void ngx_media_hls_pull_transport(
+    ngx_media_hls_pull_t *pull, ngx_uint_t healthy);
+static ngx_uint_t ngx_media_hls_pull_source_removed(
+    ngx_media_hls_pull_t *pull);
 
 /* --- helpers ------------------------------------------------------------- */
 
@@ -77,39 +129,214 @@ static void
 ngx_media_hls_pull_tracks(void *ctx, const ngx_media_trackset_t *tracks)
 {
     ngx_media_hls_pull_t  *pull = ctx;
+    ngx_media_hls_event_t  event;
+    ngx_uint_t             i;
 
-    if (pull == NULL || pull->source == NULL || tracks == NULL) {
+    if (pull == NULL || tracks == NULL
+        || ngx_atomic_fetch_add(&pull->stopping, 0)
+        || tracks->count > NGX_MEDIA_HLS_EVENT_MAX_TRACKS)
+    {
         return;
     }
 
-    (void) ngx_media_source_tracks_set(pull->source, tracks, NULL);
-    (void) ngx_media_health_tracks(&pull->source->health, 1);
+    ngx_memzero(&event, sizeof(event));
+    event.type = NGX_MEDIA_HLS_EVENT_TRACKS;
+    event.data.trackset.count = tracks->count;
+
+    for (i = 0; i < tracks->count; i++) {
+        event.data.trackset.tracks[i] = tracks->tracks[i];
+        (void) ngx_media_buf_ref(event.data.trackset.tracks[i].config);
+    }
+
+    (void) ngx_media_hls_pull_event_push(pull, &event);
 }
 
 static void
 ngx_media_hls_pull_frame(void *ctx, const ngx_media_frame_t *frame)
 {
     ngx_media_hls_pull_t  *pull = ctx;
+    ngx_media_hls_event_t  event;
 
-    if (pull == NULL || pull->stream == NULL || pull->source == NULL) {
+    if (pull == NULL || frame == NULL
+        || ngx_atomic_fetch_add(&pull->stopping, 0))
+    {
         return;
     }
 
-    /*
-     * A pulled HLS stream is a source like any other: the same health model
-     * and the same gate, so the selector and compatibility need to know
-     * nothing about where the bytes came from.  This is what lets a pull
-     * source be promoted like a publisher.
-     */
-    ngx_media_health_media(&pull->source->health, frame->dts,
-                           ngx_current_msec);
+    ngx_memzero(&event, sizeof(event));
+    event.type = NGX_MEDIA_HLS_EVENT_FRAME;
 
-    ngx_media_runtime_iso_source(pull->stream, pull->source, frame);
+    if (ngx_media_frame_copy(&event.data.frame, frame) != NGX_OK) {
+        return;
+    }
 
-    (void) ngx_media_stream_publish(pull->stream, pull->source, frame,
-                                    ngx_current_msec);
+    (void) ngx_media_hls_pull_event_push(pull, &event);
+}
+static void
+ngx_media_hls_pull_event_release(ngx_media_hls_event_t *event)
+{
+    ngx_uint_t  i;
 
-    pull->frames++;
+    if (event == NULL) {
+        return;
+    }
+
+    if (event->type == NGX_MEDIA_HLS_EVENT_TRACKS) {
+        for (i = 0; i < event->data.trackset.count; i++) {
+            ngx_media_buf_unref(event->data.trackset.tracks[i].config);
+        }
+
+    } else if (event->type == NGX_MEDIA_HLS_EVENT_FRAME) {
+        ngx_media_frame_release(&event->data.frame);
+    }
+
+    ngx_memzero(event, sizeof(*event));
+}
+
+static ngx_int_t
+ngx_media_hls_pull_event_push(ngx_media_hls_pull_t *pull,
+    ngx_media_hls_event_t *event)
+{
+    ngx_media_hls_event_t  *slot;
+
+    if (pull == NULL || event == NULL || pull->events == NULL
+        || !pull->events_mutex_initialized)
+    {
+        ngx_media_hls_pull_event_release(event);
+        return NGX_ERROR;
+    }
+
+    (void) pthread_mutex_lock(&pull->events_mutex);
+
+    if (pull->events_head - pull->events_tail >= pull->events_capacity) {
+        (void) pthread_mutex_unlock(&pull->events_mutex);
+        (void) ngx_atomic_fetch_add(&pull->events_dropped, 1);
+        ngx_media_hls_pull_event_release(event);
+        return NGX_AGAIN;
+    }
+
+    slot = &pull->events[pull->events_head % pull->events_capacity];
+    *slot = *event;
+    pull->events_head++;
+
+    (void) pthread_mutex_unlock(&pull->events_mutex);
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_media_hls_pull_event_pop(ngx_media_hls_pull_t *pull,
+    ngx_media_hls_event_t *event)
+{
+    ngx_media_hls_event_t  *slot;
+
+    if (pull == NULL || event == NULL || pull->events == NULL
+        || !pull->events_mutex_initialized)
+    {
+        return NGX_ERROR;
+    }
+
+    (void) pthread_mutex_lock(&pull->events_mutex);
+
+    if (pull->events_tail == pull->events_head) {
+        (void) pthread_mutex_unlock(&pull->events_mutex);
+        return NGX_DECLINED;
+    }
+
+    slot = &pull->events[pull->events_tail % pull->events_capacity];
+    *event = *slot;
+    ngx_memzero(slot, sizeof(*slot));
+    pull->events_tail++;
+
+    (void) pthread_mutex_unlock(&pull->events_mutex);
+
+    return NGX_OK;
+}
+
+static void
+ngx_media_hls_pull_event_clear(ngx_media_hls_pull_t *pull)
+{
+    ngx_media_hls_event_t  event;
+
+    if (pull == NULL) {
+        return;
+    }
+
+    while (ngx_media_hls_pull_event_pop(pull, &event) == NGX_OK) {
+        ngx_media_hls_pull_event_release(&event);
+    }
+}
+
+static void
+ngx_media_hls_pull_event_drain(ngx_media_hls_pull_t *pull)
+{
+    ngx_media_hls_event_t  event;
+    ngx_media_trackset_t   tracks;
+    ngx_media_source_t    *source;
+
+    if (pull == NULL) {
+        return;
+    }
+
+    for ( ;; ) {
+        if (ngx_media_hls_pull_event_pop(pull, &event) != NGX_OK) {
+            return;
+        }
+
+        source = pull->source;
+
+        if (source != NULL && source->stream == pull->stream) {
+            switch (event.type) {
+
+            case NGX_MEDIA_HLS_EVENT_TRACKS:
+                tracks.tracks = event.data.trackset.tracks;
+                tracks.count = event.data.trackset.count;
+                tracks.capacity = event.data.trackset.count;
+                (void) ngx_media_source_tracks_set(source, &tracks, NULL);
+                (void) ngx_media_health_tracks(&source->health, 1);
+                break;
+
+            case NGX_MEDIA_HLS_EVENT_FRAME:
+                ngx_media_health_media(&source->health,
+                                       event.data.frame.dts,
+                                       ngx_current_msec);
+                ngx_media_runtime_iso_source(pull->stream, source,
+                                             &event.data.frame);
+                (void) ngx_media_stream_publish(pull->stream, source,
+                                                &event.data.frame,
+                                                ngx_current_msec);
+                pull->frames++;
+                break;
+
+            case NGX_MEDIA_HLS_EVENT_TRANSPORT:
+                (void) ngx_media_health_transport(&source->health,
+                                                  event.data.healthy,
+                                                  ngx_current_msec);
+                break;
+
+            default:
+                break;
+            }
+        }
+
+        ngx_media_hls_pull_event_release(&event);
+    }
+}
+
+static void
+ngx_media_hls_pull_transport(ngx_media_hls_pull_t *pull,
+    ngx_uint_t healthy)
+{
+    ngx_media_hls_event_t  event;
+
+    if (pull == NULL || ngx_atomic_fetch_add(&pull->stopping, 0)) {
+        return;
+    }
+
+    ngx_memzero(&event, sizeof(event));
+    event.type = NGX_MEDIA_HLS_EVENT_TRANSPORT;
+    event.data.healthy = healthy;
+    (void) ngx_media_hls_pull_event_push(pull, &event);
 }
 
 static ngx_uint_t
@@ -164,34 +391,43 @@ static ngx_int_t
 ngx_media_hls_pull_segment_url(ngx_media_hls_pull_t *pull, const u_char *name,
     size_t len, ngx_str_t *out)
 {
-    if (len > 7 && ngx_memcmp(name, (u_char *) "http://", 7) == 0) {
-        out->data = ngx_pnalloc(pull->stream->pool, len + 1);
+    size_t  total;
 
-        if (out->data == NULL) {
+    if (pull == NULL || name == NULL || out == NULL
+        || pull->segment_url == NULL
+        || pull->segment_url_capacity == 0)
+    {
+        return NGX_ERROR;
+    }
+
+    if (len > 7 && ngx_memcmp(name, (u_char *) "http://", 7) == 0) {
+        if (len >= pull->segment_url_capacity) {
             return NGX_ERROR;
         }
 
-        ngx_memcpy(out->data, name, len);
-        out->data[len] = '\0';
+        ngx_memcpy(pull->segment_url, name, len);
+        pull->segment_url[len] = '\0';
+        out->data = pull->segment_url;
         out->len = len;
 
         return NGX_OK;
     }
 
-    if (pull->base.len + len + 1 > 4096) {
+    if (len > 4096 || pull->base.len > 4096 - len - 1) {
         return NGX_ERROR;
     }
 
-    out->data = ngx_pnalloc(pull->stream->pool, pull->base.len + len + 1);
+    total = pull->base.len + len;
 
-    if (out->data == NULL) {
+    if (total >= pull->segment_url_capacity) {
         return NGX_ERROR;
     }
 
-    ngx_memcpy(out->data, pull->base.data, pull->base.len);
-    ngx_memcpy(out->data + pull->base.len, name, len);
-    out->len = pull->base.len + len;
-    out->data[out->len] = '\0';
+    ngx_memcpy(pull->segment_url, pull->base.data, pull->base.len);
+    ngx_memcpy(pull->segment_url + pull->base.len, name, len);
+    pull->segment_url[total] = '\0';
+    out->data = pull->segment_url;
+    out->len = total;
 
     return NGX_OK;
 }
@@ -203,10 +439,10 @@ ngx_media_hls_pull_segment_url(ngx_media_hls_pull_t *pull, const u_char *name,
  * source_remove() detaches it, or only flags it when a writer is in flight,
  * so both are checked.  This is the reader's own pointer, which only close()
  * clears, and close() cannot run while this thread is using the reader - it
- * joins the thread first.
+ * joins the thread first - so the reader may read it as well as the worker.
  */
 static ngx_uint_t
-ngx_media_hls_pull_removed(ngx_media_hls_pull_t *pull)
+ngx_media_hls_pull_source_removed(ngx_media_hls_pull_t *pull)
 {
     return (pull->source == NULL
             || pull->source->stream == NULL
@@ -230,7 +466,9 @@ ngx_media_hls_pull_idle(ngx_media_hls_pull_t *pull)
 
     for (i = 0; i < NGX_MEDIA_HLS_PULL_IDLE_SLICES; i++) {
 
-        if (pull->stopping || ngx_media_hls_pull_removed(pull)) {
+        if (ngx_atomic_fetch_add(&pull->stopping, 0)
+            || ngx_media_hls_pull_source_removed(pull))
+        {
             return;
         }
 
@@ -249,23 +487,22 @@ ngx_media_hls_pull_thread(void *data)
     u_char                *p, *line_end;
     ngx_uint_t             fetched;
 
-    playlist = ngx_pnalloc(pull->stream->pool, NGX_MEDIA_HLS_PULL_PLAYLIST_MAX);
-    segment = ngx_pnalloc(pull->stream->pool, NGX_MEDIA_HLS_PULL_SEGMENT_MAX);
+    playlist = pull->playlist;
+    segment = pull->segment;
 
-    if (playlist == NULL || segment == NULL) {
-        /* nothing is left running to touch the reader; the reaper may join */
+    if (playlist == NULL || segment == NULL || pull->segment_url == NULL) {
         (void) ngx_atomic_cmp_set(&pull->exited, 0, 1);
         return NULL;
     }
 
-    while (!pull->stopping) {
+    while (!ngx_atomic_fetch_add(&pull->stopping, 0)) {
 
-        if (ngx_media_hls_pull_removed(pull)) {
+        if (ngx_media_hls_pull_source_removed(pull)) {
             /*
              * The source was removed through the control API, so there is
-             * nothing left to publish into.  Leave the loop: the tick reaps
-             * exited readers, and it cannot destroy this one while it is
-             * still using it.
+             * nothing left to fetch for.  Leave the loop: the tick reaps
+             * exited readers, and the stream's memory cannot be released
+             * until it has.
              */
             break;
         }
@@ -278,16 +515,13 @@ ngx_media_hls_pull_thread(void *data)
 
             ngx_log_error(NGX_LOG_INFO, pull->log, 0,
                           "media: hls pull %V could not fetch the playlist "
-                          "(failures=%ui)", &pull->source->id, pull->failures);
-            (void) ngx_media_health_transport(&pull->source->health, 0,
-                                              ngx_current_msec);
+                          "(failures=%ui)", &pull->id, pull->failures);
+            ngx_media_hls_pull_transport(pull, 0);
             ngx_media_hls_pull_idle(pull);
             continue;
         }
 
-        (void) ngx_media_health_transport(&pull->source->health, 1,
-                                          ngx_current_msec);
-
+        ngx_media_hls_pull_transport(pull, 1);
         fetched = 0;
 
         /*
@@ -297,10 +531,9 @@ ngx_media_hls_pull_thread(void *data)
          */
         p = playlist;
 
-        while (p < playlist + playlist_len && !pull->stopping
-               && !ngx_media_hls_pull_removed(pull))
+        while (p < playlist + playlist_len
+               && !ngx_atomic_fetch_add(&pull->stopping, 0))
         {
-
             line_end = (u_char *) strchr((char *) p, '\n');
 
             if (line_end == NULL) {
@@ -311,7 +544,8 @@ ngx_media_hls_pull_thread(void *data)
                 u_char  *line = p;
                 size_t   len = line_end - p;
 
-                p = line_end + 1;
+                p = (line_end < playlist + playlist_len)
+                    ? line_end + 1 : line_end;
 
                 while (len > 0 && (line[len - 1] == '\r'
                                    || line[len - 1] == ' '))
@@ -325,10 +559,10 @@ ngx_media_hls_pull_thread(void *data)
 
                 /*
                  * A read-only check.  Recording here would mark every name in
-                 * the playlist as fetched the first time the playlist is
+                 * the playlist as fetched the first time the playlist was
                  * walked, so only the lowest one would ever be read and the
-                 * rest would be skipped for good - the same mistake the
-                 * ingest reader made.  Recording happens after the fetch.
+                 * rest would be skipped for good.  Recording happens after
+                 * the fetch.
                  */
                 if (ngx_media_hls_pull_seen(pull, line, len)) {
                     continue;
@@ -346,10 +580,10 @@ ngx_media_hls_pull_thread(void *data)
                 {
                     pull->failures++;
 
-                    ngx_log_error(NGX_LOG_INFO, pull->log, 0,
-                                  "media: hls pull %V could not fetch %V "
-                                  "(failures=%ui)", &pull->source->id,
-                                  &segment_url, pull->failures);
+                    ngx_log_error(NGX_LOG_INFO, pull->log,
+                                  0, "media: hls pull %V could not fetch %V "
+                                  "(failures=%ui)", &pull->id, &segment_url,
+                                  pull->failures);
                     continue;
                 }
 
@@ -360,14 +594,34 @@ ngx_media_hls_pull_thread(void *data)
                     continue;
                 }
 
-                ngx_media_hls_pull_record(pull, line, len);
+                /*
+                 * What an HLS input may carry is MPEG-TS with H.264 or H.265
+                 * video and/or AAC audio.  A segment that carries only stream
+                 * types the demux does not know builds no tracks and publishes
+                 * no frames, so the source never becomes healthy: this is the
+                 * reason, said once.
+                 */
+                if (!pull->input_reported && !pull->demux.tracks_ready
+                    && pull->demux.stats.unsupported_streams > 0)
+                {
+                    pull->input_reported = 1;
 
+                    ngx_log_error(NGX_LOG_WARN, pull->log, 0,
+                                  "media: hls pull source %V carries no stream "
+                                  "type this build can carry (MPEG-TS with "
+                                  "H.264, H.265 or AAC); it will not become "
+                                  "healthy",
+                                  pull->source != NULL ? &pull->source->id
+                                                       : &pull->url);
+                }
+
+                ngx_media_hls_pull_record(pull, line, len);
                 pull->segments++;
                 fetched++;
 
-                ngx_log_error(NGX_LOG_INFO, pull->log, 0,
-                              "media: hls pull %V fetched segment %ui (%uz "
-                              "bytes)", &pull->source->id, pull->segments,
+                ngx_log_error(NGX_LOG_INFO, pull->log,
+                              0, "media: hls pull %V fetched segment %ui "
+                              "(%uz bytes)", &pull->id, pull->segments,
                               segment_len);
             }
         }
@@ -378,14 +632,6 @@ ngx_media_hls_pull_thread(void *data)
         }
     }
 
-    /*
-     * The loop has left the reader alone: nothing below touches the demux,
-     * the source or the buffers.  Marking that here is what lets the reaper
-     * join this thread from the tick without waiting on the origin - the
-     * source was removed through the control API, so its reader has to go
-     * with it instead of holding a thread and its buffers for the life of
-     * the worker.
-     */
     (void) ngx_atomic_cmp_set(&pull->exited, 0, 1);
 
     return NULL;
@@ -482,6 +728,7 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     if (pull->source == NULL) {
         return NULL;
     }
+    pull->id = pull->source->id;
 
     sink.tracks = ngx_media_hls_pull_tracks;
     sink.frame = ngx_media_hls_pull_frame;
@@ -489,8 +736,66 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     if (ngx_media_ts_demux_init(&pull->demux, NULL, &sink, pull, log)
         != NGX_OK)
     {
+        ngx_media_stream_source_remove(stream, pull->source);
+        pull->source = NULL;
         return NULL;
     }
+    pull->playlist = ngx_alloc(NGX_MEDIA_HLS_PULL_PLAYLIST_MAX, log);
+    pull->segment = ngx_alloc(NGX_MEDIA_HLS_PULL_SEGMENT_MAX, log);
+    pull->segment_url_capacity = NGX_MEDIA_HLS_PULL_PLAYLIST_MAX + 1;
+    pull->segment_url = ngx_alloc(pull->segment_url_capacity, log);
+
+    if (pull->playlist == NULL || pull->segment == NULL
+        || pull->segment_url == NULL)
+    {
+        ngx_free(pull->segment_url);
+        pull->segment_url = NULL;
+        ngx_free(pull->segment);
+        pull->segment = NULL;
+        ngx_free(pull->playlist);
+        pull->playlist = NULL;
+        ngx_media_ts_demux_destroy(&pull->demux);
+        ngx_media_stream_source_remove(stream, pull->source);
+        pull->source = NULL;
+        return NULL;
+    }
+
+    pull->events_capacity = NGX_MEDIA_HLS_EVENT_CAPACITY;
+    pull->events = ngx_alloc(pull->events_capacity
+                             * sizeof(ngx_media_hls_event_t), log);
+
+    if (pull->events == NULL) {
+        ngx_free(pull->segment_url);
+        pull->segment_url = NULL;
+        ngx_free(pull->segment);
+        pull->segment = NULL;
+        ngx_free(pull->playlist);
+        pull->playlist = NULL;
+        ngx_media_ts_demux_destroy(&pull->demux);
+        ngx_media_stream_source_remove(stream, pull->source);
+        pull->source = NULL;
+        return NULL;
+    }
+
+    ngx_memzero(pull->events,
+                pull->events_capacity * sizeof(ngx_media_hls_event_t));
+
+    if (pthread_mutex_init(&pull->events_mutex, NULL) != 0) {
+        ngx_free(pull->events);
+        pull->events = NULL;
+        ngx_free(pull->segment_url);
+        pull->segment_url = NULL;
+        ngx_free(pull->segment);
+        pull->segment = NULL;
+        ngx_free(pull->playlist);
+        pull->playlist = NULL;
+        ngx_media_ts_demux_destroy(&pull->demux);
+        ngx_media_stream_source_remove(stream, pull->source);
+        pull->source = NULL;
+        return NULL;
+    }
+
+    pull->events_mutex_initialized = 1;
 
     /*
      * Health has to be initialised before the first transport report.  A
@@ -548,7 +853,7 @@ ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull)
      * is torn down: the reader publishes into the stream, and the stream is
      * about to lose this source.
      */
-    pull->stopping = 1;
+    (void) ngx_atomic_fetch_add(&pull->stopping, 1);
 
     if (pull->thread_started) {
         (void) pthread_join(pull->thread, NULL);
@@ -566,6 +871,22 @@ ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull)
     }
 
     (void) pthread_mutex_unlock(&ngx_media_hls_pull_mutex);
+    ngx_media_hls_pull_event_clear(pull);
+
+    if (pull->events_mutex_initialized) {
+        (void) pthread_mutex_destroy(&pull->events_mutex);
+        pull->events_mutex_initialized = 0;
+    }
+
+    ngx_free(pull->events);
+    pull->events = NULL;
+    ngx_free(pull->segment_url);
+    pull->segment_url = NULL;
+    ngx_free(pull->segment);
+    pull->segment = NULL;
+    ngx_free(pull->playlist);
+    pull->playlist = NULL;
+
 
     ngx_media_ts_demux_destroy(&pull->demux);
 
@@ -573,6 +894,30 @@ ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull)
         ngx_media_stream_source_remove(pull->stream, pull->source);
         pull->source = NULL;
     }
+}
+
+ngx_uint_t
+ngx_media_hls_pull_stream_readers(const ngx_media_stream_t *stream)
+{
+    ngx_media_hls_pull_t  *pull;
+    ngx_uint_t             count = 0;
+
+    if (stream == NULL) {
+        return 0;
+    }
+
+    (void) pthread_mutex_lock(&ngx_media_hls_pull_mutex);
+
+    for (pull = ngx_media_hls_pull_all; pull != NULL; pull = pull->next) {
+
+        if (pull->stream == stream) {
+            count++;
+        }
+    }
+
+    (void) pthread_mutex_unlock(&ngx_media_hls_pull_mutex);
+
+    return count;
 }
 
 /*
@@ -597,8 +942,9 @@ ngx_media_hls_pull_reap(ngx_log_t *log)
         (void) pthread_mutex_lock(&ngx_media_hls_pull_mutex);
 
         for (pull = ngx_media_hls_pull_all; pull != NULL; pull = pull->next) {
-
-            if (pull->exited && ngx_media_hls_pull_removed(pull)) {
+            if (ngx_atomic_fetch_add(&pull->exited, 0)
+                && ngx_media_hls_pull_source_removed(pull))
+            {
                 break;
             }
         }
@@ -617,7 +963,19 @@ ngx_media_hls_pull_reap(ngx_log_t *log)
         ngx_media_hls_pull_close(pull);
     }
 }
+void
+ngx_media_hls_pull_drain_all(void)
+{
+    ngx_media_hls_pull_t  *pull;
 
+    (void) pthread_mutex_lock(&ngx_media_hls_pull_mutex);
+
+    for (pull = ngx_media_hls_pull_all; pull != NULL; pull = pull->next) {
+        ngx_media_hls_pull_event_drain(pull);
+    }
+
+    (void) pthread_mutex_unlock(&ngx_media_hls_pull_mutex);
+}
 void
 ngx_media_hls_pull_stop_all(void)
 {
@@ -626,20 +984,32 @@ ngx_media_hls_pull_stop_all(void)
     (void) pthread_mutex_lock(&ngx_media_hls_pull_mutex);
 
     for (pull = ngx_media_hls_pull_all; pull != NULL; pull = pull->next) {
-        pull->stopping = 1;
+        (void) ngx_atomic_fetch_add(&pull->stopping, 1);
     }
 
     (void) pthread_mutex_unlock(&ngx_media_hls_pull_mutex);
 
-    (void) pthread_mutex_lock(&ngx_media_hls_pull_mutex);
-
     for (pull = ngx_media_hls_pull_all; pull != NULL; pull = pull->next) {
-
         if (pull->thread_started) {
             (void) pthread_join(pull->thread, NULL);
             pull->thread_started = 0;
         }
-    }
 
-    (void) pthread_mutex_unlock(&ngx_media_hls_pull_mutex);
+        ngx_media_hls_pull_event_clear(pull);
+
+        if (pull->events_mutex_initialized) {
+            (void) pthread_mutex_destroy(&pull->events_mutex);
+            pull->events_mutex_initialized = 0;
+        }
+
+        ngx_free(pull->events);
+        pull->events = NULL;
+        ngx_free(pull->segment_url);
+        pull->segment_url = NULL;
+        ngx_free(pull->segment);
+        pull->segment = NULL;
+        ngx_free(pull->playlist);
+        pull->playlist = NULL;
+        ngx_media_ts_demux_destroy(&pull->demux);
+    }
 }

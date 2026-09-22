@@ -24,7 +24,11 @@
 
 typedef struct ngx_media_hls_pull_s ngx_media_hls_pull_t;
 
-/* opens url as a source on stream, and starts its reader */
+/*
+ * Opens url as a source on stream, and starts its reader.  log is kept by the
+ * reader thread, so it has to outlive the request: pass the worker's log,
+ * never a connection's.
+ */
 ngx_media_hls_pull_t *ngx_media_hls_pull_open(ngx_media_stream_t *stream,
     const ngx_str_t *id, const ngx_str_t *url, const ngx_str_t *ca_file,
     ngx_log_t *log);
@@ -38,6 +42,15 @@ void ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull);
  * has to take the reader with it, and the reader holds a thread.
  */
 void ngx_media_hls_pull_reap(ngx_log_t *log);
+
+/*
+ * How many pull readers still reference this stream, which is the pool-release
+ * gate: a reader is unlinked by its close, and close() joins its thread first,
+ * so a count of zero means no thread can still be reading the stream's memory.
+ */
+ngx_uint_t ngx_media_hls_pull_stream_readers(const ngx_media_stream_t *stream);
+/* transfers queued reader events to the owning worker; called from its tick */
+void ngx_media_hls_pull_drain_all(void);
 
 /* stops and joins every reader; called at shutdown */
 void ngx_media_hls_pull_stop_all(void);

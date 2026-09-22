@@ -148,6 +148,111 @@ test_send_receive(void)
 
     ngx_media_srt_listen_close(listener);
 }
+static void
+test_multi_session_demux(void)
+{
+    ngx_media_srt_listener_t  *listener;
+    ngx_media_srt_session_t   *caller_a = NULL, *caller_b = NULL;
+    ngx_media_srt_session_t   *accepted_a = NULL, *accepted_b = NULL;
+    ngx_media_srt_poll_t      *poll = NULL;
+    ngx_media_srt_poll_event_t events[4];
+    ngx_uint_t                 count = 0, i;
+    u_char                     a[] = { 'a', '1', '!' };
+    u_char                     b[] = { 'b', '2', '?' };
+    u_char                     got_a[sizeof(a)], got_b[sizeof(b)];
+    ngx_int_t                  n;
+    ngx_uint_t                 saw_a, saw_b;
+
+    TEST_CASE("backend: one listener demultiplexes interleaved sessions");
+
+    listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", 24574, NULL,
+                                    NULL);
+    CHECK(listener != NULL, "listener created");
+
+    caller_a = ngx_media_srt_connect((const u_char *) "127.0.0.1", 24574,
+                                     (const u_char *) "a", 1, 1000, NULL,
+                                     NULL);
+    caller_b = ngx_media_srt_connect((const u_char *) "127.0.0.1", 24574,
+                                     (const u_char *) "b", 1, 1000, NULL,
+                                     NULL);
+    CHECK(caller_a != NULL && caller_b != NULL, "two callers connected");
+
+    accepted_a = ngx_media_srt_accept(listener, 1000, NULL);
+    accepted_b = ngx_media_srt_accept(listener, 1000, NULL);
+    CHECK(accepted_a != NULL && accepted_b != NULL, "two sessions accepted");
+
+    poll = ngx_media_srt_poll_create(NULL);
+    CHECK(poll != NULL, "poll created");
+
+    if (poll != NULL) {
+        CHECK(ngx_media_srt_poll_add_listener(poll, listener) == NGX_OK,
+              "listener added");
+        CHECK(ngx_media_srt_poll_add_session(poll, accepted_a) == NGX_OK,
+              "first session added");
+        CHECK(ngx_media_srt_poll_add_session(poll, accepted_b) == NGX_OK,
+              "second session added");
+    }
+
+    if (caller_a != NULL && caller_b != NULL && accepted_a != NULL
+        && accepted_b != NULL && poll != NULL)
+    {
+        CHECK(ngx_media_srt_session_send(caller_a, a, sizeof(a), 100) > 0,
+              "first peer sent");
+        CHECK(ngx_media_srt_session_send(caller_b, b, sizeof(b), 100) > 0,
+              "second peer sent");
+
+        CHECK(ngx_media_srt_poll_wait(poll, 1000, events, 4, &count) == NGX_OK,
+              "poll demux completed");
+
+        saw_a = 0;
+        saw_b = 0;
+
+        for (i = 0; i < count; i++) {
+            saw_a |= events[i].session == accepted_a;
+            saw_b |= events[i].session == accepted_b;
+        }
+
+        CHECK(saw_a && saw_b, "both established peers reported: %lu", count);
+
+        n = ngx_media_srt_session_recv(accepted_a, got_a, sizeof(got_a), 100);
+        CHECK(n == (ngx_int_t) sizeof(got_a)
+              && memcmp(got_a, a, sizeof(a)) == 0,
+              "first peer received its own datagram");
+
+        n = ngx_media_srt_session_recv(accepted_b, got_b, sizeof(got_b), 100);
+        CHECK(n == (ngx_int_t) sizeof(got_b)
+              && memcmp(got_b, b, sizeof(b)) == 0,
+              "second peer received its own datagram");
+    }
+
+    if (poll != NULL) {
+        ngx_media_srt_poll_remove_session(poll, accepted_a);
+        ngx_media_srt_poll_remove_session(poll, accepted_b);
+        ngx_media_srt_poll_remove_listener(poll, listener);
+        ngx_media_srt_poll_destroy(poll);
+    }
+
+    if (caller_a != NULL) {
+        ngx_media_srt_session_close(caller_a);
+    }
+
+    if (caller_b != NULL) {
+        ngx_media_srt_session_close(caller_b);
+    }
+
+    if (accepted_a != NULL) {
+        ngx_media_srt_session_close(accepted_a);
+    }
+
+    if (accepted_b != NULL) {
+        ngx_media_srt_session_close(accepted_b);
+    }
+
+    if (listener != NULL) {
+        ngx_media_srt_listen_close(listener);
+    }
+}
+
 
 static void
 test_stats_and_teardown(void)
@@ -236,6 +341,7 @@ main(void)
 
     test_listen_connect_streamid();
     test_send_receive();
+    test_multi_session_demux();
     test_stats_and_teardown();
 
     TEST_LEAKS();

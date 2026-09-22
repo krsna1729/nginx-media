@@ -140,7 +140,35 @@ deleted means ordered teardown is leaking one;
 `tests/integration/api_graph_nginx.sh` asserts it returns to 2 or fewer after ten
 create/delete cycles.
 
+`nginx_media_streams_draining` is the other half of the same question.  A stream
+that owns a reader thread — a pull source, a directory being watched — is
+deleted at once, but its memory waits for that reader to notice and leave, so
+the pool is not freed under a thread that is still reading it.  The gauge is
+that wait, in streams: it goes up when such a stream is deleted and back to zero
+within a tick or two, and a value that stays up is a reader that has stopped
+making progress.  The delete itself never waits: an origin that answers slowly
+must not put its latency on the control API.  `make stream-delete` is the case
+that holds all of this, including a delete while an upload is in flight against
+a remote that never answers.
+
 ## Failure modes from outside
+
+### An input carries nothing this build can read
+
+An HLS input — a pulled playlist's segments, or segments uploaded to
+`media_hls_ingest` — is expected to be MPEG-TS carrying H.264 or H.265 video
+and/or AAC audio.  The demux reads the PMT, tracks those stream types and counts
+the ones it does not recognise, so an origin or an uploader that sends, say,
+MPEG-2 video in MPEG-TS produces no tracks and no frames.  The source then sits
+as one whose transport is up and which is not carrying media yet — the same
+state a publisher that has not sent a keyframe is in, and it is counted in
+`nginx_media_reconnecting_sources` — and it never goes on air.
+
+That is not silent: the reader logs one `WARN` naming the source and the stream
+types it accepts, the first time a segment carries nothing usable.  The fix is on
+the sending side (transcode to H.264/AAC, or point the source at an origin that
+carries those); there is no configuration that makes this build carry MPEG-2,
+AC-3 or subtitles.
 
 ### A source goes unhealthy
 
@@ -219,9 +247,19 @@ endpoint.  The practical monitor is the remote: compare what it has received
 against the HLS directory's playlist, and treat a stalled remote as a
 destination to delete and recreate rather than something the server will report.
 
-A destination pointed at a directory `media_hls` does not write simply receives
-nothing, since the scan only ever offers the configured HLS directory
-(`configuration.md`).
+Every outbound HTTP operation has a deadline: five seconds to connect to one
+address, ten seconds without progress on a read or a write.  A remote that
+accepts the connection and then says nothing therefore costs a reader thread or
+an uploader that long rather than the kernel's own timeout, and on the push side
+that matters most: the upload pool is four threads, so four silent remotes used
+to take every destination's uploads with them.  A stalled upload is then a
+failed upload (`failed` in the destination's counters, not `dropped`) and the
+segment is not published truncated.
+
+A destination pointed at a directory no program writes to simply receives
+nothing: the scan offers the program's own HLS directory
+(`<media_hls>/<application>/<name>`), so a destination has to be pointed at the
+program it is meant to carry (`configuration.md`).
 
 There is a ceiling worth knowing about on long-running destinations: each one
 remembers the 256 most recent file names it has offered
@@ -264,7 +302,9 @@ the log.
 Only the owner drives a program: the tick skips streams whose ownership hash is
 not this worker's, so in a worker that has lost ownership of a stream nothing
 runs — no selection, no outputs, no log line.  Ownership is deterministic
-(FNV-1a over `application/stream`, modulo the worker count) and never moves
+(64-bit FNV-1a over `application/stream`, modulo the worker count, so two
+distinct streams cannot hash alike and become one stream to the deployment) and
+never moves
 during a worker's life, so this is not a thing that drifts; it is a thing that
 is wrong from the start or that stops being right when the worker count changes.
 
@@ -334,8 +374,11 @@ The contract is in `api.md`; the operational shape of it is:
 
 A mutation may carry the revision it last saw and is refused with
 `409 stale_revision` when it is stale, which is the signal that someone else
-wrote; a delete of something already gone succeeds, which is what makes a retry
-after a timeout safe.
+wrote — including someone else on another worker, since revisions come from one
+sequence shared by every worker; a delete of something already gone succeeds,
+which is what makes a retry after a timeout safe.  A write that states no
+revision and loses a race is not an error: it is superseded by the newer write,
+and the graph converges on that one on every worker.
 
 Three things about a document are worth knowing before writing a controller
 against it.  It is capped at 8192 bytes — an API for a graph of tens of streams,
@@ -1069,6 +1112,8 @@ approached is a reading, not a directive.
 |---|---|---|
 | Program feed backlog | 2048 units, 32 MiB, 10 s age per stream | `feed_units`, `feed_bytes`; eviction at a ceiling is a discontinuity downstream |
 | Runtime output slots | 16 per worker, one per stream with an output configured | `nginx_media_runtime_outputs`; a count that does not fall is a leak, and 16 is the stream ceiling per worker |
+| Outbound HTTP wait | 5 s to connect per address, 10 s without progress per read or write | a reader or uploader thread is released; the fetch or upload fails and is retried or counted, and the log says so |
+| Streams draining after a delete | unbounded, one per deleted stream whose reader thread is still stopping | `nginx_media_streams_draining`; it returns to zero within a tick or two, and a value that stays up is a reader that will not leave.  Each such stream holds its pool (its feed included) until then |
 | Standby GOP cache | 512 units / 4 MiB per source | `preroll_units`, `preroll_bytes`; `preroll_overflows` rising means the cache is being cleared instead of kept, so a switch has no cached GOP to land on |
 | SRT destinations | 8 slots per worker | create fails `500 destination_start_failed` |
 | SRT sender queue | 256 units / 8 MiB per destination | drop count in the `srt output` log lines |
@@ -1105,12 +1150,13 @@ responsibility.
   that is the operator's decision.
 - It does not route the control plane between workers.  Routes act on the
   registry of the worker that accepts them.
-- It does not produce one HLS output per program.  `media_hls` applies to every
-  program and the segmenter writes `index.m3u8` and `seg-NNNNNN.ts` into the
-  configured directory with no per-program subdirectory, so two programs carrying
-  media at once share a playlist and a segment name space, including the eviction
-  that deletes files.  The tests carry one program at a time; a deployment with
-  several programs that need HLS output wants one directory per program.
+- It does not produce one *recording* per program.  HLS output is per program -
+  `media_hls <root>` writes each program's playlist and segments into
+  `<root>/<application>/<name>` - but `media_record` and `media_record_raw` name
+  one file for every program, so two programs carrying media at once write the
+  same recording path and the second truncates the first.  A deployment with
+  several programs that both record wants separate instances, or a recording
+  destination per program once one exists.
 - It does not let a profile configure the segmenter.  A `youtube_live`
   destination's validated `segment_duration_ms` and `playlist_window` are
   recorded on the destination and do not drive segmentation, which is fixed at a

@@ -140,7 +140,8 @@ A logical program has **one owner worker**, chosen by consistent hashing over
 `application/stream`.  The owner holds the mutable state: sources, selector,
 timeline, program feed, HLS state and program recording.
 
-Shared memory holds only small metadata — stream hash, owner worker/pid/cycle,
+Shared memory holds only small metadata — the stream's identity, owner
+worker/pid/cycle,
 generation, state, heartbeat — never mutable media state.  Transport socket
 ownership may differ from program ownership, and where it can, it does: each
 worker accepts on its own ingest endpoint, so a publisher is normally carried
@@ -152,7 +153,7 @@ worker rather than one shared endpoint that would make routing the rule.
 
 ```mermaid
 flowchart TB
-    subgraph W0["worker 0 - owner of live/news: hash % workers"]
+    subgraph W0["worker 0 - owner of live/news: identity % workers"]
         L0["media_srt_listen 127.0.0.1:9000"]
         P0["sources, selector, timeline,<br/>program feed, HLS state, PROGRAM recording"]
     end
@@ -183,7 +184,7 @@ sequenceDiagram
     participant W0 as worker 0 - owner of live/news
 
     E->>W1: SRT session, identity from the stream id
-    W1->>W1: owner = hash(application/stream) % workers, and it is not this worker
+    W1->>W1: owner = identity(application/stream) % workers, and it is not this worker
     W1->>W0: OPEN, then TRACKS with the source's track contract
     loop media
         W1->>W0: VIDEO / AUDIO / DATA frames, already demuxed
@@ -231,12 +232,51 @@ program, a manual switch and a switchback, are refused the same way.
 Operations carry the revision the API assigned to the mutation, and a replica
 applies one only when the stream has not already moved past it, so an operation
 that raced another worker's change to the same stream is a no-op rather than a
-duplicate or a torn object.  This is a bounded, best-effort control plane, not
+duplicate or a torn object.  A deletion is an operation like any other — it is
+broadcast to every worker, and deleting a stream this worker does not have still
+tells the workers that do — and each worker remembers the deletions it has seen
+for a bounded window, so an operation that was in flight when the stream was
+deleted cannot create it again afterwards.  Without that memory a replica that
+had applied the delete would find no stream when the older operation arrived and
+build one, and the deployment would hold a stream the operator removed.  This is a bounded, best-effort control plane, not
 consensus: a worker that is gone or behind is counted in
 `nginx_media_graph_undelivered_total`, logged and skipped, and a replica that
 missed an operation heals on the next mutation for that object or when a
 controller replays desired state through the API, which is safe because every
 create is idempotent.
+
+### Deleting a stream releases its memory
+
+Each stream carries its own pool, and deleting one gives that memory back
+rather than leaving it in the cycle pool until the worker exits — a controller
+that creates and deletes programs does not grow the worker without bound.  What
+makes that safe is ordered teardown, because a stream is not only referenced by
+the registry:
+
+- the runtime's per-stream state (output slots, the player preparation, the
+  routed slots that publish into the stream) is released first, while the
+  program feed is still there for the outputs to flush from;
+- a file reader is paced by the tick on the worker's own thread, so it is
+  closed in place: unlinked, its descriptor released, its source detached;
+- a reader that owns a thread — an origin being pulled, a directory being
+  watched — is told its source is gone and leaves on its own, and the pool it
+  points at waits on the draining list until the tick has reaped it.  Freeing
+  it in the delete instead would hand that thread a pointer into freed memory,
+  and joining it in the delete would put an origin's latency on the control
+  API's critical path;
+- a push destination's uploader runs with the destination list lock released
+  and can be inside an upload that takes as long as the remote takes, so the
+  destination owns its own pool and a reference for every holder — the last one
+  out frees it.
+
+`nginx_media_streams_draining` is the gauge for the second case: a deleted
+stream whose memory is still held by a reader that is stopping.  It returns to
+zero on its own within a tick or two, and a reader that never stops is logged
+with the counts holding it.
+
+The log an object keeps is part of the same rule: a stream, a reader, or the
+pool behind them outlives the request that created it, so what they keep is the
+worker's log, never a connection's, which dies with the connection.
 
 ## The runtime graph
 
@@ -257,11 +297,18 @@ enforce.  A stream absent from the document is not deleted — pruning is the
 controller's decision, made with the delete calls, not a side effect of a
 replay.
 
-Each object carries a revision, bumped by every mutation of it or of a child,
-and a mutation that states the revision it last saw is refused when it is stale
-rather than overwriting a newer desired state.  Deletion does not require the
-object to exist: the caller asked for an end state and that end state holds,
-which is what makes a retry after a timeout safe.
+Each object carries a revision, taken from one sequence shared by every worker
+— the counter in the shared owner directory — by every mutation of it or of a
+child, and a mutation that states the revision it last saw is refused when it is
+stale rather than overwriting a newer desired state.  One sequence rather than a
+counter per worker is what makes two workers' operations comparable: a mutation
+accepted by worker 0 and one accepted by worker 1 at the same moment get
+different numbers, so every replica resolves the pair the same way — the higher
+revision is the newer state and the lower one is dropped — instead of each
+worker keeping whichever operation reached it last, which is how replicas
+disagree.  Deletion does not require the object to exist: the caller asked for
+an end state and that end state holds, which is what makes a retry after a
+timeout safe.
 
 Destinations are the same kind of object as sources, reached through the same
 `ngx_media_destination_ops_t` contract the SRT transport uses: the core owns the
@@ -308,10 +355,15 @@ publishing side of the source gate or the consuming side of the fanout:
   directory, so a reader sees a whole segment or none of it.  A reader of type
   `hls_push` then demuxes it like any other source.  The writer and the reader
   are separate halves on purpose — the ingest endpoint does not know what reads
-  the directory.
-- An `hls_push` destination watches the HLS output directory and uploads
-  segments to its endpoint on a bounded pool, each destination with its own
-  bounded queue.
+  the directory.  An HLS input is MPEG-TS carrying H.264 or H.265 video and/or
+  AAC audio; a container with none of those yields no tracks and no frames, and
+  the reader reports that once instead of producing a source that never goes on
+  air for no stated reason.
+- An `hls_push` destination watches one program's HLS output directory and
+  uploads segments to its endpoint on a bounded pool, each destination with its
+  own bounded queue.  With `media_hls <root>`, that directory is
+  `<root>/<application>/<name>`: programs do not share a playlist or a segment
+  name space.
 
 Because all of these publish through the source gate or consume from the
 fanout, selection, health and compatibility need to know nothing about where
@@ -452,7 +504,7 @@ flowchart LR
 The adapter deliberately does not parse Stream IDs, register sources, mutate
 logical streams, select a program, prepare output formats, or fan out media.
 `streamid()` only supplies the identity to the module; ownership is then
-`hash(application/stream) % workers`, and a non-owner session is routed by the
+`identity(application/stream) % workers`, and a non-owner session is routed by the
 core IPC layer.  `recv()` supplies bytes into a caller-owned buffer and
 `send()` accepts already-prepared transport bytes.  These boundaries are the
 reason both libraries can qualify against the same module code.

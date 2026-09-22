@@ -98,13 +98,13 @@ grep -q 'rtmp publisher stream=live/tls' "$RUN/logs/error.log" \
 echo "   rtmps publisher registered"
 
 for _ in $(seq 1 200); do
-    [ -f "$RUN/hls/index.m3u8" ] \
-        && [ "$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" || true)" -ge 1 ] \
+    [ -f "$RUN/hls/live/tls/index.m3u8" ] \
+        && [ "$(grep -c '^#EXTINF' "$RUN/hls/live/tls/index.m3u8" || true)" -ge 1 ] \
         && break
     sleep 0.1
 done
 
-[ -f "$RUN/hls/index.m3u8" ] \
+[ -f "$RUN/hls/live/tls/index.m3u8" ] \
     || { echo "no hls output from the rtmps source" >&2; exit 1; }
 
 echo "   the program reached hls"

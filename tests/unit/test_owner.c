@@ -58,13 +58,26 @@ test_determinism(void)
               "component boundary is part of the hash");
     }
 
-    /* a well known FNV-1a vector pins the algorithm */
+    /*
+     * A well known FNV-1a vector pins the algorithm: the value is a stream's
+     * identity on the wire and in shared memory, so it has to be the same in
+     * every process, every build and every release.
+     */
     {
         ngx_str_t  empty = str("");
 
-        CHECK(ngx_media_owner_hash(&empty, &empty) == 0xB5F8A1ACu
-              || ngx_media_owner_hash(&empty, &empty) != 0,
-              "hash computed");
+        CHECK(ngx_media_owner_hash(&empty, &empty) == 0xaf63a24c860189feull,
+              "FNV-1a 64 over the separator is %llx",
+              (unsigned long long) ngx_media_owner_hash(&empty, &empty));
+    }
+
+    /* 64 bits, because 32 collide at a few tens of thousands of streams */
+    {
+        ngx_str_t  a = str("live"), b = str("news");
+        uint64_t   hash = ngx_media_owner_hash(&a, &b);
+
+        CHECK((hash >> 32) != 0 || (hash & 0xffffffffu) != 0,
+              "hash uses the whole word");
     }
 }
 

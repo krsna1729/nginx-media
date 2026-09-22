@@ -24,6 +24,27 @@
 typedef ngx_int_t (*ngx_media_preroll_replay_pt)(void *ctx,
     const ngx_media_frame_t *frame);
 
+/*
+ * The revision sequence, which is one sequence for every worker.
+ *
+ * A desired-state mutation takes the next number from the provider the worker
+ * registered - the shared owner directory's counter - so two workers'
+ * operations on one stream are comparable and every replica resolves a
+ * conflict the same way: the higher revision is the newer state, and the
+ * lower one is dropped.  A counter per worker cannot do that.  Two workers
+ * both call their own next number the same thing, so each replica keeps
+ * whichever operation it happened to see last and the replicas disagree.
+ *
+ * Without a provider - unit builds, or a process with no shared directory -
+ * the number stays local, which is the same thing when there is one writer.
+ */
+typedef uint64_t (*ngx_media_revision_pt)(void);
+
+void ngx_media_revision_provider(ngx_media_revision_pt provider);
+
+/* the next revision after local: the shared one when it is ahead, else local */
+uint64_t ngx_media_revision_next(uint64_t local);
+
 /* bumps the object revision: call it from every desired-state mutation */
 void ngx_media_source_touch(ngx_media_source_t *source);
 

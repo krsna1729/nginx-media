@@ -472,6 +472,25 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
         return NGX_ERROR;
     }
 
+    /*
+     * A stream this worker deleted is not brought back by an operation the
+     * deletion already moved past.  The guard below only covers a stream that
+     * is still here; after a delete there is nothing to compare against, so an
+     * operation that was in flight when the stream went would create it again
+     * - on this worker only, which is exactly the divergence replicas must not
+     * have.
+     */
+    if (ngx_media_registry_is_tombstoned(
+            registry, ngx_media_owner_hash(&op.application, &op.name),
+            op.revision))
+    {
+        ngx_log_debug4(NGX_LOG_DEBUG_CORE, log, 0,
+                       "media: graph operation type=%ui for %V/%V is older "
+                       "than its deletion (revision=%uL); dropped",
+                       op.kind, &op.application, &op.name, op.revision);
+        return NGX_OK;
+    }
+
     stream = ngx_media_registry_stream(registry, &op.application, &op.name);
 
     /*
@@ -517,7 +536,17 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
     case NGX_MEDIA_GRAPH_STREAM_DELETE:
 
         if (stream == NULL) {
-            return NGX_OK;   /* idempotent: the end state already holds */
+            /*
+             * Idempotent, but the deletion still has to be remembered: an
+             * operation that was in flight when it was issued would otherwise
+             * create the stream here afterwards, and this worker would hold a
+             * stream the operator removed while its peers do not.
+             */
+            ngx_media_registry_tombstone(
+                registry,
+                ngx_media_owner_hash(&op.application, &op.name), op.revision);
+
+            return NGX_OK;
         }
 
         /*
@@ -525,6 +554,17 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
          * worker that took the request may not have been the owner.
          */
         ngx_media_runtime_release(&op.application, &op.name);
+
+        /*
+         * The tombstone this leaves behind records the revision the deletion
+         * moved past.  A replica that had already applied a newer operation
+         * than the delete carries knows more than the deleter did, so the
+         * higher number is what the tombstone has to remember - otherwise an
+         * operation between the two would resurrect the stream here.
+         */
+        if (op.revision > stream->revision) {
+            stream->revision = op.revision;
+        }
 
         if (ngx_media_registry_stream_destroy(registry, stream) != NGX_OK) {
             return NGX_ERROR;

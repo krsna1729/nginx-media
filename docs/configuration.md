@@ -26,25 +26,44 @@ http {
 
 ### `media_hls <directory>;`
 
-Writes the segmented HLS output for every program under `<directory>`.  Serve
-it with a normal `alias`/`root` location.  The segmenter starts on a keyframe;
-no directive configures segment duration yet.
+Writes segmented HLS output under `<directory>`, one directory per program:
+`<directory>/<application>/<name>` holds that program's playlist and segments.
+Serve the root with a normal `alias`/`root` location, and a viewer fetches
+`/hls/<application>/<name>/index.m3u8`; programs do not share a playlist name or
+a set of segment names, so two of them writing at once cannot overwrite each
+other's media.  The two components come from the program's identity, with
+anything outside `[A-Za-z0-9_-]` replaced by `_`, so a name cannot choose a
+directory outside the root.  The segmenter starts on a keyframe; no directive
+configures segment duration yet.  A segment's file is written under a temporary
+name and renamed into place, the way the playlist is, so a reader that watches
+the directory - an `hls_push` destination, or a viewer that fetched the name
+from the playlist - never sees a name with a partial segment behind it.
 
-### `media_record <directory>;`
+### `media_record <file>;`
 
-Records the post-selection, timeline-normalized program — what went to air —
-as MPEG-TS parts under `<directory>`.  I/O runs on a writer thread, never on
-the event loop, and reload closes the current part cleanly.
+Records the post-selection, timeline-normalized program — what went to air — as
+MPEG-TS parts at `<file>`.  The first part is exactly `<file>`; each later part
+inserts its number before the extension (`program.ts` → `program-0002.ts`,
+`program` → `program-0002`).  I/O runs on a writer thread, never on the event
+loop, and reload closes the current part cleanly.
 
-### `media_record_raw <directory>;`
+The path is one file for every program, not one per program: two programs
+carrying media at once write the same path and the second truncates the first.
+A deployment that records several programs wants one instance per program for
+now — see the limitation in `operations.md`.
+
+### `media_record_raw <file>;`
 
 Records the RAW tap: transport bytes exactly as they arrived, before demux and
 before selection.  Useful when the question is "did the publisher send that".
+The parts are named like `media_record`'s, and it is one file for every program
+as well.
 
-### `media_record_iso <application/stream> <directory>;`
+### `media_record_iso <application/stream> <file>;`
 
-Records one named source, before the selector, into `<directory>`.  This is the
-per-source tap; it is independent of which source is currently on air.
+Records one named source, before the selector, at `<file>`, with the same part
+numbering.  This is the per-source tap; it is independent of which source is
+currently on air.
 
 ## Selection and failover
 
@@ -326,7 +345,16 @@ control API, which watches this directory.
 
 The body is written to a file by nginx's own machinery rather than read into
 memory, and the handler then renames it into place, so a reader either sees a
-whole segment or none of it, never a partial one.  Because that is a rename,
+whole segment or none of it, never a partial one.
+
+What an uploaded segment may carry is the HLS input profile: **MPEG-TS with
+H.264 or H.265 video and/or AAC audio**.  The demux reads the PMT, tracks those
+three stream types and counts the ones it does not know.  A container that
+carries only the others produces no tracks and no frames, so the source never
+goes on air; the reader says so once, naming the source and the stream types it
+accepts, rather than leaving an operator to guess.  A container that carries one
+of them and something else is read: the tracks this build can write are carried
+and the rest are ignored.  Because that is a rename,
 `client_body_temp_path` has to be on the same filesystem as the ingest
 directory — the same requirement any nginx upload-to-final-location setup has.
 
@@ -359,11 +387,15 @@ waits for the origin rather than spinning.
  "path":"https://origin.example/live/news/index.m3u8"}
 ```
 
-A **`hls_push` destination** watches the HLS output directory and uploads its
-segments and playlists to an HTTP or HTTPS endpoint.  The directory has to be
-the one `media_hls` is configured to write to: the runtime tick scans that
-directory once per tick and offers anything new to every destination watching
-it, so a destination pointed somewhere else simply receives nothing.  Uploads
+A **`hls_push` destination** watches a directory and uploads the segments and
+playlists that appear in it to an HTTP or HTTPS endpoint.  Every upload is
+bounded: five seconds to connect and ten without progress on the wire, so a
+remote that accepts and then stops reading costs one failed upload rather than
+an uploader thread.  The directory has to
+be the one the program's output is written to — with `media_hls <root>`, that is
+`<root>/<application>/<name>` — because the runtime tick scans that directory
+once per tick and offers anything new to the destinations watching it, so a
+destination pointed somewhere else simply receives nothing.  Uploads
 run on a bounded pool and each destination has its own bounded queue, so a
 stalled remote drops its oldest queued segment and counts it rather than
 stalling the program or its neighbours.  An endpoint that carries a credential

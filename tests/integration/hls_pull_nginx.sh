@@ -137,11 +137,11 @@ timeout 180 ffmpeg -hide_banner -loglevel error -re \
 ORIGIN_PUB=$!
 
 for _ in $(seq 1 300); do
-    [ -f "$RUN/origin/hls/index.m3u8" ] && break
+    [ -f "$RUN/origin/hls/live/origin/index.m3u8" ] && break
     sleep 0.1
 done
 
-[ -f "$RUN/origin/hls/index.m3u8" ] \
+[ -f "$RUN/origin/hls/live/origin/index.m3u8" ] \
     || { echo "the origin produced no hls" >&2; exit 1; }
 
 echo "   origin playlist is up"
@@ -149,7 +149,7 @@ echo "   origin playlist is up"
 echo "== an hls pull source is added at runtime"
 STATUS="$(curl -sS -o "$RUN/pull.json" -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' \
-    -d "{\"id\":\"origin-hls\",\"type\":\"hls_pull\",\"path\":\"https://127.0.0.1:$ORIGIN_HTTP/hls/index.m3u8\",\"ca_file\":\"$RUN/cert.pem\"}" \
+    -d "{\"id\":\"origin-hls\",\"type\":\"hls_pull\",\"path\":\"https://127.0.0.1:$ORIGIN_HTTP/hls/live/origin/index.m3u8\",\"ca_file\":\"$RUN/cert.pem\"}" \
     "$API/streams/live/relay/sources")"
 
 cat "$RUN/pull.json"; echo
@@ -200,14 +200,14 @@ echo "   promoted: $ACTIVE"
          curl -fsS "$API/streams/live/relay" >&2; exit 1; }
 
 for _ in $(seq 1 300); do
-    [ -f "$RUN/puller/hls/index.m3u8" ] && break
+    [ -f "$RUN/puller/hls/live/relay/index.m3u8" ] && break
     sleep 0.1
 done
 
-[ -f "$RUN/puller/hls/index.m3u8" ] \
+[ -f "$RUN/puller/hls/live/relay/index.m3u8" ] \
     || { echo "the pulled program produced no hls" >&2; exit 1; }
 
-SEG="$(ls "$RUN"/puller/hls/*.ts 2>/dev/null | head -1)"
+SEG="$(ls "$RUN"/puller/hls/live/relay/*.ts 2>/dev/null | head -1)"
 
 [ -n "$SEG" ] || { echo "no segments at the puller" >&2; exit 1; }
 
@@ -221,6 +221,88 @@ printf '%s' "$PROBE" | grep -q '^h264' \
 
 grep -q 'hls pull source origin-hls opened' "$RUN/puller/logs/error.log" \
     || { echo "the pull source was not opened" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# a source whose origin accepts and never answers
+# ---------------------------------------------------------------------------
+
+echo "== a pull source whose origin never answers gives up on its own deadline"
+
+STALL_PORT=18522
+
+python3 - "$STALL_PORT" <<'STALL' >"$RUN/stall.log" 2>&1 &
+import socket
+import sys
+
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", int(sys.argv[1])))
+listener.listen(8)
+
+print("listening", flush=True)
+
+held = []
+
+while True:
+    # accepted, and never answered: the playlist fetch waits for a reply that
+    # is not coming
+    conn, _ = listener.accept()
+    print("accepted", flush=True)
+    held.append(conn)
+STALL
+STALL=$!
+
+# the source must be pointed at a listener that is already accepting, or the
+# connect is refused and the case proves nothing about waiting
+for _ in $(seq 1 100); do
+    grep -q listening "$RUN/stall.log" && break
+    sleep 0.1
+done
+
+grep -q listening "$RUN/stall.log" \
+    || { echo "the stall server never listened" >&2
+         kill -KILL "$STALL" 2>/dev/null; exit 1; }
+
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d "{\"id\":\"stalled\",\"type\":\"hls_pull\",\"path\":\"http://127.0.0.1:$STALL_PORT/index.m3u8\"}" \
+    "$API/streams/live/relay/sources")"
+
+[ "$STATUS" = "201" ] \
+    || { echo "could not create the stalled source: $STATUS" >&2
+         kill -KILL "$STALL" 2>/dev/null; exit 1; }
+
+# the fetch reached a listener that accepted it and then said nothing, so the
+# only thing that can end it is the deadline on the socket
+for _ in $(seq 1 100); do
+    grep -q accepted "$RUN/stall.log" && break
+    sleep 0.1
+done
+
+grep -q accepted "$RUN/stall.log" \
+    || { echo "the fetch never reached the stall server" >&2
+         kill -KILL "$STALL" 2>/dev/null; exit 1; }
+
+# the I/O deadline is 10 s and the reader retries between fetches, so the first
+# failure is expected well inside this window; without a deadline the fetch
+# waits for the kernel's own timeout and this window is never enough
+for _ in $(seq 1 300); do
+    grep -q 'hls pull stalled could not fetch the playlist' \
+        "$RUN/puller/logs/error.log" && break
+    sleep 0.1
+done
+
+grep -q 'hls pull stalled could not fetch the playlist' \
+    "$RUN/puller/logs/error.log" \
+    || { echo "a source whose origin never answers did not give up" >&2
+         kill -KILL "$STALL" 2>/dev/null
+         tail -5 "$RUN/puller/logs/error.log" >&2
+         exit 1; }
+
+echo "   the fetch failed on its deadline"
+
+kill -KILL "$STALL" 2>/dev/null
+wait "$STALL" 2>/dev/null
 
 kill -KILL "$ORIGIN_PUB" 2>/dev/null
 kill -KILL "$PUB" 2>/dev/null

@@ -182,7 +182,7 @@ wait_for_writers_drained() {
 }
 
 discontinuities() {
-    grep -c '^#EXT-X-DISCONTINUITY$' "$RUN/hls/index.m3u8" 2>/dev/null || true
+    grep -c '^#EXT-X-DISCONTINUITY$' "$RUN/hls/live/news/index.m3u8" 2>/dev/null || true
 }
 
 # the first segment of the newest generation: the one that follows the last
@@ -190,7 +190,7 @@ discontinuities() {
 new_generation_segment() {
     awk '/^#EXT-X-DISCONTINUITY$/ { found = 1; name = ""; next }
          /\.ts$/ { if (found) name = $0 }
-         END { print name }' "$RUN/hls/index.m3u8"
+         END { print name }' "$RUN/hls/live/news/index.m3u8"
 }
 
 wait_for_new_generation_segment() {
@@ -200,7 +200,7 @@ wait_for_new_generation_segment() {
         if [ "$(discontinuities)" -gt "$before" ]; then
             name="$(new_generation_segment)"
 
-            if [ -n "$name" ] && [ -s "$RUN/hls/$name" ]; then
+            if [ -n "$name" ] && [ -s "$RUN/hls/live/news/$name" ]; then
                 printf '%s' "$name"
                 return 0
             fi
@@ -216,13 +216,13 @@ wait_for_new_generation_segment() {
 # video widths present in a segment, sorted and space separated
 segment_widths() {
     ffprobe -hide_banner -loglevel error -select_streams v:0 \
-        -show_entries frame=width -of csv=p=0 "$RUN/hls/$1" 2>/dev/null \
+        -show_entries frame=width -of csv=p=0 "$RUN/hls/live/news/$1" 2>/dev/null \
         | tr -d ',' | sort -u | tr '\n' ' '
 }
 
 segment_first_is_keyframe() {
     [ "$(ffprobe -hide_banner -loglevel error -select_streams v:0 \
-        -show_entries frame=key_frame -of csv=p=0 "$RUN/hls/$1" 2>/dev/null \
+        -show_entries frame=key_frame -of csv=p=0 "$RUN/hls/live/news/$1" 2>/dev/null \
         | sed -n 1p | tr -d ',')" = "1" ]
 }
 

@@ -515,7 +515,7 @@ grep -q 'srt listener ready' "$RUN/logs/error.log" \
 
 echo "== the host answers its namespaces"
 REACH="$(priv ip netns exec "$NSV" curl -sS --max-time 5 -o /dev/null \
-    -w '%{http_code}' "http://$IP_V_HOST:$HTTP_PORT/hls/index.m3u8" 2>/dev/null || true)"
+    -w '%{http_code}' "http://$IP_V_HOST:$HTTP_PORT/hls/live/netns/index.m3u8" 2>/dev/null || true)"
 
 echo "   $NSV -> $IP_V_HOST:$HTTP_PORT: ${REACH:-no answer}"
 
@@ -762,11 +762,11 @@ worker_survived() { # <what happened>
 }
 
 hls_segments() {
-    grep -c '^#EXTINF' "$RUN/hls/index.m3u8" 2>/dev/null || true
+    grep -c '^#EXTINF' "$RUN/hls/live/netns/index.m3u8" 2>/dev/null || true
 }
 
 newest_segment() {
-    grep -v '^#' "$RUN/hls/index.m3u8" 2>/dev/null | grep -v '^$' | tail -1 || true
+    grep -v '^#' "$RUN/hls/live/netns/index.m3u8" 2>/dev/null | grep -v '^$' | tail -1 || true
 }
 
 publish() { # <ns> <host-ip> <source> <freq> <seconds>
@@ -834,7 +834,7 @@ SEGMENTS="$(number "hls segments" "$(hls_segments)")"
 
 echo "== a viewer in its own namespace pulls a segment over its impaired link"
 PLAYLIST="$(priv ip netns exec "$NSV" curl -fsS --max-time 30 \
-    "http://$IP_V_HOST:$HTTP_PORT/hls/index.m3u8")"
+    "http://$IP_V_HOST:$HTTP_PORT/hls/live/netns/index.m3u8")"
 
 VIEWED_SEGMENTS="$(printf '%s\n' "$PLAYLIST" | grep -c '^#EXTINF' || true)"
 [ "$VIEWED_SEGMENTS" -ge 2 ] \
@@ -847,10 +847,10 @@ SEGMENT="$(printf '%s\n' "$PLAYLIST" | grep -v '^#' | grep -v '^$' | tail -2 | h
 
 VIEWER_START="$(date +%s%3N)"
 priv ip netns exec "$NSV" curl -fsS --max-time 30 -o "$RUN/viewer-$SEGMENT" \
-    "http://$IP_V_HOST:$HTTP_PORT/hls/$SEGMENT"
+    "http://$IP_V_HOST:$HTTP_PORT/hls/live/netns/$SEGMENT"
 VIEWER_MS=$(( $(date +%s%3N) - VIEWER_START ))
 
-curl -fsS -o "$RUN/host-$SEGMENT" "http://127.0.0.1:$HTTP_PORT/hls/$SEGMENT"
+curl -fsS -o "$RUN/host-$SEGMENT" "http://127.0.0.1:$HTTP_PORT/hls/live/netns/$SEGMENT"
 
 VIEWER_SHA="$(sha256sum "$RUN/viewer-$SEGMENT" | cut -d' ' -f1)"
 HOST_SHA="$(sha256sum "$RUN/host-$SEGMENT" | cut -d' ' -f1)"

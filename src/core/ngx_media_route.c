@@ -88,7 +88,7 @@ ngx_media_route_master_init(ngx_cycle_t *cycle, ngx_log_t *log)
 }
 
 ngx_uint_t
-ngx_media_route_owner(ngx_cycle_t *cycle, uint32_t hash)
+ngx_media_route_owner(ngx_cycle_t *cycle, uint64_t hash)
 {
     ngx_media_owner_dir_t  *dir = ngx_media_runtime_owner_dir();
     ngx_uint_t              fallback = ngx_media_owner_for(cycle, hash);
@@ -102,7 +102,7 @@ ngx_media_route_owner(ngx_cycle_t *cycle, uint32_t hash)
 }
 
 ngx_uint_t
-ngx_media_route_is_owner(ngx_cycle_t *cycle, uint32_t hash)
+ngx_media_route_is_owner(ngx_cycle_t *cycle, uint64_t hash)
 {
     return (ngx_media_route_owner(cycle, hash) == (ngx_uint_t) ngx_worker);
 }
@@ -318,7 +318,7 @@ ngx_media_route_broadcast_undelivered(void)
 }
 
 static ngx_media_ipc_endpoint_t *
-ngx_media_route_endpoint_for(ngx_cycle_t *cycle, uint32_t hash)
+ngx_media_route_endpoint_for(ngx_cycle_t *cycle, uint64_t hash)
 {
     ngx_uint_t  owner = ngx_media_route_owner(cycle, hash);
 
@@ -330,7 +330,7 @@ ngx_media_route_endpoint_for(ngx_cycle_t *cycle, uint32_t hash)
 }
 
 ngx_int_t
-ngx_media_route_open(ngx_cycle_t *cycle, uint32_t hash,
+ngx_media_route_open(ngx_cycle_t *cycle, uint64_t hash,
     const ngx_str_t *application, const ngx_str_t *stream,
     const ngx_str_t *source_id, ngx_uint_t source_type, ngx_uint_t priority)
 {
@@ -391,7 +391,7 @@ ngx_media_route_open(ngx_cycle_t *cycle, uint32_t hash,
 }
 
 ngx_int_t
-ngx_media_route_close(ngx_cycle_t *cycle, uint32_t hash)
+ngx_media_route_close(ngx_cycle_t *cycle, uint64_t hash)
 {
     ngx_media_ipc_endpoint_t  *endpoint;
     ngx_media_ipc_header_t     header;
@@ -412,7 +412,7 @@ ngx_media_route_close(ngx_cycle_t *cycle, uint32_t hash)
 }
 
 ngx_int_t
-ngx_media_route_frame(ngx_cycle_t *cycle, uint32_t hash,
+ngx_media_route_frame(ngx_cycle_t *cycle, uint64_t hash,
     const ngx_media_frame_t *frame, uint64_t sequence)
 {
     ngx_media_ipc_endpoint_t  *endpoint;
@@ -458,7 +458,7 @@ ngx_media_route_frame(ngx_cycle_t *cycle, uint32_t hash,
  * per track and the codec configuration blob where the source has one.
  */
 ngx_int_t
-ngx_media_route_tracks(ngx_cycle_t *cycle, uint32_t hash,
+ngx_media_route_tracks(ngx_cycle_t *cycle, uint64_t hash,
     const ngx_media_trackset_t *tracks)
 {
     ngx_media_ipc_endpoint_t  *endpoint;

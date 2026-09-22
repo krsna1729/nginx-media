@@ -58,6 +58,7 @@
 #define NGX_MEDIA_RTMP_OUT_CHUNK         4096
 #define NGX_MEDIA_RTMP_MAX_OUT_QUEUE     64
 #define NGX_MEDIA_RTMP_READ_BUFFER       16384
+#define NGX_MEDIA_RTMP_MAX_OUT_BYTES     (512 * 1024)
 #define NGX_MEDIA_RTMP_PLAY_INTERVAL     40
 #define NGX_MEDIA_RTMP_MAX_PLAY_BATCH    32
 #define NGX_MEDIA_RTMP_AMF_BUFFER        1024
@@ -102,13 +103,14 @@ struct ngx_media_rtmp_session_s {
 
     /* set when this worker does not own the stream and routes to the owner */
     unsigned                      routed:1;
-    uint32_t                      routed_hash;
+    uint64_t                      routed_hash;
     uint64_t                      routed_sequence;
 
     /* playing */
     ngx_media_rtmp_prepare_t     *prepare;
     uint64_t                      cursor;
     ngx_uint_t                    out_queue;
+    size_t                        out_bytes;
     ngx_chain_t                  *out;
     ngx_chain_t                  *out_last;
 
@@ -519,7 +521,10 @@ ngx_media_rtmp_queue_raw(ngx_media_rtmp_session_t *session, const u_char *data,
 {
     ngx_buf_t  *b;
 
-    if (session->out_queue >= NGX_MEDIA_RTMP_MAX_OUT_QUEUE) {
+    if (session->out_queue >= NGX_MEDIA_RTMP_MAX_OUT_QUEUE
+        || len > NGX_MEDIA_RTMP_MAX_OUT_BYTES
+        || session->out_bytes > NGX_MEDIA_RTMP_MAX_OUT_BYTES - len)
+    {
         return NGX_AGAIN;
     }
 
@@ -562,6 +567,7 @@ ngx_media_rtmp_chain_buf(ngx_media_rtmp_session_t *session, ngx_buf_t *b)
 
     session->out_last = cl;
     session->out_queue++;
+    session->out_bytes += (size_t) (b->last - b->pos);
 
     return cl;
 }
@@ -580,14 +586,17 @@ ngx_media_rtmp_queue_message(ngx_media_rtmp_session_t *session,
     ngx_media_buf_t *payload, size_t offset, size_t len)
 {
     ngx_media_rtmp_packet_t  packet;
+    ngx_media_rtmp_writer_t  writer;
     ngx_buf_t               *head;
-    ngx_uint_t               i, chunks;
+    ngx_chain_t             *pending, *pending_last, *cl;
+    ngx_uint_t               i, chunks, pending_queue;
+    size_t                    wire_bytes;
 
     /*
      * The writer splits len into ceil(len/chunk_size) chunks with two parts
      * each (header + slice).  Reserve for the whole message up front: the
-     * loop below appends one in-flight reference per payload slice with no
-     * other bound, and the ring holds exactly MAX_OUT_QUEUE of them.
+     * loop below appends one in-flight reference per payload slice, and the
+     * ring holds exactly MAX_OUT_QUEUE of them.
      */
     chunks = (len + NGX_MEDIA_RTMP_OUT_CHUNK - 1)
              / NGX_MEDIA_RTMP_OUT_CHUNK;
@@ -604,12 +613,32 @@ ngx_media_rtmp_queue_message(ngx_media_rtmp_session_t *session,
     }
 
     ngx_media_rtmp_packet_init(&packet);
+    writer = session->writer;
 
-    if (ngx_media_rtmp_writer_message(&session->writer, &packet, csid, type,
+    if (ngx_media_rtmp_writer_message(&writer, &packet, csid, type,
                                       stream_id, timestamp, payload, offset,
                                       len) != NGX_OK)
     {
         return NGX_ERROR;
+    }
+
+    wire_bytes = 0;
+
+    for (i = 0; i < packet.nparts; i++) {
+        if (packet.parts[i].len > NGX_MEDIA_RTMP_MAX_OUT_BYTES
+            || wire_bytes > NGX_MEDIA_RTMP_MAX_OUT_BYTES
+                              - packet.parts[i].len)
+        {
+            ngx_media_rtmp_packet_destroy(&packet);
+            return NGX_AGAIN;
+        }
+
+        wire_bytes += packet.parts[i].len;
+    }
+
+    if (session->out_bytes > NGX_MEDIA_RTMP_MAX_OUT_BYTES - wire_bytes) {
+        ngx_media_rtmp_packet_destroy(&packet);
+        return NGX_AGAIN;
     }
 
     /* one buffer holds every chunk header of this message */
@@ -621,22 +650,28 @@ ngx_media_rtmp_queue_message(ngx_media_rtmp_session_t *session,
     }
 
     head->last = ngx_cpymem(head->last, packet.head, packet.head_len);
+    pending = NULL;
+    pending_last = NULL;
+    pending_queue = 0;
 
+    /*
+     * Build on a private chain.  A partial allocation failure therefore
+     * cannot leave visible chain nodes or payload references behind.
+     */
     for (i = 0; i < packet.nparts; i++) {
-        ngx_buf_t    *b;
-        ngx_chain_t  *cl;
+        ngx_buf_t  *b;
+
+        b = ngx_calloc_buf(session->connection->pool);
+
+        if (b == NULL) {
+            ngx_media_rtmp_packet_destroy(&packet);
+            return NGX_ERROR;
+        }
 
         if (packet.parts[i].data >= packet.head
             && packet.parts[i].data < packet.head + packet.head_len)
         {
             /* a chunk header: a window into the copied header buffer */
-            b = ngx_calloc_buf(session->connection->pool);
-
-            if (b == NULL) {
-                ngx_media_rtmp_packet_destroy(&packet);
-                return NGX_ERROR;
-            }
-
             b->temporary = 1;
             b->start = head->start
                        + (packet.parts[i].data - packet.head);
@@ -646,42 +681,59 @@ ngx_media_rtmp_queue_message(ngx_media_rtmp_session_t *session,
 
         } else {
             /* a payload slice: a reference into the shared buffer */
-            b = ngx_calloc_buf(session->connection->pool);
-
-            if (b == NULL) {
-                ngx_media_rtmp_packet_destroy(&packet);
-                return NGX_ERROR;
-            }
-
             b->memory = 1;
             b->start = (u_char *) packet.parts[i].data;
             b->pos = b->start;
             b->end = b->start + packet.parts[i].len;
             b->last = b->end;
-
-            if (session->in_flight_count >= NGX_MEDIA_RTMP_MAX_OUT_QUEUE) {
-                ngx_media_rtmp_packet_destroy(&packet);
-                return NGX_ERROR;
-            }
-
-            session->in_flight[(session->in_flight_head
-                                + session->in_flight_count)
-                               % NGX_MEDIA_RTMP_MAX_OUT_QUEUE] =
-                ngx_media_buf_ref(packet.payload);
-            session->in_flight_count++;
         }
 
-        cl = ngx_media_rtmp_chain_buf(session, b);
+        cl = ngx_alloc_chain_link(session->connection->pool);
 
         if (cl == NULL) {
             ngx_media_rtmp_packet_destroy(&packet);
             return NGX_ERROR;
         }
+
+        cl->buf = b;
+        cl->next = NULL;
+
+        if (pending_last != NULL) {
+            pending_last->next = cl;
+
+        } else {
+            pending = cl;
+        }
+
+        pending_last = cl;
+        pending_queue++;
     }
 
     if (session->out_last != NULL) {
-        session->out_last->buf->flush = 1;
+        session->out_last->next = pending;
+
+    } else {
+        session->out = pending;
     }
+
+    session->out_last = pending_last;
+    session->out_queue += pending_queue;
+    session->out_bytes += wire_bytes;
+
+    for (i = 0; i < packet.nparts; i++) {
+        if (packet.parts[i].data < packet.head
+            || packet.parts[i].data >= packet.head + packet.head_len)
+        {
+            session->in_flight[(session->in_flight_head
+                               + session->in_flight_count)
+                              % NGX_MEDIA_RTMP_MAX_OUT_QUEUE] =
+                ngx_media_buf_ref(packet.payload);
+            session->in_flight_count++;
+        }
+    }
+
+    session->writer = writer;
+    session->out_last->buf->flush = 1;
 
     ngx_media_rtmp_packet_destroy(&packet);
 
@@ -693,6 +745,7 @@ ngx_media_rtmp_flush(ngx_media_rtmp_session_t *session)
 {
     ngx_connection_t  *c = session->connection;
     ngx_chain_t       *sent_tail, *cl, *next;
+    size_t             remaining_bytes;
 
     if (session->out == NULL) {
         return;
@@ -720,6 +773,15 @@ ngx_media_rtmp_flush(ngx_media_rtmp_session_t *session)
 
         session->out_queue--;
     }
+    remaining_bytes = 0;
+
+    for (cl = sent_tail; cl != NULL; cl = cl->next) {
+        if (cl->buf->pos < cl->buf->last) {
+            remaining_bytes += (size_t) (cl->buf->last - cl->buf->pos);
+        }
+    }
+
+    session->out_bytes = remaining_bytes;
 
     session->out = sent_tail;
 
@@ -1068,8 +1130,9 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
     feed_conf.max_bytes = 32 * 1024 * 1024;
     feed_conf.max_age = 10000;
 
+    /* the stream outlives the publisher's connection: keep the worker's log */
     stream = ngx_media_registry_stream_create(registry, app, name, &feed_conf,
-                                              session->log);
+                                              ((ngx_cycle_t *) ngx_cycle)->log);
 
     if (stream == NULL) {
         return NGX_ERROR;

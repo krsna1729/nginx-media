@@ -1,5 +1,7 @@
 # build outputs
 .build/
+# a second tree for a sanitized build (BUILD_DIR=.build-asan ...)
+.build-asan/
 objs/
 *.o
 *.so

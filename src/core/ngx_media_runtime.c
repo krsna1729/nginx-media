@@ -12,6 +12,7 @@
 #include "ngx_media_registry.h"
 #include "ngx_media_route.h"
 #include "ngx_media_selector.h"
+#include "ngx_media_source.h"
 
 /*
  * Per-stream outputs.  The program feed is drained on every runtime tick,
@@ -107,6 +108,94 @@ ngx_media_runtime_policy(void)
 
 /* --- outputs ------------------------------------------------------------- */
 
+/*
+ * One character of a path element built from an application or stream name.
+ * Those come from the control API, and a name that contains a separator or
+ * ".." would choose a directory outside the configured root, so anything
+ * outside this set becomes an underscore.
+ */
+static u_char
+ngx_media_runtime_path_char(u_char c)
+{
+    if ((c >= 'a' && c <= 'z')
+        || (c >= 'A' && c <= 'Z')
+        || (c >= '0' && c <= '9')
+        || c == '-'
+        || c == '_')
+    {
+        return c;
+    }
+
+    return '_';
+}
+
+/*
+ * The directory one program's HLS output goes to: the configured root, then the
+ * application, then the stream name.
+ *
+ * Every program writing into the root would share one playlist name and one
+ * set of segment names, which is not a smaller version of the same thing: the
+ * programs overwrite each other's media and a viewer cannot tell whose
+ * playlist it fetched.  A program's output is its own directory, and that is
+ * also the directory a push destination watches.
+ *
+ * The string lives in the stream's pool: it is read by the HLS segmenter for
+ * as long as the stream exists, and the stream's runtime outputs are released
+ * before that pool goes.
+ */
+static ngx_str_t *
+ngx_media_runtime_hls_dir(ngx_media_stream_t *stream, const ngx_str_t *root,
+    ngx_log_t *log)
+{
+    ngx_str_t  *path;
+    u_char     *p;
+    size_t      app_len, len, i;
+
+    /* an application is required by the API; an empty one still gets a level */
+    app_len = (stream->application.len > 0) ? stream->application.len : 1;
+
+    len = root->len + 1 + app_len + 1 + stream->name.len;
+
+    path = ngx_pcalloc(stream->pool, sizeof(ngx_str_t));
+
+    if (path == NULL) {
+        return NULL;
+    }
+
+    p = ngx_pnalloc(stream->pool, len);
+
+    if (p == NULL) {
+        return NULL;
+    }
+
+    path->data = p;
+    path->len = len;
+
+    ngx_memcpy(p, root->data, root->len);
+    p += root->len;
+    *p++ = '/';
+
+    if (stream->application.len > 0) {
+
+        for (i = 0; i < stream->application.len; i++) {
+            *p++ = ngx_media_runtime_path_char(stream->application.data[i]);
+        }
+
+    } else {
+        *p++ = '_';
+    }
+
+    *p++ = '/';
+
+    for (i = 0; i < stream->name.len; i++) {
+        *p++ = ngx_media_runtime_path_char(stream->name.data[i]);
+    }
+
+    (void) log;
+
+    return path;
+}
+
 static ngx_media_runtime_outputs_t *
 ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
 {
@@ -159,9 +248,16 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
     }
 
     if (policy->hls_path.len > 0) {
+        ngx_str_t  *dir = ngx_media_runtime_hls_dir(stream, &policy->hls_path,
+                                                    log);
+
+        if (dir == NULL) {
+            return NULL;
+        }
+
         ngx_media_hls_conf_default(&hls_conf);
 
-        hls_conf.path = policy->hls_path;
+        hls_conf.path = *dir;
         hls_conf.target_duration = NGX_MEDIA_RUNTIME_HLS_TARGET;
         hls_conf.min_duration = NGX_MEDIA_RUNTIME_HLS_TARGET / 2;
         hls_conf.max_duration = NGX_MEDIA_RUNTIME_HLS_TARGET * 2;
@@ -171,8 +267,7 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
 
             ngx_log_error(NGX_LOG_NOTICE, log, 0,
                           "media: hls output started for %V/%V in %V",
-                          &stream->application, &stream->name,
-                          &policy->hls_path);
+                          &stream->application, &stream->name, dir);
         }
     }
 
@@ -502,7 +597,7 @@ ngx_media_runtime_outputs_stop(ngx_media_runtime_outputs_t *out)
  * OPEN message and publishes every frame through the normal path.
  */
 static ngx_int_t
-ngx_media_runtime_route_sink(void *ctx, uint32_t hash,
+ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
     const ngx_media_ipc_header_t *header, ngx_media_buf_t *payload)
 {
     ngx_media_registry_t  *registry;
@@ -1032,7 +1127,7 @@ static ngx_media_runtime_stats_t  ngx_media_runtime_stats;
 void
 ngx_media_runtime_claim(const ngx_str_t *application, const ngx_str_t *name)
 {
-    uint32_t  hash;
+    uint64_t  hash;
 
     if (ngx_media_runtime_owners == NULL || application == NULL
         || name == NULL)
@@ -1049,7 +1144,7 @@ ngx_media_runtime_claim(const ngx_str_t *application, const ngx_str_t *name)
 void
 ngx_media_runtime_release(const ngx_str_t *application, const ngx_str_t *name)
 {
-    uint32_t  hash;
+    uint64_t  hash;
 
     if (ngx_media_runtime_owners == NULL || application == NULL
         || name == NULL)
@@ -1180,6 +1275,13 @@ ngx_media_runtime_tick(ngx_log_t *log)
      * it inside the loop advanced every reader once per owned stream.
      */
     ngx_media_file_advance_all(log);
+    /*
+     * HLS readers only perform transport and demux work.  Their callbacks
+     * enqueue bounded events; the owner drains them here so source health,
+     * timeline, feed and publication remain worker-owned.
+     */
+    ngx_media_hls_pull_drain_all();
+    ngx_media_hls_ingest_drain_all();
 
     /*
      * A source removed through the control API has to take its reader with
@@ -1192,6 +1294,15 @@ ngx_media_runtime_tick(ngx_log_t *log)
      */
     ngx_media_hls_pull_reap(log);
     ngx_media_hls_ingest_reap(log);
+
+    /*
+     * A deleted stream's pool is held until the last reader that references it
+     * has been closed, and closing a reader that holds a thread is the join
+     * the reap above just did - so this is where the memory a delete could not
+     * release becomes freeable, on the tick rather than in the delete, which
+     * must not wait on an origin.
+     */
+    ngx_media_registry_drain(registry, log);
 
     for (q = ngx_queue_head(&registry->entries);
          q != (ngx_queue_t *) &registry->entries;
@@ -1218,7 +1329,7 @@ ngx_media_runtime_tick(ngx_log_t *log)
          * to describe.
          */
         if (ngx_media_runtime_owners != NULL) {
-            uint32_t  hash = ngx_media_owner_hash(&stream->application,
+            uint64_t  hash = ngx_media_owner_hash(&stream->application,
                                                   &stream->name);
 
             (void) ngx_media_owner_dir_heartbeat(
@@ -1244,15 +1355,6 @@ ngx_media_runtime_tick(ngx_log_t *log)
                            res.emergency != NULL);
         }
 
-        /*
-         * Push destinations watch the HLS directory rather than tapping the
-         * segmenter: offering new files here costs a stat per name, and the
-         * upload itself happens on the push pool.
-         */
-        if (policy != NULL && policy->hls_path.len > 0) {
-            ngx_media_hls_push_scan(&policy->hls_path, log);
-        }
-
         if (policy != NULL
             && (policy->hls_path.len > 0
                 || policy->record_program_path.len > 0
@@ -1263,6 +1365,19 @@ ngx_media_runtime_tick(ngx_log_t *log)
             out = ngx_media_runtime_outputs_get(stream, log);
 
             if (out != NULL) {
+
+                /*
+                 * A push destination watches a directory, and a program's HLS
+                 * output is a directory of its own, so what is offered here is
+                 * this program's files - to the destinations pointed at it.
+                 * The scan is bounded per call, so each program's directory is
+                 * walked once per tick rather than the shared root once per
+                 * program.
+                 */
+                if (out->hls_ready) {
+                    ngx_media_hls_push_scan(&out->hls.conf.path, log);
+                }
+
                 ngx_media_runtime_outputs_drain(out, log);
             }
         }
@@ -1335,6 +1450,17 @@ ngx_media_runtime_handler(ngx_event_t *ev)
     ngx_add_timer(ev, NGX_MEDIA_RUNTIME_INTERVAL);
 }
 
+/*
+ * The shared revision sequence, read from the owner directory.  Zero when
+ * there is no directory: the caller then keeps a local number, which is what a
+ * single writer wants anyway.
+ */
+static uint64_t
+ngx_media_runtime_revision(void)
+{
+    return ngx_media_owner_dir_revision_next(ngx_media_runtime_owners);
+}
+
 ngx_int_t
 ngx_media_runtime_init(ngx_cycle_t *cycle, ngx_log_t *log)
 {
@@ -1356,6 +1482,14 @@ ngx_media_runtime_init(ngx_cycle_t *cycle, ngx_log_t *log)
     if (ngx_media_runtime_owners == NULL) {
         return NGX_ERROR;
     }
+
+    /*
+     * Every desired-state mutation takes its revision from the shared
+     * sequence, so a mutation on one worker and a mutation on another are
+     * ordered: replicas resolve the conflict by the higher number instead of
+     * each keeping whichever operation reached it last.
+     */
+    ngx_media_revision_provider(ngx_media_runtime_revision);
 
     if (ngx_media_route_worker_init(cycle, log) != NGX_OK) {
         return NGX_ERROR;
@@ -1434,20 +1568,6 @@ ngx_media_runtime_stop(void)
     }
 }
 
-/*
- * Releases the runtime outputs of one stream: flush what is buffered, finalize
- * the playlist and any recording part, and free the slot.  Called from ordered
- * teardown, before the stream's feed goes away, because the flush reads from
- * it.  Without this a create/delete cycle leaks an output slot every time.
- *
- * The stream's player preparation goes with it.  It reads the same feed and
- * holds the FLV conversion of the program, so it has to be dropped at this
- * same point in ordered teardown; releasing it only at worker exit would leak
- * a prepare slot, and the program payload pinned behind its ring, on every
- * create/delete cycle -- after NGX_MEDIA_RUNTIME_MAX_PREPARE cycles the next
- * stream's prepare() returns NULL and its RTMP players and destinations
- * silently receive nothing.
- */
 /* how many runtime output slots are in use: a leak shows up here */
 ngx_uint_t
 ngx_media_runtime_outputs_active(void)
@@ -1461,8 +1581,23 @@ ngx_media_runtime_outputs_active(void)
     return active;
 }
 
+/*
+ * Releases the runtime state of one stream: flush what is buffered, finalize
+ * the playlist and any recording part, and free the output slot; drop the
+ * player preparation and the routed slots.  Called from ordered teardown,
+ * before the stream's feed goes away, because the flush reads from it.
+ * Without this a create/delete cycle leaks an output slot every time.
+ *
+ * The stream's player preparation goes with it.  It reads the same feed and
+ * holds the FLV conversion of the program, so it has to be dropped at this
+ * same point in ordered teardown; releasing it only at worker exit would leak
+ * a prepare slot, and the program payload pinned behind its ring, on every
+ * create/delete cycle -- after NGX_MEDIA_RUNTIME_MAX_PREPARE cycles the next
+ * stream's prepare() returns NULL and its RTMP players and destinations
+ * silently receive nothing.
+ */
 void
-ngx_media_runtime_outputs_release(ngx_media_stream_t *stream)
+ngx_media_runtime_stream_release(ngx_media_stream_t *stream)
 {
     ngx_uint_t  i;
 
@@ -1490,6 +1625,28 @@ ngx_media_runtime_outputs_release(ngx_media_stream_t *stream)
             ngx_memzero(&ngx_media_runtime_prepares[i],
                         sizeof(ngx_media_runtime_prepare_t));
             break;
+        }
+    }
+
+    /*
+     * A routed slot publishes into the stream it remembers, so it cannot
+     * outlive it: the next frame from that publisher would be written into a
+     * feed that is going away.  The slot is dropped, and the reassembly it
+     * holds is reset first because the partial frame it is carrying is its
+     * own reference - dropping the slot without that leaks the buffers.
+     *
+     * The publisher keeps sending into a route that no longer has a slot; its
+     * frames are ignored until it opens again, which is the same thing that
+     * happens to any transport whose stream was deleted.
+     */
+    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
+
+        if (ngx_media_runtime_routed[i].used
+            && ngx_media_runtime_routed[i].stream == stream)
+        {
+            ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
+            ngx_memzero(&ngx_media_runtime_routed[i],
+                        sizeof(ngx_media_runtime_routed_t));
         }
     }
 }

@@ -235,7 +235,7 @@ netem_note() {
 segment_duration() {
     local extinf
 
-    extinf="$(grep -m1 '^#EXTINF:' "$RUN/hls/index.m3u8" 2>/dev/null || true)"
+    extinf="$(grep -m1 '^#EXTINF:' "$RUN/hls/live/bench/index.m3u8" 2>/dev/null || true)"
     extinf="${extinf#\#EXTINF:}"
     extinf="${extinf%%,*}"
 
@@ -276,12 +276,12 @@ for _ in $(seq 1 300); do
 done
 
 for _ in $(seq 1 400); do
-    closed="$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" 2>/dev/null || true)"
+    closed="$(grep -c '^#EXTINF' "$RUN/hls/live/bench/index.m3u8" 2>/dev/null || true)"
     [ "${closed:-0}" -ge 2 ] && break
     sleep 0.1
 done
 
-SEGMENTS="$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" 2>/dev/null || true)"
+SEGMENTS="$(grep -c '^#EXTINF' "$RUN/hls/live/bench/index.m3u8" 2>/dev/null || true)"
 [ "${SEGMENTS:-0}" -ge 2 ] \
     || { echo "the segmenter never closed two segments" >&2
          echo "   workers: $(worker_pids | wc -l) (master" \
@@ -307,7 +307,7 @@ storm() {
     while :; do
         : > "$list"
 
-        for name in $(grep -v '^#' "$RUN/hls/index.m3u8" 2>/dev/null \
+        for name in $(grep -v '^#' "$RUN/hls/live/bench/index.m3u8" 2>/dev/null \
                       | grep '\.ts$' || true); do
             printf 'url = "%s/%s"\noutput = "/dev/null"\n' \
                 "$HLS_URL" "$name" >> "$list"

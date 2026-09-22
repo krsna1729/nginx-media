@@ -1,5 +1,7 @@
 #include "ngx_media_source.h"
 
+static ngx_media_revision_pt  ngx_media_revision_cb;
+
 static ngx_uint_t ngx_media_source_pow2(ngx_uint_t n);
 
 static ngx_uint_t
@@ -17,10 +19,39 @@ ngx_media_source_pow2(ngx_uint_t n)
 }
 
 void
+ngx_media_revision_provider(ngx_media_revision_pt provider)
+{
+    ngx_media_revision_cb = provider;
+}
+
+uint64_t
+ngx_media_revision_next(uint64_t local)
+{
+    uint64_t  shared;
+
+    if (ngx_media_revision_cb != NULL) {
+        shared = ngx_media_revision_cb();
+
+        /*
+         * A shared number that is not ahead of this object's own is not usable
+         * as its next revision: a sequence that restarted - a reload rebuilt
+         * the shared directory - must not move an object backwards, and a
+         * replica would drop the operation as stale.  The local number carries
+         * on instead, which keeps the object's revisions increasing even then.
+         */
+        if (shared > local) {
+            return shared;
+        }
+    }
+
+    return local + 1;
+}
+
+void
 ngx_media_source_touch(ngx_media_source_t *source)
 {
     if (source != NULL) {
-        source->revision++;
+        source->revision = ngx_media_revision_next(source->revision);
     }
 }
 

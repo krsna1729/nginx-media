@@ -84,12 +84,15 @@ here rather than downstream.
 The local HLS output belongs to the program and starts with it:
 
 ```sh
-curl -s http://127.0.0.1:8080/hls/index.m3u8
+curl -s http://127.0.0.1:8080/hls/live/demo/index.m3u8
 ```
 
-The playlist is `index.m3u8` in the HLS directory, and it is a rolling window
-rather than an append-only log: segments that fall out of the window are
-deleted, so the directory does not grow with uptime.
+A program's output is a directory of its own under the configured root —
+`<media_hls>/<application>/<name>` — so `live/demo` is what the publisher above
+created, and two programs never share a playlist or a segment name.  The
+playlist is `index.m3u8` in that directory, and it is a rolling window rather
+than an append-only log: segments that fall out of the window are deleted, so
+the directory does not grow with uptime.
 
 And the program's own view of itself:
 

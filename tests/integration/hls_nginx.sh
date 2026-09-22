@@ -168,18 +168,18 @@ printf '%s' "$SWITCH" | grep -q '"switches":1' \
 
 # the switch must be announced in the playlist
 for _ in $(seq 1 200); do
-    grep -q '^#EXT-X-DISCONTINUITY' "$RUN/hls/index.m3u8" 2>/dev/null && break
+    grep -q '^#EXT-X-DISCONTINUITY' "$RUN/hls/live/news/index.m3u8" 2>/dev/null && break
     sleep 0.1
 done
 
 # and at least two segments must be closed by now
 for _ in $(seq 1 100); do
-    [ "$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" 2>/dev/null || true)" -ge 2 ] && break
+    [ "$(grep -c '^#EXTINF' "$RUN/hls/live/news/index.m3u8" 2>/dev/null || true)" -ge 2 ] && break
     sleep 0.1
 done
 
 echo "== playlist"
-cat "$RUN/hls/index.m3u8"
+cat "$RUN/hls/live/news/index.m3u8"
 
 # check_playlist <expected-switches> <label>
 #
@@ -202,7 +202,7 @@ PLAYLIST_FIRST_URI=""
 
 check_playlist() {
     local expected="$1" label="$2"
-    local playlist="$RUN/hls/index.m3u8"
+    local playlist="$RUN/hls/live/news/index.m3u8"
     local target disc dseq seq first_uri first_num uri uris cur prev n tries
     local body opens probe first_flags
 
@@ -304,13 +304,13 @@ check_playlist() {
     while read -r uri; do
         [ -n "$uri" ] || continue
 
-        [ -s "$RUN/hls/$uri" ] \
+        [ -s "$RUN/hls/live/news/$uri" ] \
             || { echo "$label: $uri is referenced but missing on disk" >&2; return 1; }
 
-        curl -fsS "http://127.0.0.1:$HTTP_PORT/hls/$uri" -o "$RUN/check.ts" \
+        curl -fsS "http://127.0.0.1:$HTTP_PORT/hls/live/news/$uri" -o "$RUN/check.ts" \
             || { echo "$label: $uri is not fetchable" >&2; return 1; }
 
-        cmp -s "$RUN/hls/$uri" "$RUN/check.ts" \
+        cmp -s "$RUN/hls/live/news/$uri" "$RUN/check.ts" \
             || { echo "$label: $uri is served differently than it is on disk" >&2
                  return 1; }
 
@@ -391,19 +391,19 @@ check_playlist() {
              return 1; }
 }
 
-grep -q '^#EXTM3U' "$RUN/hls/index.m3u8" || { echo "no playlist header" >&2; exit 1; }
+grep -q '^#EXTM3U' "$RUN/hls/live/news/index.m3u8" || { echo "no playlist header" >&2; exit 1; }
 
-SEGMENTS="$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" || true)"
+SEGMENTS="$(grep -c '^#EXTINF' "$RUN/hls/live/news/index.m3u8" || true)"
 [ "$SEGMENTS" -ge 2 ] || { echo "too few segments: $SEGMENTS" >&2; exit 1; }
 
 check_playlist 1 "after the first switch"
 
-SEGMENT_NAME="$(grep '\.ts$' "$RUN/hls/index.m3u8" | tail -1)"
+SEGMENT_NAME="$(grep '\.ts$' "$RUN/hls/live/news/index.m3u8" | tail -1)"
 
 echo "== serving $SEGMENT_NAME over HTTP"
-curl -fsS "http://127.0.0.1:$HTTP_PORT/hls/$SEGMENT_NAME" -o "$RUN/fetched.ts"
+curl -fsS "http://127.0.0.1:$HTTP_PORT/hls/live/news/$SEGMENT_NAME" -o "$RUN/fetched.ts"
 
-SHA_DISK="$(sha256sum "$RUN/hls/$SEGMENT_NAME" | cut -d' ' -f1)"
+SHA_DISK="$(sha256sum "$RUN/hls/live/news/$SEGMENT_NAME" | cut -d' ' -f1)"
 SHA_HTTP="$(sha256sum "$RUN/fetched.ts" | cut -d' ' -f1)"
 [ "$SHA_DISK" = "$SHA_HTTP" ] \
     || { echo "served segment differs from the file on disk" >&2; exit 1; }
@@ -466,7 +466,7 @@ sleep 3
 # the playlist must have announced the switch back as well, and it must still
 # reference segments that exist, are served and decode
 echo "== playlist after the switch back"
-cat "$RUN/hls/index.m3u8"
+cat "$RUN/hls/live/news/index.m3u8"
 check_playlist 2 "after the switch back"
 
 echo "== recordings"

@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit tsan nginx smoke bench-worker-scaling bench-ingest-egress bench-ingest-egress-fanout test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
+.PHONY: unit tsan nginx graph-conflict incarnation smoke bench-worker-scaling bench-ingest-egress bench-ingest-egress-fanout test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -56,6 +56,24 @@ churn:
 file-source:
 	tests/integration/file_source_nginx.sh
 
+# Deleting a stream has to release the memory it held, including when a reader
+# thread or an in-flight upload is still looking at it: the pools come back
+# only after the last reader is closed, and never by making the delete wait on
+# an origin.
+stream-delete:
+	tests/integration/stream_delete_nginx.sh
+
+# A stream deleted and created again under the same name: the publisher whose
+# session was routed to the deleted stream must not reach the new one.
+incarnation:
+	tests/integration/incarnation_nginx.sh
+
+# Two workers mutating one stream at the same time converge on one state:
+# revisions are one sequence for every worker, so a replica resolves the race
+# by the higher number rather than by whichever operation reached it last.
+graph-conflict:
+	tests/integration/graph_conflict_nginx.sh
+
 rtmp:
 	tests/integration/rtmp_nginx.sh
 
@@ -107,9 +125,10 @@ DOCKER_CACHE_ARGS ?=
 BASE ?= debian:trixie
 TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
-    hls-profile file-source churn rtmp rtmp-hevc rtmps rtmp-workers \
-    srt-output srt-crypto srt-worker-ports srt-shared-port multi-worker soak \
-    fault
+    hls-profile file-source stream-delete graph-conflict churn \
+    rtmp \
+    rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports \
+    srt-shared-port multi-worker soak fault
 
 test-image:
 	$(DOCKER) build -f Containerfile --target test --build-arg BASE=$(BASE) \

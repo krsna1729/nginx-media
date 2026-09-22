@@ -26,8 +26,29 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <netdb.h>
+#include <poll.h>
 
 #define NGX_MEDIA_HTTP_PATH_MAX  512
+
+/*
+ * Every blocking wait in this client is bounded.
+ *
+ * Both callers run on a thread whose whole job is one HTTP operation: an HLS
+ * pull reader fetching a playlist or a segment, and a push uploader moving a
+ * segment to a remote.  Without a deadline the wait is the operating system's
+ * own - minutes on a connect, none at all on a socket that was accepted and
+ * then abandoned - so one remote that accepts and never answers parks that
+ * thread for as long as it likes.  On the push side that is worse than it
+ * sounds: four such remotes occupy the whole upload pool, and every other
+ * destination stops being served.
+ *
+ * The connect bound is per address; the I/O bound is per wait, not per
+ * transfer, so a large segment to a slow-but-progressing remote is not cut
+ * off - it is a remote that has stopped moving for this long that is given up
+ * on.
+ */
+#define NGX_MEDIA_HTTP_CONNECT_TIMEOUT_MS  5000
+#define NGX_MEDIA_HTTP_IO_TIMEOUT_MS      10000
 
 /*
  * Split an http:// URL into host, port and target path.  Only plain HTTP is
@@ -123,6 +144,10 @@ ngx_media_http_split(const ngx_str_t *url, ngx_str_t *host, ngx_int_t *port,
     return NGX_OK;
 }
 
+static ngx_int_t ngx_media_http_connect_one(ngx_int_t fd,
+    const struct addrinfo *rp);
+static void ngx_media_http_deadline(ngx_int_t fd);
+
 static ngx_int_t
 ngx_media_http_connect(const ngx_str_t *host, ngx_int_t port, ngx_log_t *log)
 {
@@ -156,7 +181,7 @@ ngx_media_http_connect(const ngx_str_t *host, ngx_int_t port, ngx_log_t *log)
             continue;
         }
 
-        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+        if (ngx_media_http_connect_one(fd, rp) == NGX_OK) {
             break;
         }
 
@@ -167,6 +192,74 @@ ngx_media_http_connect(const ngx_str_t *host, ngx_int_t port, ngx_log_t *log)
     freeaddrinfo(res);
 
     return fd;
+}
+
+/*
+ * One address, connected with a deadline.
+ *
+ * A blocking connect() waits for the kernel's own timeout, which is minutes,
+ * and it cannot be shortened portably through an option.  So the socket is put
+ * in non-blocking mode for the handshake, waited for with poll(), and put back
+ * afterwards: the rest of this client is written for a blocking socket, and a
+ * send or a read that returns EAGAIN must mean the I/O deadline rather than
+ * "the connect is still going".
+ */
+static ngx_int_t
+ngx_media_http_connect_one(ngx_int_t fd, const struct addrinfo *rp)
+{
+    struct pollfd  pfd;
+    socklen_t      len;
+    ngx_int_t      flags;
+    int            err = 0;
+
+    flags = fcntl(fd, F_GETFL, 0);
+
+    if (flags == -1 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
+        return NGX_ERROR;
+    }
+
+    if (connect(fd, rp->ai_addr, rp->ai_addrlen) != 0
+        && errno != EINPROGRESS)
+    {
+        return NGX_ERROR;
+    }
+
+    pfd.fd = fd;
+    pfd.events = POLLOUT;
+
+    if (poll(&pfd, 1, NGX_MEDIA_HTTP_CONNECT_TIMEOUT_MS) <= 0) {
+        return NGX_ERROR;   /* no answer, or no room to wait for one */
+    }
+
+    len = sizeof(err);
+
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) != 0 || err != 0) {
+        return NGX_ERROR;
+    }
+
+    if (fcntl(fd, F_SETFL, flags) == -1) {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+/*
+ * The I/O deadline, on the socket itself: a read or a write that finds no
+ * progress for this long fails with EAGAIN, which is what both callers treat
+ * as a dead peer.  It is set before the TLS handshake, so a handshake that
+ * stalls is bounded the same way.
+ */
+static void
+ngx_media_http_deadline(ngx_int_t fd)
+{
+    struct timeval  tv;
+
+    tv.tv_sec = NGX_MEDIA_HTTP_IO_TIMEOUT_MS / 1000;
+    tv.tv_usec = (NGX_MEDIA_HTTP_IO_TIMEOUT_MS % 1000) * 1000;
+
+    (void) setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void) setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
 /*
@@ -259,24 +352,65 @@ ngx_media_http_tls_start(ngx_int_t fd, const ngx_str_t *host,
     return ssl;
 }
 
+/*
+ * A deadline shows up as EAGAIN, which is what the callers branch on.  OpenSSL
+ * reports a socket that timed out as a retryable condition rather than as
+ * EAGAIN, so the distinction is put back here: a caller that treated
+ * WANT_READ as "wait a little longer" would spin on a peer that has stopped
+ * answering for as long as the socket stays open.
+ */
 static ssize_t
 ngx_media_http_read(ngx_int_t fd, void *ssl, u_char *buf, size_t len)
 {
-    if (ssl != NULL) {
-        return (ssize_t) SSL_read((SSL *) ssl, buf, (int) len);
+    ssize_t  n;
+    int      err;
+
+    if (ssl == NULL) {
+        return read(fd, buf, len);
     }
 
-    return read(fd, buf, len);
+    n = (ssize_t) SSL_read((SSL *) ssl, buf, (int) len);
+
+    if (n > 0) {
+        return n;
+    }
+
+    err = SSL_get_error((SSL *) ssl, (int) n);
+
+    if ((err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+        && (errno == EAGAIN || errno == EWOULDBLOCK))
+    {
+        errno = EAGAIN;
+    }
+
+    return n;
 }
 
 static ssize_t
 ngx_media_http_write(ngx_int_t fd, void *ssl, const u_char *buf, size_t len)
 {
-    if (ssl != NULL) {
-        return (ssize_t) SSL_write((SSL *) ssl, buf, (int) len);
+    ssize_t  n;
+    int      err;
+
+    if (ssl == NULL) {
+        return write(fd, buf, len);
     }
 
-    return write(fd, buf, len);
+    n = (ssize_t) SSL_write((SSL *) ssl, buf, (int) len);
+
+    if (n > 0) {
+        return n;
+    }
+
+    err = SSL_get_error((SSL *) ssl, (int) n);
+
+    if ((err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+        && (errno == EAGAIN || errno == EWOULDBLOCK))
+    {
+        errno = EAGAIN;
+    }
+
+    return n;
 }
 
 /* whether kTLS is actually carrying this connection's records */
@@ -324,6 +458,8 @@ ngx_media_http_get(const ngx_str_t *url, const ngx_str_t *ca_file,
         return NGX_ERROR;
     }
 
+    ngx_media_http_deadline(fd);
+
     if (tls) {
         ssl = ngx_media_http_tls_start(fd, &host, ca_file, log);
 
@@ -368,10 +504,15 @@ ngx_media_http_get(const ngx_str_t *url, const ngx_str_t *ca_file,
             continue;
         }
 
-        if (n < 0 && (errno == EINTR || errno == EAGAIN)) {
-            continue;
+        if (n < 0 && errno == EINTR) {
+            continue;   /* a signal, not the peer */
         }
 
+        /*
+         * EAGAIN is the socket deadline: nothing arrived for
+         * NGX_MEDIA_HTTP_IO_TIMEOUT_MS.  What was read so far is what the
+         * origin sent before it stopped.
+         */
         break;
     }
 
@@ -469,6 +610,8 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
         return NGX_ERROR;
     }
 
+    ngx_media_http_deadline(fd);
+
     if (tls) {
         ssl = ngx_media_http_tls_start(fd, &host, ca_file, log);
 
@@ -540,10 +683,16 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
                 continue;
             }
 
-            if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
-                continue;
+            if (n < 0 && errno == EINTR) {
+                continue;   /* a signal, not the remote */
             }
 
+            /*
+             * EAGAIN is the socket deadline, and on a send it means the
+             * remote stopped reading for NGX_MEDIA_HTTP_IO_TIMEOUT_MS.  The
+             * transfer is then short, which the check below fails: a truncated
+             * segment must not be published.
+             */
             break;
         }
 

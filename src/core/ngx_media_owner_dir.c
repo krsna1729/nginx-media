@@ -19,6 +19,14 @@ typedef struct {
     uint32_t                    magic;
     uint32_t                    slots;
     ngx_atomic_t                lock;
+
+    /*
+     * The revision sequence every worker takes its mutations from, so the
+     * numbers are comparable across workers and a replica resolves a conflict
+     * by the higher one instead of by whichever operation it saw last.
+     */
+    ngx_atomic_t                revision;
+
     ngx_media_owner_record_t    records[1];
 } ngx_media_owner_dir_shm_t;
 
@@ -33,7 +41,7 @@ struct ngx_media_owner_dir_s {
 
 static ngx_media_owner_dir_shm_t  *ngx_media_owner_dir_mapped;
 
-static void
+static ngx_int_t
 ngx_media_owner_dir_lock(ngx_media_owner_dir_t *dir)
 {
     ngx_uint_t  i;
@@ -41,16 +49,23 @@ ngx_media_owner_dir_lock(ngx_media_owner_dir_t *dir)
     for (i = 0; i < 100000; i++) {
 
         if (ngx_atomic_cmp_set(&dir->shm->lock, 0, 1)) {
-            return;
+            return NGX_OK;
         }
 
         ngx_cpu_pause();
     }
 
-    /* a contended lock must never stop a worker: take it and carry on */
-    (void) ngx_atomic_cmp_set(&dir->shm->lock, 0, 1);
-}
+    /*
+     * Never enter the critical section unless this worker acquired it.  The
+     * old final compare-and-swap was intentionally ignored, which turned
+     * contention into fail-open concurrent access and could clear another
+     * worker's lock on unlock.
+     */
+    ngx_log_error(NGX_LOG_WARN, dir->log, 0,
+                  "media: owner directory lock is contended");
+    return NGX_AGAIN;
 
+}
 static void
 ngx_media_owner_dir_unlock(ngx_media_owner_dir_t *dir)
 {
@@ -63,8 +78,19 @@ ngx_media_owner_dir_now(void)
     return (ngx_msec_t) ngx_current_msec;
 }
 
+uint64_t
+ngx_media_owner_dir_revision_next(ngx_media_owner_dir_t *dir)
+{
+    if (dir == NULL || dir->shm == NULL) {
+        return 0;
+    }
+
+    /* one sequence for every worker: the first caller gets 1 */
+    return (uint64_t) ngx_atomic_fetch_add(&dir->shm->revision, 1) + 1;
+}
+
 static ngx_uint_t
-ngx_media_owner_dir_index(ngx_media_owner_dir_t *dir, uint32_t hash)
+ngx_media_owner_dir_index(ngx_media_owner_dir_t *dir, uint64_t hash)
 {
     return (ngx_uint_t) (hash % dir->slots);
 }
@@ -172,7 +198,7 @@ ngx_media_owner_dir_reclaimable(ngx_media_owner_record_t *record)
 }
 
 static ngx_media_owner_record_t *
-ngx_media_owner_dir_find(ngx_media_owner_dir_t *dir, uint32_t hash)
+ngx_media_owner_dir_find(ngx_media_owner_dir_t *dir, uint64_t hash)
 {
     ngx_uint_t                 i, index;
     ngx_media_owner_record_t  *record;
@@ -199,7 +225,7 @@ ngx_media_owner_dir_find(ngx_media_owner_dir_t *dir, uint32_t hash)
 }
 
 ngx_media_owner_record_t *
-ngx_media_owner_dir_get(ngx_media_owner_dir_t *dir, uint32_t hash,
+ngx_media_owner_dir_get(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_uint_t create)
 {
     ngx_media_owner_record_t  *record;
@@ -208,7 +234,9 @@ ngx_media_owner_dir_get(ngx_media_owner_dir_t *dir, uint32_t hash,
         return NULL;
     }
 
-    ngx_media_owner_dir_lock(dir);
+    if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
+        return NULL;
+    }
 
     record = ngx_media_owner_dir_find(dir, hash);
 
@@ -230,7 +258,7 @@ ngx_media_owner_dir_get(ngx_media_owner_dir_t *dir, uint32_t hash,
 }
 
 ngx_media_owner_record_t *
-ngx_media_owner_dir_claim(ngx_media_owner_dir_t *dir, uint32_t hash,
+ngx_media_owner_dir_claim(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_uint_t slot)
 {
     ngx_media_owner_record_t  *record;
@@ -239,7 +267,9 @@ ngx_media_owner_dir_claim(ngx_media_owner_dir_t *dir, uint32_t hash,
         return NULL;
     }
 
-    ngx_media_owner_dir_lock(dir);
+    if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
+        return NULL;
+    }
 
     record = ngx_media_owner_dir_find(dir, hash);
 
@@ -261,7 +291,7 @@ ngx_media_owner_dir_claim(ngx_media_owner_dir_t *dir, uint32_t hash,
 }
 
 void
-ngx_media_owner_dir_release(ngx_media_owner_dir_t *dir, uint32_t hash,
+ngx_media_owner_dir_release(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_uint_t slot)
 {
     ngx_media_owner_record_t  *record;
@@ -270,7 +300,9 @@ ngx_media_owner_dir_release(ngx_media_owner_dir_t *dir, uint32_t hash,
         return;
     }
 
-    ngx_media_owner_dir_lock(dir);
+    if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
+        return;
+    }
     record = ngx_media_owner_dir_find(dir, hash);
 
     if (record != NULL && record->hash == hash && record->slot == slot
@@ -284,7 +316,7 @@ ngx_media_owner_dir_release(ngx_media_owner_dir_t *dir, uint32_t hash,
 }
 
 void
-ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint32_t hash,
+ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_uint_t slot, uint64_t generation, uint64_t frames, ngx_uint_t sources)
 {
     ngx_media_owner_record_t  *record;
@@ -293,7 +325,9 @@ ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint32_t hash,
         return;
     }
 
-    ngx_media_owner_dir_lock(dir);
+    if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
+        return;
+    }
 
     record = ngx_media_owner_dir_find(dir, hash);
 
@@ -311,7 +345,7 @@ ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint32_t hash,
 }
 
 ngx_uint_t
-ngx_media_owner_dir_slot(ngx_media_owner_dir_t *dir, uint32_t hash,
+ngx_media_owner_dir_slot(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_uint_t fallback)
 {
     ngx_media_owner_record_t  *record;
@@ -321,7 +355,9 @@ ngx_media_owner_dir_slot(ngx_media_owner_dir_t *dir, uint32_t hash,
         return fallback;
     }
 
-    ngx_media_owner_dir_lock(dir);
+    if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
+        return fallback;
+    }
 
     record = ngx_media_owner_dir_find(dir, hash);
 
@@ -351,7 +387,7 @@ ngx_media_owner_dir_slot(ngx_media_owner_dir_t *dir, uint32_t hash,
  * stale number as fact.
  */
 ngx_int_t
-ngx_media_owner_dir_observe(ngx_media_owner_dir_t *dir, uint32_t hash,
+ngx_media_owner_dir_observe(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_media_owner_record_t *out)
 {
     ngx_media_owner_record_t  *record;
@@ -360,7 +396,9 @@ ngx_media_owner_dir_observe(ngx_media_owner_dir_t *dir, uint32_t hash,
         return NGX_ERROR;
     }
 
-    ngx_media_owner_dir_lock(dir);
+    if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
+        return NGX_ERROR;
+    }
 
     record = ngx_media_owner_dir_find(dir, hash);
 
@@ -389,7 +427,9 @@ ngx_media_owner_dir_list(ngx_media_owner_dir_t *dir,
         return 0;
     }
 
-    ngx_media_owner_dir_lock(dir);
+    if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
+        return 0;
+    }
 
     for (i = 0; i < dir->slots && count < max; i++) {
 

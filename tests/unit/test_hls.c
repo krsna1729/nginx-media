@@ -6,8 +6,10 @@
 #include "ngx_media_hls_segmenter.h"
 #include "ngx_media_ts_demux.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 
 /* unterminated buffers must fail instead of reading zeroed heap */
@@ -337,6 +339,55 @@ main(void)
         TEST_ASSERT_EQ_U64(extinf, 3);
         TEST_ASSERT_EQ_U64(discontinuities, 0);
         TEST_ASSERT_EQ_U64(sequences, 1);
+    }
+
+    TEST_CASE("a segment is committed under its final name, not before");
+    {
+        /*
+         * The file is written under a temporary name and renamed into place,
+         * so a reader - an HLS push destination uploading what it sees, a
+         * viewer fetching the name the playlist lists - never gets a partial
+         * segment.  Two things follow, and both are visible here: what is left
+         * in the directory is finished segments and a playlist, with no
+         * temporary beside them, and every name the playlist lists is a file
+         * that can be read whole.
+         */
+        DIR           *d;
+        struct dirent *de;
+        ngx_uint_t     temporaries = 0, segments = 0, playlists = 0;
+
+        snprintf(path, sizeof(path), "%s", HLS_DIR);
+
+        d = opendir(path);
+        TEST_ASSERT_NOT_NULL(d);
+
+        while (d != NULL && (de = readdir(d)) != NULL) {
+            size_t  len = strlen(de->d_name);
+
+            if (len > 4 && strcmp(de->d_name + len - 4, ".tmp") == 0) {
+                temporaries++;
+
+            } else if (len > 3 && strcmp(de->d_name + len - 3, ".ts") == 0) {
+                segments++;
+
+            } else if (len > 5 && strcmp(de->d_name + len - 5, ".m3u8") == 0) {
+                playlists++;
+            }
+        }
+
+        if (d != NULL) {
+            (void) closedir(d);
+        }
+
+        TEST_ASSERT_EQ_U64(temporaries, 0);
+
+        /*
+         * At least the three this run cut: the directory is not cleaned
+         * between runs, and retention leaves the names a previous run wrote
+         * exactly as it does within one run.
+         */
+        TEST_ASSERT(segments >= 3);
+        TEST_ASSERT_EQ_U64(playlists, 1);
     }
 
     TEST_CASE("segment files are valid MPEG-TS and carry the frames");

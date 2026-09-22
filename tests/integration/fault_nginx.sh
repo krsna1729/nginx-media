@@ -179,7 +179,7 @@ if grep -aqE 'signal [0-9]+ \(core dumped\)|exited on signal' "$RUN/logs/error.l
     exit 1
 fi
 
-SEGMENTS="$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" 2>/dev/null || echo 0)"
+SEGMENTS="$(grep -c '^#EXTINF' "$RUN/hls/live/fault/index.m3u8" 2>/dev/null || echo 0)"
 echo "   hls segments after the faults: $SEGMENTS"
 [ "$SEGMENTS" -ge 2 ] || { echo "hls stopped producing during the faults" >&2; exit 1; }
 

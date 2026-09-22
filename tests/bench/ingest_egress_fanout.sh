@@ -902,7 +902,7 @@ phase_ingest_one_port() {
 segments_closed() {   # the playlist's closed segments, 0 when there is none
     local n
 
-    n="$(grep -c '^#EXTINF' "$RUN/hls/index.m3u8" 2>/dev/null)"
+    n="$(grep -c '^#EXTINF' "$RUN/hls/live/eg/index.m3u8" 2>/dev/null)"
     printf '%s' "${n:-0}"
 }
 
@@ -911,9 +911,9 @@ hls_storm() {
     while :; do
         : > "$list"
 
-        for name in $(grep -v '^#' "$RUN/hls/index.m3u8" 2>/dev/null \
+        for name in $(grep -v '^#' "$RUN/hls/live/eg/index.m3u8" 2>/dev/null \
                       | grep '\.ts$' || true); do
-            printf 'url = "http://127.0.0.1:%s/hls/%s"\noutput = "/dev/null"\n' \
+            printf 'url = "http://127.0.0.1:%s/hls/live/eg/%s"\noutput = "/dev/null"\n' \
                 "$HTTP_PORT" "$name" >> "$list"
         done
 
