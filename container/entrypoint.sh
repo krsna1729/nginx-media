@@ -1,13 +1,10 @@
 #!/bin/sh
 #
-# Renders the configuration template and starts nginx.
+# Renders the one setting that comes from the environment, then starts nginx.
 #
-# The template is the input and /etc/nginx/nginx.conf is the output, which is
-# the way round that makes a custom configuration work: mount your file over
-# /etc/nginx/nginx.conf.template and it is what nginx ends up reading.  Only
-# ${NGINX_WORKER_PROCESSES} is substituted, so an nginx variable in your
-# config ($host, $remote_addr) is left alone - substituting every $VAR is how
-# that goes wrong.
+# It writes conf.d/workers.conf and nothing else.  nginx.conf itself is left
+# alone on purpose: it is the file people mount to change behaviour, and an
+# entrypoint that rewrote it would silently discard whatever they mounted.
 
 set -eu
 
@@ -27,8 +24,26 @@ if [ "$NGINX_WORKER_PROCESSES" != "1" ]; then
          "be visible to some requests and not others." >&2
 fi
 
+# Which configuration to run.  The default is the image's own; point it at a
+# mounted directory to keep a configuration outside the image:
+#
+#   -v "$PWD/container:/config:ro" -e NGINX_CONFIG=/config/nginx.conf
+#
+# A directory mount rather than a file mount, because a single-file bind mount
+# is pinned to the inode and an editor that replaces the file would leave the
+# container reading the old one.
+: "${NGINX_CONFIG:=/etc/nginx/nginx.conf}"
+export NGINX_CONFIG
+
+if [ ! -f "$NGINX_CONFIG" ]; then
+    echo "nginx-media: NGINX_CONFIG=$NGINX_CONFIG does not exist" >&2
+    exit 1
+fi
+
+mkdir -p /etc/nginx/conf.d
+
 envsubst '${NGINX_WORKER_PROCESSES}' \
-    < /etc/nginx/nginx.conf.template \
-    > /etc/nginx/nginx.conf
+    < /etc/nginx/conf.d/workers.conf.template \
+    > /etc/nginx/conf.d/workers.conf
 
 exec "$@"

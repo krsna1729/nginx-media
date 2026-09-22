@@ -30,18 +30,30 @@
 #   srt://host:9000?streamid=#!::r=live/demo,m=publish
 #   rtmp://host:1935/live/demo
 #
-# The configuration can be replaced without rebuilding.  The entrypoint
-# renders /etc/nginx/nginx.conf.template, so that template is what you mount
-# over - mount the output and the entrypoint would overwrite it:
+# The configuration can be changed without rebuilding.  container/nginx.conf
+# is a real file and the entrypoint leaves it alone, so mounting it is live:
+# an edit on the host is visible inside the running container immediately, and
+# nginx acts on it when it is reloaded.
 #
-#   -v ./nginx.conf:/etc/nginx/nginx.conf.template:ro
+#   -v "$PWD/container:/config:ro" -e NGINX_CONFIG=/config/nginx.conf
+#   docker exec media nginx -s reload
 #
-# One setting comes from the environment:
+# Mount the directory rather than the file: a single-file bind mount is pinned
+# to the inode, so `sed -i` or an editor that replaces the file leaves the
+# container reading the old one.  A directory mount sees the replacement.
+#
+# The entrypoint writes exactly one thing, /etc/nginx/conf.d/workers.conf,
+# from the environment:
 #
 #   -e NGINX_WORKER_PROCESSES=4
 #
 # It defaults to 1, and raising it is not free - the control API is not
 # worker-aware.  The entrypoint says so and warns when it is raised.
+#
+# Ready-made configurations for different scenarios are in
+# container/examples/ and are copied into the image at /etc/nginx/examples/:
+# API only, SRT ingest, RTMP ingest, a relay, an SRT sink, recording, and a
+# full one for testing.
 #
 # Two stages, and the split is the point.  The build stage has the toolchain,
 # the pinned nginx source and the module.  The runtime stage has the runtime
@@ -118,15 +130,17 @@ RUN apt-get update \
 COPY --from=build /usr/local/nginx /usr/local/nginx
 RUN ln -s /usr/local/nginx/sbin/nginx /usr/local/sbin/nginx
 
-COPY container/nginx.conf.template /etc/nginx/nginx.conf.template
+COPY container/nginx.conf /etc/nginx/nginx.conf
+COPY container/workers.conf.template /etc/nginx/conf.d/workers.conf.template
+COPY container/examples/ /etc/nginx/examples/
 COPY container/entrypoint.sh /usr/local/bin/entrypoint.sh
 
-# Rendered once here as well, so the image is inspectable with `docker run
-# ... cat /etc/nginx/nginx.conf` and so the config is valid without starting
-# it.  The entrypoint re-renders on every start.
+# Rendered once here as well, so the image is inspectable and the config is
+# valid without starting it.  The entrypoint re-renders on every start.
 RUN NGINX_WORKER_PROCESSES=1 \
         envsubst '${NGINX_WORKER_PROCESSES}' \
-        < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+        < /etc/nginx/conf.d/workers.conf.template \
+        > /etc/nginx/conf.d/workers.conf
 
 # The master starts as root so it can bind and setuid; the workers run as
 # www-data, so everything they write has to belong to it.  Without this the
@@ -163,6 +177,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # -e because the error log path is compiled into the binary and points at the
-# build tree; nginx opens it before it reads any configuration.
-CMD ["nginx", "-e", "/var/log/nginx/error.log", \
-     "-g", "daemon off;", "-c", "/etc/nginx/nginx.conf"]
+# build tree; nginx opens it before it reads any configuration.  The config
+# path comes from NGINX_CONFIG so that a mounted configuration is used, which
+# is why this goes through a shell rather than naming a file directly.
+CMD ["/bin/sh", "-c", "exec nginx -e /var/log/nginx/error.log -g 'daemon off;' -c \"${NGINX_CONFIG:-/etc/nginx/nginx.conf}\""]
