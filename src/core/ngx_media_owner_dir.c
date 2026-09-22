@@ -176,19 +176,26 @@ ngx_media_owner_dir_find(ngx_media_owner_dir_t *dir, uint32_t hash)
 {
     ngx_uint_t                 i, index;
     ngx_media_owner_record_t  *record;
+    ngx_media_owner_record_t  *first_avail = NULL;
 
     for (i = 0; i < dir->slots; i++) {
         index = (ngx_media_owner_dir_index(dir, hash) + i) % dir->slots;
         record = &dir->shm->records[index];
 
-        if (record->state == NGX_MEDIA_OWNER_STATE_FREE
-            || record->hash == hash)
-        {
-            return record;
+        if (record->state == NGX_MEDIA_OWNER_STATE_OWNED) {
+            if (record->hash == hash) {
+                return record;
+            }
+        } else if (record->state == NGX_MEDIA_OWNER_STATE_DELETED) {
+            if (first_avail == NULL) {
+                first_avail = record;
+            }
+        } else if (record->state == NGX_MEDIA_OWNER_STATE_FREE) {
+            return (first_avail != NULL) ? first_avail : record;
         }
     }
 
-    return NULL;
+    return first_avail;
 }
 
 ngx_media_owner_record_t *
@@ -264,16 +271,15 @@ ngx_media_owner_dir_release(ngx_media_owner_dir_t *dir, uint32_t hash,
     }
 
     ngx_media_owner_dir_lock(dir);
-
     record = ngx_media_owner_dir_find(dir, hash);
 
     if (record != NULL && record->hash == hash && record->slot == slot
-        && record->pid == (int32_t) ngx_pid)
+        && record->pid == (int32_t) ngx_pid
+        && record->state == NGX_MEDIA_OWNER_STATE_OWNED)
     {
         ngx_memzero(record, sizeof(ngx_media_owner_record_t));
-        record->state = NGX_MEDIA_OWNER_STATE_FREE;
+        record->state = NGX_MEDIA_OWNER_STATE_DELETED;
     }
-
     ngx_media_owner_dir_unlock(dir);
 }
 

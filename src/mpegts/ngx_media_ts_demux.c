@@ -485,21 +485,28 @@ ngx_media_ts_psi_feed(ngx_media_ts_demux_t *demux, ngx_media_ts_psi_t *psi,
 
     while (avail > 0) {
 
-        if (psi->len == 0) {
+        if (psi->len < 3) {
+            size_t  hdr_need = 3 - psi->len;
+            size_t  hdr_take = (avail < hdr_need) ? avail : hdr_need;
 
-            if (avail < 3) {
-                ngx_memcpy(psi->buf, p, avail);
-                psi->len = avail;
+            ngx_memcpy(psi->buf + psi->len, p, hdr_take);
+            psi->len += hdr_take;
+            p += hdr_take;
+            avail -= hdr_take;
+
+            if (psi->len < 3) {
                 psi->assembling = 1;
                 return;
             }
 
-            if (p[0] == 0xFF) {
+            if (psi->buf[0] == 0xFF) {
                 /* stuffing bytes fill the rest of the packet */
+                psi->len = 0;
+                psi->assembling = 0;
                 return;
             }
 
-            section_length = ((ngx_uint_t) (p[1] & 0x0F) << 8) | p[2];
+            section_length = ((ngx_uint_t) (psi->buf[1] & 0x0F) << 8) | psi->buf[2];
             total = 3 + section_length;
 
             if (total > NGX_MEDIA_TS_SECTION_MAX || section_length < 4) {

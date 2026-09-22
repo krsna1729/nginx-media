@@ -685,10 +685,17 @@ ngx_media_rtmp_reader_feed(ngx_media_rtmp_reader_t *r, const u_char *data,
                     header_len += 4;
                 }
             }
+            if (fmt != 2 && cs->payload != NULL) {
+                /*
+                 * A new message length on this csid replaces any payload that
+                 * was partially received or left by a previous message.
+                 */
+                ngx_media_buf_unref(cs->payload);
+                cs->payload = NULL;
+            }
 
             cs->extended = (ts_field == 0xFFFFFF);
             cs->received = 0;
-
             if (cs->extended) {
                 if (left < header_len + 4) {
                     break;
@@ -1127,11 +1134,14 @@ ngx_media_amf_read_value(const u_char *data, size_t len,
                 if (pos + 2 > len) {
                     return NGX_AGAIN;
                 }
-
                 {
                     size_t     nlen = ((size_t) data[pos] << 8) | data[pos + 1];
                     size_t     used = 0;
                     ngx_int_t  rc;
+
+                    if (pos + 2 + nlen > len) {
+                        return NGX_AGAIN;
+                    }
 
                     pos += 2 + nlen;
 

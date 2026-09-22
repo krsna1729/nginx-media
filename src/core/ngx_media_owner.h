@@ -33,7 +33,7 @@ ngx_uint_t ngx_media_owner_for(ngx_cycle_t *cycle, uint32_t hash);
 /* the state a worker publishes about a stream it owns */
 #define NGX_MEDIA_OWNER_STATE_FREE      0
 #define NGX_MEDIA_OWNER_STATE_OWNED     1
-
+#define NGX_MEDIA_OWNER_STATE_DELETED   2
 typedef struct {
     uint32_t    hash;           /* stream hash this record describes */
     uint32_t    slot;           /* owner worker slot */

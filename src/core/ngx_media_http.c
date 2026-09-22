@@ -25,6 +25,7 @@
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <netdb.h>
 
 #define NGX_MEDIA_HTTP_PATH_MAX  512
 
@@ -91,9 +92,10 @@ ngx_media_http_split(const ngx_str_t *url, ngx_str_t *host, ngx_int_t *port,
 static ngx_int_t
 ngx_media_http_connect(const ngx_str_t *host, ngx_int_t port, ngx_log_t *log)
 {
-    struct sockaddr_in  addr;
-    ngx_int_t           fd;
-    char                host_z[256];
+    struct addrinfo  hints, *res, *rp;
+    char             host_z[256];
+    char             port_z[16];
+    ngx_int_t        fd = -1;
 
     if (host->len >= sizeof(host_z)) {
         return NGX_ERROR;
@@ -102,24 +104,33 @@ ngx_media_http_connect(const ngx_str_t *host, ngx_int_t port, ngx_log_t *log)
     ngx_memcpy(host_z, host->data, host->len);
     host_z[host->len] = '\0';
 
-    ngx_memzero(&addr, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t) port);
+    snprintf(port_z, sizeof(port_z), "%d", (int) port);
 
-    if (inet_pton(AF_INET, host_z, &addr.sin_addr) != 1) {
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo(host_z, port_z, &hints, &res) != 0) {
+        NGX_MEDIA_HTTP_LOG(NGX_LOG_WARN, log,
+                      "media: could not resolve host %V", host);
         return NGX_ERROR;
     }
 
-    fd = socket(AF_INET, SOCK_STREAM, 0);
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+        fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd < 0) {
+            continue;
+        }
 
-    if (fd < 0) {
-        return NGX_ERROR;
-    }
+        if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+            break;
+        }
 
-    if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) != 0) {
         (void) close(fd);
-        return NGX_ERROR;
+        fd = -1;
     }
+
+    freeaddrinfo(res);
 
     return fd;
 }
@@ -191,6 +202,13 @@ ngx_media_http_tls_start(ngx_int_t fd, const ngx_str_t *host,
     SSL_CTX_free(ctx);
 
     if (ssl == NULL) {
+        return NULL;
+    }
+
+    if (SSL_set1_host(ssl, host_z) != 1) {
+        NGX_MEDIA_HTTP_LOG(NGX_LOG_WARN, log,
+                      "media: could not set TLS verification hostname %V", host);
+        SSL_free(ssl);
         return NULL;
     }
 
@@ -287,6 +305,14 @@ ngx_media_http_get(const ngx_str_t *url, const ngx_str_t *ca_file,
                           "Connection: close\r\n\r\n",
                           (int) target.len, (char *) target.data,
                           (int) host.len, (char *) host.data);
+
+    if (header_len < 0 || (size_t) header_len >= sizeof(header)) {
+        if (ssl != NULL) {
+            SSL_free((SSL *) ssl);
+        }
+        (void) close(fd);
+        return NGX_ERROR;
+    }
 
     if (ngx_media_http_write(fd, ssl, header, (size_t) header_len)
         != header_len)
@@ -401,43 +427,12 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
                     sizeof(full) - strlen((char *) full) - 1);
         }
 
-        target.data = ngx_pnalloc(ngx_cycle->pool, strlen((char *) full));
-        if (target.data == NULL) {
-            return NGX_ERROR;
-        }
-
-        ngx_memcpy(target.data, full, strlen((char *) full));
+        target.data = full;
         target.len = strlen((char *) full);
     }
 
-    fd = socket(AF_INET, SOCK_STREAM, 0);
+    fd = ngx_media_http_connect(&host, port, log);
     if (fd < 0) {
-        return NGX_ERROR;
-    }
-
-    ngx_memzero(&addr, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t) port);
-
-    {
-        char  host_z[256];
-
-        if (host.len >= sizeof(host_z)) {
-            (void) close(fd);
-            return NGX_ERROR;
-        }
-
-        ngx_memcpy(host_z, host.data, host.len);
-        host_z[host.len] = '\0';
-
-        if (inet_pton(AF_INET, host_z, &addr.sin_addr) != 1) {
-            (void) close(fd);
-            return NGX_ERROR;
-        }
-    }
-
-    if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) != 0) {
-        (void) close(fd);
         return NGX_ERROR;
     }
 
@@ -465,6 +460,15 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
                           (int) target.len, (char *) target.data,
                           (int) host.len, (char *) host.data,
                           (long long) size);
+
+    if (header_len < 0 || (size_t) header_len >= sizeof(header)) {
+        (void) close(file_fd);
+        if (ssl != NULL) {
+            SSL_free((SSL *) ssl);
+        }
+        (void) close(fd);
+        return NGX_ERROR;
+    }
 
     if (ngx_media_http_write(fd, ssl, header, (size_t) header_len)
         != header_len)
