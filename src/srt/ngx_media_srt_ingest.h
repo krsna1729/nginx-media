@@ -56,6 +56,13 @@ typedef struct {
     ngx_uint_t  max_sessions;  /* concurrent publishers */
 
     /*
+     * The second local address of a bonded listener (goal doc 11.4), or empty
+     * for a plain one.  Both legs of a group caller are accepted as a single
+     * session, so the session this queue reports is the bond, not a member.
+     */
+    ngx_str_t   bond_host;
+
+    /*
      * Encryption for the listener, or NULL for none.  The passphrase points
      * into the configuration, which outlives the listener.
      */
@@ -91,8 +98,18 @@ typedef struct {
 
     int                          notify_fd; /* eventfd, worker-owned loop */
     ngx_atomic_t                 stop;
+
+    /*
+     * Set by the worker when a graceful shutdown begins.  The ingest thread
+     * stops accepting at once - a publisher taken now would be dropped when
+     * this worker exits - and keeps serving the sessions already accepted.
+     */
+    ngx_atomic_t                 draining;
+
     ngx_atomic_t                 ready;
     ngx_atomic_t                 failed;
+
+    ngx_log_t                   *log;       /* the worker's; used by the thread */
 
     pthread_t                    thread;
     ngx_uint_t                   thread_started;
@@ -116,6 +133,15 @@ ngx_int_t ngx_media_srt_ingest_close_session(ngx_media_srt_ingest_t *ingest,
 ngx_int_t ngx_media_srt_ingest_start(ngx_media_srt_ingest_t *ingest,
     const ngx_media_srt_ingest_conf_t *conf, ngx_log_t *log);
 void ngx_media_srt_ingest_stop(ngx_media_srt_ingest_t *ingest);
+
+/*
+ * Asks the ingest thread to stop accepting and give the listening sockets up.
+ * The sessions already accepted are not touched; the port is free for the
+ * worker a reload started as soon as no session is left, and while one is
+ * live it is held by the transport, which is why the replacement worker
+ * retries its bind.
+ */
+void ngx_media_srt_ingest_stop_accepting(ngx_media_srt_ingest_t *ingest);
 
 /* pops up to max events; returns how many were copied */
 ngx_uint_t ngx_media_srt_ingest_event_read(ngx_media_srt_ingest_t *ingest,

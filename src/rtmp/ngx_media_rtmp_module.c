@@ -125,6 +125,9 @@ static ngx_chain_t *ngx_media_rtmp_chain_buf(ngx_media_rtmp_session_t *session,
     ngx_buf_t *b);
 static ngx_int_t ngx_media_rtmp_init_process(ngx_cycle_t *cycle);
 static void ngx_media_rtmp_exit_process(ngx_cycle_t *cycle);
+static void ngx_media_rtmp_listener_handler(ngx_event_t *ev);
+static ngx_int_t ngx_media_rtmp_listener_open(ngx_log_t *log);
+static void ngx_media_rtmp_listener_stop(void);
 
 static ngx_media_rtmp_session_t  ngx_media_rtmp_sessions[
     NGX_MEDIA_RTMP_MAX_SESSIONS];
@@ -132,6 +135,16 @@ static ngx_media_rtmp_session_t  ngx_media_rtmp_sessions[
 static ngx_connection_t  *ngx_media_rtmp_listener;
 static ngx_uint_t         ngx_media_rtmp_started;
 static ngx_uint_t         ngx_media_rtmp_destinations_started;
+
+/*
+ * The listener's own timer: while it is not up yet it retries the bind, and
+ * once it is up it watches for a graceful shutdown so the port is handed over
+ * at once.  See ngx_media_rtmp_listener_handler().
+ */
+#define NGX_MEDIA_RTMP_LISTENER_INTERVAL  100
+
+static ngx_event_t        ngx_media_rtmp_listener_ev;
+static ngx_uint_t         ngx_media_rtmp_listener_attempts;
 
 static ngx_command_t ngx_media_rtmp_commands[] = {
 
@@ -1885,14 +1898,6 @@ static ngx_int_t
 ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
 {
     ngx_media_rtmp_main_conf_t  *mcf;
-    ngx_connection_t            *c;
-    ngx_sockaddr_t               sa;
-    socklen_t                    socklen;
-    ngx_int_t                    fd;
-    ngx_int_t                    rc;
-    ngx_str_t                    host, port_text;
-    ngx_int_t                    port;
-    u_char                      *colon;
 
     mcf = (ngx_media_rtmp_main_conf_t *)
               cycle->conf_ctx[ngx_media_rtmp_module.index];
@@ -1942,13 +1947,68 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
         return NGX_OK;
     }
 
+    /*
+     * The listener is opened here, but a failure is not fatal and never was
+     * allowed to be: on a reload this worker starts before the worker it
+     * replaces has exited, so its bind can legitimately fail while the old
+     * listener is still open.  Failing the worker there killed it, which is a
+     * worse outcome than any bind error - the master respawns it and it dies
+     * again, and if the arrival of the new configuration is unlucky enough
+     * the instance ends up with no worker at all.  Instead the bind is
+     * retried on a timer until it succeeds.
+     */
+    ngx_memzero(&ngx_media_rtmp_listener_ev, sizeof(ngx_event_t));
+
+    ngx_media_rtmp_listener_ev.handler = ngx_media_rtmp_listener_handler;
+    ngx_media_rtmp_listener_ev.log = cycle->log;
+
+    if (ngx_media_rtmp_listener_open(cycle->log) == NGX_OK) {
+        ngx_add_timer(&ngx_media_rtmp_listener_ev,
+                      NGX_MEDIA_RTMP_LISTENER_INTERVAL);
+        return NGX_OK;
+    }
+
+    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                  "media: rtmp listener %V is still bound; retrying until the "
+                  "worker being replaced releases it",
+                  &mcf->listen);
+
+    ngx_add_timer(&ngx_media_rtmp_listener_ev,
+                  NGX_MEDIA_RTMP_LISTENER_INTERVAL);
+
+    return NGX_OK;
+}
+
+/*
+ * Opens the listening socket and starts accepting on it, or reports why it
+ * could not.  The address comes from the configuration, so this can be called
+ * again for every retry.
+ */
+static ngx_int_t
+ngx_media_rtmp_listener_open(ngx_log_t *log)
+{
+    ngx_media_rtmp_main_conf_t  *mcf;
+    ngx_connection_t            *c;
+    ngx_sockaddr_t               sa;
+    socklen_t                    socklen;
+    ngx_int_t                    fd;
+    ngx_int_t                    rc;
+    ngx_str_t                    host, port_text;
+    ngx_int_t                    port;
+    u_char                      *colon;
+
+    mcf = ngx_media_rtmp_conf();
+
+    if (mcf == NULL || !mcf->listen_set) {
+        return NGX_ERROR;
+    }
+
     colon = ngx_strlchr(mcf->listen.data, mcf->listen.data + mcf->listen.len,
                         ':');
 
     if (colon == NULL) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                      "media: invalid media_rtmp_listen \"%V\"",
-                      &mcf->listen);
+        ngx_log_error(NGX_LOG_EMERG, log, 0,
+                      "media: invalid media_rtmp_listen \"%V\"", &mcf->listen);
         return NGX_ERROR;
     }
 
@@ -1960,7 +2020,7 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
     port = ngx_atoi(port_text.data, port_text.len);
 
     if (port < 1 || port > 65535) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+        ngx_log_error(NGX_LOG_EMERG, log, 0,
                       "media: invalid media_rtmp_listen \"%V\"", &mcf->listen);
         return NGX_ERROR;
     }
@@ -1975,7 +2035,7 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
                           && ngx_strncmp(host.data, "127.0.0.1", 9) == 0))
     {
         if (ngx_inet_addr(host.data, host.len) == INADDR_NONE) {
-            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+            ngx_log_error(NGX_LOG_EMERG, log, 0,
                           "media: media_rtmp_listen host must be an IPv4 "
                           "address");
             return NGX_ERROR;
@@ -1989,13 +2049,13 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
     fd = ngx_socket(AF_INET, SOCK_STREAM, 0);
 
     if (fd == -1) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
+        ngx_log_error(NGX_LOG_ALERT, log, ngx_socket_errno,
                       "media: rtmp socket() failed");
         return NGX_ERROR;
     }
 
     if (ngx_nonblocking(fd) == -1) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
+        ngx_log_error(NGX_LOG_ALERT, log, ngx_socket_errno,
                       "media: rtmp cannot set the listener non-blocking");
         (void) ngx_close_socket(fd);
         return NGX_ERROR;
@@ -2011,29 +2071,29 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
     rc = bind(fd, &sa.sockaddr, socklen);
 
     if (rc == -1) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
+        ngx_log_error(NGX_LOG_NOTICE, log, ngx_socket_errno,
                       "media: rtmp bind(%V) failed", &mcf->listen);
         (void) ngx_close_socket(fd);
         return NGX_ERROR;
     }
 
     if (listen(fd, 128) == -1) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
+        ngx_log_error(NGX_LOG_ALERT, log, ngx_socket_errno,
                       "media: rtmp listen() failed");
         (void) ngx_close_socket(fd);
         return NGX_ERROR;
     }
 
-    c = ngx_get_connection(fd, cycle->log);
+    c = ngx_get_connection(fd, log);
 
     if (c == NULL) {
         (void) ngx_close_socket(fd);
         return NGX_ERROR;
     }
 
-    c->log = cycle->log;
+    c->log = log;
     c->read->handler = ngx_media_rtmp_accept_handler;
-    c->read->log = cycle->log;
+    c->read->log = log;
     c->data = c;
 
     if (ngx_add_event(c->read, NGX_READ_EVENT, 0) != NGX_OK) {
@@ -2045,17 +2105,107 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
     ngx_media_rtmp_listener = c;
     ngx_media_rtmp_started = 1;
 
-
-    ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                  "media: rtmp listener ready on %V", &mcf->listen);
+    if (ngx_media_rtmp_listener_attempts > 0) {
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: rtmp listener ready on %V after %ui attempt(s): "
+                      "the port was released",
+                      &mcf->listen, ngx_media_rtmp_listener_attempts + 1);
+    } else {
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: rtmp listener ready on %V", &mcf->listen);
+    }
 
     return NGX_OK;
 }
+
+/*
+ * Closes the listening socket and stops accepting, leaving every session it
+ * accepted running: an accepted connection is its own socket, so the port is
+ * free the moment this returns and the publishers already connected keep
+ * carrying media.
+ */
+static void
+ngx_media_rtmp_listener_stop(void)
+{
+    if (ngx_media_rtmp_listener == NULL) {
+        return;
+    }
+
+    (void) ngx_del_event(ngx_media_rtmp_listener->read, NGX_READ_EVENT, 0);
+    (void) ngx_close_socket(ngx_media_rtmp_listener->fd);
+    ngx_media_rtmp_listener->fd = (ngx_socket_t) -1;
+    ngx_free_connection(ngx_media_rtmp_listener);
+    ngx_media_rtmp_listener = NULL;
+
+    ngx_media_rtmp_started = 0;
+}
+
+/*
+ * Two jobs, one timer.
+ *
+ * While the listener is not up, the bind is retried: nginx starts the
+ * replacement worker before the worker it replaces has exited, so the first
+ * attempt can legitimately find the port bound by the old listener.  Once the
+ * listener is up, the same timer watches for the start of a graceful
+ * shutdown, which no module callback reports - nginx sets ngx_exiting in its
+ * own worker loop - and hands the port over there and then instead of leaving
+ * the replacement to wait for this worker's drain to end.  That is the order
+ * nginx itself uses: a worker closes its listening sockets when it begins to
+ * shut down and still drains the connections it accepted.
+ *
+ * The timer is re-armed only while the worker is alive, so it never holds the
+ * exit up.
+ */
+static void
+ngx_media_rtmp_listener_handler(ngx_event_t *ev)
+{
+    if (ngx_media_rtmp_started) {
+
+        if (!ngx_exiting && !ngx_terminate && !ngx_quit) {
+            ngx_add_timer(ev, NGX_MEDIA_RTMP_LISTENER_INTERVAL);
+            return;
+        }
+
+        ngx_log_error(NGX_LOG_INFO, ev->log, 0,
+                      "media: releasing the rtmp listener for the worker a "
+                      "reload starts");
+
+        ngx_media_rtmp_listener_stop();
+        return;
+    }
+
+    if (ngx_exiting || ngx_terminate || ngx_quit) {
+        /*
+         * The worker is going away without a listener: it is not this
+         * worker's port to take any more, and a timer left armed here would
+         * keep the worker from exiting at all.
+         */
+        return;
+    }
+
+    ngx_media_rtmp_listener_attempts++;
+
+    if (ngx_media_rtmp_listener_attempts % 50 == 0) {
+        ngx_log_error(NGX_LOG_WARN, ev->log, 0,
+                      "media: the rtmp port is still bound after %ui attempt(s); "
+                      "another process may be holding it",
+                      ngx_media_rtmp_listener_attempts);
+    }
+
+    (void) ngx_media_rtmp_listener_open(ev->log);
+
+    ngx_add_timer(ev, NGX_MEDIA_RTMP_LISTENER_INTERVAL);
+}
+
 
 static void
 ngx_media_rtmp_exit_process(ngx_cycle_t *cycle)
 {
     ngx_uint_t  i;
+
+    if (ngx_media_rtmp_listener_ev.timer_set) {
+        ngx_del_timer(&ngx_media_rtmp_listener_ev);
+    }
 
     /*
      * Ordered teardown.  Destinations go first: each one owns a socket, a
@@ -2072,12 +2222,11 @@ ngx_media_rtmp_exit_process(ngx_cycle_t *cycle)
         ngx_media_rtmp_destination_stop_all();
     }
 
-    if (!ngx_media_rtmp_started) {
-        return;
-    }
-
-    ngx_media_rtmp_started = 0;
-
+    /*
+     * The runtime is armed before the listener is attempted, and the listener
+     * may still be waiting for its port, so this is not gated on it: gating
+     * here is what leaves the runtime running in a worker that never bound.
+     */
     for (i = 0; i < NGX_MEDIA_RTMP_MAX_SESSIONS; i++) {
 
         if (ngx_media_rtmp_sessions[i].used) {
@@ -2085,13 +2234,7 @@ ngx_media_rtmp_exit_process(ngx_cycle_t *cycle)
         }
     }
 
-    if (ngx_media_rtmp_listener != NULL) {
-        (void) ngx_del_event(ngx_media_rtmp_listener->read, NGX_READ_EVENT, 0);
-        (void) ngx_close_socket(ngx_media_rtmp_listener->fd);
-        ngx_media_rtmp_listener->fd = (ngx_socket_t) -1;
-        ngx_free_connection(ngx_media_rtmp_listener);
-        ngx_media_rtmp_listener = NULL;
-    }
+    ngx_media_rtmp_listener_stop();
 
     ngx_media_runtime_shutdown(cycle->log);
 }

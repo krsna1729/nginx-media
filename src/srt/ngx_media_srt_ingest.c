@@ -11,6 +11,16 @@
  */
 #define NGX_MEDIA_SRT_NOTIFY_INTERVAL 1
 
+/*
+ * Binding the listener can legitimately fail on a reload: the worker being
+ * replaced still holds the port - an SRT listener owns the UDP socket the
+ * port is bound to, and a publisher attached to it keeps that socket alive
+ * until the worker is gone.  The bind is therefore retried until it succeeds,
+ * with the retries reported only when they stop looking like a reload.
+ */
+#define NGX_MEDIA_SRT_LISTEN_RETRY_MS   100
+#define NGX_MEDIA_SRT_LISTEN_WARN_EVERY 50
+
 typedef struct {
     ngx_media_srt_ingest_t  *ingest;
     ngx_msec_t               last_notify;
@@ -20,6 +30,8 @@ static ngx_msec_t ngx_media_srt_now(void);
 static void ngx_media_srt_notify(ngx_media_srt_notify_t *notify);
 static ngx_uint_t ngx_media_srt_event_push(ngx_media_srt_ingest_t *ingest,
     const ngx_media_srt_event_t *event);
+static ngx_media_srt_listener_t *ngx_media_srt_thread_listen(
+    ngx_media_srt_ingest_t *ingest);
 static void *ngx_media_srt_thread(void *data);
 
 static ngx_msec_t
@@ -180,6 +192,106 @@ ngx_media_srt_session_finish(ngx_media_srt_ingest_t *ingest,
     ngx_media_srt_notify(notify);
 }
 
+/*
+ * Binds the listener, waiting out the worker a reload is replacing.
+ *
+ * nginx starts the replacement worker before the worker it replaces has
+ * exited, and an SRT listener owns the UDP socket the port is bound to: while
+ * that worker still holds it - with a publisher attached, until the process
+ * is gone - no second bind can succeed.  Giving up on the first failure is
+ * what left the instance with no listener at all once the old worker exited.
+ *
+ * So the bind is retried until it succeeds.  There is no attempt ceiling: the
+ * only correct outcome for a configured listener is to have one, and a port
+ * held by something that is not going away is reported periodically instead
+ * of being fatal.  Each retry is cheap (one socket, one failed bind), and the
+ * worker's exit still interrupts it at once - ngx_media_srt_ingest_stop()
+ * joins this thread.
+ */
+static ngx_media_srt_listener_t *
+ngx_media_srt_thread_listen(ngx_media_srt_ingest_t *ingest)
+{
+    ngx_media_srt_listener_t  *listener;
+    ngx_uint_t                 attempt;
+
+    for (attempt = 0; ; attempt++) {
+
+        if (attempt > 0) {
+            struct timespec  pause;
+
+            pause.tv_sec = 0;
+            pause.tv_nsec = (long) NGX_MEDIA_SRT_LISTEN_RETRY_MS * 1000000;
+
+            (void) nanosleep(&pause, NULL);
+
+            /* the worker may be exiting: give the join something to see */
+            if (ingest->stop) {
+                return NULL;
+            }
+        }
+
+        /*
+         * A bonded listener covers two local addresses and accepts group
+         * callers; the plain one covers a single address.  Which is used is a
+         * property of the configuration, and the session that comes back is
+         * the same kind either way, so nothing below this line knows about
+         * bond members.
+         */
+        if (ingest->conf.bond_host.len > 0) {
+            listener = ngx_media_srt_listen_bond(ingest->conf.host.data,
+                                                 ingest->conf.port,
+                                                 ingest->conf.bond_host.data,
+                                                 ingest->conf.params, NULL);
+
+        } else {
+            listener = ngx_media_srt_listen(ingest->conf.host.data,
+                                            ingest->conf.port,
+                                            ingest->conf.params, NULL);
+        }
+
+        if (listener != NULL) {
+
+            if (attempt > 0 && ingest->log != NULL) {
+                ngx_log_error(NGX_LOG_NOTICE, ingest->log, 0,
+                              "media: srt listener bound %V:%ui after %ui "
+                              "attempt(s): the port was released",
+                              &ingest->conf.host, ingest->conf.port,
+                              attempt + 1);
+            }
+
+            return listener;
+        }
+
+        if (ingest->log == NULL) {
+            continue;
+        }
+
+        if (attempt == 0) {
+            /*
+             * The expected way to arrive here is the replacement worker of a
+             * reload, racing the worker it replaces.  Say so, and say what
+             * the transport reported, so a port held by something else is
+             * diagnosable from the first line.
+             */
+            ngx_log_error(NGX_LOG_NOTICE, ingest->log, 0,
+                          "media: srt listener %V:%ui is not available yet "
+                          "(%s); retrying until the port is free",
+                          &ingest->conf.host, ingest->conf.port,
+                          ngx_media_srt_last_error());
+
+        } else if (attempt % NGX_MEDIA_SRT_LISTEN_WARN_EVERY == 0) {
+            ngx_log_error(NGX_LOG_WARN, ingest->log, 0,
+                          "media: srt listener %V:%ui is still bound after "
+                          "%ui s (%s); another process may be holding the "
+                          "port",
+                          &ingest->conf.host, ingest->conf.port,
+                          (ngx_uint_t) (attempt
+                                        * NGX_MEDIA_SRT_LISTEN_RETRY_MS / 1000),
+                          ngx_media_srt_last_error());
+        }
+    }
+}
+
 static void *
 ngx_media_srt_thread(void *data)
 {
@@ -193,23 +305,19 @@ ngx_media_srt_thread(void *data)
     ngx_media_srt_event_t          event;
     u_char                         buf[65536];
     ngx_uint_t                     i, count;
+    ngx_uint_t                     accepting = 1;
     ngx_int_t                      n;
 
     notify.ingest = ingest;
     notify.last_notify = 0;
 
-    listener = ngx_media_srt_listen(ingest->conf.host.data, ingest->conf.port,
-                                    ingest->conf.params, NULL);
+    listener = ngx_media_srt_thread_listen(ingest);
 
     if (listener == NULL) {
-        ngx_memzero(&event, sizeof(event));
-        event.type = NGX_MEDIA_SRT_EVENT_FAILED;
-
-        (void) ngx_media_srt_event_push(ingest, &event);
-        (void) ngx_atomic_fetch_add(&ingest->failed, 1);
-
-        ngx_media_srt_notify(&notify);
-
+        /*
+         * The retry only stops when the worker is going away, so there is no
+         * listener to report either way.
+         */
         return NULL;
     }
 
@@ -241,6 +349,36 @@ ngx_media_srt_thread(void *data)
 
     while (!ingest->stop) {
 
+        if (ingest->draining && accepting) {
+            ngx_uint_t  draining = 0;
+
+            /*
+             * A graceful shutdown has begun.  Stop accepting: a publisher
+             * taken now would be dropped when this worker exits.  The
+             * sessions already accepted are left alone - they keep running,
+             * and with them the transport's socket on the port, so the
+             * worker a reload started may have to wait for this one to go.
+             */
+            accepting = 0;
+
+            ngx_media_srt_poll_remove_listener(poll, listener);
+            ngx_media_srt_listen_stop(listener);
+
+            for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
+                if (ingest->sessions[i].session != NULL) {
+                    draining++;
+                }
+            }
+
+            if (ingest->log != NULL) {
+                ngx_log_error(NGX_LOG_NOTICE, ingest->log, 0,
+                              "media: srt listener %V:%ui released for the "
+                              "worker the reload started, %ui session(s) "
+                              "still draining",
+                              &ingest->conf.host, ingest->conf.port, draining);
+            }
+        }
+
         if (ngx_media_srt_poll_wait(poll, 200, events, NGX_MEDIA_SRT_POLL_MAX,
                                     &count) != NGX_OK)
         {
@@ -250,6 +388,11 @@ ngx_media_srt_thread(void *data)
         for (i = 0; i < count; i++) {
 
             if (events[i].listener != NULL) {
+
+                if (!accepting) {
+                    /* released for the reload: nothing is accepted here */
+                    continue;
+                }
 
                 session = ngx_media_srt_accept_ready(events[i].listener, NULL);
 
@@ -307,6 +450,17 @@ ngx_media_srt_thread(void *data)
         }
     }
 
+    if (accepting) {
+        /*
+         * The worker is going away.  Give the listening sockets up before
+         * the sessions are closed, not after: the port has to be free for the
+         * worker a reload replaced this one with, and closing sessions is the
+         * slow part (the library runs its closing handshake first).
+         */
+        ngx_media_srt_poll_remove_listener(poll, listener);
+        ngx_media_srt_listen_stop(listener);
+    }
+
     for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
         if (ingest->sessions[i].session != NULL) {
             ngx_media_srt_session_close(ingest->sessions[i].session);
@@ -359,6 +513,7 @@ ngx_media_srt_ingest_start(ngx_media_srt_ingest_t *ingest,
     ngx_memzero(ingest, sizeof(ngx_media_srt_ingest_t));
 
     ingest->conf = *conf;
+    ingest->log = log;
 
     if (ingest->conf.max_chunks == 0) {
         ingest->conf.max_chunks = 256;
@@ -425,6 +580,16 @@ ngx_media_srt_ingest_start(ngx_media_srt_ingest_t *ingest,
     ingest->thread_started = 1;
 
     return NGX_OK;
+}
+
+void
+ngx_media_srt_ingest_stop_accepting(ngx_media_srt_ingest_t *ingest)
+{
+    if (ingest == NULL) {
+        return;
+    }
+
+    (void) ngx_atomic_cmp_set(&ingest->draining, 0, 1);
 }
 
 void

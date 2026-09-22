@@ -15,8 +15,22 @@
 #include <netinet/in.h>
 #include <srt/srt.h>
 
+/*
+ * How many local addresses one listener can cover.  Two is what a bonded
+ * listener needs: the listen address and the second address the other leg of
+ * a group caller arrives on (goal doc 11.4).
+ */
+#define NGX_MEDIA_SRT_MAX_LISTEN_ADDRS  2
+
 struct ngx_media_srt_listener_s {
-    SRTSOCKET                 sock;
+    /*
+     * The sockets this listener accepts on.  A plain listener has one; a
+     * bonded listener has one per local address, and they are always passed
+     * to srt_accept_bond() together, so a group caller is accepted as one
+     * socket no matter which leg is seen first.
+     */
+    SRTSOCKET                 socks[NGX_MEDIA_SRT_MAX_LISTEN_ADDRS];
+    ngx_uint_t                nsocks;
     ngx_media_srt_session_t  *sessions;
     ngx_media_srt_listener_t *next;
 };
@@ -90,7 +104,17 @@ ngx_media_srt_haivision_last_error(void)
 static ngx_media_srt_listener_t *ngx_media_srt_haivision_listen(
     const u_char *host, ngx_uint_t port,
     const ngx_media_srt_params_t *params, ngx_log_t *log);
+static ngx_media_srt_listener_t *ngx_media_srt_haivision_listen_bond(
+    const u_char *host, ngx_uint_t port, const u_char *bond_host,
+    const ngx_media_srt_params_t *params, ngx_log_t *log);
+static ngx_media_srt_listener_t *ngx_media_srt_haivision_listener_alloc(
+    const SRTSOCKET *socks, ngx_uint_t nsocks, ngx_log_t *log);
+static SRTSOCKET ngx_media_srt_haivision_bind(const u_char *host,
+    ngx_uint_t port, ngx_uint_t group,
+    const ngx_media_srt_params_t *params);
 static void ngx_media_srt_haivision_listen_close(
+    ngx_media_srt_listener_t *listener);
+static void ngx_media_srt_haivision_listen_stop(
     ngx_media_srt_listener_t *listener);
 static ngx_media_srt_session_t *ngx_media_srt_haivision_accept(
     ngx_media_srt_listener_t *listener, ngx_msec_t timeout_ms,
@@ -122,6 +146,8 @@ static ngx_media_srt_poll_t *ngx_media_srt_haivision_poll_create(
 static void ngx_media_srt_haivision_poll_destroy(ngx_media_srt_poll_t *poll);
 static ngx_int_t ngx_media_srt_haivision_poll_add_listener(
     ngx_media_srt_poll_t *poll, ngx_media_srt_listener_t *listener);
+static void ngx_media_srt_haivision_poll_remove_listener(
+    ngx_media_srt_poll_t *poll, ngx_media_srt_listener_t *listener);
 static ngx_int_t ngx_media_srt_haivision_poll_add_session(
     ngx_media_srt_poll_t *poll, ngx_media_srt_session_t *session);
 static void ngx_media_srt_haivision_poll_remove_session(
@@ -136,6 +162,7 @@ ngx_media_srt_ops_t ngx_media_srt_haivision_ops = {
     "srt",
     ngx_media_srt_haivision_listen,
     ngx_media_srt_haivision_listen_close,
+    ngx_media_srt_haivision_listen_stop,
     ngx_media_srt_haivision_accept,
     ngx_media_srt_haivision_accept_ready,
     ngx_media_srt_haivision_streamid,
@@ -147,12 +174,14 @@ ngx_media_srt_ops_t ngx_media_srt_haivision_ops = {
     ngx_media_srt_haivision_poll_create,
     ngx_media_srt_haivision_poll_destroy,
     ngx_media_srt_haivision_poll_add_listener,
+    ngx_media_srt_haivision_poll_remove_listener,
     ngx_media_srt_haivision_poll_add_session,
     ngx_media_srt_haivision_poll_remove_session,
     ngx_media_srt_haivision_poll_wait,
     ngx_media_srt_haivision_library_version,
     ngx_media_srt_haivision_last_error,
-    ngx_media_srt_haivision_shutdown
+    ngx_media_srt_haivision_shutdown,
+    ngx_media_srt_haivision_listen_bond
 };
 
 /*
@@ -239,24 +268,28 @@ ngx_media_srt_haivision_apply_crypto(SRTSOCKET sock,
     return NGX_OK;
 }
 
-static ngx_media_srt_listener_t *
-ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
-    const ngx_media_srt_params_t *params, ngx_log_t *log)
+/*
+ * Creates one socket, bound and listening on one local address.  `group`
+ * enables group acceptance on it, which the library only allows before the
+ * socket starts listening, so it is set here and not by the caller.
+ */
+static SRTSOCKET
+ngx_media_srt_haivision_bind(const u_char *host, ngx_uint_t port,
+    ngx_uint_t group, const ngx_media_srt_params_t *params)
 {
-    ngx_media_srt_listener_t  *listener;
-    struct sockaddr_in         addr;
-    SRTSOCKET                  sock;
-    int                        transtype, yes, timeout;
+    struct sockaddr_in  addr;
+    SRTSOCKET           sock;
+    int                 transtype, yes, timeout, allow;
 
     if (host == NULL || host[0] == '\0' || port == 0 || port > 65535) {
         ngx_media_srt_note_error("invalid listen address");
-        return NULL;
+        return SRT_INVALID_SOCK;
     }
 
     if (!ngx_media_srt_started) {
         if (srt_startup() == SRT_ERROR) {
             ngx_media_srt_note_error(srt_getlasterror_str());
-            return NULL;
+            return SRT_INVALID_SOCK;
         }
 
         ngx_media_srt_started = 1;
@@ -265,7 +298,7 @@ ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
     sock = srt_create_socket();
     if (sock == SRT_INVALID_SOCK) {
         ngx_media_srt_note_error(srt_getlasterror_str());
-        return NULL;
+        return SRT_INVALID_SOCK;
     }
 
     transtype = SRTT_LIVE;
@@ -285,7 +318,29 @@ ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
         }
 
         (void) srt_close(sock);
-        return NULL;
+        return SRT_INVALID_SOCK;
+    }
+
+    if (group) {
+        allow = 1;
+
+        if (srt_setsockopt(sock, 0, SRTO_GROUPCONNECT, &allow,
+                           sizeof(allow)) == SRT_ERROR)
+        {
+            /*
+             * A distribution libsrt is routinely built with bonding
+             * compiled out: the header declares SRTO_GROUPCONNECT and the
+             * symbol exists, but the option is unknown to the library.  Say
+             * which one it is, so the operator does not go looking at
+             * addresses and firewalls.
+             */
+            ngx_media_srt_note_error("this SRT library was built without "
+                                     "bonding (SRTO_GROUPCONNECT rejected), "
+                                     "so it cannot accept group callers");
+
+            (void) srt_close(sock);
+            return SRT_INVALID_SOCK;
+        }
     }
 
     ngx_memzero(&addr, sizeof(addr));
@@ -295,7 +350,7 @@ ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
     if (inet_pton(AF_INET, (const char *) host, &addr.sin_addr) != 1) {
         ngx_media_srt_note_error("unparsable listen address");
         (void) srt_close(sock);
-        return NULL;
+        return SRT_INVALID_SOCK;
     }
 
     if (srt_bind(sock, (struct sockaddr *) &addr, sizeof(addr)) == SRT_ERROR
@@ -303,23 +358,124 @@ ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
     {
         ngx_media_srt_note_error(srt_getlasterror_str());
         (void) srt_close(sock);
-        return NULL;
+        return SRT_INVALID_SOCK;
     }
+
+    return sock;
+}
+
+static ngx_media_srt_listener_t *
+ngx_media_srt_haivision_listener_alloc(const SRTSOCKET *socks,
+    ngx_uint_t nsocks, ngx_log_t *log)
+{
+    ngx_media_srt_listener_t  *listener;
+    ngx_uint_t                 i;
 
     listener = ngx_alloc(sizeof(ngx_media_srt_listener_t), log);
     if (listener == NULL) {
+        for (i = 0; i < nsocks; i++) {
+            (void) srt_close(socks[i]);
+        }
+
         ngx_media_srt_note_error("out of memory");
-        (void) srt_close(sock);
         return NULL;
     }
 
     ngx_memzero(listener, sizeof(ngx_media_srt_listener_t));
 
-    listener->sock = sock;
+    for (i = 0; i < nsocks; i++) {
+        listener->socks[i] = socks[i];
+    }
+
+    listener->nsocks = nsocks;
     listener->next = ngx_media_srt_listeners;
     ngx_media_srt_listeners = listener;
 
     return listener;
+}
+
+static ngx_media_srt_listener_t *
+ngx_media_srt_haivision_listen(const u_char *host, ngx_uint_t port,
+    const ngx_media_srt_params_t *params, ngx_log_t *log)
+{
+    SRTSOCKET  sock;
+
+    sock = ngx_media_srt_haivision_bind(host, port, 0, params);
+    if (sock == SRT_INVALID_SOCK) {
+        return NULL;
+    }
+
+    return ngx_media_srt_haivision_listener_alloc(&sock, 1, log);
+}
+
+/*
+ * The bonded listener (goal doc 11.4).  Both local addresses are bound with
+ * group acceptance enabled, and both sockets are handed to srt_accept_bond()
+ * together, so the library returns one socket for the whole group.  That
+ * socket is an ordinary session to everything above this file: the core
+ * registers one source for the bonded publisher and the selector has one
+ * candidate, never one per leg.
+ */
+static ngx_media_srt_listener_t *
+ngx_media_srt_haivision_listen_bond(const u_char *host, ngx_uint_t port,
+    const u_char *bond_host, const ngx_media_srt_params_t *params,
+    ngx_log_t *log)
+{
+    SRTSOCKET  socks[NGX_MEDIA_SRT_MAX_LISTEN_ADDRS];
+
+    if (bond_host == NULL || bond_host[0] == '\0') {
+        ngx_media_srt_note_error("bonded listener without a second address");
+        return NULL;
+    }
+
+    socks[0] = ngx_media_srt_haivision_bind(host, port, 1, params);
+
+    if (socks[0] == SRT_INVALID_SOCK) {
+        return NULL;
+    }
+
+    socks[1] = ngx_media_srt_haivision_bind(bond_host, port, 1, params);
+
+    if (socks[1] == SRT_INVALID_SOCK) {
+        (void) srt_close(socks[0]);
+        return NULL;
+    }
+
+    return ngx_media_srt_haivision_listener_alloc(socks, 2, log);
+}
+
+/*
+ * Releases the listening sockets and nothing else.  An accepted SRT session
+ * has its own socket, bound to the same local port and connected to its
+ * peer, so closing the listener's sockets leaves the sessions running; that
+ * is what lets a worker that is shutting down free the port immediately
+ * without disturbing the publishers it is still draining.
+ *
+ * The listener stays in the global list: its sessions are found through it,
+ * and the entry with no sockets left is what listen_close() finally frees.
+ */
+static void
+ngx_media_srt_haivision_listen_stop(ngx_media_srt_listener_t *listener)
+{
+    ngx_uint_t  i;
+
+    if (listener == NULL) {
+        return;
+    }
+
+    for (i = 0; i < listener->nsocks; i++) {
+
+        if (listener->socks[i] == SRT_INVALID_SOCK) {
+            continue;
+        }
+
+        /*
+         * A released socket id must never be matched again by a socket that
+         * reuses the number, so it is forgotten as it is closed.
+         */
+        (void) srt_close(listener->socks[i]);
+        listener->socks[i] = SRT_INVALID_SOCK;
+    }
 }
 
 static void
@@ -327,6 +483,7 @@ ngx_media_srt_haivision_listen_close(ngx_media_srt_listener_t *listener)
 {
     ngx_media_srt_session_t   *session, *next;
     ngx_media_srt_listener_t **pp;
+    ngx_uint_t                 i;
 
     if (listener == NULL) {
         return;
@@ -341,7 +498,15 @@ ngx_media_srt_haivision_listen_close(ngx_media_srt_listener_t *listener)
 
     listener->sessions = NULL;
 
-    (void) srt_close(listener->sock);
+    for (i = 0; i < listener->nsocks; i++) {
+
+        if (listener->socks[i] == SRT_INVALID_SOCK) {
+            continue;
+        }
+
+        (void) srt_close(listener->socks[i]);
+        listener->socks[i] = SRT_INVALID_SOCK;
+    }
 
     for (pp = &ngx_media_srt_listeners; *pp != NULL; pp = &(*pp)->next) {
         if (*pp == listener) {
@@ -366,9 +531,12 @@ ngx_media_srt_haivision_accept(ngx_media_srt_listener_t *listener,
     /*
      * srt_accept() ignores SRTO_RCVTIMEO and blocks forever, which would pin
      * the helper thread (and the worker shutdown that joins it);
-     * srt_accept_bond() accepts with a real timeout.
+     * srt_accept_bond() accepts with a real timeout.  Every address of the
+     * listener is passed, so whichever leg of a group caller arrives first
+     * yields the same single socket for the whole group.
      */
-    sock = srt_accept_bond(&listener->sock, 1, (int64_t) timeout_ms);
+    sock = srt_accept_bond(listener->socks, (int) listener->nsocks,
+                           (int64_t) timeout_ms);
     if (sock == SRT_INVALID_SOCK) {
         return NULL;
     }
@@ -381,6 +549,7 @@ ngx_media_srt_haivision_accept_ready(ngx_media_srt_listener_t *listener,
     ngx_log_t *log)
 {
     SRTSOCKET  sock;
+    ngx_uint_t i;
     int        zero = 0, one = 1;
 
     if (listener == NULL) {
@@ -392,13 +561,28 @@ ngx_media_srt_haivision_accept_ready(ngx_media_srt_listener_t *listener,
      * only called after the poll reported a pending connection, and it may
      * never block the shared scheduler.
      */
-    if (srt_setsockopt(listener->sock, 0, SRTO_RCVSYN, &zero, sizeof(zero))
-        == SRT_ERROR)
-    {
-        return NULL;
+    for (i = 0; i < listener->nsocks; i++) {
+        if (srt_setsockopt(listener->socks[i], 0, SRTO_RCVSYN, &zero,
+                           sizeof(zero)) == SRT_ERROR)
+        {
+            return NULL;
+        }
     }
 
-    sock = srt_accept(listener->sock, NULL, NULL);
+    /*
+     * The poll reports whichever address of a bonded listener the first leg
+     * arrived on, and srt_accept() returns the group socket when a group
+     * caller is behind a pending connection, so both legs become this one
+     * session.  It is taken per socket rather than through
+     * srt_accept_bond(), which subscribes a fresh poll of its own and so
+     * cannot see a connection that is already queued and did not arrive
+     * while it was watching.
+     */
+    sock = SRT_INVALID_SOCK;
+
+    for (i = 0; i < listener->nsocks && sock == SRT_INVALID_SOCK; i++) {
+        sock = srt_accept(listener->socks[i], NULL, NULL);
+    }
 
     if (sock == SRT_INVALID_SOCK) {
         return NULL;
@@ -707,6 +891,21 @@ ngx_media_srt_haivision_shutdown(void)
     }
 }
 
+static ngx_uint_t
+ngx_media_srt_listener_is_socket(ngx_media_srt_listener_t *listener,
+    SRTSOCKET sock)
+{
+    ngx_uint_t  i;
+
+    for (i = 0; i < listener->nsocks; i++) {
+        if (listener->socks[i] == sock) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static ngx_media_srt_session_t *
 ngx_media_srt_session_by_socket(SRTSOCKET sock)
 {
@@ -716,7 +915,7 @@ ngx_media_srt_session_by_socket(SRTSOCKET sock)
     for (listener = ngx_media_srt_listeners; listener != NULL;
          listener = listener->next)
     {
-        if (listener->sock == sock) {
+        if (ngx_media_srt_listener_is_socket(listener, sock)) {
             return NULL;
         }
 
@@ -748,7 +947,7 @@ ngx_media_srt_listener_by_socket(SRTSOCKET sock)
     for (listener = ngx_media_srt_listeners; listener != NULL;
          listener = listener->next)
     {
-        if (listener->sock == sock) {
+        if (ngx_media_srt_listener_is_socket(listener, sock)) {
             return listener;
         }
     }
@@ -810,7 +1009,40 @@ static ngx_int_t
 ngx_media_srt_haivision_poll_add_listener(ngx_media_srt_poll_t *poll,
     ngx_media_srt_listener_t *listener)
 {
-    return ngx_media_srt_poll_register(poll, listener->sock);
+    ngx_uint_t  i;
+
+    /*
+     * Every address of the listener is polled: a group caller's first leg can
+     * arrive on either one, and the accept that follows is taken over the
+     * whole set.
+     */
+    for (i = 0; i < listener->nsocks; i++) {
+        if (ngx_media_srt_poll_register(poll, listener->socks[i]) != NGX_OK) {
+            return NGX_ERROR;
+        }
+    }
+
+    return NGX_OK;
+}
+
+static void
+ngx_media_srt_haivision_poll_remove_listener(ngx_media_srt_poll_t *poll,
+    ngx_media_srt_listener_t *listener)
+{
+    ngx_uint_t  i;
+
+    if (poll == NULL || listener == NULL) {
+        return;
+    }
+
+    for (i = 0; i < listener->nsocks; i++) {
+
+        if (listener->socks[i] == SRT_INVALID_SOCK) {
+            continue;
+        }
+
+        (void) srt_epoll_remove_usock(poll->eid, listener->socks[i]);
+    }
 }
 
 static ngx_int_t

@@ -50,6 +50,21 @@ ngx_media_srt_listen(const u_char *host, ngx_uint_t port,
     return ngx_media_srt_backend()->listen(host, port, params, log);
 }
 
+ngx_media_srt_listener_t *
+ngx_media_srt_listen_bond(const u_char *host, ngx_uint_t port,
+    const u_char *bond_host, const ngx_media_srt_params_t *params,
+    ngx_log_t *log)
+{
+    if (ngx_media_srt_backend() == NULL
+        || ngx_media_srt_backend()->listen_bond == NULL)
+    {
+        return NULL;
+    }
+
+    return ngx_media_srt_backend()->listen_bond(host, port, bond_host, params,
+                                                log);
+}
+
 void
 ngx_media_srt_listen_close(ngx_media_srt_listener_t *listener)
 {
@@ -60,6 +75,18 @@ ngx_media_srt_listen_close(ngx_media_srt_listener_t *listener)
     }
 
     ngx_media_srt_backend()->listen_close(listener);
+}
+
+void
+ngx_media_srt_listen_stop(ngx_media_srt_listener_t *listener)
+{
+    if (listener == NULL || ngx_media_srt_backend() == NULL
+        || ngx_media_srt_backend()->listen_stop == NULL)
+    {
+        return;
+    }
+
+    ngx_media_srt_backend()->listen_stop(listener);
 }
 
 ngx_media_srt_session_t *
@@ -189,6 +216,19 @@ ngx_media_srt_poll_add_listener(ngx_media_srt_poll_t *poll,
     }
 
     return ngx_media_srt_backend()->poll_add_listener(poll, listener);
+}
+
+void
+ngx_media_srt_poll_remove_listener(ngx_media_srt_poll_t *poll,
+    ngx_media_srt_listener_t *listener)
+{
+    if (poll == NULL || listener == NULL || ngx_media_srt_backend() == NULL
+        || ngx_media_srt_backend()->poll_remove_listener == NULL)
+    {
+        return;
+    }
+
+    ngx_media_srt_backend()->poll_remove_listener(poll, listener);
 }
 
 ngx_int_t

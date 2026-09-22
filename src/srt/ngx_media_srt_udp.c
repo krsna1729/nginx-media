@@ -67,6 +67,8 @@ static ngx_media_srt_listener_t *ngx_media_srt_udp_listen(
     const ngx_media_srt_params_t *params, ngx_log_t *log);
 static void ngx_media_srt_udp_listen_close(
     ngx_media_srt_listener_t *listener);
+static void ngx_media_srt_udp_listen_stop(
+    ngx_media_srt_listener_t *listener);
 static ngx_media_srt_session_t *ngx_media_srt_udp_accept(
     ngx_media_srt_listener_t *listener, ngx_msec_t timeout_ms, ngx_log_t *log);
 static ngx_media_srt_session_t *ngx_media_srt_udp_accept_ready(
@@ -99,6 +101,8 @@ static ngx_media_srt_poll_t *ngx_media_srt_udp_poll_create(
 static void ngx_media_srt_udp_poll_destroy(ngx_media_srt_poll_t *poll);
 static ngx_int_t ngx_media_srt_udp_poll_add_listener(
     ngx_media_srt_poll_t *poll, ngx_media_srt_listener_t *listener);
+static void ngx_media_srt_udp_poll_remove_listener(
+    ngx_media_srt_poll_t *poll, ngx_media_srt_listener_t *listener);
 static ngx_int_t ngx_media_srt_udp_poll_add_session(
     ngx_media_srt_poll_t *poll, ngx_media_srt_session_t *session);
 static void ngx_media_srt_udp_poll_remove_session(
@@ -111,6 +115,7 @@ ngx_media_srt_ops_t ngx_media_srt_udp_ops = {
     "udp",
     ngx_media_srt_udp_listen,
     ngx_media_srt_udp_listen_close,
+    ngx_media_srt_udp_listen_stop,
     ngx_media_srt_udp_accept,
     ngx_media_srt_udp_accept_ready,
     ngx_media_srt_udp_streamid,
@@ -122,12 +127,14 @@ ngx_media_srt_ops_t ngx_media_srt_udp_ops = {
     ngx_media_srt_udp_poll_create,
     ngx_media_srt_udp_poll_destroy,
     ngx_media_srt_udp_poll_add_listener,
+    ngx_media_srt_udp_poll_remove_listener,
     ngx_media_srt_udp_poll_add_session,
     ngx_media_srt_udp_poll_remove_session,
     ngx_media_srt_udp_poll_wait,
     ngx_media_srt_udp_library_version,
     NULL,                                  /* no printable last error */
-    ngx_media_srt_udp_shutdown
+    ngx_media_srt_udp_shutdown,
+    NULL                                   /* no group acceptance */
 };
 
 static ngx_int_t
@@ -204,6 +211,19 @@ ngx_media_srt_udp_listen(const u_char *host, ngx_uint_t port,
     ngx_media_srt_udp_started = 1;
 
     return listener;
+}
+
+static void
+ngx_media_srt_udp_listen_stop(ngx_media_srt_listener_t *listener)
+{
+    /*
+     * The double multiplexes every peer it has accepted on the listener's own
+     * socket, so there is no separate listening socket to release: closing
+     * the fd would break the sessions the caller asked to keep.  Stopping the
+     * accept loop is all this backend can do, and the ingest thread does it
+     * by taking the listener out of the poll.
+     */
+    (void) listener;
 }
 
 static void
@@ -635,6 +655,15 @@ ngx_media_srt_udp_poll_add_listener(ngx_media_srt_poll_t *scheduler,
     scheduler->listener = listener;
 
     return NGX_OK;
+}
+
+static void
+ngx_media_srt_udp_poll_remove_listener(ngx_media_srt_poll_t *scheduler,
+    ngx_media_srt_listener_t *listener)
+{
+    if (scheduler != NULL && scheduler->listener == listener) {
+        scheduler->listener = NULL;
+    }
 }
 
 static ngx_int_t

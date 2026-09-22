@@ -128,6 +128,7 @@ static char *ngx_media_srt_crypto_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static ngx_int_t ngx_media_srt_init_process(ngx_cycle_t *cycle);
 static void ngx_media_srt_exit_process(ngx_cycle_t *cycle);
+static void ngx_media_srt_shutdown_handler(ngx_event_t *ev);
 static void ngx_media_srt_handler(ngx_event_t *ev);
 static ngx_int_t ngx_media_srt_parse_endpoint(ngx_pool_t *pool,
     const ngx_str_t *endpoint, ngx_str_t *host, ngx_uint_t *port);
@@ -164,6 +165,15 @@ static ngx_media_srt_slot_t *ngx_media_srt_slot_alloc(void);
 static ngx_media_srt_ingest_t   ngx_media_srt_ingest;
 static ngx_connection_t        *ngx_media_srt_connection;
 static ngx_uint_t               ngx_media_srt_started;
+
+/*
+ * How often the worker checks whether a graceful shutdown has begun, and the
+ * watcher that does it.  See ngx_media_srt_shutdown_handler().
+ */
+#define NGX_MEDIA_SRT_SHUTDOWN_INTERVAL  100
+
+static ngx_event_t              ngx_media_srt_shutdown_ev;
+
 /*
  * The program runtime is armed in every worker, before the worker-0 checks,
  * and the destination block runs without the listener: teardown is gated on
@@ -1497,12 +1507,60 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     ngx_media_srt_connection = c;
     ngx_media_srt_started = 1;
 
+    /*
+     * From here on, a graceful shutdown has to give this port up promptly:
+     * see ngx_media_srt_shutdown_handler().
+     */
+    ngx_memzero(&ngx_media_srt_shutdown_ev, sizeof(ngx_event_t));
 
+    ngx_media_srt_shutdown_ev.handler = ngx_media_srt_shutdown_handler;
+    ngx_media_srt_shutdown_ev.log = cycle->log;
+
+    ngx_add_timer(&ngx_media_srt_shutdown_ev,
+                  NGX_MEDIA_SRT_SHUTDOWN_INTERVAL);
 
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
                   "media: SRT ingest runtime started for %V", &mcf->listen);
 
     return NGX_OK;
+}
+
+/*
+ * A worker that is shutting down stops accepting publishers at once.
+ *
+ * On a reload nginx starts the replacement worker before the worker it
+ * replaces has exited, and an SRT listener owns the UDP socket the port is
+ * bound to, so the replacement's first bind fails.  Two things have to happen
+ * for the port to move over: this worker must stop accepting publishers it is
+ * about to drop, which this watcher does as soon as the shutdown starts, and
+ * the replacement must keep retrying the bind until this worker - and with it
+ * the socket a live publisher is holding - is gone.  The sessions themselves
+ * are never touched here: they keep running, and keep that socket alive,
+ * until this worker exits.
+ *
+ * That is the ordering nginx itself uses: a worker closes its listening
+ * sockets when it begins to shut down and still drains what it accepted.
+ *
+ * Nothing calls a module back when that moment arrives - nginx sets ngx_exiting
+ * in its own worker loop - so this watcher polls for it.  It re-arms only
+ * while the worker is alive, so it never holds the exit up, and it stops
+ * polling once it has released the listener.
+ */
+static void
+ngx_media_srt_shutdown_handler(ngx_event_t *ev)
+{
+    if (!ngx_exiting && !ngx_terminate && !ngx_quit) {
+        ngx_add_timer(ev, NGX_MEDIA_SRT_SHUTDOWN_INTERVAL);
+        return;
+    }
+
+    if (ngx_media_srt_started) {
+        ngx_log_error(NGX_LOG_INFO, ev->log, 0,
+                      "media: releasing the srt listener for the worker a "
+                      "reload starts");
+
+        ngx_media_srt_ingest_stop_accepting(&ngx_media_srt_ingest);
+    }
 }
 
 static void
@@ -1738,6 +1796,10 @@ ngx_media_srt_exit_process(ngx_cycle_t *cycle)
     }
 
     ngx_media_srt_runtime_started = 0;
+
+    if (ngx_media_srt_shutdown_ev.timer_set) {
+        ngx_del_timer(&ngx_media_srt_shutdown_ev);
+    }
 
     /* the ingest side, up only when a listener was configured */
     ingest = ngx_media_srt_started;

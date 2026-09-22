@@ -25,7 +25,33 @@ mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/hls"
 PUB=0
 cleanup() {
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null
-    pkill -KILL -f 'nginx: ' 2>/dev/null
+
+    # only this script's instances, matched by the prefixes it started.  The
+    # prefix is unique to this target, so a worker orphaned by an earlier
+    # aborted run is reaped too, while another agent's nginx - a different
+    # prefix - is never touched.  A pattern like `pkill -f 'nginx: '` would
+    # kill every nginx on the box and is never used here.
+    for inst in "$RUN" "$RUN/sink"; do
+        [ -f "$inst/logs/nginx.pid" ] || continue
+
+        pid="$(cat "$inst/logs/nginx.pid")"
+
+        # the master reaps its workers on a graceful signal, so no orphaned
+        # worker is left holding the SRT port for the next run
+        kill -QUIT "$pid" 2>/dev/null
+
+        for _ in $(seq 1 100); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.05
+        done
+
+        for child in $(pgrep -P "$pid" 2>/dev/null); do
+            kill -KILL "$child" 2>/dev/null
+        done
+
+        kill -KILL "$pid" 2>/dev/null
+    done
+
     return 0
 }
 trap cleanup EXIT
@@ -345,6 +371,7 @@ done
 PD="$(publish encoder-d 20)"
 sleep 2
 
+
 STATUS="$(curl -sS -o "$RUN/dest.json" -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' \
     -d "{\"id\":\"sink1\",\"type\":\"srt\",\"host\":\"127.0.0.1\",\"port\":$SINK_PORT,\"streamid\":\"#!::r=live/news,m=publish,s=runtime-out\"}" \
@@ -368,7 +395,26 @@ grep -q 'srt source open.*source=runtime-out' "$RUN/sink/logs/error.log" \
     || { echo "the runtime destination carried no media" >&2
          tail -3 "$RUN/sink/logs/error.log" >&2; exit 1; }
 
-echo "   destination added at runtime, media reached the sink"
+# The senders are one pool over the destination table, so while media keeps
+# flowing the worker gains no thread: a sender per burst or per push shows up
+# here as a count that keeps climbing.  (The exact "adding a destination adds
+# no sender" property is asserted in tests/unit/test_srt_output.c, where the
+# core runs against the reference backend: with libsrt the worker's thread
+# count is dominated by the threads the transport creates per socket, so an
+# absolute count here would test libsrt, not the pool.)
+MASTER="$(cat "$RUN/logs/nginx.pid")"
+WORKER="$(pgrep -P "$MASTER" | head -1)"
+THREADS_SETTLED="$(ls /proc/$WORKER/task | wc -l)"
+
+sleep 3
+
+THREADS_FLOWING="$(ls /proc/$WORKER/task | wc -l)"
+
+[ "$THREADS_FLOWING" = "$THREADS_SETTLED" ] \
+    || { echo "the sender pool grew while carrying media: $THREADS_SETTLED -> $THREADS_FLOWING threads" >&2
+         exit 1; }
+
+echo "   destination added at runtime, media reached the sink, worker threads steady ($THREADS_FLOWING)"
 
 echo "== removing it stops the push and leaves the program running"
 STATUS="$(curl -sS -o "$RUN/destdel.json" -w '%{http_code}' \
@@ -489,19 +535,108 @@ AFTER="$(curl -fsS "$API/desired" \
 echo "   replayed with no duplicates ($AFTER)"
 
 echo "== a reload loses the graph and the document restores it"
-kill -HUP "$(cat "$RUN/logs/nginx.pid")"
+# The graph is populated when the reload happens - a stream and its source,
+# asserted here - so "a reload loses the graph" is checked against real runtime
+# objects rather than an empty registry.
+curl -fsS "$API/streams/live/doc" | grep -q '"id":"doc-src"' \
+    || { echo "the doc graph is not populated before the reload" >&2; exit 1; }
 
-for _ in $(seq 1 100); do
-    grep -q 'srt listener ready' "$RUN/logs/error.log" 2>/dev/null && break
+MASTER="$(cat "$RUN/logs/nginx.pid")"
+WORKER_BEFORE="$(pgrep -P "$MASTER" | head -1)"
+READY_BEFORE="$(grep -c 'srt listener ready' "$RUN/logs/error.log" || true)"
+
+[ "$(pgrep -P "$MASTER" | wc -l)" = "1" ] \
+    || { echo "worker_processes 1 should mean one worker, found $(pgrep -P "$MASTER" | wc -l)" >&2; exit 1; }
+
+kill -HUP "$MASTER"
+
+# the new worker is up and ready, and the old one has drained and exited: the
+# reload's outcome is deterministic, so this is asserted, not merely waited for
+for _ in $(seq 1 300); do
+    WORKER_AFTER="$(pgrep -P "$MASTER" | head -1)"
+
+    [ -n "$WORKER_AFTER" ] && [ "$WORKER_AFTER" != "$WORKER_BEFORE" ] \
+        && [ "$(grep -c 'srt listener ready' "$RUN/logs/error.log" || true)" \
+             -gt "$READY_BEFORE" ] \
+        && break
+
     sleep 0.1
 done
 
 sleep 1
 
-AFTER_RELOAD="$(curl -fsS "$API/streams" | grep -c '"name":"doc"' || true)"
+WORKER_AFTER="$(pgrep -P "$MASTER" | head -1)"
 
-echo "   streams after reload: $AFTER_RELOAD (the graph is worker state)"
+[ "$(cat "$RUN/logs/nginx.pid")" = "$MASTER" ] \
+    || { echo "the master was replaced by the reload" >&2; exit 1; }
 
+[ "$WORKER_AFTER" != "$WORKER_BEFORE" ] \
+    || { echo "the reload did not replace the worker" >&2; exit 1; }
+
+[ "$(pgrep -P "$MASTER" | wc -l)" = "1" ] \
+    || { echo "the reload left $(pgrep -P "$MASTER" | wc -l) workers" >&2; exit 1; }
+
+[ "$(grep -c 'srt listener ready' "$RUN/logs/error.log" || true)" -gt "$READY_BEFORE" ] \
+    || { echo "the worker the reload started never became ready" >&2; exit 1; }
+
+# every runtime object was worker memory, so the graph went with the old worker
+curl -fsS "$API/streams" | grep -q '"streams":\[\]' \
+    || { echo "the graph survived the reload" >&2
+         curl -fsS "$API/streams" >&2; exit 1; }
+
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "$API/streams/live/doc")"
+
+[ "$STATUS" = "404" ] \
+    || { echo "the doc stream survived the reload ($STATUS)" >&2; exit 1; }
+
+echo "   worker $WORKER_BEFORE -> $WORKER_AFTER ready, graph empty, the doc objects went with it"
+
+# The log line above is a proxy.  The property is that the instance accepts a
+# publisher on the SRT port without an intervening restart - the bind race
+# this guards against left the worker the reload started with no listener at
+# all, so "the worker is up" was true while nothing could publish.  So: a real
+# publisher connects to the same port, to a stream created after the reload,
+# and its media has to reach the program.
+echo "== a publisher is accepted after the reload"
+PAFTER="$(publish encoder-after 10)"
+
+for _ in $(seq 1 200); do
+    grep -q 'srt source open app=live stream=news source=encoder-after' \
+        "$RUN/logs/error.log" 2>/dev/null && break
+    sleep 0.1
+done
+
+grep -q 'srt source open app=live stream=news source=encoder-after' \
+    "$RUN/logs/error.log" \
+    || { echo "nothing accepted a publisher on $SRT_PORT after the reload" >&2
+         tail -5 "$RUN/logs/error.log" >&2; exit 1; }
+
+for _ in $(seq 1 200); do
+    curl -fsS "$API/streams/live/news" 2>/dev/null \
+        | grep -qE '"program_frames":[1-9]' && break
+    sleep 0.1
+done
+
+curl -fsS "$API/streams/live/news" | grep -qE '"program_frames":[1-9]' \
+    || { echo "a publisher accepted after the reload carried no frames" >&2
+         curl -fsS "$API/streams/live/news" >&2; exit 1; }
+
+echo "   accepted on $SRT_PORT and on air"
+
+# the publisher created its stream implicitly, and the sections below expect
+# the empty graph the reload left, so it goes with the publisher
+kill -TERM "$PAFTER" 2>/dev/null
+wait "$PAFTER" 2>/dev/null
+
+sleep 1
+
+curl -fsS -X DELETE "$API/streams/live/news" >/dev/null
+
+curl -fsS "$API/streams" | grep -q '"streams":\[\]' \
+    || { echo "the post-reload publisher's stream was not cleaned up" >&2
+         curl -fsS "$API/streams" >&2; exit 1; }
+
+echo "== the document restores it exactly, with no duplicates and no orphans"
 STATUS="$(curl -sS -o "$RUN/reconcile.json" -w '%{http_code}' \
     -X PUT -H 'Content-Type: application/json' -d "$DESIRED" "$API/desired")"
 
@@ -515,13 +650,56 @@ curl -fsS "$API/streams" | grep -q '"name":"doc"' \
 curl -fsS "$API/streams/live/doc/sources" | grep -q '"id":"doc-src"' \
     || { echo "the document did not restore the source" >&2; exit 1; }
 
-COUNT="$(curl -fsS "$API/desired" \
-    | grep -o '"id":"doc-src"' | wc -l)"
+# exactly the document's objects: one stream, one source, and no destination
+# anywhere, because the document names none
+STREAMS="$(curl -fsS "$API/streams" | grep -o '"name":"[a-z-]*"' | wc -l)"
+
+[ "$STREAMS" = "1" ] \
+    || { echo "expected exactly one stream after the reconcile, found $STREAMS" >&2; exit 1; }
+
+COUNT="$(curl -fsS "$API/desired" | grep -o '"id":"doc-src"' | wc -l)"
 
 [ "$COUNT" = "1" ] \
     || { echo "reconcile duplicated the source: $COUNT" >&2; exit 1; }
 
-echo "   reconciled after reload without duplicates"
+DESTINATIONS="$(curl -fsS "$API/streams/live/doc/destinations" \
+    | grep -o '"count":[0-9]*' | cut -d: -f2)"
+
+[ "$DESTINATIONS" = "0" ] \
+    || { echo "the restore created a destination the document does not name" >&2; exit 1; }
+
+# a stream the document does not mention stays deleted, and so does its
+# destination: the reconcile restores the document, it does not recreate what
+# earlier sections deleted
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "$API/streams/live/news")"
+
+[ "$STATUS" = "404" ] \
+    || { echo "a stream absent from the document was resurrected ($STATUS)" >&2; exit 1; }
+
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "$API/streams/live/news/destinations/sink1")"
+
+[ "$STATUS" = "404" ] \
+    || { echo "a destination absent from the document was resurrected ($STATUS)" >&2; exit 1; }
+
+echo "   restored exactly: one stream, one source, no destination, nothing else"
+
+echo "== the worker the reload started carries media"
+PLIVE="$(publish encoder-live 12)"
+
+for _ in $(seq 1 250); do
+    curl -fsS "$API/streams/live/news" 2>/dev/null \
+        | grep -qE '"program_frames":[1-9]' && break
+    sleep 0.1
+done
+
+curl -fsS "$API/streams/live/news" | grep -qE '"program_frames":[1-9]' \
+    || { echo "no program ran after the reload" >&2
+         curl -fsS "$API/streams/live/news" >&2; exit 1; }
+
+kill -KILL "$PLIVE" 2>/dev/null
+wait "$PLIVE" 2>/dev/null
+
+echo "   media after the reload"
 
 echo "== create/delete cycles with media do not exhaust the runtime"
 # The per-stream runtime output is a fixed table, and a slot is taken for

@@ -61,6 +61,19 @@ typedef struct {
         const ngx_media_srt_params_t *params, ngx_log_t *log);
     void (*listen_close)(ngx_media_srt_listener_t *listener);
 
+    /*
+     * Stops accepting: closes the listening sockets and leaves every session
+     * already accepted running.  listen_close() is still what releases the
+     * listener itself.
+     *
+     * An SRT session keeps the listening socket's UDP socket alive, so with a
+     * publisher attached the port stays bound until the session ends; with no
+     * session left the port is free as soon as this returns.  A backend whose
+     * sessions share the listening socket cannot release it at all and says
+     * so in its own comment.
+     */
+    void (*listen_stop)(ngx_media_srt_listener_t *listener);
+
     /* accepted session, or NULL on timeout or error */
     ngx_media_srt_session_t *(*accept)(ngx_media_srt_listener_t *listener,
         ngx_msec_t timeout_ms, ngx_log_t *log);
@@ -112,6 +125,8 @@ typedef struct {
     void (*poll_destroy)(ngx_media_srt_poll_t *poll);
     ngx_int_t (*poll_add_listener)(ngx_media_srt_poll_t *poll,
         ngx_media_srt_listener_t *listener);
+    void (*poll_remove_listener)(ngx_media_srt_poll_t *poll,
+        ngx_media_srt_listener_t *listener);
     ngx_int_t (*poll_add_session)(ngx_media_srt_poll_t *poll,
         ngx_media_srt_session_t *session);
     void (*poll_remove_session)(ngx_media_srt_poll_t *poll,
@@ -135,6 +150,17 @@ typedef struct {
 
     /* releases backend-global state once no listener remains */
     void (*shutdown)(void);
+
+    /*
+     * Group (bonded) acceptance (goal doc 11.4).  Creates a listener that
+     * also accepts group callers: the second local address is bound too and
+     * group acceptance is enabled on both, so the legs of one bonded caller
+     * arrive as one socket and the core and the selector see one source and
+     * never a bond member.  NULL for a backend that cannot bond.
+     */
+    ngx_media_srt_listener_t *(*listen_bond)(const u_char *host,
+        ngx_uint_t port, const u_char *bond_host,
+        const ngx_media_srt_params_t *params, ngx_log_t *log);
 } ngx_media_srt_ops_t;
 
 extern ngx_media_srt_ops_t ngx_media_srt_haivision_ops;
@@ -147,7 +173,27 @@ void ngx_media_srt_set_backend(ngx_media_srt_ops_t *ops);
 
 ngx_media_srt_listener_t *ngx_media_srt_listen(const u_char *host,
     ngx_uint_t port, const ngx_media_srt_params_t *params, ngx_log_t *log);
+
+/*
+ * The listener that also accepts group (bonded) callers: the same listen
+ * address plus a second local address, with group acceptance enabled on
+ * both.  Both legs of one bonded caller are accepted as a single session, so
+ * nothing above this layer ever learns that a source has members.
+ */
+ngx_media_srt_listener_t *ngx_media_srt_listen_bond(const u_char *host,
+    ngx_uint_t port, const u_char *bond_host,
+    const ngx_media_srt_params_t *params, ngx_log_t *log);
+
 void ngx_media_srt_listen_close(ngx_media_srt_listener_t *listener);
+
+/*
+ * Stops accepting without touching the sessions already accepted.  The worker
+ * that is shutting down calls this the moment the graceful shutdown starts,
+ * so it stops taking publishers it is about to drop and, when it has no
+ * session left, hands the port straight over; a binding publisher keeps the
+ * port until it ends, which the replacement worker waits out by retrying.
+ */
+void ngx_media_srt_listen_stop(ngx_media_srt_listener_t *listener);
 
 ngx_media_srt_session_t *ngx_media_srt_accept(ngx_media_srt_listener_t *listener,
     ngx_msec_t timeout_ms, ngx_log_t *log);
@@ -172,6 +218,8 @@ void ngx_media_srt_session_close(ngx_media_srt_session_t *session);
 ngx_media_srt_poll_t *ngx_media_srt_poll_create(ngx_log_t *log);
 void ngx_media_srt_poll_destroy(ngx_media_srt_poll_t *poll);
 ngx_int_t ngx_media_srt_poll_add_listener(ngx_media_srt_poll_t *poll,
+    ngx_media_srt_listener_t *listener);
+void ngx_media_srt_poll_remove_listener(ngx_media_srt_poll_t *poll,
     ngx_media_srt_listener_t *listener);
 ngx_int_t ngx_media_srt_poll_add_session(ngx_media_srt_poll_t *poll,
     ngx_media_srt_session_t *session);
