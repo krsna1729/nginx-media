@@ -18,6 +18,34 @@ static void __attribute__((constructor)) ngx_media_hls_poison_alloc(void)
 
 #define HLS_DIR ".build/hls-test"
 
+/*
+ * The segmenter writes into HLS_DIR, and the test then reads back what it
+ * wrote.  The path is relative, so this has to create it: the suite is run
+ * from tests/unit by `make -C tests/unit`, where .build/ does not exist, and
+ * without this the test depends on being run from a directory that happens to
+ * have one.  That difference is what made it pass locally and crash on CI.
+ */
+static void
+ensure_dir(const char *path)
+{
+    char  tmp[512];
+    char *p;
+
+    if (snprintf(tmp, sizeof(tmp), "%s", path) >= (int) sizeof(tmp)) {
+        return;
+    }
+
+    for (p = tmp + 1; *p != '\0'; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            (void) mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+
+    (void) mkdir(tmp, 0755);
+}
+
 typedef struct {
     uint64_t  frames;
     uint64_t  keyframes;
@@ -217,6 +245,9 @@ main(void)
     char                   path[256];
     uint64_t               segments;
 
+    ensure_dir(HLS_DIR);
+    ensure_dir(HLS_DIR "-small");
+
     fixture_init(&f);
 
     TEST_CASE("configuration and init");
@@ -274,7 +305,13 @@ main(void)
         fp = fopen(path, "r");
         TEST_ASSERT_NOT_NULL(fp);
 
-        while (fgets(line, sizeof(line), fp) != NULL) {
+        /*
+         * TEST_ASSERT_NOT_NULL records a failure and continues, so without
+         * this guard a missing playlist becomes a NULL dereference inside
+         * fgets - the process dies and reports nothing, instead of failing
+         * the check above and saying why.
+         */
+        while (fp != NULL && fgets(line, sizeof(line), fp) != NULL) {
             if (strncmp(line, "#EXTINF:", 8) == 0) {
                 extinf++;
             }
@@ -293,7 +330,9 @@ main(void)
             }
         }
 
-        fclose(fp);
+        if (fp != NULL) {
+            (void) fclose(fp);
+        }
 
         TEST_ASSERT_EQ_U64(extinf, 3);
         TEST_ASSERT_EQ_U64(discontinuities, 0);
@@ -351,7 +390,13 @@ main(void)
         fp = fopen(path, "r");
         TEST_ASSERT_NOT_NULL(fp);
 
-        while (fgets(line, sizeof(line), fp) != NULL) {
+        /*
+         * TEST_ASSERT_NOT_NULL records a failure and continues, so without
+         * this guard a missing playlist becomes a NULL dereference inside
+         * fgets - the process dies and reports nothing, instead of failing
+         * the check above and saying why.
+         */
+        while (fp != NULL && fgets(line, sizeof(line), fp) != NULL) {
             if (strcmp(line, tag) == 0) {
                 discontinuities++;
             }

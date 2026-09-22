@@ -4,7 +4,16 @@
 # is the point of the runtime graph - the container starts empty and an
 # operator or a controller builds the program it wants.
 
-worker_processes auto;
+# The master runs as root (it binds the sockets and then setuids); the workers
+# drop to www-data.  This is stated rather than left to nginx's compiled
+# default of `nobody`, because the image chowns its writable directories to
+# www-data and the two have to agree.
+user www-data;
+
+# Worker count comes from NGINX_WORKER_PROCESSES, which the entrypoint
+# substitutes; it defaults to 1.  Read the entrypoint before raising it: the
+# media graph is per-worker state and the control API is not worker-aware.
+worker_processes ${NGINX_WORKER_PROCESSES};
 error_log /var/log/nginx/error.log info;
 pid /run/nginx.pid;
 

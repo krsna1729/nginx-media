@@ -1,13 +1,54 @@
 # nginx-media container image.
 #
-# Two stages, because a media server has no business shipping a compiler.  The
-# build stage fetches the pinned nginx source, builds it with the module
-# against the distribution's libsrt, and the runtime stage keeps only what the
-# result needs to run.
+# An NGINX media subsystem: redundant sources selected into one logical
+# program and carried to consumers.  The image starts with no streams
+# declared, because the media graph is runtime state rather than
+# configuration - you build the program you want through the control API.
 #
-# The image is usable as it stands: it starts an SRT listener, an RTMP
-# listener, a control API and a local HLS output, so `docker run -p ...` gives
-# something to publish to without writing a config first.
+# Run it:
+#
+#   docker run -d --name media \
+#     -p 8080:8080 \
+#     -p 1935:1935 \
+#     -p 9000:9000/udp \
+#     -v media:/var/lib/nginx/media \
+#     -v logs:/var/log/nginx \
+#     ghcr.io/krsna1729/nginx-media:latest
+#
+# Then create a program and give it something to carry:
+#
+#   curl -X POST -H 'Content-Type: application/json' \
+#     -d '{"application":"live","name":"demo"}' \
+#     http://127.0.0.1:8080/media/api/v1/streams
+#
+#   curl -X POST -H 'Content-Type: application/json' \
+#     -d '{"id":"file1","type":"file","path":"/media/source.ts"}' \
+#     http://127.0.0.1:8080/media/api/v1/streams/live/demo/sources
+#
+# HLS comes out at http://127.0.0.1:8080/hls/index.m3u8.  Or publish live:
+#
+#   srt://host:9000?streamid=#!::r=live/demo,m=publish
+#   rtmp://host:1935/live/demo
+#
+# The configuration can be replaced without rebuilding.  The entrypoint
+# renders /etc/nginx/nginx.conf.template, so that template is what you mount
+# over - mount the output and the entrypoint would overwrite it:
+#
+#   -v ./nginx.conf:/etc/nginx/nginx.conf.template:ro
+#
+# One setting comes from the environment:
+#
+#   -e NGINX_WORKER_PROCESSES=4
+#
+# It defaults to 1, and raising it is not free - the control API is not
+# worker-aware.  The entrypoint says so and warns when it is raised.
+#
+# Two stages, and the split is the point.  The build stage has the toolchain,
+# the pinned nginx source and the module.  The runtime stage has the runtime
+# libraries and the installed prefix and nothing else: no compiler, no source
+# tree, no headers.  ffmpeg is deliberately absent from both - the media core
+# does not decode, and an image that carries a decoder invites a deployment
+# that uses one.
 
 FROM ubuntu:24.04 AS build
 
@@ -27,41 +68,101 @@ COPY scripts/build-nginx.sh /src/scripts/build-nginx.sh
 COPY config /src/config
 COPY src /src/src
 
+# A real installed layout rather than a path inside the build tree, because
+# nginx compiles its prefix into the binary and resolves its temp paths and
+# its default error log against it at run time.
 ENV BUILD_DIR=/src/.build
 ENV NGINX_PREFIX=/usr/local/nginx
 RUN bash /src/scripts/build-nginx.sh
 
+
 FROM ubuntu:24.04 AS runtime
+
+# Provenance, in the OCI standard labels rather than in a tag per build.  A
+# tag per commit is a tag explosion that gets worse the longer the project
+# runs, and these are readable from `docker inspect`, from `docker images`,
+# and from every registry UI - and they travel with the image when it is
+# copied or mirrored, which a tag does not.
+#
+# The workflow fills all four in; the defaults are for a plain local build.
+ARG IMAGE_VERSION=dev
+ARG IMAGE_REVISION=unknown
+ARG IMAGE_CREATED=unknown
+ARG IMAGE_SOURCE=https://github.com/krsna1729/nginx-media
+
+LABEL org.opencontainers.image.title="nginx-media" \
+      org.opencontainers.image.description="An NGINX media subsystem: redundant sources selected into one logical program and carried to consumers" \
+      org.opencontainers.image.source="${IMAGE_SOURCE}" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${IMAGE_REVISION}" \
+      org.opencontainers.image.created="${IMAGE_CREATED}"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# The runtime libraries only.  libsrt is what the SRT transport links against,
-# and ffmpeg is deliberately absent: the media core does not decode, and an
-# image that carries a decoder invites a deployment that uses one.
+# Runtime libraries only, and three of them are load-bearing:
+#
+#   libsrt          the SRT transport links against it
+#   ca-certificates an HLS destination pulls and pushes over HTTPS, and with
+#                   no trust store every TLS fetch fails to verify - the
+#                   youtube_live profile requires https, so an image without
+#                   this could not do the thing the profile exists for
+#   curl            the healthcheck below, which asks the control API rather
+#                   than asking nginx whether its own config parses
+#   gettext-base    envsubst, which the entrypoint uses to render the template
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        libpcre2-8-0 zlib1g libssl3t64 libsrt1.5-openssl \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/log/nginx /var/lib/nginx/media/hls \
-                /var/lib/nginx/media/record /var/lib/nginx/media/ingest
+        libpcre2-8-0 zlib1g libssl3t64 libsrt1.5-openssl ca-certificates \
+        curl gettext-base \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /usr/local/nginx /usr/local/nginx
-RUN ln -s /usr/local/nginx/sbin/nginx /usr/local/sbin/nginx \
-    && mkdir -p /usr/local/nginx/logs
-COPY container/nginx.conf /etc/nginx/nginx.conf
+RUN ln -s /usr/local/nginx/sbin/nginx /usr/local/sbin/nginx
 
-EXPOSE 1935 8080 9000/udp
+COPY container/nginx.conf.template /etc/nginx/nginx.conf.template
+COPY container/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# Rendered once here as well, so the image is inspectable with `docker run
+# ... cat /etc/nginx/nginx.conf` and so the config is valid without starting
+# it.  The entrypoint re-renders on every start.
+RUN NGINX_WORKER_PROCESSES=1 \
+        envsubst '${NGINX_WORKER_PROCESSES}' \
+        < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+
+# The master starts as root so it can bind and setuid; the workers run as
+# www-data, so everything they write has to belong to it.  Without this the
+# image builds, starts, serves the API and then fails the moment a program
+# carries media, because the HLS directory is root-owned and the worker
+# cannot write a segment into it.
+RUN mkdir -p /var/lib/nginx/media/hls \
+             /var/lib/nginx/media/record \
+             /var/lib/nginx/media/ingest \
+             /var/log/nginx \
+    && chown -R www-data:www-data /var/lib/nginx /var/log/nginx
+
+# SRT ingest: publishers connect here.
+EXPOSE 9000/udp
+# RTMP ingest.
+EXPOSE 1935
+# The control API, and the local HLS output.
+EXPOSE 8080
+
+# The media directory is the state worth keeping: HLS output, recordings and
+# the ingest drop box.  Mount it or the output dies with the container.
+VOLUME ["/var/lib/nginx/media"]
+# Logs, so they survive a restart and can be shipped somewhere else.
+VOLUME ["/var/log/nginx"]
 
 STOPSIGNAL SIGQUIT
 
-# A media server that cannot write its HLS directory is not a media server.
-VOLUME ["/var/lib/nginx/media"]
-
+# Asks the control API, which only answers when the worker is up and serving.
+# `nginx -t` would pass with no worker running at all, which is not health.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
-    CMD /usr/local/sbin/nginx -t -c /etc/nginx/nginx.conf || exit 1
+    CMD curl -fsS http://127.0.0.1:8080/media/api/v1/streams >/dev/null \
+        || exit 1
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # -e because the error log path is compiled into the binary and points at the
-# build tree; nginx opens it before it reads any configuration, so without
-# this the very first thing it does is print an alert.
-CMD ["/usr/local/sbin/nginx", "-e", "/var/log/nginx/error.log", \
+# build tree; nginx opens it before it reads any configuration.
+CMD ["nginx", "-e", "/var/log/nginx/error.log", \
      "-g", "daemon off;", "-c", "/etc/nginx/nginx.conf"]

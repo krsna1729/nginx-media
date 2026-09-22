@@ -2,15 +2,18 @@ name: container
 
 # Publishes the image to GHCR.
 #
-#   push to main     -> latest, sha-<short>
-#   push of a v* tag -> <version> only
+#   push to main     -> latest
+#   push of a v* tag -> <version>
 #   pull request     -> build and smoke, no push
 #
-# `latest` tracks main HEAD and nothing else.  A release tag publishes its
-# version and deliberately does not move `latest`: pulling `latest` gets you
-# the newest build of main, pulling a version gets you that release, and
-# neither can surprise you by becoming the other.  Pin `sha-<short>` when you
-# need a build that does not move at all.
+# Two kinds of tag and no others.  `latest` tracks main HEAD and is the only
+# moving tag; a release publishes its version and deliberately does not touch
+# `latest`, so pulling one can never get you the other.
+#
+# There are no per-commit tags on purpose.  One tag per build is a tag
+# explosion that makes the registry harder to read the longer it runs, and
+# `latest` plus the version tags are what a deployment actually pulls.  Pin a
+# version when you need a build that does not move.
 #
 # Authentication is GITHUB_TOKEN, which the workflow already has; nothing here
 # needs a stored credential.
@@ -48,7 +51,36 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build the image
-        run: docker build -f Containerfile -t nginx-media:ci .
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+
+          docker build -f Containerfile -t nginx-media:ci \
+            --build-arg "IMAGE_VERSION=$VERSION" \
+            --build-arg "IMAGE_REVISION=$GITHUB_SHA" \
+            --build-arg "IMAGE_CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --build-arg "IMAGE_SOURCE=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            .
+
+      - name: The image carries its provenance
+        run: |
+          # A published image with no revision label is an image nobody can
+          # trace back, which is the whole reason the labels exist. Fail
+          # rather than publish one.
+          docker inspect nginx-media:ci --format \
+            '{{ range $k, $v := .Config.Labels }}{{ $k }}={{ $v }}{{ "\n" }}{{ end }}'
+
+          for label in revision version created source; do
+            value="$(docker inspect nginx-media:ci --format \
+              "{{ index .Config.Labels \"org.opencontainers.image.$label\" }}")"
+
+            [ -n "$value" ] && [ "$value" != "unknown" ] \
+              || { echo "org.opencontainers.image.$label is missing" >&2
+                   exit 1; }
+          done
 
       - name: The image serves a request
         run: |
@@ -79,19 +111,14 @@ jobs:
           IMAGE="ghcr.io/${{ github.repository }}"
 
           if [ "${{ github.ref_type }}" = "tag" ]; then
-            # A release: its version, and nothing else.  latest is not
+            # A release publishes its version and nothing else.  latest is not
             # touched here on purpose - it belongs to main.
-            TAGS="${GITHUB_REF_NAME#v}"
+            TAG="${GITHUB_REF_NAME#v}"
           else
-            TAGS="latest sha-$(git rev-parse --short HEAD)"
+            TAG="latest"
           fi
 
-          echo "publishing $GITHUB_SHA as: $TAGS"
+          echo "publishing $GITHUB_SHA as $IMAGE:$TAG"
 
-          for t in $TAGS; do
-            docker tag nginx-media:ci "$IMAGE:$t"
-          done
-
-          for t in $TAGS; do
-            docker push "$IMAGE:$t"
-          done
+          docker tag nginx-media:ci "$IMAGE:$TAG"
+          docker push "$IMAGE:$TAG"
