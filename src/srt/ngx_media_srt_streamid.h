@@ -26,7 +26,18 @@
 #define NGX_MEDIA_SRT_MODE_REQUEST      2
 
 typedef struct {
-    ngx_str_t   raw;          /* whole stream id, without a copy */
+    /*
+     * Every field below points into this, never into the caller's buffer.
+     * The parsed result outlives the call that produced it - it is stored on
+     * the source and read later by the control API - so owning the bytes is
+     * the only way the pointers can be trusted.  They used to point at the
+     * caller's memory, which happened to be long-lived; the moment the parse
+     * needed to decode a percent-encoded stream id into a local buffer, the
+     * fields became dangling pointers and the application and stream names
+     * came out as garbage.
+     */
+    u_char      storage[NGX_MEDIA_SRT_STREAMID_MAX];
+    ngx_str_t   raw;          /* whole stream id, decoded */
     ngx_str_t   resource;     /* r= */
     ngx_str_t   mode;         /* m= */
     ngx_str_t   source;       /* s= */
