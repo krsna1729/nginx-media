@@ -30,6 +30,15 @@ on:
       - 'src/**'
       - 'config'
       - 'scripts/build-nginx.sh'
+  workflow_dispatch:
+    inputs:
+      prune:
+        description: >-
+          Space-separated tags to delete from the package. Refuses any version
+          that also carries latest or a version tag, so a release cannot be
+          removed by accident.
+        required: true
+        type: string
 
 # Pull request builds cancel each other; publishes queue.  Cancelling a run
 # mid-push leaves a half-written tag, which is worse than waiting a minute for
@@ -40,6 +49,7 @@ concurrency:
 
 jobs:
   image:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -132,3 +142,62 @@ jobs:
 
           docker tag nginx-media:ci "$IMAGE:$TAG"
           docker push "$IMAGE:$TAG"
+
+  # Removes tags the policy no longer uses, which is how the strays left by an
+  # earlier iteration get cleaned up.  It deletes the version a tag points at,
+  # because GHCR's API deletes versions rather than tags - so it refuses any
+  # version that carries something else worth keeping.
+  prune:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Delete the named tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          PRUNE: ${{ inputs.prune }}
+        run: |
+          set -eu
+
+          VERSIONS="/users/$OWNER/packages/container/nginx-media/versions"
+
+          for tag in $PRUNE; do
+            gh api "$VERSIONS" --paginate \
+              --jq '.[] | "\(.id) \(.metadata.container.tags | join(" "))"' \
+              > /tmp/versions.txt
+
+            id="$(awk -v t="$tag" \
+              '{ for (i = 2; i <= NF; i++) if ($i == t) { print $1; exit } }' \
+              /tmp/versions.txt)"
+
+            if [ -z "$id" ]; then
+              echo "$tag: not present, nothing to do"
+              continue
+            fi
+
+            # Refuse if this version carries anything the policy keeps.
+            for other in $(awk -v i="$id" \
+                '$1 == i { for (j = 2; j <= NF; j++) print $j }' \
+                /tmp/versions.txt)
+            do
+              case "$other" in
+                latest|[0-9]*)
+                  echo "refusing to delete $tag: version $id also carries" \
+                       "$other" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+
+            echo "deleting $tag (version $id, also carries:" \
+                 "$(awk -v i="$id" \
+                     '$1 == i { for (j = 2; j <= NF; j++) printf "%s ", $j }' \
+                     /tmp/versions.txt))"
+            gh api -X DELETE "$VERSIONS/$id"
+          done
