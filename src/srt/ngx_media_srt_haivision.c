@@ -11,8 +11,12 @@
 #include <stdio.h>
 
 #include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <srt/srt.h>
 
 /*
@@ -122,6 +126,9 @@ static ngx_media_srt_listener_t *ngx_media_srt_haivision_listen_bond(
     const ngx_media_srt_params_t *params, ngx_log_t *log);
 static ngx_media_srt_listener_t *ngx_media_srt_haivision_listener_alloc(
     const SRTSOCKET *socks, ngx_uint_t nsocks, ngx_log_t *log);
+static ngx_media_srt_listener_t *ngx_media_srt_haivision_listen_shared(
+    const u_char *host, ngx_uint_t port,
+    const ngx_media_srt_params_t *params, ngx_log_t *log);
 static SRTSOCKET ngx_media_srt_haivision_bind(const u_char *host,
     ngx_uint_t port, ngx_uint_t group,
     const ngx_media_srt_params_t *params);
@@ -197,7 +204,8 @@ ngx_media_srt_ops_t ngx_media_srt_haivision_ops = {
     ngx_media_srt_haivision_library_version,
     ngx_media_srt_haivision_last_error,
     ngx_media_srt_haivision_shutdown,
-    ngx_media_srt_haivision_listen_bond
+    ngx_media_srt_haivision_listen_bond,
+    ngx_media_srt_haivision_listen_shared
 };
 
 /*
@@ -285,22 +293,41 @@ ngx_media_srt_haivision_apply_crypto(SRTSOCKET sock,
 }
 
 /*
- * Creates one socket, bound and listening on one local address.  `group`
- * enables group acceptance on it, which the library only allows before the
- * socket starts listening, so it is set here and not by the caller.
+ * The local address a listener binds, as the library's own srt_bind() wants
+ * it.  Both bind paths need it, and the address of the shared one is also the
+ * address the application-owned socket is bound to, so it is built once here.
  */
-static SRTSOCKET
-ngx_media_srt_haivision_bind(const u_char *host, ngx_uint_t port,
-    ngx_uint_t group, const ngx_media_srt_params_t *params)
+static ngx_int_t
+ngx_media_srt_haivision_addr(const u_char *host, ngx_uint_t port,
+    struct sockaddr_in *addr)
 {
-    struct sockaddr_in  addr;
-    SRTSOCKET           sock;
-    int                 transtype, yes, timeout, allow;
-
     if (host == NULL || host[0] == '\0' || port == 0 || port > 65535) {
         ngx_media_srt_note_error("invalid listen address");
-        return SRT_INVALID_SOCK;
+        return NGX_ERROR;
     }
+
+    ngx_memzero(addr, sizeof(*addr));
+    addr->sin_family = AF_INET;
+    addr->sin_port = htons((uint16_t) port);
+
+    if (inet_pton(AF_INET, (const char *) host, &addr->sin_addr) != 1) {
+        ngx_media_srt_note_error("unparsable listen address");
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+/*
+ * The library starts once per process, and this is the only place a socket is
+ * created, so the startup belongs to this pair rather than to each caller.
+ * A failure is reported here, once, the way the callers used to report it
+ * themselves.
+ */
+static SRTSOCKET
+ngx_media_srt_haivision_socket(void)
+{
+    SRTSOCKET  sock;
 
     if (!ngx_media_srt_started) {
         if (srt_startup() == SRT_ERROR) {
@@ -312,10 +339,24 @@ ngx_media_srt_haivision_bind(const u_char *host, ngx_uint_t port,
     }
 
     sock = srt_create_socket();
+
     if (sock == SRT_INVALID_SOCK) {
         ngx_media_srt_note_error(srt_getlasterror_str());
-        return SRT_INVALID_SOCK;
     }
+
+    return sock;
+}
+
+/*
+ * The listen options, applied to a socket that is not bound yet.  `group`
+ * enables group acceptance, which the library only allows before the socket
+ * starts listening, so it is set here and not by the caller.
+ */
+static ngx_int_t
+ngx_media_srt_haivision_configure(SRTSOCKET sock, ngx_uint_t group,
+    const ngx_media_srt_params_t *params)
+{
+    int  transtype, yes, timeout, allow;
 
     transtype = SRTT_LIVE;
     yes = 1;
@@ -333,8 +374,7 @@ ngx_media_srt_haivision_bind(const u_char *host, ngx_uint_t port,
             ngx_media_srt_note_error(srt_getlasterror_str());
         }
 
-        (void) srt_close(sock);
-        return SRT_INVALID_SOCK;
+        return NGX_ERROR;
     }
 
     if (group) {
@@ -354,17 +394,35 @@ ngx_media_srt_haivision_bind(const u_char *host, ngx_uint_t port,
                                      "bonding (SRTO_GROUPCONNECT rejected), "
                                      "so it cannot accept group callers");
 
-            (void) srt_close(sock);
-            return SRT_INVALID_SOCK;
+            return NGX_ERROR;
         }
     }
 
-    ngx_memzero(&addr, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t) port);
+    return NGX_OK;
+}
 
-    if (inet_pton(AF_INET, (const char *) host, &addr.sin_addr) != 1) {
-        ngx_media_srt_note_error("unparsable listen address");
+/*
+ * Creates one socket, bound and listening on one local address.
+ */
+static SRTSOCKET
+ngx_media_srt_haivision_bind(const u_char *host, ngx_uint_t port,
+    ngx_uint_t group, const ngx_media_srt_params_t *params)
+{
+    struct sockaddr_in  addr;
+    SRTSOCKET           sock;
+
+    if (ngx_media_srt_haivision_addr(host, port, &addr) != NGX_OK) {
+        return SRT_INVALID_SOCK;
+    }
+
+    sock = ngx_media_srt_haivision_socket();
+
+    if (sock == SRT_INVALID_SOCK) {
+        ngx_media_srt_note_error(srt_getlasterror_str());
+        return SRT_INVALID_SOCK;
+    }
+
+    if (ngx_media_srt_haivision_configure(sock, group, params) != NGX_OK) {
         (void) srt_close(sock);
         return SRT_INVALID_SOCK;
     }
@@ -378,6 +436,144 @@ ngx_media_srt_haivision_bind(const u_char *host, ngx_uint_t port,
     }
 
     return sock;
+}
+
+/*
+ * The shared listener: one endpoint that every worker binds.
+ *
+ * libsrt's SRTSOCKET is a handle rather than a descriptor - getsockopt() and
+ * fcntl() on it fail with EBADF - and its option list has no SO_REUSEPORT
+ * passthrough, so the only moment at which the socket the library will
+ * receive on can be given SO_REUSEPORT is before that socket exists.  So it is
+ * created here, bound here, and handed over with srt_bind_acquire(), the
+ * public API for exactly that: the library then attaches it to the listener
+ * instead of creating one of its own (CChannel::attach(), which never calls
+ * ::bind()).  Every worker of the instance does the same on the same address,
+ * the kernel spreads incoming flows across those sockets by 4-tuple, and each
+ * session stays on the one it landed on for its whole life.
+ *
+ * The descriptor is the library's from the moment srt_bind_acquire() returns:
+ * srt_close() on the socket releases it, and closing it here as well would
+ * release whatever the process opened under that number next.  See
+ * docs/operations.md for what sharing a port costs when the set of processes
+ * bound to it changes.
+ */
+static SRTSOCKET
+ngx_media_srt_haivision_bind_shared(const u_char *host, ngx_uint_t port,
+    const ngx_media_srt_params_t *params)
+{
+#if !defined(SO_REUSEPORT)
+
+    /*
+     * A platform without SO_REUSEPORT cannot share one port between
+     * processes at all, so the mode is refused rather than approximated by
+     * binding one endpoint per worker, which is a different directive.  The
+     * interface is kept whole so the caller needs no #if of its own; the
+     * parameters are unused because there is nothing to bind.
+     */
+    (void) host;
+    (void) port;
+    (void) params;
+
+    ngx_media_srt_note_error("this platform has no SO_REUSEPORT, which the "
+                             "shared listener is built on; give each worker "
+                             "its own media_srt_listen endpoint instead");
+
+    return SRT_INVALID_SOCK;
+
+#else
+
+    struct sockaddr_in  addr;
+    SRTSOCKET           sock;
+    char                detail[192];
+    int                 fd, yes;
+
+    if (ngx_media_srt_haivision_addr(host, port, &addr) != NGX_OK) {
+        return SRT_INVALID_SOCK;
+    }
+
+    sock = ngx_media_srt_haivision_socket();
+
+    if (sock == SRT_INVALID_SOCK) {
+        ngx_media_srt_note_error(srt_getlasterror_str());
+        return SRT_INVALID_SOCK;
+    }
+
+    /* the shared mode never accepts group callers: the two do not combine */
+    if (ngx_media_srt_haivision_configure(sock, 0, params) != NGX_OK) {
+        (void) srt_close(sock);
+        return SRT_INVALID_SOCK;
+    }
+
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+
+    if (fd < 0) {
+        (void) snprintf(detail, sizeof(detail),
+                        "could not create the UDP socket a shared listener "
+                        "needs: %s", strerror(errno));
+        ngx_media_srt_note_error(detail);
+        (void) srt_close(sock);
+        return SRT_INVALID_SOCK;
+    }
+
+    yes = 1;
+
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &yes, sizeof(yes)) < 0) {
+        (void) snprintf(detail, sizeof(detail),
+                        "SO_REUSEPORT was refused on the shared listener "
+                        "socket: %s; this process cannot share the port with "
+                        "the other workers", strerror(errno));
+        ngx_media_srt_note_error(detail);
+        (void) close(fd);
+        (void) srt_close(sock);
+        return SRT_INVALID_SOCK;
+    }
+
+    /*
+     * Bound here rather than by the library, because the library would bind
+     * its own socket.  The one way this still fails with an address in use is
+     * a process holding the port without SO_REUSEPORT - the generation a
+     * reload is replacing when the directive changes, or a foreign process -
+     * and that is what the ingest thread retries.
+     */
+    if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+        (void) snprintf(detail, sizeof(detail),
+                        "the shared listener could not bind %s:%lu: %s (the "
+                        "port is held by something without SO_REUSEPORT)",
+                        (const char *) host, (unsigned long) port,
+                        strerror(errno));
+        ngx_media_srt_note_error(detail);
+        (void) close(fd);
+        (void) srt_close(sock);
+        return SRT_INVALID_SOCK;
+    }
+
+    if (srt_bind_acquire(sock, fd) == SRT_ERROR) {
+        ngx_media_srt_note_error(srt_getlasterror_str());
+
+        /*
+         * Whether the library took the descriptor is not something its
+         * return value says: it attaches the socket part way through and
+         * closes it again if it fails after that, so it is closed here only
+         * while it is still open, which is what "not taken" looks like.
+         */
+        if (fcntl(fd, F_GETFD) != -1) {
+            (void) close(fd);
+        }
+
+        (void) srt_close(sock);
+        return SRT_INVALID_SOCK;
+    }
+
+    if (srt_listen(sock, 8) == SRT_ERROR) {
+        ngx_media_srt_note_error(srt_getlasterror_str());
+        (void) srt_close(sock);
+        return SRT_INVALID_SOCK;
+    }
+
+    return sock;
+
+#endif /* SO_REUSEPORT */
 }
 
 static ngx_media_srt_listener_t *
@@ -458,6 +654,26 @@ ngx_media_srt_haivision_listen_bond(const u_char *host, ngx_uint_t port,
     }
 
     return ngx_media_srt_haivision_listener_alloc(socks, 2, log);
+}
+
+/*
+ * The shared listener, as the transport adapter names it: the socket creation
+ * above, plus the listener object every other listen path builds.  The
+ * endpoint is one address for the whole instance, so this is what a worker
+ * binds when the configuration asks for one shared port.
+ */
+static ngx_media_srt_listener_t *
+ngx_media_srt_haivision_listen_shared(const u_char *host, ngx_uint_t port,
+    const ngx_media_srt_params_t *params, ngx_log_t *log)
+{
+    SRTSOCKET  sock;
+
+    sock = ngx_media_srt_haivision_bind_shared(host, port, params);
+    if (sock == SRT_INVALID_SOCK) {
+        return NULL;
+    }
+
+    return ngx_media_srt_haivision_listener_alloc(&sock, 1, log);
 }
 
 /*

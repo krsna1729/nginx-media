@@ -90,11 +90,13 @@ media_srt_listen 127.0.0.1:9003;   # worker 3
 
 Order is the worker order: entry i is what worker i binds, so the list is
 written in worker order.  libsrt exposes no `SO_REUSEPORT` of its own, so one
-endpoint per worker is what replaces it — with a single shared endpoint the
-worker that bound it receives every publisher, which makes worker 0 the whole
-ingest path and routing the rule rather than the exception.  A publisher is
-still routed over the internal transport to the worker that owns its program
-(goal doc 22) whenever that is a different worker; that path is unchanged.
+endpoint per worker is what replaces it — with a single entry the worker that
+bound it receives every publisher, which makes worker 0 the whole ingest path
+and routing the rule rather than the exception.  A publisher is still routed
+over the internal transport to the worker that owns its program (goal doc 22)
+whenever that is a different worker; that path is unchanged.
+`media_srt_listen_shared`, below, is the other way: one endpoint for every
+worker, at the cost of the constraint described there.
 
 * **One entry** is the single-listener shape: worker 0 binds it, and every
   other worker owns programs without accepting publishers.
@@ -118,6 +120,80 @@ listener per worker obeys the same address rules as a single one.
 A publisher's identity comes from its stream id
 (`#!::r=<app>/<stream>,m=publish,s=<identity>`), never from a trusted field:
 `s=` is only a label.
+
+### `media_srt_listen_shared <host:port>;`
+
+The other way to give ingest a port: **one endpoint that every worker binds**,
+instead of one endpoint per worker.
+
+```nginx
+worker_processes 4;
+
+media_srt_listen_shared 127.0.0.1:9000;
+```
+
+Each worker creates its own UDP socket, sets `SO_REUSEPORT` on it, binds it to
+that address and hands it to libsrt with `srt_bind_acquire()`.  The kernel then
+spreads incoming publishers across those sockets by 4-tuple — source address
+and port, destination address and port — and each publisher's session stays on
+the worker it landed on for its whole life: a session is never split across
+workers.  The publisher is routed to its program's owner from there, exactly as
+in the per-worker mode, so the owner of a program is still `hash % workers` and
+still reported by the graph as `owner`; what changes is that the encoder does
+not have to be pointed at a particular entry.
+
+It is a directive of its own rather than an option on `media_srt_listen`,
+because the mode belongs to the whole listener set: `media_srt_listen` means
+"worker i binds entry i", and a flag on one entry could not say what that entry
+means beside a shared port.  So the two are refused together, and so is
+`media_srt_listen_bond`: the legs of a bonded caller have different source
+addresses by construction, which is the point of bonding, and a shared port
+hashes each leg on exactly that, so the legs scatter across workers.  libsrt
+builds the receiving side of a bond in process state (`CUDT::uglobal()`'s
+group registry), so workers that each hold one leg cannot join them into one
+bond and would serve the caller's bond as several independent publishers.  That
+is a correctness failure rather than a degradation, so it is a configuration
+error, and a deployment that bonds keeps one endpoint per worker.  The shared
+listener therefore does not enable group acceptance at all: a bonded caller
+pointed at it is refused at the handshake, visibly, instead of being split.
+
+**Read "One shared SRT port" in docs/operations.md before choosing this.**  The
+mode has one hard constraint: the set of processes bound to the port must not
+change while publishers are connected.  A reload changes it — the new
+generation's workers bind before the old generation's exit — and the kernel
+re-hashes the flows still running onto workers that have no session state for
+them, so **a reload ends every live publisher's session** (measured; the
+per-worker mode ends them too, when the replaced worker exits).  A worker
+respawning after a crash is enough to do it as well, which the per-worker mode
+is not subject to.  The instance says so in its error log once per
+configuration read, before any worker starts.
+
+What the shared bind can fail with, and what it does about it.  The socket is
+this module's own, so every failure is reported where the operator will read
+it and none of them is silent.  If the platform has no `SO_REUSEPORT`, the
+kernel refuses it, the UDP socket cannot be created, the address cannot be
+bound, or libsrt will not take the descriptor, the worker logs
+
+```
+media: srt listener 127.0.0.1:9000 is not available yet (the shared listener
+could not bind 127.0.0.1:9000: Address already in use (the port is held by
+something without SO_REUSEPORT)); retrying until the port is free
+```
+
+with the reason it was actually given — `this platform has no SO_REUSEPORT,
+which the shared listener is built on`, `SO_REUSEPORT was refused on the
+shared listener socket`, `could not create the UDP socket a shared listener
+needs`, or the library's own words — and keeps retrying at 100 ms until the
+worker exits, saying so again every five seconds.  The instance itself stays
+up: ingest runs in a thread of its own, so the master, the control API and
+every destination start normally, and what is missing is ingest on that one
+endpoint.  The case that resolves itself is a port held by something that does
+not share it — a foreign process, or the generation a reload is replacing when
+this directive was just added — and then every worker takes the port as soon
+as the holder exits, logging `srt listener bound <address> after N
+attempt(s): the port was released`.  On a platform without `SO_REUSEPORT`,
+that first line is the cue to use `media_srt_listen` and give every worker its
+own endpoint instead.
 
 ### `media_srt_source_priority <identity> <number>;`
 
@@ -172,6 +248,22 @@ that would provide it.
 
 Accepts RTMP publishers (handshake, AMF0 command channel, FLV tags) and serves
 RTMP play requests for programs that exist.
+
+Every worker opens the listener on the same address with `SO_REUSEPORT`, so the
+kernel hashes each arriving connection onto one of them rather than funnelling
+all of RTMP through one worker; a publisher that lands on a worker which does
+not own its program is routed to the owner over the inter-worker transport
+(goal doc 22).  A build whose `configure` found no `SO_REUSEPORT` cannot share
+the port, so the listener stays on worker 0 and worker 0 routes every publisher.
+The session table is per worker in either case, so the ceiling on how many
+publishers one instance carries is that number times the worker count.
+
+`SO_REUSEPORT` shares the port with *any* process that has asked for the same
+thing, not only with this instance's other workers: two nginx instances
+configured on the same address and port will both bind and split the incoming
+publishers between them instead of the second one failing to start.  That is
+the same tradeoff `listen ... reuseport` makes for nginx's own listeners, and
+the answer is the same - give each instance its own address or port.
 
 ### `media_rtmp_source_priority <identity> <number>;`
 

@@ -144,14 +144,17 @@ certificates with openssl.
 
 There is no umbrella `make all`.  The Makefile exposes one target per script
 (`make srt-ingest`, `make rtmp`, `make srt-output`… — the full list is the
-Makefile's `.PHONY` line), and the authoritative "everything" is the list the
-workflows run: `.github/workflows/ci.yml` runs the fast subset on a pull
-request, and `.github/workflows/master.yml` runs the full set — ingest and
-fixture, selection and switching, the HLS directions, RTMP and RTMPS,
-srt-output and srt-crypto, multi-worker, soak and fault — before anything is
-tagged.  `make srt-qualify` is separate: it rebuilds nginx with
-`MEDIA_SRT_BACKEND=both` and runs `srt_backend_qualify.sh`, which drives one
-scenario against the SRT library and against the UDP test double.
+Makefile's `.PHONY` line), and the authoritative "everything" is `make
+test-in-container`, which runs the Makefile's `TEST_TARGETS` in the shipped
+image's environment: `.github/workflows/ci.yml` runs it (beside the fast subset
+it names individually) on a pull request, and `.github/workflows/master.yml`
+runs the individual targets — ingest and fixture, selection and switching, the
+HLS directions, RTMP and RTMPS, srt-output and srt-crypto, multi-worker, soak
+and fault — before anything is tagged.  A new suite target belongs in
+`TEST_TARGETS` for that reason; `srt-worker-ports`, the per-worker SRT ingest
+endpoints, is the most recent one.  `make srt-qualify` is separate: it rebuilds
+nginx with `MEDIA_SRT_BACKEND=both` and runs `srt_backend_qualify.sh`, which
+drives one scenario against the SRT library and against the UDP test double.
 
 ### Benchmarks: `tests/bench`
 

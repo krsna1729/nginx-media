@@ -149,7 +149,8 @@ ngx_media_srt_ops_t ngx_media_srt_udp_ops = {
     ngx_media_srt_udp_library_version,
     NULL,                                  /* no printable last error */
     ngx_media_srt_udp_shutdown,
-    NULL                                   /* no group acceptance */
+    NULL,                                  /* no group acceptance */
+    NULL                                   /* no shared port */
 };
 
 static ngx_int_t

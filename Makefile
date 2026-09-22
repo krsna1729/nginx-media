@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit nginx smoke bench-worker-scaling bench-ingest-egress test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
+.PHONY: unit nginx smoke bench-worker-scaling bench-ingest-egress bench-ingest-egress-fanout test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -100,7 +100,8 @@ BASE ?= debian:trixie
 TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
     hls-profile file-source churn rtmp rtmp-hevc rtmps rtmp-workers \
-    srt-output srt-crypto srt-worker-ports multi-worker soak fault
+    srt-output srt-crypto srt-worker-ports srt-shared-port multi-worker soak \
+    fault
 
 test-image:
 	$(DOCKER) build -f Containerfile --target test --build-arg BASE=$(BASE) \
@@ -118,6 +119,15 @@ srt-crypto:
 # through worker 0.
 srt-worker-ports:
 	tests/integration/srt_worker_ports_nginx.sh
+
+# One SRT ingest endpoint shared by every worker: media_srt_listen_shared
+# makes each worker bind the same address on a socket it creates with
+# SO_REUSEPORT, so the kernel spreads publishers across the workers instead of
+# funnelling them through the worker that bound the port.  What that costs - a
+# reload ends every live publisher's session - is measured here rather than
+# predicted, and written up in docs/operations.md.
+srt-shared-port:
+	tests/integration/srt_shared_port_nginx.sh
 
 bench-hls:
 	tests/bench/hls_serve.sh
@@ -141,6 +151,15 @@ bench-worker-scaling:
 # workers.
 bench-ingest-egress:
 	tests/bench/ingest_egress_scaling.sh
+
+# Where ingest and egress each saturate under extreme fanout: publishers ramp
+# onto one endpoint per worker (per-thread CPU attribution, and one endpoint
+# with more workers bound to show the ceiling is the port and not the worker),
+# HLS readers against the shared segment store versus live destinations fed by
+# the owner, and the same publisher placed on its owner and routed from
+# another worker so the escape hatch has a price.
+bench-ingest-egress-fanout:
+	tests/bench/ingest_egress_fanout.sh
 
 srt-qualify:
 	MEDIA_SRT_BACKEND=both $(MAKE) nginx

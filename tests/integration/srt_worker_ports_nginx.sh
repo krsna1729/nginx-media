@@ -30,10 +30,11 @@
 #     program is owned elsewhere is still routed from there.
 #
 #   configuration errors
-#     more endpoints than workers, and the same endpoint twice, are refused
-#     with a message that names what is wrong; fewer endpoints than workers
-#     is accepted, because those workers own programs without accepting
-#     publishers.
+#     the same endpoint twice is refused with a message that names what is
+#     wrong; more endpoints than workers is accepted with a warning, because
+#     the worker count is not always in the configuration; fewer endpoints
+#     than workers is accepted, because those workers own programs without
+#     accepting publishers.
 #
 # Which worker accepted a session is read from the pid in the log line
 # (nginx's error log prefix), mapped through the "worker N routing ready" line
@@ -206,8 +207,11 @@ mkdir -p "$ONE/logs" "$ONE/conf" "$MANY/logs" "$MANY/conf" \
 echo "== configuration errors"
 ###############################################################################
 
-# one endpoint per worker: five endpoints and four workers, the same endpoint
-# twice, and the legal shape of fewer endpoints than workers
+# one endpoint per worker: the same endpoint twice is refused, five endpoints
+# with four workers is accepted with a warning (the worker count comes from the
+# environment in a container, so scaling down must not stop the instance), and
+# fewer endpoints than workers is legal - those workers own programs without
+# accepting publishers
 cat > "$ERRORS/conf/too-many.conf" <<EOF
 worker_processes 4;
 error_log logs/error.log info;
@@ -261,8 +265,22 @@ config_error() {  # <conf name> <message that must be there>
     echo "   refused: $want"
 }
 
-config_error too-many "endpoint(s) and there are 4 worker(s)"
 config_error duplicate "is duplicate: one endpoint per worker"
+
+# more endpoints than workers: accepted, with a warning naming the waste.
+# Refusing would make the configuration depend on the worker count, and the
+# container takes that from the environment.
+if ! "$NGINX" -p "$ERRORS" -c conf/too-many.conf -t >"$ERRORS/too-many.out" 2>&1
+then
+    cat "$ERRORS/too-many.out" >&2
+    fail "five endpoints with four workers must be accepted, with a warning"
+fi
+
+grep -qF "endpoint(s) and there are 4 worker(s)" "$ERRORS/too-many.out" \
+    || { cat "$ERRORS/too-many.out" >&2
+         fail "the extra endpoints were accepted without saying they are unused"; }
+
+echo "   accepted with a warning: more endpoints than workers"
 
 "$NGINX" -p "$ERRORS" -c conf/fewer.conf -t >"$ERRORS/fewer.out" 2>&1 \
     || { cat "$ERRORS/fewer.out" >&2

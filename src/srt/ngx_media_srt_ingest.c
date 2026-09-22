@@ -238,6 +238,12 @@ ngx_media_srt_session_finish(ngx_media_srt_ingest_t *ingest,
  * of being fatal.  Each retry is cheap (one socket, one failed bind), and the
  * worker's exit still interrupts it at once - ngx_media_srt_ingest_stop()
  * joins this thread.
+ *
+ * The shared endpoint's socket carries SO_REUSEPORT, so its bind does not
+ * fail because another worker holds the port - that is the point of it - and
+ * the one failure left is a holder that does not share: the generation being
+ * replaced when the directive changes on a reload, or a foreign process.  The
+ * same retry covers both, and the same worker exit ends it.
  */
 static ngx_media_srt_listener_t *
 ngx_media_srt_thread_listen(ngx_media_srt_ingest_t *ingest)
@@ -262,13 +268,20 @@ ngx_media_srt_thread_listen(ngx_media_srt_ingest_t *ingest)
         }
 
         /*
-         * A bonded listener covers two local addresses and accepts group
-         * callers; the plain one covers a single address.  Which is used is a
-         * property of the configuration, and the session that comes back is
-         * the same kind either way, so nothing below this line knows about
-         * bond members.
+         * Which listener this worker binds is a property of the
+         * configuration: the instance's one shared endpoint (every worker
+         * binds the same address, on a socket of its own, and the kernel
+         * spreads publishers across them), a bonded listener covering two
+         * local addresses so group callers are accepted as one session, or
+         * this worker's own endpoint.  Whatever comes back accepts the same
+         * sessions, so nothing below this line knows which it was.
          */
-        if (ingest->conf.bond_host.len > 0) {
+        if (ingest->conf.shared) {
+            listener = ngx_media_srt_listen_shared(ingest->conf.host.data,
+                                                   ingest->conf.port,
+                                                   ingest->conf.params, NULL);
+
+        } else if (ingest->conf.bond_host.len > 0) {
             listener = ngx_media_srt_listen_bond(ingest->conf.host.data,
                                                  ingest->conf.port,
                                                  ingest->conf.bond_host.data,

@@ -177,6 +177,20 @@ typedef struct {
     ngx_media_srt_listener_t *(*listen_bond)(const u_char *host,
         ngx_uint_t port, const u_char *bond_host,
         const ngx_media_srt_params_t *params, ngx_log_t *log);
+
+    /*
+     * The listener that every process of one instance shares.  One endpoint,
+     * bound by each of them on a socket the application owns with
+     * SO_REUSEPORT set, so the kernel spreads incoming flows across the
+     * processes; a backend that does not own the socket it receives on cannot
+     * offer this, and NULL says so.  The set of processes bound to the port
+     * must not change while publishers are connected - see
+     * docs/operations.md - and a bonded caller cannot be served this way,
+     * which is why group acceptance is not armed on it.
+     */
+    ngx_media_srt_listener_t *(*listen_shared)(const u_char *host,
+        ngx_uint_t port, const ngx_media_srt_params_t *params,
+        ngx_log_t *log);
 } ngx_media_srt_ops_t;
 
 extern ngx_media_srt_ops_t ngx_media_srt_haivision_ops;
@@ -199,6 +213,17 @@ ngx_media_srt_listener_t *ngx_media_srt_listen(const u_char *host,
 ngx_media_srt_listener_t *ngx_media_srt_listen_bond(const u_char *host,
     ngx_uint_t port, const u_char *bond_host,
     const ngx_media_srt_params_t *params, ngx_log_t *log);
+
+/*
+ * The one endpoint every worker of an instance binds (media_srt_listen_shared
+ * in the configuration).  Each caller gets its own listening socket on the
+ * same address and the kernel decides which of them a publisher's packets
+ * reach, so the sessions distribute over the workers instead of arriving at
+ * one.  NULL when the backend cannot share a port, or when the platform has no
+ * SO_REUSEPORT.
+ */
+ngx_media_srt_listener_t *ngx_media_srt_listen_shared(const u_char *host,
+    ngx_uint_t port, const ngx_media_srt_params_t *params, ngx_log_t *log);
 
 void ngx_media_srt_listen_close(ngx_media_srt_listener_t *listener);
 

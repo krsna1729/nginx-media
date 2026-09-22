@@ -2150,10 +2150,10 @@ ngx_media_rtmp_listener_open(ngx_log_t *log)
      * before bind(), and on every socket in the group: one member without it
      * makes every other member's bind fail.
      *
-     * A failure here is not fatal.  It means this worker takes the port rather
-     * than sharing it - it still binds if the port is free, and the retry
-     * below eventually gives it the port once whoever holds it lets go - so it
-     * is logged and the worker carries on.
+     * A failure here is not fatal.  It means this worker cannot share: it
+     * binds if the port is free and waits on the retry below if it is not,
+     * which is a worker that serves publishers when it can rather than one
+     * that dies at startup.
      */
     {
         int  on = 1;
@@ -2163,8 +2163,8 @@ ngx_media_rtmp_listener_open(ngx_log_t *log)
         {
             ngx_log_error(NGX_LOG_NOTICE, log, ngx_socket_errno,
                           "media: rtmp cannot share the listener "
-                          "(SO_REUSEPORT failed): this worker will take the "
-                          "port on its own");
+                          "(SO_REUSEPORT failed): this worker needs the port "
+                          "to itself");
         }
     }
 #endif

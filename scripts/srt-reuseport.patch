@@ -1,0 +1,126 @@
+# srt-reuseport.patch - let several processes share one SRT listener port.
+#
+# What it changes
+#   srtcore/channel.cpp, CChannel::open(const sockaddr_any&):
+#     sets SO_REUSEPORT on the internal UDP socket, immediately before
+#     ::bind(), whenever the caller asked for a concrete port.
+#   CMakeLists.txt: adds an ENABLE_REUSEPORT option (OFF by default) that
+#     compiles the block above in.
+#
+# Why
+#   A SRTSOCKET is an int32_t handle, not a file descriptor (bit 30 marks a
+#   group), so an application cannot setsockopt() SO_REUSEPORT on the socket
+#   that SRT actually binds: getsockopt()/fcntl() on it fail with EBADF.
+#   SRT's option list has no SO_REUSEPORT passthrough either - SRTO_REUSEADDR
+#   only controls SRT's own internal UDP multiplexer and never reaches the OS
+#   (srtcore/channel.h calls it "unused and ineffective"), and the only
+#   options forwarded to the socket are SRTO_IPTTL and SRTO_IPTOS.  As
+#   shipped, therefore, every process after the first fails bind() with
+#   EADDRINUSE, and the only way to spread SRT ingest over workers is one
+#   listening port per worker.  With this patch N processes bind the same
+#   address:port and the kernel distributes incoming flows between them.
+#
+#   This is needed only for the "libsrt does the bind" path.  An application
+#   that owns its own UDP socket can do the same thing with the shipped
+#   library: bind the socket with SO_REUSEPORT itself and hand the descriptor
+#   to srt_bind_acquire(), which reaches CChannel::attach() and never calls
+#   bind().  The accompanying experiment measures both paths and they behave
+#   identically, so the patch is a convenience, not a requirement.
+#
+# Scope
+#   Set only when addr.hport() != 0, i.e. for an explicitly requested fixed
+#   port (a listener, or a source port pinned by the application).  Sockets
+#   that autoselect an ephemeral port are left alone, so an outgoing socket
+#   cannot accidentally join a reuseport group with an unrelated process in
+#   another worker and have its replies load-balanced away from it.  A failed
+#   setsockopt is not fatal: binding then behaves exactly as it did before.
+#
+# Cost and risk
+#   It makes the shipped library a locally built one (or an upstream patch
+#   that upstream first has to accept).  With ENABLE_REUSEPORT=ON the
+#   "address already in use" error also disappears for fixed ports, so two
+#   unrelated binders of one port silently share it instead of the second
+#   failing - which is exactly what a worker pool wants and exactly what a
+#   mistyped port does not.
+#
+# Apply (the same recipe the bonding-enabled library in .build/ uses):
+#   git clone --depth 1 -b v1.5.6 https://github.com/Haivision/srt.git .build/srt-src
+#   git -C .build/srt-src apply scripts/srt-reuseport.patch
+#   cmake -S .build/srt-src -B .build/srt-reuseport-build \
+#       -DCMAKE_BUILD_TYPE=Release -DENABLE_REUSEPORT=ON -DENABLE_BONDING=ON \
+#       -DENABLE_TESTING=OFF -DUSE_ENCLIB=openssl-evp \
+#       -DCMAKE_INSTALL_PREFIX="$PWD/.build/srt-reuseport"
+#   cmake --build .build/srt-reuseport-build -j
+#   cmake --install .build/srt-reuseport-build
+#
+# The patch is against the 1.5.6 sources - the version the shipped
+# /usr/lib/libsrt.so.1.5.6 reports, and the only one the module can link
+# against.  srtcore/channel.cpp is byte-identical in v1.5.6, in the v1.5.7
+# tag's parent (which is what Arch's srt 1.5.7-1 package was built from) and
+# in the v1.5.7 tag itself, so the hunks apply unchanged to either.
+#
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e10715a2..34f2a8a4 100755
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -199,6 +199,7 @@ option(SRT_USE_OPENSSL_STATIC_LIBS "Link OpenSSL libraries statically." OFF)
+ option(USE_BUSY_WAITING "Enable more accurate sending times at a cost of potentially higher CPU load" OFF)
+ option(USE_GNUSTL "Get c++ library/headers from the gnustl.pc" OFF)
+ option(ENABLE_SOCK_CLOEXEC "Enable setting SOCK_CLOEXEC on a socket" ON)
++option(ENABLE_REUSEPORT "Set SO_REUSEPORT on the internal UDP socket, so that several processes can bind the same SRT port" OFF)
+ option(ENABLE_SHOW_PROJECT_CONFIG "Enable show Project Configuration" OFF)
+ 
+ option(ENABLE_CLANG_TSA "Enable Clang Thread Safety Analysis" OFF)
+@@ -680,6 +681,13 @@ if (ENABLE_SOCK_CLOEXEC)
+ 	add_definitions(-DENABLE_SOCK_CLOEXEC=1)
+ endif()
+ 
++if (ENABLE_REUSEPORT)
++	add_definitions(-DENABLE_REUSEPORT=1)
++	message(STATUS "ENABLE_REUSEPORT: ON - the internal UDP socket will be created with SO_REUSEPORT")
++else()
++	message(STATUS "ENABLE_REUSEPORT: OFF")
++endif()
++
+ if (CMAKE_MAJOR_VERSION LESS 3)
+ 	set (FORCE_CXX_STANDARD_GNUONLY 1)
+ endif()
+diff --git a/srtcore/channel.cpp b/srtcore/channel.cpp
+index 9c8babed..d1144a35 100644
+--- a/srtcore/channel.cpp
++++ b/srtcore/channel.cpp
+@@ -220,6 +220,34 @@ void srt::CChannel::open(const sockaddr_any& addr)
+     createSocket(addr.family());
+     socklen_t namelen = addr.size();
+ 
++#if ENABLE_REUSEPORT && defined(SO_REUSEPORT)
++    // ENABLE_REUSEPORT: allow several processes to share one bound UDP port.
++    // SO_REUSEPORT must be set before bind(), so it is done here and not in
++    // setUDPSockOpt(), which runs after the bind.  It is set only when the
++    // caller asked for a concrete port (a listener, or a source port pinned by
++    // the application); sockets that autoselect an ephemeral port are left
++    // alone so that they cannot accidentally form a reuseport group with an
++    // unrelated process and have their replies load-balanced away from them.
++    // A failure here (an old kernel, an unsupported platform) is not fatal:
++    // binding then behaves exactly as it did before the patch.
++    if (addr.hport() != 0)
++    {
++        const int yes = 1;
++        const int res SRT_ATR_UNUSED =
++            ::setsockopt(m_iSocket, SOL_SOCKET, SO_REUSEPORT, (const char*)&yes, sizeof yes);
++#if ENABLE_LOGGING
++        if (res == -1)
++        {
++            int  err = errno;
++            char msg[160];
++            LOGC(kmlog.Error,
++                 log << "::setsockopt: failed to set SOL_SOCKET/SO_REUSEPORT: "
++                     << SysStrError(err, msg, 159));
++        }
++#endif // ENABLE_LOGGING
++    }
++#endif // ENABLE_REUSEPORT && defined(SO_REUSEPORT)
++
+     if (::bind(m_iSocket, &addr.sa, namelen) == -1)
+         throw CUDTException(MJ_SETUP, MN_NORES, NET_ERROR);
+ 

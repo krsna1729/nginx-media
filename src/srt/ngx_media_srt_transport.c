@@ -65,6 +65,19 @@ ngx_media_srt_listen_bond(const u_char *host, ngx_uint_t port,
                                                 log);
 }
 
+ngx_media_srt_listener_t *
+ngx_media_srt_listen_shared(const u_char *host, ngx_uint_t port,
+    const ngx_media_srt_params_t *params, ngx_log_t *log)
+{
+    if (ngx_media_srt_backend() == NULL
+        || ngx_media_srt_backend()->listen_shared == NULL)
+    {
+        return NULL;
+    }
+
+    return ngx_media_srt_backend()->listen_shared(host, port, params, log);
+}
+
 void
 ngx_media_srt_listen_close(ngx_media_srt_listener_t *listener)
 {

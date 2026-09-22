@@ -19,6 +19,27 @@
  * its own, so one endpoint per worker is what replaces it - a single shared
  * endpoint would funnel every publisher through the worker that bound it.
  *
+ * Or the endpoint is shared, when the configuration asks for that:
+ *
+ *     media_srt_listen_shared 127.0.0.1:9000;
+ *
+ * Every worker then binds that one address on a UDP socket it creates itself
+ * with SO_REUSEPORT set and hands to libsrt with srt_bind_acquire(), and the
+ * kernel spreads incoming publishers across those sockets by 4-tuple - so a
+ * publisher arrives on whichever worker the kernel picked and is routed to
+ * the program's owner from there.  It is a separate directive, not a flag on
+ * media_srt_listen, because the mode belongs to the whole listener set rather
+ * than to one entry, and it is refused beside media_srt_listen and
+ * media_srt_listen_bond.  A bonded caller cannot be served this way at all:
+ * its legs have different source addresses by construction, so they hash to
+ * different workers, and the library's mirror-group registry is process
+ * state, so those workers cannot join the legs into one bond.  And the set of
+ * processes bound to the port must not change while publishers are connected:
+ * a reload changes it twice - the new generation binds before the old one
+ * exits - and every flow that re-hashes lands on a worker with no state for
+ * it.  docs/operations.md has the measurements; the mode logs a warning at
+ * startup and does not change what either of the other two directives means.
+ *
  * Each worker's transport helper thread runs one shared poll over its
  * listener and every session, and hands compact events plus raw MPEG-TS
  * chunks (tagged with their session) to the worker through an eventfd.  The
@@ -94,6 +115,22 @@ typedef struct {
     ngx_array_t              *listens;   /* ngx_media_srt_listen_t */
 
     /*
+     * The one endpoint every worker binds (media_srt_listen_shared).  It is a
+     * directive of its own rather than a flag on media_srt_listen because the
+     * mode belongs to the whole listener set, not to one entry: with a flag an
+     * operator could write one shared entry beside per-worker entries, and
+     * "worker i binds entry i" would no longer say which entry that is.  Held
+     * here because exactly one is legal, and refused beside the two directives
+     * whose meaning it would otherwise contradict.
+     *
+     * Binding it needs SO_REUSEPORT on a socket this module creates, which is
+     * a libsrt backend capability: on a backend without one the worker
+     * reports that the listener could not be bound and keeps retrying.
+     */
+    ngx_str_t                shared;
+    unsigned                 shared_set:1;
+
+    /*
      * The second local address of a bonded listener (goal doc 11.4).  Bonding
      * is transport-internal: this address is bound with group acceptance
      * enabled so a group caller's legs become one session, and nothing above
@@ -139,6 +176,8 @@ static char *ngx_media_srt_init_main_conf(ngx_cycle_t *cycle, void *conf);
 static char *ngx_media_srt_listen_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_media_srt_listen_bond_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
+static char *ngx_media_srt_listen_shared_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_media_srt_crypto_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
@@ -224,6 +263,13 @@ static ngx_command_t ngx_media_srt_commands[] = {
     { ngx_string("media_srt_listen_bond"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
       ngx_media_srt_listen_bond_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_srt_listen_shared"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_srt_listen_shared_cmd,
       0,
       0,
       NULL },
@@ -1227,6 +1273,30 @@ ngx_media_srt_listen_bond_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     return NGX_CONF_OK;
 }
 
+static char *
+ngx_media_srt_listen_shared_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_media_srt_main_conf_t  *mcf = conf;
+    ngx_str_t                  *value;
+
+    (void) cmd;
+
+    if (mcf->shared_set) {
+        return "is duplicate";
+    }
+
+    value = cf->args->elts;
+
+    if (value[1].len == 0) {
+        return NGX_CONF_ERROR;
+    }
+
+    mcf->shared = value[1];
+    mcf->shared_set = 1;
+
+    return NGX_CONF_OK;
+}
+
 /*
  * The checks that have to happen before a worker binds anything.
  *
@@ -1251,6 +1321,25 @@ ngx_media_srt_listen_bond_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
  *
  * Checking here is what turns each of those into a configuration error naming
  * the directive instead of a startup failure about an address in use.
+ *
+ * media_srt_listen_shared is the other way round: one endpoint for the whole
+ * instance, which every worker binds.  It is refused beside either of the
+ * others, because neither combination has a meaning worth inventing:
+ *
+ * - beside media_srt_listen, the entries would no longer line up with the
+ *   workers ("worker i binds entry i" says nothing about a worker that must
+ *   also bind the shared port), and a worker accepts on one listener;
+ * - beside media_srt_listen_bond, a bond cannot work at all.  The legs of a
+ *   group caller have different source addresses by construction, which is
+ *   the point of bonding, and SO_REUSEPORT hashes on the outer address and
+ *   port - so the legs land on different workers.  libsrt joins the legs of
+ *   one caller into one group through uglobal()'s registry, which is process
+ *   state (CUDT::uglobal() is a function-local static, findPeerGroup_LOCKED()
+ *   walks its m_Groups), so those workers do not find each other's mirror
+ *   group and each serves one leg of the caller's bond as a session of its
+ *   own.  A bond that silently becomes two independent publishers is a
+ *   correctness failure, not a degradation, so the combination is refused and
+ *   the port-per-worker mode is where group callers belong.
  */
 static char *
 ngx_media_srt_init_main_conf(ngx_cycle_t *cycle, void *conf)
@@ -1264,6 +1353,57 @@ ngx_media_srt_init_main_conf(ngx_cycle_t *cycle, void *conf)
 
     listens = (mcf->listens != NULL) ? mcf->listens->elts : NULL;
     n = (mcf->listens != NULL) ? mcf->listens->nelts : 0;
+
+    if (mcf->shared_set) {
+        problem = NULL;
+
+        if (n > 0) {
+            problem = "cannot be combined with media_srt_listen: one endpoint "
+                      "per worker and one endpoint for the instance are two "
+                      "modes, and a worker accepts on one listener";
+
+        } else if (mcf->bond_set) {
+            problem = "cannot be combined with media_srt_listen_bond: the "
+                      "legs of a bonded caller have different source "
+                      "addresses, so they hash to different workers, which "
+                      "cannot join them into one bond - use media_srt_listen "
+                      "(one endpoint per worker) for group callers";
+        }
+
+        if (problem != NULL) {
+            ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                          "media: media_srt_listen_shared %V %s", &mcf->shared,
+                          problem);
+
+            return NGX_CONF_ERROR;
+        }
+
+        /*
+         * The one line an operator who enabled the mode is sure to read.
+         * Said here, by the master, because it is a property of the mode and
+         * not of a worker: printed once, before any worker starts, and again
+         * on a reload - which is the operation it is about.
+         *
+         * What it says is measured: see "One shared SRT port" in
+         * docs/operations.md.  A reload starts the new generation before the
+         * old one exits, so the set of processes bound to the port changes
+         * twice, and SO_REUSEPORT re-hashes the flows in flight each time.
+         * The sessions that move are served by a worker with no state for
+         * them, so they end - and a session that moves gets no
+         * acknowledgement, so its caller hangs until SRT gives up rather than
+         * failing at once.
+         */
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+                      "media: media_srt_listen_shared %V is bound by every "
+                      "worker: publishers spread across them, and a reload "
+                      "ends every live publisher's session, because the new "
+                      "generation binds the port before the old one exits and "
+                      "the kernel re-hashes the flows still running.  A "
+                      "bonded (group) caller cannot use it at all.  See \"One "
+                      "shared SRT port\" in docs/operations.md before "
+                      "relying on it",
+                      &mcf->shared);
+    }
 
     if (mcf->bond_set) {
         problem = NULL;
@@ -1349,14 +1489,20 @@ ngx_media_srt_init_main_conf(ngx_cycle_t *cycle, void *conf)
 
     workers = ngx_media_owner_worker_count(cycle);
 
+    /*
+     * More endpoints than workers is a warning, not a configuration error,
+     * because the worker count is not always a property of the configuration:
+     * the container takes it from the environment, so a deployment that
+     * scales down would stop starting at all if this refused.  The endpoints
+     * past the worker count are unused, and saying so once at startup is
+     * enough.
+     */
     if (n > workers) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+        ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
                       "media: media_srt_listen has %ui endpoint(s) and there "
                       "are %ui worker(s): a worker binds one endpoint, so the "
-                      "extra %ui would accept nothing",
+                      "last %ui will not be used",
                       n, workers, n - workers);
-
-        return NGX_CONF_ERROR;
     }
 
     return NGX_CONF_OK;
@@ -1406,10 +1552,10 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
 {
     ngx_media_srt_main_conf_t   *mcf;
     ngx_media_srt_ingest_conf_t  conf;
-    ngx_media_srt_listen_t      *listen;
+    ngx_str_t                   *endpoint;
     ngx_connection_t            *c;
     ngx_str_t                    host;
-    ngx_uint_t                   port;
+    ngx_uint_t                   port, shared;
 
     mcf = (ngx_media_srt_main_conf_t *)
               cycle->conf_ctx[ngx_media_srt_module.index];
@@ -1528,13 +1674,20 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     }
 
     /*
-     * This worker's ingest endpoint.  media_srt_listen may be given once per
-     * worker and worker i binds the i-th entry, so a publisher that connects
-     * to entry i is accepted by worker i: the receive path of a publisher is
-     * the worker that carries it whenever the publisher was placed there, and
-     * a session is routed to the program's owner only when that is a
-     * different worker.  With one entry this is exactly the single-listener
-     * shape - worker 0 binds it, every other worker returns here.
+     * This worker's listener.  media_srt_listen may be given once per worker
+     * and worker i binds the i-th entry, so a publisher that connects to
+     * entry i is accepted by worker i: the receive path of a publisher is the
+     * worker that carries it whenever the publisher was placed there, and a
+     * session is routed to the program's owner only when that is a different
+     * worker.  With one entry this is exactly the single-listener shape -
+     * worker 0 binds it, every other worker returns here.
+     *
+     * media_srt_listen_shared is the other mode, and every worker takes this
+     * path: there is one endpoint for the instance and no entry to index, so
+     * no worker returns early.  Which worker accepts a publisher is the
+     * kernel's decision there, and routing to the program's owner is what
+     * gets the media to where it belongs - see the constraint the mode
+     * carries in docs/operations.md before choosing it.
      *
      * The index is ngx_worker, not ngx_process_slot: the slot is the position
      * in the process table, which a reload changes - the respawned worker
@@ -1543,11 +1696,23 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
      * without accepting publishers, which is what fewer entries than workers
      * means: it still owns the programs its hash selects.
      */
-    if (mcf->listens == NULL || (ngx_uint_t) ngx_worker >= mcf->listens->nelts) {
-        return NGX_OK;
+    endpoint = NULL;
+    shared = 0;
+
+    if (mcf->shared_set) {
+        endpoint = &mcf->shared;
+        shared = 1;
+
+    } else if (mcf->listens != NULL
+               && (ngx_uint_t) ngx_worker < mcf->listens->nelts)
+    {
+        endpoint = &((ngx_media_srt_listen_t *)
+                         mcf->listens->elts)[ngx_worker].endpoint;
     }
 
-    listen = &((ngx_media_srt_listen_t *) mcf->listens->elts)[ngx_worker];
+    if (endpoint == NULL) {
+        return NGX_OK;
+    }
 
     /*
      * The listener is optional.  An instance whose destinations all point
@@ -1555,13 +1720,13 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
      * start its destinations because it has no listener would be exactly the
      * bug this ordering fixes.
      */
-    if (ngx_media_srt_parse_endpoint(cycle->pool, &listen->endpoint, &host,
-                                     &port)
+    if (ngx_media_srt_parse_endpoint(cycle->pool, endpoint, &host, &port)
         != NGX_OK)
     {
         ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                      "media: invalid media_srt_listen \"%V\"",
-                      &listen->endpoint);
+                      "media: invalid %s \"%V\"",
+                      shared ? "media_srt_listen_shared" : "media_srt_listen",
+                      endpoint);
         return NGX_ERROR;
     }
 
@@ -1573,6 +1738,7 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
     conf.max_bytes = 8 * 1024 * 1024;
     conf.max_events = 64;
     conf.max_sessions = NGX_MEDIA_SRT_MAX_SESSIONS;
+    conf.shared = shared;
     conf.params = ngx_media_srt_crypto_params(mcf, NULL, &mcf->crypto_params);
 
     if (mcf->bond_set) {
@@ -1631,8 +1797,10 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
                   NGX_MEDIA_SRT_SHUTDOWN_INTERVAL);
 
     ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
-                  "media: SRT ingest runtime started for %V",
-                  &listen->endpoint);
+                  shared ? "media: SRT ingest runtime started for %V, shared "
+                           "with every worker"
+                         : "media: SRT ingest runtime started for %V",
+                  endpoint);
 
     return NGX_OK;
 }

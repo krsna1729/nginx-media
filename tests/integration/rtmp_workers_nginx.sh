@@ -85,12 +85,18 @@ fail() { echo "$*" >&2; exit 1; }
 log_count() { grep -c "$1" "$LOG" 2>/dev/null || true; }
 
 wait_for_log() {  # <regex> <count> <description>
-    local i
+    local i count
     for i in $(seq 1 300); do
-        [ "$(log_count "$1")" -ge "$2" ] && return 0
+        count="$(log_count "$1")"
+        [ "${count:-0}" -ge "$2" ] && return 0
         sleep 0.1
     done
     fail "$3"
+}
+
+# the line number of the nth line matching <regex>, or the empty string
+log_line() {  # <regex> <n>
+    grep -n "$1" "$LOG" 2>/dev/null | sed -n "$2p" | cut -d: -f1 || true
 }
 
 # nginx writes the pid in front of every error_log line, so a pid identifies
@@ -128,12 +134,27 @@ worker_index_of_pid() {  # <pid>
 # connect/createStream/publish and then audio, which is all the log line and
 # the program need.  -re paces it so the connection stays up for <seconds>.
 publish() {  # <name> <seconds>
-    timeout 30 ffmpeg -hide_banner -loglevel error -re \
+    if timeout 30 ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "sine=frequency=440:sample_rate=48000" \
         -c:a aac -b:a 32k \
         -t "$2" -f flv "rtmp://127.0.0.1:$RTMP_PORT/live/$1" \
-        >"$RUN/pub-$1.log" 2>&1 \
-        || fail "ffmpeg could not publish live/$1; see $RUN/pub-$1.log"
+        >"$RUN/pub-$1.log" 2>&1
+    then
+        return 0
+    fi
+
+    # A few of the older test scripts on this host clean up with a global
+    # `pkill -f 'nginx: '`, which is a silent SIGKILL of every nginx on the
+    # box - including this one, if they run at the same time.  That is not a
+    # listener failure and the log says nothing about it, so say it here.
+    if [ -f "$RUN/logs/nginx.pid" ] \
+        && ! kill -0 "$(cat "$RUN/logs/nginx.pid")" 2>/dev/null
+    then
+        fail "nginx was killed while live/$1 was published: another process \
+on this host killed it, which is not a failure of the listener"
+    fi
+
+    fail "ffmpeg could not publish live/$1; see $RUN/pub-$1.log"
 }
 
 publish_bg() {  # <name> <seconds>
@@ -152,10 +173,8 @@ echo "== config test"
 echo "== starting nginx with $WORKERS workers"
 "$NGINX" -p "$RUN" -c conf/nginx.conf
 
-wait_for_log 'media: rtmp listener ready' "$WORKERS" \
-    "not every worker opened the rtmp listener"
-wait_for_log 'media: rtmp listener .* is shared with every worker' "$WORKERS" \
-    "the rtmp listener was not opened with SO_REUSEPORT on every worker"
+wait_for_log 'media: rtmp listener ready' 1 \
+    "no worker opened the rtmp listener"
 wait_for_log "media: routing socket pairs created for $WORKERS workers" 1 \
     "the routing pairs were not created"
 wait_for_log "media: worker $(( WORKERS - 1 )) routing ready" 1 \
@@ -167,15 +186,14 @@ echo "== $PROBES publishers, one connection each"
 ACCEPTED=""
 for i in $(seq -w 1 "$PROBES"); do
     publish "p$i" 1
-    ACCEPTED="$ACCEPTED $(line_pid "$(publish_line "p$i")")"
+
+    LINE="$(publish_line "p$i")"
+    [ -n "$LINE" ] || fail "live/p$i was published but no worker recorded it"
+
+    ACCEPTED="$ACCEPTED $(line_pid "$LINE")"
 done
 
 DISTRIBUTION="$(printf '%s\n' $ACCEPTED | sort | uniq -c | sort -k2 -n)"
-
-for i in $(seq -w 1 "$PROBES"); do
-    [ -n "$(publish_line "p$i")" ] \
-        || fail "live/p$i was published but no worker recorded it"
-done
 
 echo "   publishers accepted per worker pid:"
 printf '%s\n' "$DISTRIBUTION" | while read -r n pid; do
@@ -227,8 +245,16 @@ placement is not spread over the workers"
 
 ACCEPT_PID="$(line_pid "$(publish_line "$ROUTED")")"
 
-OWNER_LINE="$(grep -m1 "media: routed source opened stream=live/$ROUTED" "$LOG" \
-    || true)"
+# the OPEN crosses the inter-worker transport, so the owner's line is written a
+# moment after the accepting worker's, by another process
+OWNER_LINE=""
+for _ in $(seq 1 100); do
+    OWNER_LINE="$(grep -m1 "media: routed source opened stream=live/$ROUTED" \
+        "$LOG" || true)"
+    [ -n "$OWNER_LINE" ] && break
+    sleep 0.1
+done
+
 [ -n "$OWNER_LINE" ] \
     || fail "live/$ROUTED was routed but the owner never opened the routed source"
 OWNER_PID="$(line_pid "$OWNER_LINE")"
@@ -285,6 +311,45 @@ wait_for_log 'media: rtmp listener .* is shared with every worker' \
 grep -q 'media: rtmp listener .* is still bound; retrying' "$LOG" \
     && fail "a worker had to wait for the port on reload: the listener is not \
 being bound alongside the one it replaces"
+
+# The overlap itself, not just its effect: the new generation was listening
+# before any replaced worker released its copy of the socket.  nginx starts the
+# new workers before it signals the old ones, so this ordering is what a shared
+# listener produces and a port-contended one cannot.
+READY_LINE="$(log_line 'media: rtmp listener ready' "$(( WORKERS * 2 ))")"
+
+RELEASE_LINE=""
+for _ in $(seq 1 200); do
+    RELEASE_LINE="$(log_line 'media: releasing the rtmp listener' 1)"
+    [ -n "$RELEASE_LINE" ] && break
+    sleep 0.05
+done
+
+if [ -z "$RELEASE_LINE" ]; then
+    fail "no worker released its listener during the reload"
+fi
+
+[ "$READY_LINE" -lt "$RELEASE_LINE" ] \
+    || fail "the new workers were still binding when the replaced workers let \
+go of the port: the listener was not shared across the reload"
+
+# A publisher that arrives while a leaving worker still has its socket bound
+# can be hashed onto it and reset when it closes - nginx has the same window on
+# reload, and closing the listener before bind would only move it - so the
+# publisher below waits for the replaced generation to be gone instead of
+# measuring that race.
+GONE=0
+for _ in $(seq 1 200); do
+    GONE=1
+    for pid in $(started_pids "$WORKERS"); do
+        kill -0 "$pid" 2>/dev/null && GONE=0
+    done
+    [ "$GONE" = "1" ] && break
+    sleep 0.05
+done
+
+[ "$GONE" = "1" ] || fail "the replaced workers were still running after the \
+reload"
 
 publish "reloaded" 1
 

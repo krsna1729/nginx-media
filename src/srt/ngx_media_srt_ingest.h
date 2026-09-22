@@ -63,6 +63,14 @@ typedef struct {
     ngx_str_t   bond_host;
 
     /*
+     * Set when this listener is the instance's one shared endpoint
+     * (media_srt_listen_shared) rather than this worker's own: every worker
+     * binds the same address on a socket it owns, and the kernel decides
+     * which of them a publisher reaches.
+     */
+    ngx_uint_t  shared;
+
+    /*
      * Encryption for the listener, or NULL for none.  The passphrase points
      * into the configuration, which outlives the listener.
      */
