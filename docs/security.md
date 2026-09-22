@@ -63,6 +63,46 @@ This document records the security boundaries, threat models, verified vulnerabi
 - **Root Cause**: Removing items from an open-addressing hash table without tombstones.
 - **Fix**: Introduced `NGX_MEDIA_OWNER_STATE_DELETED` tombstone state. `find()` continues probing past tombstones, and `claim()` reclaims them.
 
+### 10. RTMP Player Queue Under-Reserved Multi-Chunk Messages
+- **Vulnerability**: In `src/rtmp/ngx_media_rtmp_module.c`, `queue_message()` reserved one payload slice (`slices = 1`) while the writer emits `ceil(len/4096)` slices. A >256 KiB message passed the admission check, then wrote past the 64-entry `in_flight` ring (overwriting live references, leaking them) and the matching drain path double-unref'd the wrapped slots.
+- **Root Cause**: Admission accounting assumed one slice per message instead of one per chunk.
+- **Fix**: Compute `chunks = ceil(len/OUT_CHUNK)` up front and admit only when `out_queue + chunks*2 + 1` and `in_flight_count + chunks` fit; added an in-loop ring guard mirroring `rtmp_destination.c`.
+
+### 11. SRT Transport NULL-Backend Dereference
+- **Vulnerability**: In `src/srt/ngx_media_srt_transport.c`, `connect()`, `session_send()`, and `last_error()` dereferenced `ngx_media_srt_backend()` without checking for NULL. With neither backend linked the weak symbols resolve to NULL, so any output, send, or error-format call segfaulted the worker.
+- **Root Cause**: Three wrappers missed the NULL check every adjacent wrapper performs.
+- **Fix**: Added the `backend() == NULL` guard to all three, matching the file's own convention.
+
+### 12. HLS Push Scanner Out-of-Bounds Read on 4-Character Filenames
+- **Vulnerability**: In `src/core/ngx_media_hls_push.c`, the directory scan tested `strcmp(name + len - 5, ".m3u8")` for any name with `len >= 4`. A 4-character non-segment name made the pointer `name - 1`, reading one byte before the dirent buffer on every runtime tick.
+- **Root Cause**: `size_t` pointer arithmetic underflow in a suffix check.
+- **Fix**: Restructured to check `.ts` first, then require `len >= 5` before the `.m3u8` comparison.
+
+### 13. NAL Iterator Unbounded Recursion on Empty Units
+- **Vulnerability**: In `src/codec/ngx_media_nal.c`, `ngx_media_nal_iter_next()` recursed once per empty NAL unit (adjacent start codes). A 200k-empty-unit access unit (~600 KiB of `00 00 01`) recursed 200k frames deep and smashed the 8 MB worker stack; any RTMP/SRT publisher controls this input.
+- **Root Cause**: Recursion where the depth equals attacker-controlled input length.
+- **Fix**: Replaced recursion with a loop (`it->pos` already advances past each empty unit) and added NULL guards.
+
+### 14. Record Part Suffix Read Past Path Length
+- **Vulnerability**: In `src/record/ngx_media_record.c`, part 2+ filenames were built with `%s` on `dot`, a pointer into an `ngx_str_t` with no NUL guarantee, over-reading past `path.len`. The fixed `+16` allocation also assumed small part numbers without checking `snprintf`'s return.
+- **Root Cause**: Treating a counted slice as a NUL-terminated string.
+- **Fix**: Build the suffix with `%.*s` bounded by the slice length, size for the longest uint64 part number, and fail on `snprintf` truncation.
+
+### 15. Routed OPEN/TRACKS Accepted Chunkable Payloads the Sink Cannot Reassemble
+- **Vulnerability**: In `src/core/ngx_media_route.c`, `route_open()` and `route_tracks()` sent arbitrarily large payloads through the chunking IPC sender while the runtime sink parses each datagram as a complete message. A TRACKS payload past one datagram (reachable via large codec configs) would parse as truncated and bogus track sets.
+- **Root Cause**: Missing the single-datagram bound the graph encoder already enforces.
+- **Fix**: Return `NGX_ERROR` when `len > NGX_MEDIA_IPC_MAX_PAYLOAD`, mirroring `graph_encode`.
+
+### 16. HTTP Endpoint Split Accepted Control Bytes and Bad Ports
+- **Vulnerability**: In `src/core/ngx_media_http.c`, `http_split()` copied host/target into the request line without charset checks, so a configured URL containing CR/LF could inject headers into the socket write; `atoi` port parsing accepted 0 and >65535, and empty hosts passed through.
+- **Root Cause**: No validation between URL configuration and request serialization.
+- **Fix**: Reject bytes `<= 0x20`, `0x7F`, and `#` in host, controls in target, require a leading `/`, and enforce port `1-65535` plus a non-empty host.
+
+### 17. Control API Returned Truncated JSON as 200 OK
+- **Vulnerability**: In `src/api/ngx_media_api_module.c`, `destination_json()` always returned `NGX_OK` and `desired_get()` never checked truncation, so a large graph (many streams/destinations) returned a cut-mid-array document with 200 OK; replaying it would lose state.
+- **Root Cause**: Inconsistent bounds handling: sibling builders already return ERROR on truncation.
+- **Fix**: `destination_json()` reports `(*last < end - 1)`, all four call sites and every `desired_get` append check for truncation and answer 500 instead.
+
 ---
 
 ## 3. Engineering Guidelines for Future Contributors
@@ -76,3 +116,15 @@ This document records the security boundaries, threat models, verified vulnerabi
    - Never use single-threaded NGINX memory pools (`cycle->pool` or `r->pool`) inside background worker threads.
 4. **Open-Addressing Tables**:
    - Linear probing or secondary hashing tables require tombstone states for deletions; resetting a slot to `FREE` corrupts probe sequences for colliding keys.
+5. **Queue Admission Must Mirror the Writer**:
+   - When a packetizer fans one message out to N units (chunks, slices, fragments), reserve N before encoding, not 1; re-check the bound inside the fill loop.
+6. **Recursion Depth Is Attacker Input**:
+   - Never recurse once per input element in a parser reachable from the network; use a loop and keep the iterator's progress in the state object.
+7. **Slices Are Not Strings**:
+   - `ngx_str_t` carries no NUL guarantee: never pass `data` to `%s`/`str*` without a bound (`%.*s`, explicit length checks).
+8. **One Datagram, One Message**:
+   - If the sink parses a single datagram as a complete message, the sender must refuse payloads past `NGX_MEDIA_IPC_MAX_PAYLOAD` rather than chunk them.
+9. **Validate Before Serializing**:
+   - URLs and filenames that reach a socket write or a filesystem call must be charset/range-checked at parse time (controls, ports, suffixes), not at use.
+10. **Truncation Is an Error**:
+    - A builder that cannot fit its document must report it and the handler must answer 5xx; a cut 200 OK corrupts every controller that replays it.

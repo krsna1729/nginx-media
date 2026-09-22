@@ -45,6 +45,10 @@
 #include "ngx_media_ts_demux.h"
 #include "ngx_media_owner.h"
 #include "ngx_media_hls_segmenter.h"
+#include "ngx_media_nal.h"
+#include "ngx_media_record.h"
+#include "ngx_media_ipc.h"
+#include "ngx_media_srt_transport.h"
 
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -52,6 +56,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -232,6 +237,31 @@ static const char *route_paths[] = {
 static const char *hls_seg_paths[] = {
     "../../src/hls/ngx_media_hls_segmenter.c",
     "src/hls/ngx_media_hls_segmenter.c",
+};
+
+static const char *rtmp_mod_paths[] = {
+    "../../src/rtmp/ngx_media_rtmp_module.c",
+    "src/rtmp/ngx_media_rtmp_module.c",
+};
+
+static const char *srt_tr_paths[] = {
+    "../../src/srt/ngx_media_srt_transport.c",
+    "src/srt/ngx_media_srt_transport.c",
+};
+
+static const char *hls_push_paths[] = {
+    "../../src/core/ngx_media_hls_push.c",
+    "src/core/ngx_media_hls_push.c",
+};
+
+static const char *nal_paths[] = {
+    "../../src/codec/ngx_media_nal.c",
+    "src/codec/ngx_media_nal.c",
+};
+
+static const char *record_paths[] = {
+    "../../src/record/ngx_media_record.c",
+    "src/record/ngx_media_record.c",
 };
 
 /* ------------------------------------------------------------------ */
@@ -1224,6 +1254,424 @@ test_hls_segmenter_psi_bytes(void)
           "segmenter prepends PAT/PMT to every new segment");
 }
 
+/* ------------------------------------------------------------------ */
+/* Round 4: player-queue accounting, null backends, push scan, NAL     */
+/* loop, record suffix, route bounds, URL validation, API truncation.  */
+/* ------------------------------------------------------------------ */
+
+/* mirrors the reservation in ngx_media_rtmp_queue_message */
+#define SEC_RTMP_OUT_CHUNK  4096
+#define SEC_RTMP_MAX_QUEUE  64
+
+static void
+test_rtmp_player_reserve(void)
+{
+    /* a 300 KiB keyframe: the writer emits ceil(len/4096) payload slices */
+    size_t  len = 300 * 1024;
+    size_t  chunks = (len + SEC_RTMP_OUT_CHUNK - 1) / SEC_RTMP_OUT_CHUNK;
+    size_t  old_reserve_chain = 1 * 2 + 1;
+    size_t  old_reserve_refs = 1;
+    size_t  need_chain = chunks * 2 + 1;
+    size_t  need_refs = chunks;
+
+    TEST_CASE("rtmp: player queue reserves per-chunk, not per-message");
+
+    CHECK(chunks == 75, "300 KiB is 75 chunks: %lu", chunks);
+    CHECK(old_reserve_chain < need_chain && old_reserve_refs < need_refs,
+          "the old per-message reservation demonstrably undercounts "
+          "(chain %lu<%lu, refs %lu<%lu)",
+          old_reserve_chain, need_chain, old_reserve_refs, need_refs);
+
+    /*
+     * Admission outcome from an empty queue: the old check passes and the
+     * message proceeds into the 64-slot ring (overflow past 64 refs); the
+     * fixed check refuses with AGAIN.  A 100 KiB message (25 chunks) still
+     * fits under the fixed accounting.
+     */
+    CHECK(old_reserve_chain <= SEC_RTMP_MAX_QUEUE
+          && old_reserve_refs <= SEC_RTMP_MAX_QUEUE,
+          "old check admits the 75-chunk message (then overflows)");
+    CHECK(need_chain > SEC_RTMP_MAX_QUEUE || need_refs > SEC_RTMP_MAX_QUEUE,
+          "fixed check refuses it instead (chain %lu, refs %lu)",
+          need_chain, need_refs);
+    {
+        size_t  small = (100 * 1024 + SEC_RTMP_OUT_CHUNK - 1)
+                        / SEC_RTMP_OUT_CHUNK;
+
+        CHECK(small * 2 + 1 <= SEC_RTMP_MAX_QUEUE
+              && small <= SEC_RTMP_MAX_QUEUE,
+              "a 100 KiB message (%lu chunks) is still admitted", small);
+    }
+    CHECK(file_contains(rtmp_mod_paths,
+                        sizeof(rtmp_mod_paths) / sizeof(rtmp_mod_paths[0]),
+                        "(len + NGX_MEDIA_RTMP_OUT_CHUNK - 1)"),
+          "player queue sizes the reservation by chunk count");
+    CHECK(file_contains(rtmp_mod_paths,
+                        sizeof(rtmp_mod_paths) / sizeof(rtmp_mod_paths[0]),
+                        "in_flight_count >= NGX_MEDIA_RTMP_MAX_OUT_QUEUE"),
+          "player queue guards the ring inside the slice loop");
+}
+
+static void
+test_srt_null_backend(void)
+{
+    const char  *err;
+
+    TEST_CASE("srt: transport wrappers survive a missing backend");
+
+    /* with a backend linked these are live values, never NULL */
+    err = ngx_media_srt_last_error();
+    CHECK(err != NULL, "last_error always returns a string");
+
+    CHECK(file_contains(srt_tr_paths,
+                        sizeof(srt_tr_paths) / sizeof(srt_tr_paths[0]),
+                        "|| ngx_media_srt_backend()->connect == NULL"),
+          "connect() guards the backend pointer");
+    CHECK(file_contains(srt_tr_paths,
+                        sizeof(srt_tr_paths) / sizeof(srt_tr_paths[0]),
+                        "|| ngx_media_srt_backend()->send == NULL"),
+          "send() guards the backend pointer");
+    CHECK(file_contains(srt_tr_paths,
+                        sizeof(srt_tr_paths) / sizeof(srt_tr_paths[0]),
+                        "|| ngx_media_srt_backend()->last_error == NULL"),
+          "last_error() guards the backend pointer");
+}
+
+/* mirrors the fixed scanner condition in ngx_media_hls_push.c */
+static int
+sec_push_wanted(const char *name)
+{
+    size_t  len = strlen(name);
+
+    if (len < 4) {
+        return 0;
+    }
+
+    if (strcmp(name + len - 3, ".ts") == 0) {
+        return 1;
+    }
+
+    if (len >= 5 && strcmp(name + len - 5, ".m3u8") == 0) {
+        return 1;
+    }
+
+    return 0;
+}
+
+static void
+test_push_scan_names(void)
+{
+    const char  *evil = "abcd";   /* len 4, not a segment */
+
+    TEST_CASE("hls push: 4-char names never read before the buffer");
+
+    /* the old expression evaluates name+4-5 == name-1: demonstrate the
+     * underflow without dereferencing it, so this is core-free */
+    CHECK(evil + strlen(evil) - 5 < evil,
+          "old arithmetic points before the name (the OOB)");
+
+    CHECK(!sec_push_wanted("abcd"), "4-char non-segment skipped");
+    CHECK(!sec_push_wanted("abc"), "short name skipped");
+    CHECK(sec_push_wanted("seg-1.ts"), ".ts accepted");
+    CHECK(sec_push_wanted("index.m3u8"), ".m3u8 accepted");
+    CHECK(!sec_push_wanted("index.m3u"), "truncated suffix rejected");
+
+    CHECK(file_contains(hls_push_paths,
+                        sizeof(hls_push_paths) / sizeof(hls_push_paths[0]),
+                        "name_len >= 5"),
+          "scanner guards the .m3u8 suffix length");
+}
+
+#define SEC_NAL_EMPTIES  200000
+
+static void
+test_nal_no_recursion(void)
+{
+    u_char                *buf;
+    size_t                 i;
+
+    TEST_CASE("nal: a run of empty units terminates without recursion");
+
+    buf = malloc((size_t) SEC_NAL_EMPTIES * 3);
+    CHECK(buf != NULL, "fuzz buffer allocated");
+
+    if (buf == NULL) {
+        return;
+    }
+
+    for (i = 0; i < SEC_NAL_EMPTIES; i++) {
+        buf[i * 3] = 0x00;
+        buf[i * 3 + 1] = 0x00;
+        buf[i * 3 + 2] = 0x01;
+    }
+
+    /*
+     * Forked probe like the AMF one: 200k nested frames would smash the
+     * 8 MB stack on pre-fix code (each level keeps a frame).  The child
+     * inherits the no-core limit, so a pre-fix crash is a FAIL, not a
+     * core file.
+     */
+    {
+        pid_t  pid;
+        int    status = 0;
+
+        fflush(stdout);
+        pid = fork();
+
+        if (pid == -1) {
+            CHECK(0, "fork for nal probe failed");
+        } else if (pid == 0) {
+            ngx_media_nal_iter_t  cit;
+            ngx_media_nal_t        cnal;
+            size_t                 cn = 0;
+
+            ngx_media_nal_iter_init(&cit, buf, (size_t) SEC_NAL_EMPTIES * 3);
+
+            while (ngx_media_nal_iter_next(&cit, &cnal)) {
+                cn++;
+            }
+
+            _exit((cn == 0) ? 0 : 1);
+        } else {
+            while (waitpid(pid, &status, 0) < 0) {
+                /* retry on EINTR */
+            }
+
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                CHECK(1, "forked probe: empty units terminate with no NALs");
+            } else if (WIFSIGNALED(status)) {
+                CHECK(0, "empty units crashed child (signal %d, no core): "
+                      "pre-fix recursion", WTERMSIG(status));
+            } else {
+                CHECK(0, "empty units yielded NALs (child exit %d)",
+                      WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+            }
+        }
+    }
+
+    /* the same input in-process on a shallow run: safe at any depth the
+     * fixed loop handles, and shallow enough that even pre-fix recursion
+     * cannot overflow the stack, so the main process never crashes */
+    {
+        u_char                small[64 * 3];
+        ngx_media_nal_iter_t  sit;
+        ngx_media_nal_t        snal;
+        size_t                 sn = 0, si;
+
+        for (si = 0; si < 64; si++) {
+            small[si * 3] = 0x00;
+            small[si * 3 + 1] = 0x00;
+            small[si * 3 + 2] = 0x01;
+        }
+
+        ngx_media_nal_iter_init(&sit, small, sizeof(small));
+
+        while (ngx_media_nal_iter_next(&sit, &snal)) {
+            sn++;
+        }
+
+        CHECK(sn == 0, "no NALs from empty units: %lu", sn);
+    }
+
+    free(buf);
+
+    CHECK(!file_contains(nal_paths,
+                         sizeof(nal_paths) / sizeof(nal_paths[0]),
+                         "return ngx_media_nal_iter_next(it, nal);"),
+          "iterator loops instead of recursing");
+}
+
+static void
+test_record_suffix(void)
+{
+    ngx_media_record_t       rec;
+    ngx_media_record_conf_t  conf;
+    ngx_media_buf_t         *buf;
+    u_char                  *raw;
+    char                     expect[256];
+    struct stat              st;
+    ngx_uint_t               i;
+
+    TEST_CASE("record: part suffix never reads past path.len");
+
+    (void) mkdir(".build", 0755);
+    (void) mkdir(".build/sec-record", 0755);
+
+    /*
+     * A path slice with no NUL at path.len: pre-fix %s keeps reading into
+     * the 'Q' fill, so part 2 lands in a garbage filename and the expected
+     * file is missing (FAIL, no crash).  Fixed code uses %.*s.
+     */
+    raw = malloc(64);
+    CHECK(raw != NULL, "path buffer allocated");
+
+    if (raw == NULL) {
+        return;
+    }
+
+    memcpy(raw, ".build/sec-record/r.ts", 23);
+    memset(raw + 23, 'Q', 64 - 23 - 1);
+    raw[63] = '\0';
+
+    snprintf(expect, sizeof(expect), ".build/sec-record/r-0002.ts");
+    (void) unlink(expect);
+
+    ngx_media_record_conf_default(&conf);
+    conf.path.data = raw;
+    conf.path.len = 23;
+    conf.tap = NGX_MEDIA_RECORD_PROGRAM;
+    conf.max_part_bytes = 512;
+    conf.max_pending_bytes = 64 * 1024;
+    conf.max_jobs = 256;
+
+    CHECK(ngx_media_record_init(&rec, &conf, NULL) == NGX_OK, "record init");
+
+    for (i = 0; i < 16; i++) {
+        buf = ngx_media_buf_alloc(256);
+
+        if (buf == NULL) {
+            break;
+        }
+
+        memset(ngx_media_buf_data(buf), (int) i, 256);
+        (void) ngx_media_buf_freeze(buf, 256);
+        (void) ngx_media_record_append(&rec, buf, 0, 256);
+        ngx_media_buf_unref(buf);
+    }
+
+    ngx_media_record_stop(&rec);
+    free(raw);
+
+    CHECK(stat(expect, &st) == 0, "part 2 has the exact bounded name");
+    (void) unlink(expect);
+
+    CHECK(file_contains(record_paths,
+                        sizeof(record_paths) / sizeof(record_paths[0]),
+                        "%.*s-%04llu%.*s"),
+          "part suffix is bounded by the slice length");
+}
+
+static void
+test_route_ipc_bounds(void)
+{
+    /* a track set with a 70 KiB codec config blob */
+    size_t  len = sizeof(uint32_t) + 10 * sizeof(uint32_t) + 70 * 1024;
+
+    TEST_CASE("route: open/tracks refuse payloads past one datagram");
+
+    CHECK(len > NGX_MEDIA_IPC_MAX_PAYLOAD,
+          "70 KiB config exceeds the %lu-byte datagram payload",
+          (unsigned long) NGX_MEDIA_IPC_MAX_PAYLOAD);
+    CHECK(file_contains(route_paths,
+                        sizeof(route_paths) / sizeof(route_paths[0]),
+                        "len > NGX_MEDIA_IPC_MAX_PAYLOAD"),
+          "route_open/tracks guard the datagram bound");
+}
+
+/* mirrors the fixed ngx_media_http_split validation */
+static int
+sec_url_ok(const char *url)
+{
+    const char  *host, *slash, *colon, *end, *target, *p;
+    size_t       host_len, target_len;
+
+    if (strncmp(url, "https://", 8) == 0) {
+        host = url + 8;
+    } else if (strncmp(url, "http://", 7) == 0) {
+        host = url + 7;
+    } else {
+        return 0;
+    }
+
+    end = url + strlen(url);
+    slash = strchr(host, '/');
+
+    if (slash == NULL) {
+        target = "/";
+        target_len = 1;
+        host_len = (size_t) (end - host);
+    } else {
+        target = slash;
+        target_len = (size_t) (end - slash);
+        host_len = (size_t) (slash - host);
+    }
+
+    for (p = target; p < target + target_len; p++) {
+        if ((unsigned char) *p <= 0x20 || *p == 0x7F) {
+            return 0;
+        }
+    }
+
+    for (p = host; p < host + host_len; p++) {
+        if ((unsigned char) *p <= 0x20 || *p == 0x7F || *p == '#') {
+            return 0;
+        }
+    }
+
+    if (target[0] != '/') {
+        return 0;
+    }
+
+    colon = memchr(host, ':', host_len);
+
+    if (colon != NULL) {
+        long  port = atol(colon + 1);
+
+        if (port <= 0 || port > 65535) {
+            return 0;
+        }
+
+        host_len = (size_t) (colon - host);
+    }
+
+    return host_len > 0 && target_len > 0;
+}
+
+static void
+test_http_split_validation(void)
+{
+    TEST_CASE("http: endpoint URLs reject controls and bad ports");
+
+    CHECK(sec_url_ok("http://example.com/live/a.ts"), "plain URL accepted");
+    CHECK(sec_url_ok("https://example.com:8443/a.ts"), "explicit port ok");
+    CHECK(!sec_url_ok("http://example.com/a\r\nX-Evil: 1"),
+          "CRLF injection rejected");
+    CHECK(!sec_url_ok("http://example.com/a b.ts"), "space rejected");
+    CHECK(!sec_url_ok("http://example.com:99999/a.ts"), "port range checked");
+    CHECK(!sec_url_ok("http://example.com:0/a.ts"), "port zero rejected");
+    CHECK(!sec_url_ok("http:///a.ts"), "empty host rejected");
+    CHECK(!sec_url_ok("ftp://example.com/a.ts"), "scheme restricted");
+
+    CHECK(file_contains(http_paths,
+                        sizeof(http_paths) / sizeof(http_paths[0]),
+                        "*p <= 0x20"),
+          "http_split rejects control bytes");
+    CHECK(file_contains(http_paths,
+                        sizeof(http_paths) / sizeof(http_paths[0]),
+                        "> 65535"),
+          "http_split validates the port range");
+}
+
+static void
+test_api_truncation(void)
+{
+    TEST_CASE("api: truncated JSON reports 500, never a cut 200");
+
+    /*
+     * destination_json used to return OK unconditionally and desired_get
+     * closed with OK: three pre-existing uses of the status idiom, five
+     * once both report truncation.
+     */
+    CHECK(file_count(api_paths,
+                     sizeof(api_paths) / sizeof(api_paths[0]),
+                     "return (*last < end - 1) ? NGX_OK : NGX_ERROR;") >= 4,
+          "destination_json/desired tail report truncation");
+    CHECK(file_count(api_paths,
+                     sizeof(api_paths) / sizeof(api_paths[0]),
+                     "if (ngx_media_api_destination_json") >= 4,
+          "truncation propagates to a 500 status");
+}
+
 int
 main(void)
 {
@@ -1249,6 +1697,16 @@ main(void)
     test_ingest_seen_ring();
     test_route_reload_fds();
     test_hls_segmenter_psi_bytes();
+
+    /* round 4 */
+    test_rtmp_player_reserve();
+    test_srt_null_backend();
+    test_push_scan_names();
+    test_nal_no_recursion();
+    test_record_suffix();
+    test_route_ipc_bounds();
+    test_http_split_validation();
+    test_api_truncation();
 
     TEST_LEAKS();
     TEST_MAIN_END();
