@@ -189,6 +189,7 @@ make bench-hls            # serving HLS: disk vs tmpfs, sendfile, kTLS
 make bench-hls-fanout     # many concurrent readers over a sliding window
 make bench-push-fanout    # the uploader's copy path, 8 destinations
 make bench-burst-sizing   # sweep TS backing capacity against real media
+make bench-capacity-curve     # fixed-worker offered-load sweep and fairness
 ```
 
 These measure rather than assert, and their numbers are what the HLS and push
@@ -198,6 +199,27 @@ tmpfs mount and says so and skips that variant when it cannot have one.
 one function changed, so it takes the two nginx binaries as its arguments
 (defaulting to `/tmp/nginx-sendfile` and `/tmp/nginx-buffered`); the target
 runs it with those defaults, which is only meaningful if you put them there.
+
+`bench-capacity-curve` holds the worker count constant (four by default) and
+sweeps active programs, encoded video bitrate, then SRT destinations per
+program; its last case is sustained and reports Jain's frame-progress fairness.
+Each case starts a fresh NGINX instance and enables HLS's shared transport mux,
+which supplies the SRT push sink; the HLS segmentation and file I/O overhead are
+part of the measured configuration.  Destinations and receivers are installed
+before publishers start.  The harness waits for program-frame and output-feed
+progress, then snapshots the baseline before the timed window so startup is
+excluded from throughput and histogram deltas.  The fresh stream also scopes
+the exact `fanout.max` to that load point.  It reports owner progress, worker
+CPU, visit maxima and budget reposts, feed pressure, per-worker `ss -m` socket
+memory, and host-global `/proc/net/sockstat` values.
+
+`CAPACITY_WORKERS` chooses the fixed worker count.  `CAPACITY_WINDOW`,
+`CAPACITY_PROGRAM_STEPS`, `CAPACITY_BITRATE_STEPS`, and `CAPACITY_DEST_STEPS`
+bound the shorter sweeps; `CAPACITY_SUSTAINED_SECONDS` controls the fairness
+window.  The harness caps each source at 60 Mbit/s, nominal case egress at
+1000 Mbit/s, total destinations at 64, outputs per owner at 16, and each
+measurement window at 600 seconds.  This is an offered-load curve, not a
+worker-count sweep.
 
 `bench-burst-sizing` runs the in-process demux/mux/remux fixture at each
 capacity in `CAPACITIES` (bytes).  It reports burst count, observed byte range,

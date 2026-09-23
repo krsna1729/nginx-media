@@ -74,7 +74,9 @@ a controller restart survivable.
       "preroll_units":77,"preroll_bytes":495866,"preroll_overflows":0},
      {"id":"encoder-b","type":1,"state":"active","priority":50,
       ...}],
-   "fanout_ms":{"p50":3,"p95":11,"p99":24,"max":41},
+   "fanout_ms":{"p50":4,"p95":16,"p99":32,"max":41,
+     "bucket_upper_ms":[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,null],
+     "bucket_counts":[0,0,1700,1430,220,40,10,0,0,0,0,0,0,0,0,0]},
    "dispatched":3400}
 ],"count":1}
 ```
@@ -105,12 +107,14 @@ Field notes:
   whether the worker answering this read is it.  Both are computed the same way
   on every worker — see "Ownership" below — so they agree across the
   deployment, which is the point of them.
-- `fanout_ms` is the program's fanout delay — the time from when the program
-  published a unit of media to when a consumer took it — at the 50th, 95th and
-  99th percentile and the observed maximum, and `dispatched` counts the units
-  consumers have taken.  This is the number an operator can feel: it says
-  whether the deployment has headroom or is spending its slack on a slow
-  destination.
+- `fanout_ms` reports p50/p95/p99 and the observed maximum delay, in
+  milliseconds from program publish to consumer dispatch.  The percentiles
+  are conservative upper bounds of the histogram buckets; `max` is the exact
+  observed maximum, capped at 60000 ms.  `bucket_upper_ms` lists inclusive
+  bucket upper bounds, with `null` for the final bucket above 16384 ms;
+  `bucket_counts` gives the per-bucket sample counts in the same order, and
+  their sum equals `dispatched`.  `dispatched` counts units consumers have
+  taken.
 
 ## Ownership
 
@@ -426,7 +430,9 @@ An apply is accepted as `PUT` or as `POST`.
                "revision":2}],
    "destinations":[{"id":"cdn","type":3,"host":"http://origin/","port":0,
                     "enabled":true,"revision":3}],
-   "fanout_ms":{"p50":3,"p95":11,"p99":24,"max":41},
+   "fanout_ms":{"p50":4,"p95":16,"p99":32,"max":41,
+     "bucket_upper_ms":[1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,null],
+     "bucket_counts":[0,0,1700,1430,220,40,10,0,0,0,0,0,0,0,0,0]},
    "dispatched":3400}],
  "count":1}
 ```
@@ -465,6 +471,11 @@ API for a graph of tens of streams, not thousands.
 maintained by the program runtime, so scraping costs one walk of the registry
 and nothing is computed on the request path.
 
+Each response contains one `nginx_media_worker_info{worker,pid} 1` series
+identifying the worker that served it.  Worker counters are process-local, not
+cluster aggregates; with `reuseport`, a new connection can be served by a
+different worker.
+
 ```
 nginx_media_stream_generation{application="live",name="news"} 2
 nginx_media_stream_switches{application="live",name="news"} 1
@@ -485,13 +496,14 @@ nginx_media_streams_draining 0
 nginx_media_worker_event_loop_delay_ms 100
 nginx_media_worker_event_loop_max_delay_ms 143
 nginx_media_worker_late_ticks_total 2
+nginx_media_worker_info{worker="0",pid="1234"} 1
 ```
 
 Series appear for every registered program and every source of it, so
 `nginx_media_source_active` is the cheapest way to alert on "the program lost
 its source": no source with value `1` means nothing is on air.
 
-Three groups are worth knowing:
+Four groups are worth knowing:
 
 - **Fanout delay.**  `nginx_media_stream_fanout_delay_ms{percentile="50|95|99"}`
   is `dispatch_time - program_publish_time`: how long a unit of media waits
@@ -501,6 +513,9 @@ Three groups are worth knowing:
   the series never reports better than reality.  `dispatched_total` is the
   count of units taken: a zero rate here while frames are still being produced
   means nobody is consuming the program.
+- **Worker identity.**  `nginx_media_worker_info{worker,pid}` identifies the
+  worker that generated the current response; per-worker gauges and counters
+  immediately above are not aggregated across the NGINX workers.
 - **Feed lag.**  `nginx_media_stream_feed_units` and `_feed_bytes` are what the
   program feed still retains — the backlog a slow consumer is running against.
   Both are gauges with a ceiling, so a value pinned at the ceiling is the

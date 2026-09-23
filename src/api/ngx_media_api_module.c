@@ -676,6 +676,42 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
 }
 
 static ngx_int_t
+ngx_media_api_fanout_json(u_char **last, u_char *end,
+    ngx_media_stream_t *stream)
+{
+    ngx_uint_t  i;
+
+    *last = ngx_snprintf(*last, end - *last,
+                         ",\"fanout_ms\":{\"p50\":%M,\"p95\":%M,"
+                         "\"p99\":%M,\"max\":%uL,"
+                         "\"bucket_upper_ms\":[1,2,4,8,16,32,64,128,"
+                         "256,512,1024,2048,4096,8192,16384,null],"
+                         "\"bucket_counts\":[",
+                         ngx_media_feed_fanout_percentile(&stream->program_feed,
+                                                          500),
+                         ngx_media_feed_fanout_percentile(&stream->program_feed,
+                                                          950),
+                         ngx_media_feed_fanout_percentile(&stream->program_feed,
+                                                          990),
+                         ngx_media_feed_fanout_max(&stream->program_feed));
+
+    for (i = 0; i < NGX_MEDIA_FEED_HIST_BUCKETS; i++) {
+        if (i != 0) {
+            *last = ngx_snprintf(*last, end - *last, ",");
+        }
+
+        *last = ngx_snprintf(*last, end - *last, "%uL",
+                             stream->program_feed.fanout.buckets[i]);
+    }
+
+    *last = ngx_snprintf(*last, end - *last,
+                         "]},\"dispatched\":%uL",
+                         ngx_media_feed_fanout_count(&stream->program_feed));
+
+    return (*last < end - 1) ? NGX_OK : NGX_ERROR;
+}
+
+static ngx_int_t
 ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream)
 {
     ngx_media_runtime_progress_t  progress;
@@ -759,17 +795,12 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
     }
 
     *last = ngx_snprintf(*last, end - *last, "]");
-    *last = ngx_snprintf(*last, end - *last,
-                         ",\"fanout_ms\":{\"p50\":%M,\"p95\":%M,"
-                         "\"p99\":%M,\"max\":%uL},\"dispatched\":%uL}",
-                         ngx_media_feed_fanout_percentile(&stream->program_feed,
-                                                          500),
-                         ngx_media_feed_fanout_percentile(&stream->program_feed,
-                                                          950),
-                         ngx_media_feed_fanout_percentile(&stream->program_feed,
-                                                          990),
-                         ngx_media_feed_fanout_max(&stream->program_feed),
-                         ngx_media_feed_fanout_count(&stream->program_feed));
+
+    if (ngx_media_api_fanout_json(last, end, stream) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last, "}");
 
     return (*last < end - 1) ? NGX_OK : NGX_ERROR;
 }
@@ -1045,6 +1076,17 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          stats.routed_no_payload,
                          stats.routed_reassembly_errors,
                          stats.routed_publish_errors);
+    *last = ngx_snprintf(*last, end - *last,
+                         "# HELP nginx_media_worker_info identity of the "
+                         "worker serving this metrics response\n"
+                         "# TYPE nginx_media_worker_info gauge\n"
+                         "nginx_media_worker_info{worker=\"%i\",pid=\"%P\"} "
+                         "1\n",
+                         ngx_worker, ngx_pid);
+
+    if (*last >= end) {
+        return NGX_ERROR;
+    }
 
     for (q = ngx_queue_head(&registry->entries);
          q != (ngx_queue_t *) &registry->entries;
@@ -3110,18 +3152,13 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
             }
         }
 
-        *last = ngx_snprintf(*last, end - *last,
-                             "],\"fanout_ms\":{\"p50\":%M,\"p95\":%M,"
-                             "\"p99\":%M,\"max\":%uL},\"dispatched\":%uL}",
-                             ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 500),
-                             ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 950),
-                             ngx_media_feed_fanout_percentile(
-                                 &stream->program_feed, 990),
-                             ngx_media_feed_fanout_max(&stream->program_feed),
-                             ngx_media_feed_fanout_count(
-                                 &stream->program_feed));
+        *last = ngx_snprintf(*last, end - *last, "]");
+
+        if (ngx_media_api_fanout_json(last, end, stream) != NGX_OK) {
+            return NGX_ERROR;
+        }
+
+        *last = ngx_snprintf(*last, end - *last, "}");
 
         if (*last >= end - 1) {
             return NGX_ERROR;

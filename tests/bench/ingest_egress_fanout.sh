@@ -40,6 +40,12 @@
 #            alternating, and one-program local/routed controls.  Every row
 #            includes input/program frames, feed pressure, preroll causes and
 #            route failures from the owning worker.
+#   capacity a fixed-worker offered-load curve: first add programs, then
+#            encoded bitrate, then destinations per program, followed by a
+#            sustained multi-program fairness window.  Each point records
+#            owner progress/fanout, per-worker CPU and visit metrics, feed
+#            pressure, and socket memory.
+#
 #
 # Publishers stream a pre-encoded file with -c copy, so what is measured is
 # the receiver's cost and not ffmpeg's encoder.  `media_srt_listen` is given
@@ -65,6 +71,8 @@
 #   PHASES=misplace make bench-ingest-egress-fanout     one phase
 #   PHASES=topology make bench-ingest-egress-fanout    owner matrix
 #   HI_BITRATE=45M PHASES=ingest ...                    more aggressive
+#   make bench-capacity-curve
+#   CAPACITY_WINDOW=2 CAPACITY_PROGRAM_STEPS="1 4" PHASES=capacity ... smoke
 
 set -uo pipefail
 
@@ -72,9 +80,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NGINX="$ROOT/.build/nginx-install/sbin/nginx"
 RUN="$ROOT/.build/ingest-egress-fanout"
 
-# ports from the pid, so two runs on one host cannot collide.  One block is 40
-# wide: endpoints 0-3, http and rtmp at +0/+1, destination sinks from +20.
-BASE=$(( 30000 + ($$ % 40) * 40 ))
+# ports from the pid, so two runs on one host cannot collide.  Each instance
+# owns a 256-wide block: endpoints 0-3, http and rtmp at +0/+1, destination
+# sinks from +20.
+BASE=$(( 30000 + ($$ % 80) * 256 ))
 HTTP_PORT="$BASE"
 RTMP_PORT="$(( BASE + 1 ))"
 
@@ -111,6 +120,22 @@ LIVE_SECONDS="${LIVE_SECONDS:-12}"
 MP_WORKERS="${MP_WORKERS:-2}"
 MP_PUBS="${MP_PUBS:-12}"
 MP_BITRATE="${MP_BITRATE:-20M}"
+# capacity curve (fixed worker count; each axis varies offered work)
+CAPACITY_WORKERS="${CAPACITY_WORKERS:-4}"
+CAPACITY_WINDOW="${CAPACITY_WINDOW:-8}"
+CAPACITY_PROGRAM_STEPS="${CAPACITY_PROGRAM_STEPS:-1 2 4 8}"
+CAPACITY_PROGRAM_RATE="${CAPACITY_PROGRAM_RATE:-6M}"
+CAPACITY_PROGRAM_DESTS="${CAPACITY_PROGRAM_DESTS:-1}"
+CAPACITY_BITRATE_STEPS="${CAPACITY_BITRATE_STEPS:-2M 6M 12M 20M}"
+CAPACITY_BITRATE_PROGRAMS="${CAPACITY_BITRATE_PROGRAMS:-4}"
+CAPACITY_BITRATE_DESTS="${CAPACITY_BITRATE_DESTS:-1}"
+CAPACITY_DEST_STEPS="${CAPACITY_DEST_STEPS:-1 2 4 8}"
+CAPACITY_DEST_PROGRAMS="${CAPACITY_DEST_PROGRAMS:-4}"
+CAPACITY_DEST_RATE="${CAPACITY_DEST_RATE:-6M}"
+CAPACITY_SUSTAINED_SECONDS="${CAPACITY_SUSTAINED_SECONDS:-60}"
+CAPACITY_SUSTAINED_PROGRAMS="${CAPACITY_SUSTAINED_PROGRAMS:-4}"
+CAPACITY_SUSTAINED_RATE="${CAPACITY_SUSTAINED_RATE:-6M}"
+CAPACITY_SUSTAINED_DESTS="${CAPACITY_SUSTAINED_DESTS:-4}"
 # -muxrate makes the offered rate a parameter, so the placed and routed runs
 # carry the same media and the CPU comparison is per unit carried
 MP_RATE="${MP_RATE:-20M}"
@@ -1434,6 +1459,585 @@ phase_topology() {
     return 0
 }
 
+capacity_json_field() {   # <stream snapshot> <dot-separated field>
+    python3 - "$1" "$2" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    value = json.loads(source.read().split("# HELP", 1)[0])
+for field in sys.argv[2].split("."):
+    value = value[field]
+if isinstance(value, list):
+    print(" ".join("60000" if item is None else str(item) for item in value))
+else:
+    print(value)
+PY
+}
+
+capacity_metric() {   # <metrics snapshot> <metric>
+    awk -v metric="$2" '$1 == metric { print $2; exit }' "$1"
+}
+
+capacity_percentile() {   # <metrics snapshot> <stream> <percentile>
+    awk -v name="$2" -v percentile="$3" '
+        index($1, "nginx_media_stream_fanout_delay_ms{") == 1 &&
+        index($1, "name=\"" name "\"") > 0 &&
+        index($1, "percentile=\"" percentile "\"") > 0 { print $2; exit }
+    ' "$1"
+}
+
+capacity_worker_pid() {
+    sed -n \
+        's/^nginx_media_worker_info{worker="[^"]*",pid="\([0-9][0-9]*\)"} 1$/\1/p'
+}
+
+capacity_worker_metrics() {   # <file prefix>; one response from every worker
+    local prefix="$1" required valid blob pid attempt
+    local -A seen=()
+
+    required="$(worker_pids | awk 'NF { n++ } END { print n + 0 }')"
+    valid=" $(worker_pids | tr '\n' ' ') "
+
+    for attempt in $(seq 1 "$(( required * 50 ))"); do
+        blob="$(curl -fsS "$(api)/metrics" 2>/dev/null || true)"
+        pid="$(printf '%s\n' "$blob" | capacity_worker_pid | head -1)"
+
+        case "$valid" in
+            *" $pid "*)
+                if [ -z "${seen[$pid]:-}" ]; then
+                    printf '%s\n' "$blob" > "$prefix.$pid"
+                    seen[$pid]=1
+                fi
+                ;;
+        esac
+
+        [ "${#seen[@]}" -ge "$required" ] && break
+    done
+
+    if [ "${#seen[@]}" -ne "$required" ]; then
+        echo "   only scraped ${#seen[@]} of $required worker metrics" >&2
+        return 1
+    fi
+}
+
+capacity_socket_snapshot() {   # <file prefix>
+    local prefix="$1" pids
+
+    pids="$(worker_pids | tr '\n' ' ')"
+    ss -t -n -a -m -p > "$prefix.tcp" || return 1
+    ss -u -n -a -m -p > "$prefix.udp" || return 1
+    cp /proc/net/sockstat "$prefix.sockstat" || return 1
+
+    python3 - "$prefix" "$pids" > "$prefix" <<'PY'
+import re
+import sys
+
+prefix = sys.argv[1]
+pids = [pid for pid in sys.argv[2].split() if pid]
+stats = {
+    pid: {"tcp_sockets": 0, "tcp_bytes": 0,
+          "udp_sockets": 0, "udp_bytes": 0}
+    for pid in pids
+}
+
+for proto in ("tcp", "udp"):
+    with open(f"{prefix}.{proto}", encoding="utf-8") as source:
+        lines = source.readlines()
+
+    for index, line in enumerate(lines):
+        match = re.search(r"skmem:\(([^)]*)\)", line)
+        if match is None:
+            continue
+
+        chunk = "".join(lines[max(0, index - 2):index + 1])
+        owners = set(re.findall(r"pid=(\d+)", chunk)).intersection(stats)
+        if not owners:
+            continue
+
+        fields = dict((key, int(value))
+                      for key, value in re.findall(
+                          r"([a-z]+)(\d+)", match.group(1)))
+        memory = sum(fields.get(key, 0)
+                     for key in ("r", "t", "f", "w", "o", "bl"))
+        for pid in owners:
+            stats[pid][f"{proto}_sockets"] += 1
+            stats[pid][f"{proto}_bytes"] += memory
+
+for pid in sorted(stats, key=int):
+    row = stats[pid]
+    sockets = row["tcp_sockets"] + row["udp_sockets"]
+    memory = row["tcp_bytes"] + row["udp_bytes"]
+    print(pid, row["tcp_sockets"], row["tcp_bytes"],
+          row["udp_sockets"], row["udp_bytes"], sockets, memory,
+          sep="\t")
+PY
+}
+
+capacity_sockstat_value() {   # <snapshot> <protocol:> <field>
+    awk -v proto="$2" -v field="$3" '
+        $1 == proto {
+            for (i = 2; i < NF; i += 2) {
+                if ($i == field) {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }
+    ' "$1"
+}
+
+capacity_rate_bps() {
+    python3 - "$1" <<'PY'
+import re
+import sys
+
+match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgG]?)", sys.argv[1])
+if match is None:
+    raise SystemExit(f"invalid bitrate: {sys.argv[1]}")
+scale = {"": 1, "k": 1_000, "m": 1_000_000, "g": 1_000_000_000}
+bps = round(float(match.group(1)) * scale[match.group(2).lower()])
+if bps <= 0 or bps > 60_000_000:
+    raise SystemExit("bitrate must be positive and no higher than 60M")
+print(bps)
+PY
+}
+
+capacity_worker_cpu() {   # <before> <after> <seconds> <slot>
+    report_cpu "$1" "$2" "$3" \
+        | awk -v slot="$4" '$1 == slot { total += $3 }
+            END { printf "%.1f", total }'
+}
+
+capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds>
+    local label="$1" programs="$2" rate="$3" destinations="$4" seconds="$5"
+    local workers="$CAPACITY_WORKERS" case_id source rate_bps offered_in
+    local offered_out owner name slot index depth total_dest total_started
+    local owner_streams
+    local port sink_id sink_pid attempt progress_ready
+    local before_frames after_frames before_dispatched after_dispatched
+    local fanout_max p50 p95 p99 p999 frame_rate frame_delta fairness
+    local measure_start measure_end measure_seconds
+    local metrics_before metrics_after feed_units feed_bytes feed_high_units
+    local feed_high_bytes feed_evictions feed_evictions_before
+    local feed_evictions_after feed_overruns feed_overruns_before
+    local feed_overruns_after source_frames source_frames_before
+    local source_frames_after
+    local worker_pid worker_slot worker_before worker_after cpu_pct
+    local budget_before budget_after visits_before visits_after
+    local late_before late_after max_service event_delay
+    local socket_before socket_after sock_tcp_before sock_tcp_after
+    local sock_udp_before sock_udp_after tcp_inuse_before tcp_inuse_after
+    local udp_inuse_before udp_inuse_after socket_row
+    local -a owner_pool=() one_owner=() names=() owners=()
+    local -a counts_before=() counts_after=() bounds=()
+    local -a progress_frames=()
+    local bucket_total=0 dispatched_delta=0 bin_label bins_text=""
+    local low high value
+
+    [[ "$programs" =~ ^[1-9][0-9]*$ \
+       && "$destinations" =~ ^[1-9][0-9]*$ \
+       && "$workers" =~ ^[1-9][0-9]*$ \
+       && "$seconds" =~ ^[1-9][0-9]*$ ]] \
+        || { echo "invalid capacity case: $label" >&2; return 1; }
+    [ "$seconds" -le 600 ] \
+        || { echo "capacity window must be at most 600 seconds" \
+                 >&2; return 1; }
+    owner_streams=$(( (programs + workers - 1) / workers ))
+    [ "$workers" -le 16 ] && [ "$programs" -le 32 ] \
+        && [ "$destinations" -le 16 ] \
+        && [ "$(( programs * destinations ))" -le 64 ] \
+        && [ "$(( owner_streams * destinations ))" -le 16 ] \
+        || { echo "capacity case exceeds bounded worker/output/port limits" \
+                 >&2; return 1; }
+    command -v ss >/dev/null \
+        || { echo "ss is required for socket memory snapshots" >&2; return 1; }
+
+    rate_bps="$(capacity_rate_bps "$rate")" || return 1
+    [ "$(( rate_bps * programs * destinations ))" -le 1000000000 ] \
+        || { echo "capacity case nominal egress exceeds 1000 Mbit/s" \
+                 >&2; return 1; }
+    offered_in="$(awk -v b="$(( programs * rate_bps ))" \
+        'BEGIN { printf "%.1f", b / 1000000 }')"
+    offered_out="$(awk -v b="$(( programs * rate_bps * destinations ))" \
+        'BEGIN { printf "%.1f", b / 1000000 }')"
+    total_dest=$(( programs * destinations ))
+    CAPACITY_CASE_ID=$(( ${CAPACITY_CASE_ID:-0} + 1 ))
+    case_id="$CAPACITY_CASE_ID"
+    source="$RUN/media/capacity-$rate.ts"
+    if [ ! -s "$source" ]; then
+        make_source "$source" "$rate"
+    fi
+
+    mkdir -p "$RUN/capacity"
+    local case_dir="$RUN/capacity/$label"
+    rm -rf "$case_dir"
+    mkdir -p "$case_dir"
+
+    for (( slot = 0; slot < workers; slot++ )); do
+        mapfile -t one_owner < <(
+            owner_names "$slot" "$workers" "$programs" "cc${case_id}-"
+        )
+        [ "${#one_owner[@]}" -eq "$programs" ] \
+            || { echo "could not name $programs streams for worker $slot" \
+                     >&2; return 1; }
+        for name in "${one_owner[@]}"; do
+            owner_pool+=( "$slot:$name" )
+        done
+    done
+
+    depth=0
+    while [ "${#names[@]}" -lt "$programs" ]; do
+        for (( slot = 0; slot < workers; slot++ )); do
+            index=$(( slot * programs + depth ))
+            [ "$index" -lt "${#owner_pool[@]}" ] || continue
+            IFS=: read -r owner name <<< "${owner_pool[$index]}"
+            owners+=( "$owner" )
+            names+=( "$name" )
+            [ "${#names[@]}" -ge "$programs" ] && break
+        done
+        depth=$(( depth + 1 ))
+    done
+
+    echo
+    echo "== capacity $label: workers=$workers programs=$programs"
+    echo "   video_rate=$rate offered_ingress=${offered_in}Mbit/s"
+    echo "   destinations_per_program=$destinations total_destinations=$total_dest"
+    echo "   offered_egress=${offered_out}Mbit/s window=${seconds}s"
+
+    # SRT pushes use the shared transport mux; HLS enables that output path.
+    start_instance "$workers" yes no
+    PUBS=()
+    SINKS=()
+
+    for name in "${names[@]}"; do
+        curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d "{\"application\":\"live\",\"name\":\"$name\"}" \
+            "$(api)/streams" >/dev/null \
+            || { echo "could not create capacity stream $name" >&2; return 1; }
+    done
+
+    for (( index = 0; index < programs; index++ )); do
+        name="${names[$index]}"
+        slot="${owners[$index]}"
+        owner="$(owner_of "$name")" || {
+            echo "could not read owner for $name" >&2; return 1;
+        }
+        [ "$owner" = "$slot" ] \
+            || { echo "$name owner $owner did not match expected worker $slot" \
+                     >&2; return 1; }
+
+        for (( attempt = 0; attempt < destinations; attempt++ )); do
+            sink_id="cap${case_id}-p${index}-d${attempt}"
+            port=$(( BASE + 20 + index * destinations + attempt ))
+            ffmpeg -hide_banner -loglevel error \
+                -i "srt://127.0.0.1:$port?mode=listener" -c copy -f null - \
+                >"$case_dir/$sink_id.log" 2>&1 &
+            SINKS+=( "$!" )
+        done
+    done
+
+    sleep 1
+    for sink_pid in "${SINKS[@]}"; do
+        kill -0 "$sink_pid" 2>/dev/null \
+            || { echo "an SRT receiver exited before connect" >&2; return 1; }
+    done
+
+    total_started=0
+    for (( index = 0; index < programs; index++ )); do
+        name="${names[$index]}"
+        for (( attempt = 0; attempt < destinations; attempt++ )); do
+            sink_id="cap${case_id}-p${index}-d${attempt}"
+            port=$(( BASE + 20 + index * destinations + attempt ))
+            post_owner "/streams/live/$name/destinations" \
+                "{\"id\":\"$sink_id\",\"type\":\"srt\",\"host\":\"127.0.0.1\",\"port\":$port,\"streamid\":\"#!::r=live/$name,m=publish,s=$sink_id\"}" \
+                || return 1
+        done
+    done
+
+    for attempt in $(seq 1 100); do
+        total_started="$(grep -cE \
+            "media: srt destination cap${case_id}-.* started" \
+            "$RUN/logs/error.log" 2>/dev/null || true)"
+        [ "${total_started:-0}" -ge "$total_dest" ] && break
+        sleep 0.1
+    done
+    [ "${total_started:-0}" -eq "$total_dest" ] \
+        || { echo "only $total_started of $total_dest SRT destinations started" \
+                 >&2; return 1; }
+
+
+    for (( index = 0; index < programs; index++ )); do
+        publish "${SRT_PORTS[${owners[$index]}]}" "${names[$index]}" "$source"
+        PUBS+=( "$!" )
+    done
+    # Exclude publisher connection and the first output burst from measurement.
+    for attempt in $(seq 1 120); do
+        progress_ready=1
+        for name in "${names[@]}"; do
+            source_frames="$(owner_metric "$name" \
+                nginx_media_stream_program_frames)"
+            dispatched_delta="$(owner_metric "$name" \
+                nginx_media_stream_dispatched_total)"
+            if [ "${source_frames:-0}" -le 0 ] \
+                || [ "${dispatched_delta:-0}" -le 0 ]; then
+                progress_ready=0
+                break
+            fi
+        done
+        [ "$progress_ready" -eq 1 ] && break
+        sleep 0.1
+    done
+    [ "$progress_ready" -eq 1 ] \
+        || { echo "capacity streams never reached program/output progress" \
+                 >&2; return 1; }
+
+    for name in "${names[@]}"; do
+        owner_metrics "$name" > "$case_dir/stream.$name.before" \
+            || { echo "could not capture baseline for $name" >&2; return 1; }
+    done
+    capacity_worker_metrics "$case_dir/workers.before" || return 1
+    capacity_socket_snapshot "$case_dir/before" || return 1
+    measure_start="$(date +%s.%N)"
+
+    cpu_window "$seconds"
+
+    for sink_pid in "${PUBS[@]}"; do
+        kill -0 "$sink_pid" 2>/dev/null \
+            || { echo "a capacity publisher exited during the window" \
+                     >&2; return 1; }
+    done
+    for name in "${names[@]}"; do
+        owner_metrics "$name" > "$case_dir/stream.$name.after" \
+            || { echo "could not capture final metrics for $name" >&2; return 1; }
+    done
+    measure_end="$(date +%s.%N)"
+    measure_seconds="$(awk -v a="$measure_start" -v b="$measure_end" \
+        'BEGIN { printf "%.2f", b - a }')"
+    capacity_worker_metrics "$case_dir/workers.after" || return 1
+    capacity_socket_snapshot "$case_dir/after" || return 1
+
+    echo "   measurement_s=$measure_seconds cpu_window_s=$W_DUR"
+
+    for (( index = 0; index < programs; index++ )); do
+        name="${names[$index]}"
+        slot="${owners[$index]}"
+        before_frames="$(capacity_json_field "$case_dir/stream.$name.before" \
+            program_frames)"
+        after_frames="$(capacity_json_field "$case_dir/stream.$name.after" \
+            program_frames)"
+        before_dispatched="$(capacity_json_field \
+            "$case_dir/stream.$name.before" dispatched)"
+        after_dispatched="$(capacity_json_field \
+            "$case_dir/stream.$name.after" dispatched)"
+        dispatched_delta=$(( after_dispatched - before_dispatched ))
+
+        read -r -a counts_before <<< "$(
+            capacity_json_field "$case_dir/stream.$name.before" \
+                fanout_ms.bucket_counts
+        )"
+        read -r -a counts_after <<< "$(
+            capacity_json_field "$case_dir/stream.$name.after" \
+                fanout_ms.bucket_counts
+        )"
+        read -r -a bounds <<< "$(
+            capacity_json_field "$case_dir/stream.$name.after" \
+                fanout_ms.bucket_upper_ms
+        )"
+        if (( ${#counts_before[@]} != 16 ||
+              ${#counts_after[@]} != 16 ||
+              ${#bounds[@]} != 16 )); then
+            echo "$name returned an invalid fanout histogram" >&2
+            return 1
+        fi
+
+        bucket_total=0
+        bins_text=""
+        for (( attempt = 0; attempt < 16; attempt++ )); do
+            value=$(( counts_after[attempt] - counts_before[attempt] ))
+            [ "$value" -ge 0 ] \
+                || { echo "$name fanout bucket counter regressed" \
+                         >&2; return 1; }
+            bucket_total=$(( bucket_total + value ))
+            high="${bounds[$attempt]}"
+            if [ "$attempt" -eq 0 ]; then
+                low=0
+            else
+                low=$(( bounds[attempt - 1] + 1 ))
+            fi
+            if [ "$low" -eq "$high" ]; then
+                bin_label="$low"
+            else
+                bin_label="$low-$high"
+            fi
+            [ -z "$bins_text" ] || bins_text+=","
+            bins_text+="$bin_label:$value"
+        done
+        [ "$bucket_total" -eq "$dispatched_delta" ] \
+            || { echo "$name fanout histogram has $bucket_total samples, " \
+                     "but dispatched delta is $dispatched_delta" >&2; return 1; }
+        [ "$dispatched_delta" -gt 0 ] \
+            || { echo "$name produced no fanout samples" >&2; return 1; }
+
+        fanout_max="$(capacity_json_field "$case_dir/stream.$name.after" \
+            fanout_ms.max)"
+        metrics_before="$(<"$case_dir/stream.$name.before")"
+        metrics_after="$(<"$case_dir/stream.$name.after")"
+        p50="$(capacity_percentile "$case_dir/stream.$name.after" "$name" 50)"
+        p95="$(capacity_percentile "$case_dir/stream.$name.after" "$name" 95)"
+        p99="$(capacity_percentile "$case_dir/stream.$name.after" "$name" 99)"
+        p999="$(capacity_percentile "$case_dir/stream.$name.after" "$name" 99.9)"
+        feed_units="$(blob_label_metric "$metrics_after" \
+            nginx_media_stream_feed_units "$name")"
+        feed_bytes="$(blob_label_metric "$metrics_after" \
+            nginx_media_stream_feed_bytes "$name")"
+        feed_high_units="$(blob_label_metric "$metrics_after" \
+            nginx_media_stream_feed_high_water_units "$name")"
+        feed_high_bytes="$(blob_label_metric "$metrics_after" \
+            nginx_media_stream_feed_high_water_bytes "$name")"
+        feed_overruns_before="$(blob_label_metric "$metrics_before" \
+            nginx_media_stream_feed_overruns_total "$name")"
+        feed_overruns_after="$(blob_label_metric "$metrics_after" \
+            nginx_media_stream_feed_overruns_total "$name")"
+        feed_overruns=$(( ${feed_overruns_after:-0} \
+                        - ${feed_overruns_before:-0} ))
+        feed_evictions_before="$(blob_label_metric "$metrics_before" \
+            nginx_media_stream_feed_evictions_total "$name")"
+        feed_evictions_after="$(blob_label_metric "$metrics_after" \
+            nginx_media_stream_feed_evictions_total "$name")"
+        feed_evictions=$(( ${feed_evictions_after:-0} \
+                         - ${feed_evictions_before:-0} ))
+        source_frames_before="$(blob_source_metric "$metrics_before" \
+            nginx_media_source_frames_in "$name")"
+        source_frames_after="$(blob_source_metric "$metrics_after" \
+            nginx_media_source_frames_in "$name")"
+        source_frames=$(( ${source_frames_after:-0} \
+                        - ${source_frames_before:-0} ))
+        frame_delta=$(( after_frames - before_frames ))
+        [ "$frame_delta" -gt 0 ] \
+            || { echo "$name made no program progress" >&2; return 1; }
+        progress_frames+=( "$frame_delta" )
+        frame_rate="$(awk -v f="$frame_delta" -v s="$measure_seconds" \
+            'BEGIN { printf "%.1f", f / s }')"
+
+        echo "   $name owner=w$slot source_frames=$source_frames"
+        echo "      program_frames=$frame_delta"
+        echo "      progress_fps=$frame_rate fanout_samples=$dispatched_delta"
+        echo "      fanout_p50/p95/p99/p99.9=${p50:-0}/${p95:-0}/${p99:-0}/${p999:-0}ms"
+        echo "      fanout.max=$fanout_max ms buckets_ms=[$bins_text]"
+        echo "      feed_retained=${feed_units:-0}u/${feed_bytes:-0}B"
+        echo "      feed_high_water=${feed_high_units:-0}u/${feed_high_bytes:-0}B"
+        echo "      feed_evictions_delta=$feed_evictions"
+        echo "      feed_overruns_delta=$feed_overruns"
+    done
+
+    fairness="$(python3 - "${progress_frames[@]}" <<'PY'
+import sys
+
+frames = [int(value) for value in sys.argv[1:]]
+total = sum(frames)
+squares = sum(value * value for value in frames)
+print(f"{total * total / (len(frames) * squares):.4f}" if squares else "0")
+PY
+)"
+    echo "   program_frame_fairness_jain=$fairness (1.0 is equal progress)"
+
+    echo "   worker visit and scheduling metrics:"
+    for worker_pid in $(worker_pids); do
+        worker_slot="$(slot_name "$worker_pid")"
+        worker_before="$case_dir/workers.before.$worker_pid"
+        worker_after="$case_dir/workers.after.$worker_pid"
+        cpu_pct="$(capacity_worker_cpu "$W_BEFORE" "$W_AFTER" "$W_DUR" \
+            "$worker_slot")"
+        budget_before="$(capacity_metric "$worker_before" \
+            nginx_media_worker_budget_reposts_total)"
+        budget_after="$(capacity_metric "$worker_after" \
+            nginx_media_worker_budget_reposts_total)"
+        visits_before="$(capacity_metric "$worker_before" \
+            nginx_media_worker_periodic_visits_total)"
+        visits_after="$(capacity_metric "$worker_after" \
+            nginx_media_worker_periodic_visits_total)"
+        late_before="$(capacity_metric "$worker_before" \
+            nginx_media_worker_late_ticks_total)"
+        late_after="$(capacity_metric "$worker_after" \
+            nginx_media_worker_late_ticks_total)"
+        max_service="$(capacity_metric "$worker_after" \
+            nginx_media_worker_max_service_ms)"
+        event_delay="$(capacity_metric "$worker_after" \
+            nginx_media_worker_event_loop_max_delay_ms)"
+        echo "      $worker_slot pid=$worker_pid cpu=${cpu_pct}%"
+        echo "         visit_max=${max_service:-0}ms event_loop_max_delay=${event_delay:-0}ms"
+        echo "         periodic_visits_delta=$(( ${visits_after:-0} - ${visits_before:-0} ))"
+        echo "         budget_reposts_delta=$(( ${budget_after:-0} - ${budget_before:-0} ))"
+        echo "         late_ticks_delta=$(( ${late_after:-0} - ${late_before:-0} ))"
+    done
+
+    echo "   NGINX socket skmem (ss -m):"
+    for worker_pid in $(worker_pids); do
+        worker_slot="$(slot_name "$worker_pid")"
+        socket_before="$(awk -v pid="$worker_pid" '$1 == pid { print $7; exit }' \
+            "$case_dir/before")"
+        socket_after="$(awk -v pid="$worker_pid" '$1 == pid { print $7; exit }' \
+            "$case_dir/after")"
+        [ -n "$socket_before" ] || socket_before=0
+        [ -n "$socket_after" ] || socket_after=0
+        socket_row="$(awk -v pid="$worker_pid" '$1 == pid { print $6; exit }' \
+            "$case_dir/after")"
+        [ -n "$socket_row" ] || socket_row=0
+        echo "      $worker_slot sockets=$socket_row skmem_bytes=$socket_after delta_bytes=$(( socket_after - socket_before ))"
+    done
+    sock_tcp_before="$(capacity_sockstat_value "$case_dir/before.sockstat" TCP: mem)"
+    sock_tcp_after="$(capacity_sockstat_value "$case_dir/after.sockstat" TCP: mem)"
+    sock_udp_before="$(capacity_sockstat_value "$case_dir/before.sockstat" UDP: mem)"
+    sock_udp_after="$(capacity_sockstat_value "$case_dir/after.sockstat" UDP: mem)"
+    tcp_inuse_before="$(capacity_sockstat_value "$case_dir/before.sockstat" TCP: inuse)"
+    tcp_inuse_after="$(capacity_sockstat_value "$case_dir/after.sockstat" TCP: inuse)"
+    udp_inuse_before="$(capacity_sockstat_value "$case_dir/before.sockstat" UDP: inuse)"
+    udp_inuse_after="$(capacity_sockstat_value "$case_dir/after.sockstat" UDP: inuse)"
+    echo "   host /proc/net/sockstat (global, not process-attributed):"
+    echo "      TCP mem_pages=${sock_tcp_before:-0}->${sock_tcp_after:-0}"
+    echo "      UDP mem_pages=${sock_udp_before:-0}->${sock_udp_after:-0}"
+    echo "      TCP inuse=${tcp_inuse_before:-0}->${tcp_inuse_after:-0}"
+    echo "      UDP inuse=${udp_inuse_before:-0}->${udp_inuse_after:-0}"
+
+    kill_pubs
+    for sink_pid in "${SINKS[@]}"; do kill_one "$sink_pid"; done
+    SINKS=()
+    stop_instance
+}
+
+phase_capacity() {
+    local programs rate destinations
+
+    echo
+    echo "== offered-load capacity curve (fixed worker count)"
+    echo "   programs, bitrate and destinations vary independently; each case"
+    echo "   starts a fresh NGINX instance so fanout maxima and histograms are"
+    echo "   scoped to that case; HLS's TS mux feeds the SRT push sink."
+    echo "   Publishers and outputs warm up before the timed baseline."
+
+    for programs in $CAPACITY_PROGRAM_STEPS; do
+        capacity_case "programs-$programs" "$programs" \
+            "$CAPACITY_PROGRAM_RATE" "$CAPACITY_PROGRAM_DESTS" \
+            "$CAPACITY_WINDOW" || return 1
+    done
+
+    for rate in $CAPACITY_BITRATE_STEPS; do
+        capacity_case "bitrate-$rate" "$CAPACITY_BITRATE_PROGRAMS" "$rate" \
+            "$CAPACITY_BITRATE_DESTS" "$CAPACITY_WINDOW" || return 1
+    done
+
+    for destinations in $CAPACITY_DEST_STEPS; do
+        capacity_case "destinations-$destinations" \
+            "$CAPACITY_DEST_PROGRAMS" "$CAPACITY_DEST_RATE" "$destinations" \
+            "$CAPACITY_WINDOW" || return 1
+    done
+
+    capacity_case "sustained" "$CAPACITY_SUSTAINED_PROGRAMS" \
+        "$CAPACITY_SUSTAINED_RATE" "$CAPACITY_SUSTAINED_DESTS" \
+        "$CAPACITY_SUSTAINED_SECONDS"
+}
+
 # --- run --------------------------------------------------------------------
 
 rm -rf "$RUN"
@@ -1468,6 +2072,7 @@ for phase in $PHASES; do
             ;;
         misplace) phase_misplace ;;
         topology) phase_topology ;;
+        capacity) phase_capacity || exit 1 ;;
     esac
 done
 
@@ -1482,6 +2087,10 @@ echo "   api:        listen ... reuseport; mutations retried until the owner"
 echo "               answers, metrics read on the owner's own connection"
 echo "   throughput: chunks/s and bytes/s are the workers' own drained totals"
 echo "   cpu:        per thread, percent of one core, over the measured window"
+if [[ " $PHASES " == *" capacity "* ]]; then
+    echo "   clients:    ffmpeg publishers/receivers run in this command;"
+    echo "               worker CPU rows cover nginx workers only"
+fi
 echo "   labels:     SRT:* from comm; this module's threads from a stack" \
      "backtrace ($([ "$LABELLED" = 1 ] && echo 'attached and labelled' \
                                 || echo 'NOT AVAILABLE: comm names only'))"

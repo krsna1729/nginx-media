@@ -559,6 +559,19 @@ cat "$RUN/docdest.json"; echo
 
 DESIRED="$(curl -fsS "$API/desired")"
 printf '%s\n' "$DESIRED"
+python3 - "$DESIRED" <<'PY'
+import json
+import sys
+
+stream = json.loads(sys.argv[1])["streams"][0]
+fanout = stream["fanout_ms"]
+bounds = fanout["bucket_upper_ms"]
+counts = fanout["bucket_counts"]
+assert bounds == [1 << i for i in range(15)] + [None], bounds
+assert len(counts) == 16 and sum(counts) == stream["dispatched"], counts
+print("   desired-state fanout histogram is valid and replayable")
+PY
+
 
 printf '%s' "$DESIRED" | grep -q '"application":"live","name":"doc"' \
     || { echo "the document does not describe the stream" >&2; exit 1; }
@@ -873,6 +886,10 @@ do
     printf '%s\n' "$METRICS" | grep -q "^$metric " \
         || { echo "metrics omitted $metric" >&2; exit 1; }
 done
+
+printf '%s\n' "$METRICS" \
+    | grep -Eq '^nginx_media_worker_info\{worker="[0-9]+",pid="[0-9]+"\} 1$' \
+    || { echo "metrics omitted the serving worker identity" >&2; exit 1; }
 
 [ "${ACTIVE:-99}" -le 2 ] \
     || { echo "runtime output slots leaked: $ACTIVE in use" >&2; exit 1; }

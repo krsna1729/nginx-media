@@ -2,12 +2,12 @@ NGINX_VERSION ?= 1.30.5
 
 .PHONY: unit tsan nginx graph-conflict incarnation smoke bench-worker-scaling \
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
-    bench-burst-sizing test-image test-in-container srt-ingest srt-ingest-nginx \
-    ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull \
-    hls-ingest hls-profile file-source transform stream-delete churn rtmp \
-    rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports \
-    multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout \
-    bench-push-fanout bench-fanout-delay clean
+    bench-capacity-curve bench-burst-sizing test-image test-in-container \
+    srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph \
+    failover hls hls-push hls-pull hls-ingest hls-profile file-source transform \
+    stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto \
+    srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls \
+    bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -204,6 +204,12 @@ bench-ingest-egress:
 # another worker so the escape hatch has a price.
 bench-ingest-egress-fanout:
 	tests/bench/ingest_egress_fanout.sh
+
+# Fixed-worker capacity curve (four workers by default): progressively add
+# programs, encoded bitrate, and live SRT destinations; includes sustained
+# multi-program fairness.
+bench-capacity-curve:
+	PHASES=capacity tests/bench/ingest_egress_fanout.sh
 
 srt-qualify:
 	MEDIA_SRT_BACKEND=both $(MAKE) nginx

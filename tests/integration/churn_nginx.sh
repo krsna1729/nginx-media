@@ -201,6 +201,24 @@ echo "   $FANOUT"
 P99="$(printf '%s' "$FANOUT" | sed -n 's/.*"p99":\([0-9]*\).*/\1/p')"
 DISPATCHED="$(printf '%s' "$STATS" | grep -o '"dispatched":[0-9]*' | head -1 | cut -d: -f2)"
 
+python3 - "$STATS" <<'PY'
+import json
+import sys
+
+doc = json.loads(sys.argv[1])
+fanout = doc["fanout_ms"]
+bounds = fanout["bucket_upper_ms"]
+counts = fanout["bucket_counts"]
+expected = [1 << i for i in range(15)]
+
+assert bounds[:15] == expected and bounds[15] is None, bounds
+assert len(counts) == 16 and all(isinstance(n, int) and n >= 0
+                                 for n in counts), counts
+assert sum(counts) == doc["dispatched"], (sum(counts), doc["dispatched"])
+assert isinstance(fanout["max"], int) and 0 <= fanout["max"] <= 60000
+print(f"   fanout histogram: {sum(counts)} samples in {len(counts)} bins")
+PY
+
 [ -n "$P99" ] || { echo "no fanout percentile in the response" >&2; exit 1; }
 [ -n "$DISPATCHED" ] && [ "$DISPATCHED" -gt 0 ] \
     || { echo "nothing was dispatched: $DISPATCHED" >&2; exit 1; }
