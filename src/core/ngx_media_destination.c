@@ -67,12 +67,13 @@ ngx_media_destination_strdup(ngx_pool_t *pool, const ngx_str_t *src)
         return NULL;
     }
 
-    dst->data = ngx_pnalloc(pool, src->len);
+    dst->data = ngx_pnalloc(pool, src->len + 1);
     if (dst->data == NULL) {
         return NULL;
     }
 
     ngx_memcpy(dst->data, src->data, src->len);
+    dst->data[src->len] = '\0';
     dst->len = src->len;
 
     return dst;

@@ -41,7 +41,7 @@ CORE := ../../src/core/ngx_media_buffer.c \
 
 SHIM := shim/ngx_shim.c
 
-TESTS := test_buffer test_frame test_feed test_track test_timeline \
+TESTS := test_buffer test_destination test_frame test_feed test_track test_timeline \
          test_rtmp_wire test_rtmp_flv test_srt_output test_owner test_ipc test_lifecycle test_fuzz test_bounds test_srt_udp test_security test_tombstone test_transform test_executor
 BINS  := $(addprefix build/,$(TESTS))
 

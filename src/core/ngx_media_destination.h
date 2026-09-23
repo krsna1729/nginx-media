@@ -80,7 +80,7 @@ void ngx_media_destination_remove(ngx_media_stream_t *stream,
     ngx_media_destination_t *destination);
 ngx_uint_t ngx_media_destination_count(const ngx_media_stream_t *stream);
 
-/* pool copy of a string field; NULL when src is empty or allocation fails */
+/* NUL-terminated pool copy of a nonempty string field */
 ngx_str_t *ngx_media_destination_strdup(ngx_pool_t *pool, const ngx_str_t *src);
 
 /* bumps the object revision: call it from every desired-state mutation */
