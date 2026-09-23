@@ -6,10 +6,13 @@
 /*
  * Shared metadata directory (goal doc 22).
  *
- * Small, bounded bookkeeping in shared memory: which worker owns a stream, its
- * pid, the generation it is serving and a heartbeat.  It deliberately holds no
- * mutable media state - sources, feeds, HLS state and recordings stay in the
- * owner process.
+ * Small, bounded bookkeeping in shared memory: liveness and progress for a
+ * stream - the worker that drives it (always the deterministic owner,
+ * ngx_media_route_owner), its pid, the generation it is serving and a
+ * heartbeat.  The record never decides ownership: it can only repeat the
+ * deterministic answer, because ngx_media_owner_dir_claim refuses a slot that
+ * is not that owner's.  It deliberately holds no mutable media state -
+ * sources, feeds, HLS state and recordings stay in the owner process.
  *
  * The directory is an open-addressing table in one shared memory zone, guarded
  * by a single spinlock: writes happen when a stream appears, disappears or
@@ -17,6 +20,14 @@
  */
 
 typedef struct ngx_media_owner_dir_s ngx_media_owner_dir_t;
+
+/*
+ * One bounded directory is shared by the workers.  This is the deployment-wide
+ * active-stream capacity for owner metadata; a claim beyond it is refused
+ * rather than leaving a stream silently without liveness/progress.
+ */
+#define NGX_MEDIA_OWNER_DIR_SLOTS 256
+
 
 /*
  * Master process: allocates the shared mapping before workers are forked, so
@@ -27,11 +38,11 @@ ngx_int_t ngx_media_owner_dir_shm_create(ngx_cycle_t *cycle, ngx_uint_t slots,
 ngx_media_owner_dir_t *ngx_media_owner_dir_attach(ngx_cycle_t *cycle,
     ngx_log_t *log);
 
-/* the record for a stream, created when requested */
-ngx_media_owner_record_t *ngx_media_owner_dir_get(ngx_media_owner_dir_t *dir,
-    uint64_t hash, ngx_uint_t create);
-
-/* publishes this worker as the owner of a stream */
+/*
+ * Publishes a stream's owner.  Only the deterministic owner may claim: a slot
+ * that is not ngx_media_route_owner(hash) is refused with NULL, so a record
+ * can never name a worker the hash does not.
+ */
 ngx_media_owner_record_t *ngx_media_owner_dir_claim(
     ngx_media_owner_dir_t *dir, uint64_t hash, ngx_uint_t slot);
 
@@ -50,10 +61,6 @@ uint64_t ngx_media_owner_dir_revision_next(ngx_media_owner_dir_t *dir);
 /* refreshes liveness and progress for a stream this worker owns */
 void ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_uint_t slot, uint64_t generation, uint64_t frames, ngx_uint_t sources);
-
-/* the owner slot recorded for a stream, or the worker count when unknown */
-ngx_uint_t ngx_media_owner_dir_slot(ngx_media_owner_dir_t *dir, uint64_t hash,
-    ngx_uint_t fallback);
 
 /*
  * Reads the progress the owner of a stream published: owner slot, generation,

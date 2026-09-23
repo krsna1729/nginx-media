@@ -986,6 +986,48 @@ ngx_media_rtmp_writer_message(ngx_media_rtmp_writer_t *w,
     return NGX_OK;
 }
 
+/*
+ * The reservation a queue makes before handing this message to the writer.
+ * See the declaration in the header for why it is counted per chunk: a queue
+ * that reserved one slot and one reference per message wrote past its ring as
+ * soon as the writer split a large keyframe.
+ *
+ * The length is bounded by the writer's own message bound before the chunk
+ * count is taken, so the addition below cannot wrap.
+ */
+ngx_int_t
+ngx_media_rtmp_message_footprint(const ngx_media_rtmp_writer_t *w, size_t len,
+    ngx_media_rtmp_footprint_t *out)
+{
+    size_t  chunks;
+
+    if (w == NULL || out == NULL || w->chunk_size == 0
+        || len > w->max_message)
+    {
+        /* past what writer_message() can emit: nothing to reserve either */
+        return NGX_AGAIN;
+    }
+
+    out->parts = 1;
+    out->refs = 0;
+
+    if (len == 0) {
+        /* one header-only chunk, and no payload slice to reference */
+        return NGX_OK;
+    }
+
+    chunks = (len + w->chunk_size - 1) / w->chunk_size;
+
+    if (chunks * 2 > NGX_MEDIA_RTMP_MAX_OUT_PARTS) {
+        return NGX_AGAIN;
+    }
+
+    out->parts = (ngx_uint_t) chunks * 2;
+    out->refs = (ngx_uint_t) chunks;
+
+    return NGX_OK;
+}
+
 /* --- AMF0 ---------------------------------------------------------------- */
 
 static void

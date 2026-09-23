@@ -69,9 +69,9 @@ void ngx_media_route_set_sink(ngx_media_route_frame_pt cb, void *ctx);
  *
  * Best effort and bounded by construction: the send is a non-blocking write
  * to an existing socket, so a worker that is gone (NGX_ERROR) or behind
- * (NGX_AGAIN) is counted and skipped rather than waited for.  There is no
- * acknowledgement and no retry - see ngx_media_graph.h for what that means
- * for a replica that misses an operation.
+ * (NGX_AGAIN) is counted and skipped rather than waited for.  This primitive
+ * has no acknowledgement; the graph layer retains a bounded payload journal
+ * and retries missed graph operations from the runtime tick.
  *
  * Returns how many peers took the message; the number of peers addressed
  * (which is zero for a single-worker deployment) is returned in *peers.

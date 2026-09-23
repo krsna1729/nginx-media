@@ -72,12 +72,15 @@ struct ngx_media_hls_push_t {
 
     /*
      * Names already offered, so a scan does not enqueue the same file twice.
-     * A ring, not a list: when it fills, the oldest entry gives way, because
-     * refusing to store a name means offering it again on every tick.
+     * The bounded table covers the recent window; the lexical high-water mark
+     * keeps immutable segment names older than it out after the table wraps.
+     * The playlist is rewritten in place, so it is tracked by version instead.
      */
     ngx_media_hls_push_seen_t  seen[NGX_MEDIA_HLS_PUSH_SCAN_MAX];
-    ngx_uint_t                 nseen;      /* slots in use, up to SCAN_MAX */
-    ngx_uint_t                 seen_next;  /* the ring: oldest slot first */
+    ngx_uint_t                 nseen;
+    ngx_uint_t                 seen_next;
+    u_char                     last_segment[NGX_MEDIA_HLS_PUSH_NAME_MAX];
+    ngx_uint_t                 last_segment_set;
 
     uint64_t                 uploaded;
     uint64_t                 dropped;
@@ -447,6 +450,12 @@ ngx_media_hls_push_seen(ngx_media_hls_push_t *push, const u_char *name,
     playlist = (len > 5
                 && ngx_memcmp(name + len - 5, (u_char *) ".m3u8", 5) == 0);
 
+    if (!playlist && push->last_segment_set
+        && strcmp((char *) name, (char *) push->last_segment) <= 0)
+    {
+        return 1;
+    }
+
     for (i = 0; i < push->nseen; i++) {
 
         entry = &push->seen[i];
@@ -480,6 +489,14 @@ ngx_media_hls_push_seen(ngx_media_hls_push_t *push, const u_char *name,
     } else {
         entry = &push->seen[push->seen_next];
         push->seen_next = (push->seen_next + 1) % NGX_MEDIA_HLS_PUSH_SCAN_MAX;
+    }
+
+    if (!playlist
+        && (!push->last_segment_set
+            || strcmp((char *) name, (char *) push->last_segment) > 0))
+    {
+        ngx_memcpy(push->last_segment, name, len + 1);
+        push->last_segment_set = 1;
     }
 
     ngx_memcpy(entry->name, name, len);

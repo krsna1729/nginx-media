@@ -12,6 +12,18 @@
 #define NGX_MEDIA_HLS_PULL_SEGMENT_MAX   (8 * 1024 * 1024)
 #define NGX_MEDIA_HLS_PULL_NAMES         64
 #define NGX_MEDIA_HLS_PULL_NAME_MAX      256
+
+/*
+ * The longest URL this reader builds or asks for.  A segment URL is the
+ * playlist's directory plus a playlist entry (or the entry alone when it is
+ * absolute), built into one fixed scratch buffer in the reader, and it bounds
+ * the request target the HTTP client is handed.  One named bound covers the
+ * scratch, the build and the request, so they cannot drift apart: the scratch
+ * used to be sized from the playlist bound - sixteen times what it could ever
+ * hold - while the check that mattered was a bare 4096 in one of the two
+ * branches, so an absolute entry far longer than a relative one was accepted.
+ */
+#define NGX_MEDIA_HLS_PULL_URL_MAX       4096
 #define NGX_MEDIA_HLS_EVENT_CAPACITY     128
 #define NGX_MEDIA_HLS_EVENT_MAX_TRACKS   NGX_MEDIA_TS_DEFAULT_TRACKS
 
@@ -61,6 +73,13 @@ typedef struct ngx_media_hls_pull_s {
                                            * system store */
     ngx_log_t               *log;
 
+    /*
+     * Reader-thread scratch: the playlist and segment buffers, and the one
+     * buffer a segment URL is built in.  Allocated when the reader is opened
+     * and freed by close() only after the thread has been joined, so the
+     * scratch never outlives the thread and no request that created the
+     * reader can free it under it.
+     */
     u_char                  *playlist;
     u_char                  *segment;
     u_char                  *segment_url;
@@ -89,15 +108,17 @@ typedef struct ngx_media_hls_pull_s {
     ngx_atomic_t             exited;
 
     /*
-     * Segment names already fetched, so a refresh does not repeat them.  A
-     * ring, not a list: when it fills, the oldest entry gives way, because a
-     * name the table refuses to store is fetched and demuxed again on every
-     * poll, which publishes the same media twice with timestamps that no
-     * longer move forward.
+     * Segment names already fetched, so a refresh does not repeat them.  The
+     * bounded table covers the recent window; the lexical high-water mark
+     * keeps immutable names older than it out even after that table wraps.
+     * This relies on the segmenter naming its immutable files monotonically.
      */
     ngx_media_hls_pull_seen_t  seen[NGX_MEDIA_HLS_PULL_NAMES];
     ngx_uint_t                 nseen;      /* slots in use, up to NAMES */
     ngx_uint_t                 seen_next;  /* the ring: oldest slot first */
+    u_char                     last_name[NGX_MEDIA_HLS_PULL_URL_MAX];
+    size_t                     last_name_len;
+    ngx_uint_t                 last_name_set;
 
     uint64_t                 segments;
     uint64_t                 frames;
@@ -122,6 +143,8 @@ static void ngx_media_hls_pull_transport(
     ngx_media_hls_pull_t *pull, ngx_uint_t healthy);
 static ngx_uint_t ngx_media_hls_pull_source_removed(
     ngx_media_hls_pull_t *pull);
+static ngx_int_t ngx_media_hls_pull_name_cmp(const u_char *a, size_t alen,
+    const u_char *b, size_t blen);
 
 /* --- helpers ------------------------------------------------------------- */
 
@@ -339,6 +362,23 @@ ngx_media_hls_pull_transport(ngx_media_hls_pull_t *pull,
     (void) ngx_media_hls_pull_event_push(pull, &event);
 }
 
+static ngx_int_t
+ngx_media_hls_pull_name_cmp(const u_char *a, size_t alen,
+    const u_char *b, size_t blen)
+{
+    size_t    len;
+    ngx_int_t rc;
+
+    len = (alen < blen) ? alen : blen;
+    rc = (len == 0) ? 0 : ngx_memcmp(a, b, len);
+
+    if (rc != 0) {
+        return rc;
+    }
+
+    return (alen > blen) - (alen < blen);
+}
+
 static ngx_uint_t
 ngx_media_hls_pull_seen(ngx_media_hls_pull_t *pull, const u_char *name,
     size_t len)
@@ -346,6 +386,13 @@ ngx_media_hls_pull_seen(ngx_media_hls_pull_t *pull, const u_char *name,
     ngx_media_hls_pull_seen_t  *entry;
     size_t                      key;
     ngx_uint_t                  i;
+
+    if (pull->last_name_set
+        && ngx_media_hls_pull_name_cmp(name, len, pull->last_name,
+                                       pull->last_name_len) <= 0)
+    {
+        return 1;
+    }
 
     /* what a slot can hold; the length below separates the rest */
     key = (len < NGX_MEDIA_HLS_PULL_NAME_MAX) ? len
@@ -378,12 +425,23 @@ ngx_media_hls_pull_record(ngx_media_hls_pull_t *pull, const u_char *name,
         entry = &pull->seen[pull->nseen++];
 
     } else {
+
         entry = &pull->seen[pull->seen_next];
         pull->seen_next = (pull->seen_next + 1) % NGX_MEDIA_HLS_PULL_NAMES;
     }
 
     ngx_memcpy(entry->name, name, key);
     entry->len = len;
+
+    if (len < NGX_MEDIA_HLS_PULL_URL_MAX
+        && (!pull->last_name_set
+            || ngx_media_hls_pull_name_cmp(name, len, pull->last_name,
+                                           pull->last_name_len) > 0))
+    {
+        ngx_memcpy(pull->last_name, name, len);
+        pull->last_name_len = len;
+        pull->last_name_set = 1;
+    }
 }
 
 /* absolute URL for a playlist entry, which may be relative or absolute */
@@ -400,11 +458,16 @@ ngx_media_hls_pull_segment_url(ngx_media_hls_pull_t *pull, const u_char *name,
         return NGX_ERROR;
     }
 
-    if (len > 7 && ngx_memcmp(name, (u_char *) "http://", 7) == 0) {
-        if (len >= pull->segment_url_capacity) {
-            return NGX_ERROR;
-        }
+    /*
+     * One bound for both branches, and it is the one the scratch was sized
+     * from: a longer entry is refused here rather than truncated into the
+     * buffer, and the room the terminator needs is part of the check.
+     */
+    if (len >= NGX_MEDIA_HLS_PULL_URL_MAX) {
+        return NGX_ERROR;
+    }
 
+    if (len > 7 && ngx_memcmp(name, (u_char *) "http://", 7) == 0) {
         ngx_memcpy(pull->segment_url, name, len);
         pull->segment_url[len] = '\0';
         out->data = pull->segment_url;
@@ -413,15 +476,11 @@ ngx_media_hls_pull_segment_url(ngx_media_hls_pull_t *pull, const u_char *name,
         return NGX_OK;
     }
 
-    if (len > 4096 || pull->base.len > 4096 - len - 1) {
+    if (pull->base.len > NGX_MEDIA_HLS_PULL_URL_MAX - len - 1) {
         return NGX_ERROR;
     }
 
     total = pull->base.len + len;
-
-    if (total >= pull->segment_url_capacity) {
-        return NGX_ERROR;
-    }
 
     ngx_memcpy(pull->segment_url, pull->base.data, pull->base.len);
     ngx_memcpy(pull->segment_url + pull->base.len, name, len);
@@ -435,18 +494,15 @@ ngx_media_hls_pull_segment_url(ngx_media_hls_pull_t *pull, const u_char *name,
 /* --- the pull loop ------------------------------------------------------- */
 
 /*
- * Whether the source behind this reader was removed through the control API.
- * source_remove() detaches it, or only flags it when a writer is in flight,
- * so both are checked.  This is the reader's own pointer, which only close()
- * clears, and close() cannot run while this thread is using the reader - it
- * joins the thread first - so the reader may read it as well as the worker.
+ * Source removal publishes pending_remove before detaching the source.  The
+ * reader owns its source pointer until close joins it, so the atomic flag is
+ * the only cross-thread lifetime check needed here.
  */
 static ngx_uint_t
 ngx_media_hls_pull_source_removed(ngx_media_hls_pull_t *pull)
 {
     return (pull->source == NULL
-            || pull->source->stream == NULL
-            || pull->source->pending_remove);
+            || ngx_atomic_fetch_add(&pull->source->pending_remove, 0));
 }
 
 /*
@@ -654,6 +710,20 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
         return NULL;
     }
 
+    if (url->len > NGX_MEDIA_HLS_PULL_URL_MAX) {
+        /*
+         * Every segment URL this reader builds starts with this one (for a
+         * relative entry, with the directory part of it), so a playlist URL
+         * past the bound could only ever produce segment URLs the builder
+         * refuses: say so here, where the operator can see the reason, rather
+         * than leave a reader that polls the playlist and fetches no segment.
+         */
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "media: hls pull %V url is longer than the %d byte "
+                      "segment url bound", id, NGX_MEDIA_HLS_PULL_URL_MAX);
+        return NULL;
+    }
+
     pull = ngx_pcalloc(stream->pool, sizeof(ngx_media_hls_pull_t));
 
     if (pull == NULL) {
@@ -742,7 +812,14 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     }
     pull->playlist = ngx_alloc(NGX_MEDIA_HLS_PULL_PLAYLIST_MAX, log);
     pull->segment = ngx_alloc(NGX_MEDIA_HLS_PULL_SEGMENT_MAX, log);
-    pull->segment_url_capacity = NGX_MEDIA_HLS_PULL_PLAYLIST_MAX + 1;
+
+    /*
+     * The segment URL scratch, sized from the one bound a URL may reach plus
+     * its terminator: reader-thread scratch, owned by this reader and freed by
+     * ngx_media_hls_pull_close() after it has joined that thread, so no
+     * request that created the reader can free it out from under the thread.
+     */
+    pull->segment_url_capacity = NGX_MEDIA_HLS_PULL_URL_MAX + 1;
     pull->segment_url = ngx_alloc(pull->segment_url_capacity, log);
 
     if (pull->playlist == NULL || pull->segment == NULL

@@ -28,6 +28,113 @@ static u_char *
 ngx_media_graph_copy(u_char *p, const ngx_str_t *value);
 
 static ngx_int_t
+ngx_media_graph_source_paths_set(ngx_media_source_t *source,
+    const ngx_str_t *path, const ngx_str_t *ca_file);
+
+typedef struct {
+    ngx_uint_t                 used;
+    ngx_media_ipc_header_t     header;
+    ngx_media_buf_t           *payload;
+    size_t                     length;
+} ngx_media_graph_repair_t;
+
+static ngx_media_graph_repair_t
+    ngx_media_graph_repair[NGX_MEDIA_GRAPH_REPAIR_CAPACITY];
+static ngx_uint_t ngx_media_graph_repair_cursor;
+
+static ngx_int_t
+ngx_media_graph_repair_enqueue(const ngx_media_ipc_header_t *header,
+    ngx_media_buf_t *payload, size_t length);
+
+static void
+ngx_media_graph_repair_clear(ngx_uint_t index);
+
+static ngx_int_t
+ngx_media_graph_repair_enqueue(const ngx_media_ipc_header_t *header,
+    ngx_media_buf_t *payload, size_t length)
+{
+    ngx_uint_t  i;
+
+    if (header == NULL || payload == NULL || length == 0) {
+        return NGX_ERROR;
+    }
+
+    for (i = 0; i < NGX_MEDIA_GRAPH_REPAIR_CAPACITY; i++) {
+        if (ngx_media_graph_repair[i].used) {
+            continue;
+        }
+
+        ngx_media_graph_repair[i].used = 1;
+        ngx_media_graph_repair[i].header = *header;
+        ngx_media_graph_repair[i].payload = ngx_media_buf_ref(payload);
+        ngx_media_graph_repair[i].length = length;
+
+        return NGX_OK;
+    }
+
+    return NGX_AGAIN;
+}
+
+static void
+ngx_media_graph_repair_clear(ngx_uint_t index)
+{
+    if (index >= NGX_MEDIA_GRAPH_REPAIR_CAPACITY
+        || !ngx_media_graph_repair[index].used)
+    {
+        return;
+    }
+
+    ngx_media_buf_unref(ngx_media_graph_repair[index].payload);
+    ngx_memzero(&ngx_media_graph_repair[index],
+                sizeof(ngx_media_graph_repair[index]));
+}
+
+void
+ngx_media_graph_repair_tick(ngx_log_t *log)
+{
+    ngx_uint_t                 i, offset, attempts, peers, delivered;
+    ngx_media_graph_repair_t  *entry;
+
+    for (attempts = 0; attempts < NGX_MEDIA_GRAPH_REPAIR_PER_TICK;
+         attempts++)
+    {
+        entry = NULL;
+
+        for (offset = 0; offset < NGX_MEDIA_GRAPH_REPAIR_CAPACITY; offset++) {
+            i = (ngx_media_graph_repair_cursor + offset)
+                % NGX_MEDIA_GRAPH_REPAIR_CAPACITY;
+
+            if (ngx_media_graph_repair[i].used) {
+                entry = &ngx_media_graph_repair[i];
+                ngx_media_graph_repair_cursor =
+                    (i + 1) % NGX_MEDIA_GRAPH_REPAIR_CAPACITY;
+                break;
+            }
+        }
+
+        if (entry == NULL) {
+            return;
+        }
+
+        peers = 0;
+        delivered = ngx_media_route_broadcast((ngx_cycle_t *) ngx_cycle,
+                                              &entry->header, entry->payload,
+                                              entry->length, &peers);
+
+        if (peers > 0 && delivered == peers) {
+            ngx_media_graph_repair_clear((ngx_uint_t) (entry
+                                                       - ngx_media_graph_repair));
+            continue;
+        }
+
+        ngx_log_error(NGX_LOG_DEBUG, log, 0,
+                      "media: graph repair pending hash=%uL peers=%ui "
+                      "delivered=%ui",
+                      entry->header.hash, peers, delivered);
+    }
+}
+
+static ngx_int_t
 ngx_media_graph_send(const ngx_media_graph_op_t *op)
 {
     ngx_media_ipc_header_t  header;
@@ -42,20 +149,26 @@ ngx_media_graph_send(const ngx_media_graph_op_t *op)
     delivered = ngx_media_route_broadcast((ngx_cycle_t *) ngx_cycle, &header,
                                           payload, length, &peers);
 
-    ngx_media_buf_unref(payload);
-
-    if (peers == 0 || delivered == peers) {
-        /* one worker is its own replica, and every peer took it */
+    if ((peers == 0
+         && ngx_media_owner_worker_count((ngx_cycle_t *) ngx_cycle) <= 1)
+        || (peers > 0 && delivered == peers))
+    {
+        ngx_media_buf_unref(payload);
         return NGX_OK;
     }
 
     /*
-     * Best effort, and it says so: this worker has the mutation, a peer does
-     * not.  The request that caused it still succeeds - stalling a control
-     * request on a worker that is gone would be worse than a replica that
-     * heals on the next operation - and ngx_media_route_broadcast() has
-     * already logged which peer was missed.
+     * Keep the immutable message until a later runtime tick can offer it
+     * again.  Replays are safe because graph application is revision-gated.
      */
+    if (ngx_media_graph_repair_enqueue(&header, payload, length) != NGX_OK) {
+        ngx_log_error(NGX_LOG_WARN, ngx_cycle->log, 0,
+                      "media: graph repair journal is full; hash=%uL "
+                      "operation was not retained", header.hash);
+    }
+
+    ngx_media_buf_unref(payload);
+
     return NGX_AGAIN;
 }
 
@@ -141,6 +254,14 @@ ngx_media_graph_stream_set(const ngx_media_stream_t *stream)
         return NGX_ERROR;
     }
 
+    if (ngx_media_graph_owns(&stream->application, &stream->name)
+        && ngx_media_runtime_admit((ngx_media_stream_t *) stream,
+                                    ((ngx_cycle_t *) ngx_cycle)->log)
+           != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
     ngx_memzero(&op, sizeof(op));
 
     op.kind = NGX_MEDIA_GRAPH_STREAM_SET;
@@ -173,6 +294,62 @@ ngx_media_graph_stream_delete(const ngx_str_t *application,
     return ngx_media_graph_send(&op);
 }
 
+static ngx_int_t
+ngx_media_graph_source_paths_set(ngx_media_source_t *source,
+    const ngx_str_t *path, const ngx_str_t *ca_file)
+{
+    ngx_str_t  *stored;
+    u_char     *copy;
+
+    if (source == NULL || source->stream == NULL) {
+        return NGX_ERROR;
+    }
+
+    if ((path != NULL && path->len > NGX_MEDIA_GRAPH_MAX_PATH)
+        || (ca_file != NULL && ca_file->len > NGX_MEDIA_GRAPH_MAX_PATH))
+    {
+        return NGX_ERROR;
+    }
+
+    if (path != NULL && path->len != 0) {
+        stored = &source->path;
+
+        if (stored->len != path->len
+            || (stored->len != 0
+                && ngx_memcmp(stored->data, path->data, stored->len) != 0))
+        {
+            copy = ngx_pnalloc(source->stream->pool, path->len);
+            if (copy == NULL) {
+                return NGX_ERROR;
+            }
+
+            ngx_memcpy(copy, path->data, path->len);
+            stored->data = copy;
+            stored->len = path->len;
+        }
+    }
+
+    if (ca_file != NULL && ca_file->len != 0) {
+        stored = &source->ca_file;
+
+        if (stored->len != ca_file->len
+            || (stored->len != 0
+                && ngx_memcmp(stored->data, ca_file->data, stored->len) != 0))
+        {
+            copy = ngx_pnalloc(source->stream->pool, ca_file->len);
+            if (copy == NULL) {
+                return NGX_ERROR;
+            }
+
+            ngx_memcpy(copy, ca_file->data, ca_file->len);
+            stored->data = copy;
+            stored->len = ca_file->len;
+        }
+    }
+
+    return NGX_OK;
+}
+
 ngx_int_t
 ngx_media_graph_source_set(const ngx_media_stream_t *stream,
     const ngx_media_source_t *source, const ngx_str_t *path,
@@ -181,6 +358,13 @@ ngx_media_graph_source_set(const ngx_media_stream_t *stream,
     ngx_media_graph_op_t  op;
 
     if (stream == NULL || source == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (ngx_media_graph_source_paths_set((ngx_media_source_t *) source,
+                                         path, ca_file)
+        != NGX_OK)
+    {
         return NGX_ERROR;
     }
 
@@ -195,12 +379,14 @@ ngx_media_graph_source_set(const ngx_media_stream_t *stream,
     op.application = stream->application;
     op.name = stream->name;
     op.id = source->id;
+    op.path = source->path;
+    op.ca_file = source->ca_file;
 
-    if (path != NULL) {
+    if (path != NULL && path->len != 0) {
         op.path = *path;
     }
 
-    if (ca_file != NULL) {
+    if (ca_file != NULL && ca_file->len != 0) {
         op.ca_file = *ca_file;
     }
 
@@ -531,6 +717,12 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
          */
         stream->revision = op.revision;
 
+        if (ngx_media_graph_owns(&stream->application, &stream->name)
+            && ngx_media_runtime_admit(stream, log) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+
         return NGX_OK;
 
     case NGX_MEDIA_GRAPH_STREAM_DELETE:
@@ -600,6 +792,12 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
 
         } else if (source->type == op.type) {
             source->priority = op.priority;
+        }
+
+        if (ngx_media_graph_source_paths_set(source, &op.path, &op.ca_file)
+            != NGX_OK)
+        {
+            return NGX_ERROR;
         }
 
         /*

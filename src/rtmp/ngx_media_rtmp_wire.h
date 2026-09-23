@@ -168,6 +168,24 @@ ngx_int_t ngx_media_rtmp_writer_message(ngx_media_rtmp_writer_t *w,
     ngx_uint_t stream_id, uint32_t timestamp, ngx_media_buf_t *payload,
     size_t offset, size_t len);
 
+/*
+ * What one message costs a queue that has to reserve room for it before it is
+ * built: a chain slot per part (two per chunk) and a payload reference per
+ * chunk.  A queue that reserves one of each per *message* undercounts a
+ * multi-chunk message, which is how a >256 KiB keyframe used to run past the
+ * fixed in_flight ring.  Both the player and the destination reserve from
+ * this, and it is derived from the writer they will hand the message to, so
+ * the reservation cannot drift from what the fill loop actually appends.
+ */
+typedef struct {
+    ngx_uint_t  parts;   /* chain slots the message will occupy */
+    ngx_uint_t  refs;    /* payload references it will hold */
+} ngx_media_rtmp_footprint_t;
+
+/* NGX_AGAIN when the message is past what this writer can emit at all */
+ngx_int_t ngx_media_rtmp_message_footprint(const ngx_media_rtmp_writer_t *w,
+    size_t len, ngx_media_rtmp_footprint_t *out);
+
 /* --- AMF0 ---------------------------------------------------------------- */
 
 #define NGX_MEDIA_AMF_NUMBER      0x00

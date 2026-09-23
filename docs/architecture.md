@@ -136,13 +136,23 @@ thread budget and the options that bound throughput.
 
 ## Ownership
 
-A logical program has **one owner worker**, chosen by consistent hashing over
-`application/stream`.  The owner holds the mutable state: sources, selector,
-timeline, program feed, HLS state and program recording.
+A logical program has **one owner worker**, and the choice is deterministic:
+`FNV-1a64(application/stream) % worker_count`, computed identically by every
+worker with nothing to negotiate.  Ownership is therefore a property of the
+program's identity and the configuration, not of the request that created the
+program or of the worker that accepted its publisher, and the two functions
+that ask about it — the one that drives (`ngx_media_route_is_owner`, asked by
+the tick) and the one that reports (`ngx_media_route_owner`, asked by the API)
+— answer from the same computation.  The owner holds the mutable state:
+sources, selector, timeline, program feed, HLS state and program recording.
 
-Shared memory holds only small metadata — the stream's identity, owner
-worker/pid/cycle,
-generation, state, heartbeat — never mutable media state.  Transport socket
+Shared memory holds only small metadata — the owner's slot, pid, the state it
+is in, its generation, frame count and source count, and a heartbeat, plus the
+one revision sequence the control plane mutates — never mutable media state and
+never the decision itself.  The record is what the owner publishes about a
+program it is running: a read on another worker uses it for the progress
+figures, and a record whose owner has stopped heartbeating for ten seconds is
+reclaimable by the next claim on that slot.  Transport socket
 ownership may differ from program ownership, and where it can, it does: each
 worker accepts on its own ingest endpoint, so a publisher is normally carried
 by the worker that accepted it, and a publisher that lands on a non-owner
@@ -168,8 +178,8 @@ flowchart TB
     R1 -->|"bounded SOCK_SEQPACKET:<br/>the escape hatch"| P0
 
     P0 --> TAP["taps: HLS, recording, RTMP, SRT"]
-    TAP --> SHM[("shared segment store")]
-    SHM --> ANY["any worker serves HLS from it"]
+    TAP --> HLS[("<media_hls>/live/news<br/>the filesystem, one directory per program")]
+    HLS --> ANY["nginx's own HTTP path serves it<br/>on whichever worker answers"]
 ```
 
 The worker that accepts a misplaced publisher does **not** register the source
@@ -217,10 +227,12 @@ A replica is not a second program.  Only the owner materialises a transport —
 opens the file, watches the directory, pulls the origin — and only the owner
 runs selection, the program feed and the outputs, so a program reads a file
 once rather than once per worker, and one program's egress is never split.  A
-A read that lands on a replica reports the graph, plus the generation and
-program-frame figures the owner published in the shared directory — with the
-owner named, and `observed_here` false when the numbers came from somewhere
-else.  The transport and fanout figures in the same document are the answering
+read that lands on a replica reports the graph, plus the generation and
+program-frame figures the owner published in the shared directory — with
+`owner` naming the slot the hash selects and `observed_here` false when that is
+not this worker — and when the owner is not publishing at all those figures
+read zero rather than being filled in from a copy that is not driving anything.
+The transport and fanout figures in the same document are the answering
 worker's own, so on a worker that does not drive the program they say nothing.
 A **destination** is an output rather than graph state and is not replicated:
 it is started where the program runs, so creating, deleting or applying one
@@ -235,15 +247,20 @@ that raced another worker's change to the same stream is a no-op rather than a
 duplicate or a torn object.  A deletion is an operation like any other — it is
 broadcast to every worker, and deleting a stream this worker does not have still
 tells the workers that do — and each worker remembers the deletions it has seen
-for a bounded window, so an operation that was in flight when the stream was
-deleted cannot create it again afterwards.  Without that memory a replica that
-had applied the delete would find no stream when the older operation arrived and
-build one, and the deployment would hold a stream the operator removed.  This is a bounded, best-effort control plane, not
-consensus: a worker that is gone or behind is counted in
-`nginx_media_graph_undelivered_total`, logged and skipped, and a replica that
-missed an operation heals on the next mutation for that object or when a
-controller replays desired state through the API, which is safe because every
-create is idempotent.
+for a bounded window (a ring of 256 `hash`/`revision` pairs; the names are not
+kept, because they would grow with churn), so an operation that was in flight
+when the stream was deleted cannot create it again afterwards.  An operation
+older than the window is the same best-effort case as an operation a worker
+never received — which is why the window is a ring and not a history.
+Without that memory a replica that had applied the delete would find no stream
+when the older operation arrived and build one, and the deployment would hold a
+stream the operator removed while its peers do not.  The control plane is still
+bounded rather than consensus: a worker that is gone or behind is counted in
+`nginx_media_graph_undelivered_total`, logged, and its encoded graph operations
+are retained in a 256-entry repair journal.  Four entries per runtime tick are
+retried over the non-blocking route until all currently connected peers accept
+them.  A journal overflow or a worker/master replacement remains a controller
+replay case, and replay is safe because every create is idempotent.
 
 ### Deleting a stream releases its memory
 

@@ -583,7 +583,7 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
 
     ngx_media_srt_stream_policy(stream);
 
-    /* publish ownership so other workers can route to us */
+    /* publish the program's record: liveness and progress for the replicas */
     {
         ngx_media_owner_dir_t  *dir = ngx_media_runtime_owner_dir();
 
@@ -2003,7 +2003,8 @@ ngx_media_srt_handler(ngx_event_t *ev)
 
             if (session != NULL && session->source != NULL
                 && (session->source->stream == NULL
-                    || session->source->pending_remove))
+                    || ngx_atomic_fetch_add(
+                           &session->source->pending_remove, 0)))
             {
                 /*
                  * The source was removed through the control API.  Ordered

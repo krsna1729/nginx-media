@@ -215,19 +215,15 @@ ngx_media_file_advance(ngx_media_file_source_t *source, ngx_log_t *log)
 }
 
 /*
- * Whether the source behind this reader was removed through the control API.
- * ngx_media_stream_source_remove() detaches it from the stream, or only flags
- * it when a writer is in flight, so both are checked: either way the reader
- * has nothing left to publish into - publish() drops a frame whose source is
- * no longer attached - and has to stop.  The reader's own pointer is only
- * cleared by close(), which is what keeps this true until the teardown runs.
+ * Source removal publishes pending_remove before detaching the source.  The
+ * reader owns its source pointer until close joins it, so the atomic flag is
+ * the only lifetime check needed here.
  */
 static ngx_uint_t
 ngx_media_file_removed(ngx_media_file_source_t *source)
 {
     return (source->source == NULL
-            || source->source->stream == NULL
-            || source->source->pending_remove);
+            || ngx_atomic_fetch_add(&source->source->pending_remove, 0));
 }
 
 /*

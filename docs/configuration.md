@@ -323,7 +323,11 @@ publisher refused by an RTMPS listener.
 ### `media_api;`
 
 Location-level (`NGX_HTTP_LOC_CONF`, no arguments).  Enables the control API on
-that location; see `api.md` for the endpoints.
+that location; see `api.md` for the endpoints.  Neither the API nor
+`media_hls_ingest` below authenticates anything: the location is the whole
+boundary, so serve it on loopback, behind a proxy that authenticates, or on a
+Unix socket.  `security.md` section 3 is the deployment guidance and lists what
+a caller who reaches it can do; `api.md` has the routes.
 
 ### `media_hls_ingest <directory>;`
 
@@ -404,7 +408,7 @@ is redacted before it reaches a log or an API read.
 ```json
 {"id":"cdn","type":"hls_push",
  "host":"https://origin.example/live/news/",
- "path":"/var/lib/nginx/media/hls",
+ "path":"/var/lib/nginx/media/hls/live/news",
  "profile":"youtube_live"}
 ```
 

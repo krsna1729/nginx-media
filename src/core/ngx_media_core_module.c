@@ -319,7 +319,8 @@ ngx_media_core_init_module(ngx_cycle_t *cycle)
      * forked, so every worker inherits the same pages (goal doc 22).  It holds
      * small bookkeeping only: owner slot and pid, generation, heartbeat.
      */
-    if (ngx_media_owner_dir_shm_create(cycle, 256, cycle->log) != NGX_OK) {
+    if (ngx_media_owner_dir_shm_create(cycle, NGX_MEDIA_OWNER_DIR_SLOTS,
+                                       cycle->log) != NGX_OK) {
         return NGX_ERROR;
     }
 

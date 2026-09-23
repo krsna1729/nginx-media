@@ -578,36 +578,40 @@ ngx_media_rtmp_chain_buf(ngx_media_rtmp_session_t *session, ngx_buf_t *b)
  * exact interleaving the writer produced: a multi chunk message alternates a
  * chunk header with its payload slice.  A receiver therefore pays for headers
  * only, and one reference per payload slice keeps the shared media alive until
- * that slice has been sent (goal doc 12.1).
+ * that slice has been sent (goal doc 12.1).  Admission counts every chain slot
+ * and payload reference the writer is about to produce, from the writer
+ * itself, so the queue and the in_flight ring can never be overrun by a multi
+ * chunk message.
  */
 static ngx_int_t
 ngx_media_rtmp_queue_message(ngx_media_rtmp_session_t *session,
     ngx_uint_t csid, ngx_uint_t type, ngx_uint_t stream_id, uint32_t timestamp,
     ngx_media_buf_t *payload, size_t offset, size_t len)
 {
-    ngx_media_rtmp_packet_t  packet;
-    ngx_media_rtmp_writer_t  writer;
-    ngx_buf_t               *head;
-    ngx_chain_t             *pending, *pending_last, *cl;
-    ngx_uint_t               i, chunks, pending_queue;
-    size_t                    wire_bytes;
+    ngx_media_rtmp_packet_t      packet;
+    ngx_media_rtmp_writer_t      writer;
+    ngx_media_rtmp_footprint_t   foot;
+    ngx_buf_t                   *head;
+    ngx_chain_t                 *pending, *pending_last, *cl;
+    ngx_uint_t                   i, pending_queue;
+    size_t                       wire_bytes;
 
     /*
-     * The writer splits len into ceil(len/chunk_size) chunks with two parts
-     * each (header + slice).  Reserve for the whole message up front: the
-     * loop below appends one in-flight reference per payload slice, and the
-     * ring holds exactly MAX_OUT_QUEUE of them.
+     * Reserve the whole message before a byte of it is built: one chain slot
+     * and one in-flight reference per chunk the writer is about to emit.  A
+     * message that does not fit is refused here and nowhere else, so a refusal
+     * leaves the queue, the ring and the byte count exactly as they were and
+     * the caller can retry the same message once the queue has drained.
      */
-    chunks = (len + NGX_MEDIA_RTMP_OUT_CHUNK - 1)
-             / NGX_MEDIA_RTMP_OUT_CHUNK;
-
-    if (chunks == 0) {
-        chunks = 1;
+    if (ngx_media_rtmp_message_footprint(&session->writer, len, &foot)
+        != NGX_OK)
+    {
+        return NGX_AGAIN;
     }
 
-    if (session->out_queue + chunks * 2 + 1
-        > NGX_MEDIA_RTMP_MAX_OUT_QUEUE
-        || session->in_flight_count + chunks > NGX_MEDIA_RTMP_MAX_OUT_QUEUE)
+    if (session->out_queue + foot.parts > NGX_MEDIA_RTMP_MAX_OUT_QUEUE
+        || session->in_flight_count + foot.refs
+           > NGX_MEDIA_RTMP_MAX_OUT_QUEUE)
     {
         return NGX_AGAIN;
     }

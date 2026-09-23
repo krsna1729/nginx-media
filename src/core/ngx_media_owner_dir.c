@@ -18,6 +18,14 @@
 typedef struct {
     uint32_t                    magic;
     uint32_t                    slots;
+
+    /*
+     * The worker count this deployment's ownership is derived under.  The
+     * record's slot is checked against it, so a record can only ever name the
+     * deterministic owner of its hash (ngx_media_route_owner) and never a
+     * third worker that happened to take a request.
+     */
+    uint32_t                    workers;
     ngx_atomic_t                lock;
 
     /*
@@ -103,15 +111,22 @@ ngx_media_owner_dir_shm_create(ngx_cycle_t *cycle, ngx_uint_t slots,
     size_t                      size;
     ngx_uint_t                  i;
 
-    (void) cycle;
-
     if (ngx_media_owner_dir_mapped != NULL) {
+        /*
+         * A reload keeps the mapping the workers already adopted, but a
+         * changed worker count moves every stream's deterministic owner with
+         * it, so the count a record's slot is checked against has to follow.
+         */
+        ngx_media_owner_dir_mapped->workers =
+            (uint32_t) ngx_media_owner_worker_count(cycle);
+
         return NGX_OK;
     }
 
     if (slots == 0) {
-        slots = 256;
+        slots = NGX_MEDIA_OWNER_DIR_SLOTS;
     }
+
 
     size = sizeof(ngx_media_owner_dir_shm_t)
            + (slots - 1) * sizeof(ngx_media_owner_record_t);
@@ -129,6 +144,7 @@ ngx_media_owner_dir_shm_create(ngx_cycle_t *cycle, ngx_uint_t slots,
 
     shm->magic = NGX_MEDIA_OWNER_DIR_MAGIC;
     shm->slots = (uint32_t) slots;
+    shm->workers = (uint32_t) ngx_media_owner_worker_count(cycle);
 
     for (i = 0; i < slots; i++) {
         shm->records[i].state = NGX_MEDIA_OWNER_STATE_FREE;
@@ -178,15 +194,14 @@ ngx_media_owner_dir_reclaimable(ngx_media_owner_record_t *record)
      *
      * The owner's pid is deliberately not part of this.  A pid that matches
      * ours is the normal case for a stream this worker owns, and reading it as
-     * "our own record from a previous cycle" disowns the very worker that
-     * holds the program: it then falls back to the deterministic slot, which
-     * for a claimed stream is usually a different worker, so the program has
-     * an owner everywhere and a driver nowhere.  A record from a previous
-     * cycle cannot be recognised by pid either - a worker forked by a reload
-     * has a new pid - and does not need to be: a draining old owner still
+     * "our own record from a previous cycle" disowns the record the worker
+     * that drives the program is refreshing.  A record from a previous cycle
+     * cannot be recognised by pid either - a worker forked by a reload has a
+     * new pid - and does not need to be: a draining old owner still
      * heartbeats, so its record stays live and stays its own (goal doc 24),
      * and a dead one stops heartbeating and is reclaimable after
-     * NGX_MEDIA_OWNER_STALE_MS.
+     * NGX_MEDIA_OWNER_STALE_MS, which is when the surviving worker of that
+     * slot (the same deterministic owner) can publish its own.
      */
     if (ngx_media_owner_dir_now() - (ngx_msec_t) record->heartbeat
         > NGX_MEDIA_OWNER_STALE_MS)
@@ -212,6 +227,13 @@ ngx_media_owner_dir_find(ngx_media_owner_dir_t *dir, uint64_t hash)
             if (record->hash == hash) {
                 return record;
             }
+
+            if (first_avail == NULL
+                && ngx_media_owner_dir_reclaimable(record))
+            {
+                first_avail = record;
+            }
+
         } else if (record->state == NGX_MEDIA_OWNER_STATE_DELETED) {
             if (first_avail == NULL) {
                 first_avail = record;
@@ -219,42 +241,10 @@ ngx_media_owner_dir_find(ngx_media_owner_dir_t *dir, uint64_t hash)
         } else if (record->state == NGX_MEDIA_OWNER_STATE_FREE) {
             return (first_avail != NULL) ? first_avail : record;
         }
+
     }
 
     return first_avail;
-}
-
-ngx_media_owner_record_t *
-ngx_media_owner_dir_get(ngx_media_owner_dir_t *dir, uint64_t hash,
-    ngx_uint_t create)
-{
-    ngx_media_owner_record_t  *record;
-
-    if (dir == NULL || dir->shm == NULL) {
-        return NULL;
-    }
-
-    if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
-        return NULL;
-    }
-
-    record = ngx_media_owner_dir_find(dir, hash);
-
-    if (record != NULL && record->hash != hash) {
-
-        if (!create) {
-            record = NULL;
-
-        } else {
-            ngx_memzero(record, sizeof(ngx_media_owner_record_t));
-            record->hash = hash;
-            record->state = NGX_MEDIA_OWNER_STATE_FREE;
-        }
-    }
-
-    ngx_media_owner_dir_unlock(dir);
-
-    return record;
 }
 
 ngx_media_owner_record_t *
@@ -267,15 +257,43 @@ ngx_media_owner_dir_claim(ngx_media_owner_dir_t *dir, uint64_t hash,
         return NULL;
     }
 
+    /*
+     * Only the deterministic owner of a stream may publish a record for it.
+     *
+     * The record used to be written by whoever took the request (the API
+     * claim, and any worker that opened a local program), and every reader
+     * then treated it as the owner - so a stream whose hash names worker 1
+     * could be driven on worker 0 by a claim worker 0 never refreshed, and the
+     * two answers disagreed on every worker that read them.  Refusing a
+     * foreign slot here makes the record repeat ngx_media_route_owner by
+     * construction: a claim either names the hash owner or writes nothing.
+     */
+    if (slot != ngx_media_owner_slot(hash, (ngx_uint_t) dir->shm->workers)) {
+        return NULL;
+    }
+
     if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
         return NULL;
     }
 
     record = ngx_media_owner_dir_find(dir, hash);
 
-    if (record != NULL
-        && (record->hash != hash || ngx_media_owner_dir_reclaimable(record)))
+    if (record == NULL) {
+        ngx_log_error(NGX_LOG_WARN, dir->log, 0,
+                      "media: owner directory is full (capacity=%ui); "
+                      "cannot claim hash=%uL", dir->slots, hash);
+        ngx_media_owner_dir_unlock(dir);
+        return NULL;
+    }
+
+    if (record->hash != hash || record->slot != slot
+        || ngx_media_owner_dir_reclaimable(record))
     {
+        /*
+         * A record left by the pre-deterministic ownership code may name a
+         * different slot.  The route owner is now derived, so the deterministic
+         * worker repairs that metadata instead of preserving a stale claim.
+         */
         ngx_memzero(record, sizeof(ngx_media_owner_record_t));
 
         record->hash = hash;
@@ -342,37 +360,6 @@ ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint64_t hash,
     }
 
     ngx_media_owner_dir_unlock(dir);
-}
-
-ngx_uint_t
-ngx_media_owner_dir_slot(ngx_media_owner_dir_t *dir, uint64_t hash,
-    ngx_uint_t fallback)
-{
-    ngx_media_owner_record_t  *record;
-    ngx_uint_t                 slot;
-
-    if (dir == NULL || dir->shm == NULL) {
-        return fallback;
-    }
-
-    if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
-        return fallback;
-    }
-
-    record = ngx_media_owner_dir_find(dir, hash);
-
-    if (record == NULL || record->hash != hash
-        || ngx_media_owner_dir_reclaimable(record))
-    {
-        slot = fallback;
-
-    } else {
-        slot = (ngx_uint_t) record->slot;
-    }
-
-    ngx_media_owner_dir_unlock(dir);
-
-    return slot;
 }
 
 /*

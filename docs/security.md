@@ -10,7 +10,7 @@ This document records the security boundaries, threat models, verified vulnerabi
 |---|---|---|
 | **SRT Ingest** | Untrusted public network (UDP) | Stream ID parsed via strict parser (`#!::...`); raw TS buffered in bounded queues. |
 | **RTMP Ingest** | Untrusted public network (TCP) | Message lengths strictly checked against `max_message`; AMF0 strings and containers bounded; buffers unref'd before new message payloads. |
-| **HTTP Control API** | Administrative trust boundary | Has **no** built-in auth; must be secured via NGINX `allow/deny` or `auth_basic`. JSON responses are escaped; body sizes bounded. |
+| **HTTP Control API** | Administrative trust boundary | Has **no** built-in auth, no client-address check and no TLS of its own: the location serving it is the entire boundary, and it must be loopback, authenticated at a proxy, or a Unix socket — see section 3.  JSON responses are escaped; body sizes bounded. |
 | **HLS Ingest / Push / Pull** | External HTTP/HTTPS servers | Hostname verification (`SSL_set1_host`) enforced; DNS resolution supports IPv4 and IPv6 via `getaddrinfo()`; buffers must not share non-thread-safe pools. |
 | **Inter-Worker IPC** | Internal Unix domain sockets (`SOCK_SEQPACKET`) | Only authenticated peers in the same cluster communicate; messages are chunked and reassembled with strict length validation. |
 
@@ -105,7 +105,110 @@ This document records the security boundaries, threat models, verified vulnerabi
 
 ---
 
-## 3. Engineering Guidelines for Future Contributors
+## 3. The Control API's Deployment Boundary
+
+`media_api` is a content handler and nothing more: `ngx_media_api_set()` in
+`src/api/ngx_media_api_module.c` installs it on a location, and every request
+that reaches that location is dispatched.  There is no authentication, no
+client-address or peer-credential check, and no TLS of the module's own, and
+enabling it logs no banner — so **the API is exactly as protected as the
+location serving it**, and nothing in nginx-media will tell an operator when
+that location is public.  (`ngx_media_api_handler()` checks the method, reads
+the body, and dispatches; every check inside `src/api/` is a bound or an
+escape, never an authorization.)
+
+### What a request that reaches it can do
+
+- **Read the deployment.**  `GET /streams`, `/streams/{app}/{name}`, `/desired`
+  and `/metrics` return the whole graph, each program's sources and
+  destinations, and the Prometheus series — the shape of the deployment, not
+  merely whether it is up.
+- **Create and delete programs and their children.**  A stream, a source, a
+  destination, a switch, a switchback, and `DELETE` on each of them.  These are
+  runtime objects that start immediately and carry media, which is why the
+  boundary matters at all.
+- **Make the server read a path.**  A `file` source opens the `path` it is
+  given and an `hls_push` source opens the directory it is given, both on the
+  program's owner, and the difference between opened and not opened comes back
+  in the answer (`201` against `400 source_open_failed`), so a reached API is
+  also a read oracle for what that worker can open.
+- **Make the server fetch a URL.**  An `hls_pull` source is handed a playlist
+  URL and fetches it, and its segments, over HTTP or HTTPS, to any host the
+  worker can reach.  Reaching the API is reaching the worker's network
+  position, not just its media pipeline.
+- **Make the server send the program somewhere.**  An `srt`, `rtmp` or
+  `hls_push` destination connects out to the host it is given and publishes the
+  program to it, so the API is also a way to move a deployment's media to a
+  third party.
+- What it **cannot** do is change configuration: there is no reload route and no
+  directive is writable through it, and the graph is runtime state that a
+  reload loses.  That bounds the damage of a momentary exposure; it does not
+  bound the damage of a standing one.
+
+### The safe shapes
+
+- **Loopback, with the API on its own listener.**  Bind the API's `server` to
+  `127.0.0.1` rather than sharing the public listener, and put the belt beside
+  the braces inside the location: `allow 127.0.0.1; allow ::1; deny all;`.  The
+  access phase runs before the handler, so that rule is a boundary and not a
+  comment.
+- **Behind a reverse proxy that authenticates.**  Terminate TLS and
+  authenticate at the front — client certificates from an internal CA with
+  `ssl_verify_client on;` and `ssl_client_certificate`, HTTP basic against the
+  deployment's own file, or `auth_request` against its authorizer — and keep
+  the nginx-media listener private, so the API cannot be reached around the
+  proxy.  The proxy is also where a rate limit belongs; the API's own limits
+  bound one request, not a request rate.
+- **A Unix socket.**  `listen unix:/run/nginx-media/api.sock;` moves the
+  boundary into the filesystem: only a process that can open the socket reaches
+  the API, and the socket's permissions are the authorization.  That is the
+  right shape for a controller on the same host, because it removes the network
+  question entirely.
+- **Never the public listener.**  `location /media/api/ { media_api; }` on a
+  `listen 0.0.0.0:80` is a write API for the internet: it can tear down running
+  programs, point the server at arbitrary URLs, and publish the deployment's
+  media to an arbitrary remote.  An API that must be reachable off-host belongs
+  on its own listener behind the authenticating proxy, not in a location beside
+  the public site.
+
+The same reasoning applies to `media_hls_ingest`, which is a separate location
+that writes uploaded bodies into a directory on disk.  It authenticates nobody
+either, so restrict it to the encoder's address or put it behind the same
+proxy.  Its surface is narrower than the API's — the URI has to end in `.ts`
+and may not start with a dot, and the body size is nginx's own — but a public
+ingest endpoint is disk and media pipeline that an anonymous caller controls.
+
+### What the module does do
+
+None of this is authentication; all of it limits what a reached API or a stored
+value can be turned into, and it is worth knowing when triaging:
+
+- Request bodies are capped at 8192 bytes (`400 body_too_large`) and every
+  response is built into a fixed buffer, where truncation is a `500` and never a
+  partial document answered `200` (finding 17).
+- Endpoint credentials are redacted wherever an endpoint is reported — the
+  query string is dropped and userinfo replaced — so a key carried in an
+  `hls_push` URL cannot be read back out of the API, a log line, or the
+  desired-state document.
+- A destination type with no backend in the build is accepted and then fails to
+  start with `500`, so the API cannot start a transport this build does not
+  carry (there is no `record` destination backend here).
+
+### Checking it
+
+A boundary that cannot be demonstrated is a hope, so the check belongs in
+deployment and in review, from a host that is not the intended peer:
+
+```sh
+# the API must not answer an unauthenticated off-host caller: this must not be 200
+curl -sS -o /dev/null -w '%{http_code}\n' http://<host>:<port>/media/api/v1/streams
+# and it must not be listening anywhere but where it should be
+ss -lntp | grep <port>
+```
+
+---
+
+## 4. Engineering Guidelines for Future Contributors
 
 1. **Buffer Lifecycles in Packet Stream Parsers**:
    - Never assume a parser state object's buffer pointer is reusable across packet headers without verifying whether its capacity matches the new payload's requirements.
@@ -128,3 +231,24 @@ This document records the security boundaries, threat models, verified vulnerabi
    - URLs and filenames that reach a socket write or a filesystem call must be charset/range-checked at parse time (controls, ports, suffixes), not at use.
 10. **Truncation Is an Error**:
     - A builder that cannot fit its document must report it and the handler must answer 5xx; a cut 200 OK corrupts every controller that replays it.
+
+---
+
+## 5. What the Static Analysis Covers
+
+`.github/workflows/codeql.yml` scans `src` and `tests` — this repository's own
+sources — and deliberately not the nginx tree the build fetches into `.build/`.
+The analysis is a compiled one, so the build step pulls that tree in and it ends
+up in the database either way; analyzing it reported findings in code this
+project does not own, cannot act on, and would have to triage on every run (two
+of the four open alerts were in it: `ngx_time.c`'s `localtime()` and an
+`ngx_log.c` path argument).  Those reports are noise that hides findings in
+`src/`, which is the code this module ships, so a finding in the vendored tree
+is out of scope here by decision rather than by accident — upstream's business,
+recorded upstream, not in this list of remediations.
+
+Both alerts that were ours are fixed, and they are not in section 2 because they
+were found this way rather than by audit: an access-unit allocation in
+`src/mpegts/ngx_media_ts_demux.c` now checks the reassembled length against
+`demux->max_au_bytes` at the allocation and counts the refusal, and the routed
+path allocation in `src/core/ngx_media_runtime.c` is bounded the same way.

@@ -148,6 +148,8 @@ struct ngx_media_source_s {
 
     ngx_uint_t              type;      /* NGX_MEDIA_SOURCE_* */
     ngx_uint_t              priority;
+    ngx_str_t               path;      /* desired file, directory or URL */
+    ngx_str_t               ca_file;   /* desired HLS pull trust anchor */
     ngx_uint_t              state;     /* activation gate state */
     ngx_msec_t              last_media;
     ngx_msec_t              healthy_since;
@@ -166,7 +168,7 @@ struct ngx_media_source_s {
     unsigned                active:1;
     unsigned                has_video:1;
     unsigned                pending_switch:1;
-    unsigned                pending_remove:1;
+    ngx_atomic_t            pending_remove;
 };
 
 /* application: runtime graph root (normative revision) */

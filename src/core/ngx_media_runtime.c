@@ -65,9 +65,18 @@ static ngx_media_owner_dir_t     *ngx_media_runtime_owners;
 /* sources that live in another worker and are fed through the routing layer */
 #define NGX_MEDIA_RUNTIME_MAX_ROUTED 32
 
+#define NGX_MEDIA_RUNTIME_MAX_TRACK_CONFIG  (64 * 1024)
+
 typedef struct {
     ngx_uint_t              used;
-    uint32_t                hash;
+
+    /*
+     * The stream identity the sender addressed.  It was uint32_t here while
+     * the IPC header, the owner directory and the routing table all key on
+     * the full 64-bit hash, so a routed source was looked up under a
+     * truncated identity that could resolve to another stream's slot.
+     */
+    uint64_t                hash;
     ngx_media_stream_t     *stream;
     ngx_media_source_t     *source;
     /* reassembly of one publisher's chunked frames, one per routed endpoint */
@@ -196,6 +205,9 @@ ngx_media_runtime_hls_dir(ngx_media_stream_t *stream, const ngx_str_t *root,
     return path;
 }
 
+static void
+ngx_media_runtime_outputs_stop(ngx_media_runtime_outputs_t *out);
+
 static ngx_media_runtime_outputs_t *
 ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
 {
@@ -252,6 +264,7 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
                                                     log);
 
         if (dir == NULL) {
+            ngx_media_runtime_outputs_stop(out);
             return NULL;
         }
 
@@ -262,13 +275,16 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
         hls_conf.min_duration = NGX_MEDIA_RUNTIME_HLS_TARGET / 2;
         hls_conf.max_duration = NGX_MEDIA_RUNTIME_HLS_TARGET * 2;
 
-        if (ngx_media_hls_init(&out->hls, &hls_conf, log) == NGX_OK) {
-            out->hls_ready = 1;
-
-            ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                          "media: hls output started for %V/%V in %V",
-                          &stream->application, &stream->name, dir);
+        if (ngx_media_hls_init(&out->hls, &hls_conf, log) != NGX_OK) {
+            ngx_media_runtime_outputs_stop(out);
+            return NULL;
         }
+
+        out->hls_ready = 1;
+
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: hls output started for %V/%V in %V",
+                      &stream->application, &stream->name, dir);
     }
 
     if (policy->record_program_path.len > 0) {
@@ -277,13 +293,16 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
         rec_conf.path = policy->record_program_path;
         rec_conf.tap = NGX_MEDIA_RECORD_PROGRAM;
 
-        if (ngx_media_record_init(&out->program, &rec_conf, log) == NGX_OK) {
-            out->program_ready = 1;
-
-            ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                          "media: program recording started for %V/%V",
-                          &stream->application, &stream->name);
+        if (ngx_media_record_init(&out->program, &rec_conf, log) != NGX_OK) {
+            ngx_media_runtime_outputs_stop(out);
+            return NULL;
         }
+
+        out->program_ready = 1;
+
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: program recording started for %V/%V",
+                      &stream->application, &stream->name);
     }
 
     if (policy->record_iso_path.len > 0) {
@@ -292,19 +311,54 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
         rec_conf.path = policy->record_iso_path;
         rec_conf.tap = NGX_MEDIA_RECORD_ISO;
 
-        if (ngx_media_ts_mux_init(&out->iso_mux, NULL, log) == NGX_OK
-            && ngx_media_record_init(&out->iso, &rec_conf, log) == NGX_OK)
+        if (ngx_media_ts_mux_init(&out->iso_mux, NULL, log) != NGX_OK
+            || ngx_media_record_init(&out->iso, &rec_conf, log) != NGX_OK)
         {
-            out->iso_ready = 1;
-
-            ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                          "media: iso recording started for %V/%V source %V",
-                          &stream->application, &stream->name,
-                          &policy->record_iso_source);
+            ngx_media_runtime_outputs_stop(out);
+            return NULL;
         }
+
+        out->iso_ready = 1;
+
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: iso recording started for %V/%V source %V",
+                      &stream->application, &stream->name,
+                      &policy->record_iso_source);
     }
 
     return out;
+}
+
+ngx_int_t
+ngx_media_runtime_admit(ngx_media_stream_t *stream, ngx_log_t *log)
+{
+    ngx_media_policy_t              *policy;
+    ngx_media_runtime_outputs_t     *out;
+
+    if (stream == NULL) {
+        return NGX_ERROR;
+    }
+
+    policy = ngx_media_runtime_policy();
+
+    if (policy == NULL
+        || (policy->hls_path.len == 0
+            && policy->record_program_path.len == 0
+            && policy->record_iso_path.len == 0))
+    {
+        return NGX_OK;
+    }
+
+    out = ngx_media_runtime_outputs_get(stream, log);
+
+    if (out == NULL) {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "media: no runtime output capacity for %V/%V",
+                      &stream->application, &stream->name);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
 }
 
 void
@@ -609,7 +663,11 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
     ngx_media_feed_conf_t  feed_conf;
 
     (void) ctx;
-    (void) hash;
+
+    if (header == NULL) {
+        return NGX_ERROR;
+    }
+
 
     /*
      * A graph operation is desired state, not media: it belongs to this
@@ -626,6 +684,7 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
     if (registry == NULL) {
         return NGX_ERROR;
     }
+
 
     if (header->type == NGX_MEDIA_IPC_MSG_OPEN) {
 
@@ -658,6 +717,20 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         source_id.data = slash + 1;
         source_id.len = ngx_media_buf_size(payload)
                         - application.len - name.len - 2;
+
+        /*
+         * The datagram itself is bounded, but its fields are copied into
+         * long-lived pool objects below.  Keep the identity fields at the same
+         * bound as graph operations; otherwise a peer could turn one OPEN
+         * into a nearly-64 KiB stream/source allocation on every reconnect.
+         */
+        if (application.len == 0 || name.len == 0 || source_id.len == 0
+            || application.len > NGX_MEDIA_GRAPH_MAX_NAME
+            || name.len > NGX_MEDIA_GRAPH_MAX_NAME
+            || source_id.len > NGX_MEDIA_GRAPH_MAX_NAME)
+        {
+            return NGX_ERROR;
+        }
 
         feed_conf.max_units = 2048;
         feed_conf.max_bytes = 32 * 1024 * 1024;
@@ -796,7 +869,9 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
             q += sizeof(fields);
             left -= sizeof(fields);
 
-            if (fields[9] > left) {
+            if (fields[9] > left
+                || fields[9] > NGX_MEDIA_RUNTIME_MAX_TRACK_CONFIG)
+            {
                 ngx_media_trackset_destroy(&set);
                 return NGX_ERROR;
             }
@@ -1164,7 +1239,7 @@ ngx_media_runtime_progress(const ngx_str_t *application, const ngx_str_t *name,
     ngx_media_runtime_progress_t *out)
 {
     ngx_media_owner_record_t  record;
-    uint32_t                  hash;
+    uint64_t                  hash;
     ngx_uint_t                owner;
 
     if (out == NULL) {
@@ -1182,6 +1257,13 @@ ngx_media_runtime_progress(const ngx_str_t *application, const ngx_str_t *name,
         return;
     }
 
+    /*
+     * The owner is derived from the full 64-bit identity.  A uint32_t copy of
+     * it named a different worker as soon as hash % workers and
+     * (hash & 0xffffffff) % workers differ - the API's `owner` field then
+     * disagreed with the worker that drove the stream, and the owner directory
+     * lookup missed a record that was published under the full hash.
+     */
     hash = ngx_media_owner_hash(application, name);
     owner = ngx_media_route_owner((ngx_cycle_t *) ngx_cycle, hash);
 
@@ -1259,6 +1341,8 @@ ngx_media_runtime_tick(ngx_log_t *log)
     ngx_media_runtime_last_tick = now;
     ngx_media_runtime_stats.ticks++;
 
+    ngx_media_graph_repair_tick(log);
+
     ngx_media_runtime_stats.reconnecting = 0;
 
     registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
@@ -1332,10 +1416,14 @@ ngx_media_runtime_tick(ngx_log_t *log)
             uint64_t  hash = ngx_media_owner_hash(&stream->application,
                                                   &stream->name);
 
+            /*
+             * The slot is this worker's own.  A record can only have been
+             * published under the deterministic owner of this hash, and the
+             * tick only runs for streams this worker owns, so the hash owner
+             * and this worker are the same one the record names.
+             */
             (void) ngx_media_owner_dir_heartbeat(
-                ngx_media_runtime_owners, hash,
-                ngx_media_owner_dir_slot(ngx_media_runtime_owners, hash,
-                                         (ngx_uint_t) ngx_worker),
+                ngx_media_runtime_owners, hash, (ngx_uint_t) ngx_worker,
                 stream->generation, stream->program_frames,
                 ngx_media_stream_source_count(stream));
         }

@@ -87,18 +87,27 @@ ngx_media_route_master_init(ngx_cycle_t *cycle, ngx_log_t *log)
     return NGX_OK;
 }
 
+/*
+ * Ownership is derived, never published: the answer is the deterministic slot
+ * for application/stream, so every worker computes the same one on its own.
+ *
+ * The shared owner-directory record deliberately does not decide this.  It
+ * used to win whenever it held a live record, and that record is written by
+ * whichever worker takes the API request (ngx_media_runtime_claim) - not the
+ * worker that drives the program.  Measured on this tree (`make incarnation`,
+ * two workers, log line numbers from an instrumented run): live/inc-2 hashes
+ * to worker 1 on both workers, the POST landed on worker 0 and claimed the
+ * stream for worker 0, and the SRT listener worker then read that record as
+ * its own ownership - it opened the publisher's source locally while the
+ * graph reported worker 1, and neither answer named the driver.  The record
+ * is liveness and progress now, not identity: it can only ever repeat this
+ * answer, because ngx_media_owner_dir_claim refuses to publish a slot that is
+ * not the one returned here.
+ */
 ngx_uint_t
 ngx_media_route_owner(ngx_cycle_t *cycle, uint64_t hash)
 {
-    ngx_media_owner_dir_t  *dir = ngx_media_runtime_owner_dir();
-    ngx_uint_t              fallback = ngx_media_owner_for(cycle, hash);
-
-    if (dir == NULL) {
-        return fallback;
-    }
-
-    /* a live owner record wins; otherwise the deterministic slot does */
-    return ngx_media_owner_dir_slot(dir, hash, fallback);
+    return ngx_media_owner_for(cycle, hash);
 }
 
 ngx_uint_t
@@ -130,8 +139,14 @@ ngx_media_route_read_handler(ngx_event_t *ev)
         }
 
         if (ngx_media_route_sink != NULL) {
+            /*
+             * The header carries the full 64-bit identity; truncating it here
+             * gave the receiver a different hash than the one the sender
+             * addressed, so a routed source could resolve to another stream's
+             * slot (or to none) while the two workers believed they agreed.
+             */
             (void) ngx_media_route_sink(ngx_media_route_sink_ctx,
-                                        (uint32_t) message.header.hash,
+                                        message.header.hash,
                                         &message.header, message.payload);
         }
 

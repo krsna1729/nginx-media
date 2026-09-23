@@ -8,6 +8,12 @@ location /media/api/ {
 }
 ```
 
+The API authenticates nobody: no credential, no client-address check, no TLS of
+its own.  It is exactly as protected as the location serving it, so serve that
+location on loopback, behind a reverse proxy that authenticates, or on a Unix
+socket — `security.md` section 3 has the safe shapes, and what a caller who
+reaches it can do to a deployment — and never beside a public `listen`.
+
 All routes are under `/media/api/v1/`.  Responses are bounded JSON with
 explicit status codes; the buffer is fixed size, so a pathological registry
 produces a truncated error rather than an unbounded allocation.  Everything
@@ -54,7 +60,8 @@ a controller restart survivable.
 
 ```json
 {"streams":[
-  {"application":"live","name":"news",
+  {"application":"live","name":"news","owner":0,"observed_here":true,
+   "revision":9,
    "generation":2,"switches":1,"emergency_switches":0,
    "failure_timeout_ms":1500,"recovery_timeout_ms":10000,
    "switchback":1,"program_frames":696,
@@ -94,12 +101,64 @@ Field notes:
 - `preroll_units`/`preroll_bytes` describe the standby GOP cache; the cache is
   what makes a switch land on a keyframe without a visible stall.
 - `switchback` is the configured policy (`1` auto, `2` manual, `3` never).
+- `owner` is the worker slot that drives the program and `observed_here` says
+  whether the worker answering this read is it.  Both are computed the same way
+  on every worker — see "Ownership" below — so they agree across the
+  deployment, which is the point of them.
 - `fanout_ms` is the program's fanout delay — the time from when the program
   published a unit of media to when a consumer took it — at the 50th, 95th and
   99th percentile and the observed maximum, and `dispatched` counts the units
   consumers have taken.  This is the number an operator can feel: it says
   whether the deployment has headroom or is spending its slack on a slow
   destination.
+
+## Ownership
+
+A program is driven by exactly one worker, and which one is a function of the
+program's identity rather than of where a request landed: every worker computes
+`FNV-1a64(application/stream) % worker_processes` and gets the same answer, so
+`owner` is the same slot in every worker's copy of the document and no request
+can move it.  With one worker every program is that worker's, and nothing here
+can happen.
+
+Reads are answered anywhere, because the graph is replicated: a worker that
+does not own a program still reports it, and `observed_here` is how a caller
+tells the two apart.  On the owner the whole document is the running program's
+own state.  On a replica `generation` and `program_frames` are what the owner
+published in the shared directory — and `0` when the owner is not reporting at
+all, which is deliberate: a replica saying "this program has carried nothing"
+would be indistinguishable from a program that is running elsewhere.  The rest
+of the document on a replica — the per-source counters, `switches`,
+`fanout_ms`, `dispatched` — belongs to the answering worker's own copy, which
+is not driving the program, and so says nothing about it.
+
+Mutations that act on the *running* program are the exception, and they are
+answered only by the owner:
+
+- a manual switch (`POST .../switch`) and `POST .../switchback`, which move the
+  selector;
+- every destination mutation — create, delete, and anything else that is not a
+  `GET` on `.../destinations` — because an output started on a worker that does
+  not drive the program is never handed media;
+- a desired-state document that names a destination the worker does not own.
+
+Anywhere else they are refused with `409` rather than accepted into a copy that
+nothing watches:
+
+```json
+{"error":"not_owner","owner":2}
+```
+
+`owner` names the slot from the same hash, so a controller retries the request
+there instead of guessing.  The desired-state form names the stream too —
+`{"error":"destination_needs_owner","owner":2,"stream":"live/news"}` — and what
+was applied of the document before that point stays applied, which is safe
+because applying it again is idempotent.
+
+Streams, sources and a source's desired state are not refused: they are
+replicated state, and a worker that does not own the program registers them and
+lets the operation reach the owner, which is the worker that opens a source's
+reader and runs selection.
 
 ## Streams
 
@@ -175,21 +234,28 @@ transport attached — the id is a label the operator chooses and a publisher
 presenting it attaches to this object — except for the three types that own a
 reader:
 
-- `file` needs `path`, the MPEG-TS file to read.  The file is opened by the
-  create call and read one bounded chunk per runtime tick, so a large file
-  cannot stall a worker.
-- `hls_push` needs `path`, the directory an uploader watches.  A program's HLS
-  output is `<media_hls>/<application>/<name>`, so that is the directory a
-  destination for one program is pointed at.
+- `file` needs `path`, the MPEG-TS file to read.  The owner opens it when the
+  source is created and reads one bounded chunk per runtime tick, so a large
+  file cannot stall a worker.
+- `hls_push` needs `path`, the directory the source watches for uploaded
+  segments — the `media_hls_ingest` target.  A program's own HLS output is
+  `<media_hls>/<application>/<name>`, which is a different thing: that is the
+  directory an `hls_push` *destination* is pointed at.
 - `hls_pull` needs `path`, the playlist URL to fetch, and accepts an optional
   `ca_file` for an HTTPS origin whose certificate is not in the system store.
 
 A file that cannot be opened, and an ingest directory that is not readable,
-fail the create with `400` rather than leaving a source that never produces.
-A pull source is the exception: its reader does the first fetch on its own
-thread, so a playlist that cannot be reached is counted as a fetch failure and
-the source stays unproductive until the origin answers — whereupon it fails
-health like any source that has produced nothing.
+fail the create with `400` `{"error":"source_open_failed"}` rather than leaving
+a source that never produces.  That is the answer on the worker that owns the
+stream, which is the one that opens the reader.  A create that lands on a
+replica registers the source as desired state and answers `201`: the reader is
+opened by the owner when the operation reaches it, so a path the owner cannot
+open is reported in the owner's log (`media: could not register source ...`)
+and not in the response the caller got.  A pull source is the exception to the
+`400`: its reader does the first fetch on its own thread, so a playlist that
+cannot be reached is counted as a fetch failure and the source stays
+unproductive until the origin answers — whereupon it fails health like any
+source that has produced nothing.
 
 `GET .../sources` returns `{"sources":[...]}` with the same objects the stream
 detail embeds.  `GET .../sources/{id}` returns the smaller form the create and
@@ -199,6 +265,12 @@ delete replies echo:
 {"id":"encoder-b","type":3,"priority":50,"enabled":true,
  "state":"standby","revision":4}
 ```
+
+The desired-state document also preserves reader inputs: every source includes
+`"path"` (empty for transport-attached SRT/RTMP sources), and an HLS pull source
+with a custom trust anchor includes `"ca_file"`.  Replaying `/desired` therefore
+reopens the same file, ingest directory or playlist on the deterministic owner
+instead of reducing a path-bearing source to a label.
 
 `enable` and `disable` are desired state, accepted whatever the transport is
 doing: disabling takes a source out of selection without tearing its session
@@ -250,6 +322,13 @@ output directory it watches; there is no port:
  "path":"/var/lib/nginx/media/hls/live/news"}
 ```
 
+That directory is not free-form: it has to be the program's own HLS output
+directory, `<media_hls>/<application>/<name>`, because the runtime tick scans
+that directory and offers what appears in it to the destinations watching it.
+A destination pointed anywhere else starts, is listed, and receives nothing —
+the string it was given is compared against the directory the program writes,
+so a typo is a silent no-op rather than an error.
+
 A destination is answered as `{"id","type","host","port","enabled","revision"}`
 with the type numbers `srt` 1, `rtmp` 2, `hls_push` 3, `record` 4, and
 `GET .../destinations` wraps the list in `{"destinations":[...],"count":N}`.
@@ -291,7 +370,7 @@ An `hls_push` destination may name a platform profile:
 ```json
 {"id":"yt","type":"hls_push","profile":"youtube_live",
  "host":"https://a.upload.youtube.com/http_upload_hls?cid=...",
- "path":"/var/lib/nginx/media/hls",
+ "path":"/var/lib/nginx/media/hls/live/news",
  "segment_duration_ms":2000,"playlist_window":5}
 ```
 

@@ -228,31 +228,36 @@ ngx_media_rtmp_dest_queue_raw(ngx_media_rtmp_dest_t *d, const u_char *data,
  * Queues one RTMP message.  The chunk headers are copied once into a pool
  * buffer and the media bytes are referenced in place, in the exact
  * interleaving the writer produced, so the shared payload stays alive until
- * the last byte of the message has been sent (goal doc 12.1).  The capacity
- * check counts every payload slice the writer is about to produce, so the
- * queue can never be overrun by a multi chunk message.
+ * the last byte of the message has been sent (goal doc 12.1).  Admission
+ * counts every chain slot and payload reference the writer is about to
+ * produce, from the writer itself, so the queue and the ring can never be
+ * overrun by a multi chunk message.
  */
 static ngx_int_t
 ngx_media_rtmp_dest_queue_message(ngx_media_rtmp_dest_t *d, ngx_uint_t csid,
     ngx_uint_t type, ngx_uint_t stream_id, uint32_t timestamp,
     ngx_media_buf_t *payload, size_t len)
 {
-    ngx_media_rtmp_packet_t  packet;
-    ngx_media_rtmp_writer_t  writer;
-    ngx_buf_t               *head;
-    ngx_chain_t             *pending, *pending_last, *cl;
-    ngx_uint_t               i, chunks, pending_queue;
-    size_t                    wire_bytes;
+    ngx_media_rtmp_packet_t      packet;
+    ngx_media_rtmp_writer_t      writer;
+    ngx_media_rtmp_footprint_t   foot;
+    ngx_buf_t                   *head;
+    ngx_chain_t                 *pending, *pending_last, *cl;
+    ngx_uint_t                   i, pending_queue;
+    size_t                       wire_bytes;
 
-    chunks = (len + NGX_MEDIA_RTMP_DEST_CHUNK - 1)
-             / NGX_MEDIA_RTMP_DEST_CHUNK;
-
-    if (chunks == 0) {
-        chunks = 1;
+    /*
+     * Reserve the whole message before a byte of it is built: one chain slot
+     * and one in-flight reference per chunk the writer is about to emit.  A
+     * message that does not fit is refused here and nowhere else, so a refusal
+     * leaves the queue, the ring and the byte count exactly as they were.
+     */
+    if (ngx_media_rtmp_message_footprint(&d->writer, len, &foot) != NGX_OK) {
+        return NGX_AGAIN;
     }
 
-    if (d->out_queue + chunks * 2 > NGX_MEDIA_RTMP_DEST_MAX_QUEUE
-        || d->in_flight_count + chunks > NGX_MEDIA_RTMP_DEST_MAX_QUEUE)
+    if (d->out_queue + foot.parts > NGX_MEDIA_RTMP_DEST_MAX_QUEUE
+        || d->in_flight_count + foot.refs > NGX_MEDIA_RTMP_DEST_MAX_QUEUE)
     {
         return NGX_AGAIN;
     }

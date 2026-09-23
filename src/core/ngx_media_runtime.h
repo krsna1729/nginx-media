@@ -53,17 +53,19 @@ void ngx_media_runtime_progress(const ngx_str_t *application,
     ngx_media_runtime_progress_t *out);
 
 /*
- * Ownership, claimed rather than hashed.
+ * Ownership, derived rather than claimed.
  *
- * A worker that creates a stream through the control API owns it, and says
- * so in the shared directory.  Without this the owner is whatever the hash
- * picks, which is a different worker from the one that answered the request -
- * and since only the owner drives a program, the program is driven by nobody
- * and carries no media at all.  Measured with two workers: zero frames.
+ * A stream's owner is the deterministic slot for its application/stream hash
+ * (ngx_media_route_owner), so every worker computes the same answer on its
+ * own.  This publishes the owner's shared-directory record - liveness,
+ * generation and progress - and only the deterministic owner may write one:
+ * ngx_media_owner_dir_claim refuses any other slot, so a record can only
+ * repeat the hash answer and never introduce a third one.
  *
- * The routed-publisher path already claims the same way when a publisher
- * arrives, so this is the same mechanism applied at the other entry point
- * rather than a second one.
+ * A worker that is not the owner writes nothing here.  The stream it created
+ * is desired state that the graph carries to the owner, and publishing a
+ * record naming itself is exactly what used to make the API and the driver
+ * disagree about who owns the stream.
  */
 void ngx_media_runtime_claim(const ngx_str_t *application,
     const ngx_str_t *name);
@@ -107,9 +109,11 @@ typedef struct {
 
 void ngx_media_runtime_stats_get(ngx_media_runtime_stats_t *out);
 
+/* reserves a per-stream output slot before the owner accepts desired state */
+ngx_int_t ngx_media_runtime_admit(ngx_media_stream_t *stream, ngx_log_t *log);
+
 /* stops and releases per-stream outputs; called from exit_process */
 void ngx_media_runtime_shutdown(ngx_log_t *log);
-
 /*
  * Ordered teardown for everything the runtime keys by one stream: the outputs
  * (HLS, recording) flush and free their slots, the player preparation drops

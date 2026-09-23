@@ -36,11 +36,16 @@
  *
  * This is a bounded, best-effort control plane, not distributed consensus
  * (goal doc 23).  A mutation is applied locally, then offered to every peer
- * with a non-blocking send; a peer that is gone or behind is counted, logged
- * and skipped.  A replica that misses an operation stays behind until the
- * next operation for the same object, or until desired state is replayed
- * through the API - which is safe because every create is idempotent, and
- * re-creating is how a controller heals a worker anyway (goal doc 25).
+ * with a non-blocking send.  If a peer is behind, the encoded operation is
+ * retained in a bounded repair journal and retried from the runtime tick until
+ * every currently connected peer has accepted it.  A journal overflow is
+ * logged and remains a bounded loss; the controller's desired document is the
+ * recovery path after a worker or a master is gone.
+ *
+ * A replica that misses an operation stays behind until the repair retry or
+ * until desired state is replayed through the API - which is safe because every
+ * create is idempotent, and re-creating is how a controller heals a worker
+ * anyway (goal doc 25).
  *
  * Ordering and idempotency come from the object revisions the API already
  * assigns: an operation carries the stream revision it produces, and a
@@ -48,9 +53,16 @@
  * already seen.  Delivery between two workers is ordered by the transport
  * itself (SOCK_SEQPACKET), so reordering can only come from two workers
  * mutating the same stream at once; the revision then makes the loser a
- * no-op instead of a duplicate or a torn object, and every object operation
- * is idempotent, so applying one twice changes nothing.
+ * no-op instead of a duplicate or a torn object, and every object operation is
+ * idempotent, so applying one twice changes nothing.
  */
+/*
+ * The journal is deliberately finite: a blocked peer cannot turn a control
+ * plane into an unbounded allocator.  Each entry owns one immutable IPC
+ * payload reference until all addressed peers take it.
+ */
+#define NGX_MEDIA_GRAPH_REPAIR_CAPACITY 256
+#define NGX_MEDIA_GRAPH_REPAIR_PER_TICK  4
 
 /* operations on the wire; the numbers are the protocol, not an enum */
 #define NGX_MEDIA_GRAPH_STREAM_SET      1   /* create a stream or update it */
@@ -126,6 +138,9 @@ ngx_int_t ngx_media_graph_source_delete(const ngx_media_stream_t *stream,
 /* applies one received operation to this worker's registry */
 ngx_int_t ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
     ngx_media_buf_t *payload);
+
+/* retries bounded graph operations that a peer could not accept earlier */
+void ngx_media_graph_repair_tick(ngx_log_t *log);
 
 /*
  * Registers a desired source on this worker's stream: the reader on the

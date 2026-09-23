@@ -5,6 +5,7 @@
 
 #include <dirent.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -84,6 +85,8 @@ struct ngx_media_hls_ingest_source_s {
     u_char                   seen[NGX_MEDIA_HLS_INGEST_SEEN][NGX_MEDIA_HLS_INGEST_NAME_MAX];
     ngx_uint_t               nseen;
     ngx_uint_t               seen_next;
+    u_char                   last_name[NGX_MEDIA_HLS_INGEST_NAME_MAX];
+    ngx_uint_t               last_name_set;
     uint64_t                 segments;
     uint64_t                 frames;
     uint64_t                 failures;
@@ -343,6 +346,17 @@ ngx_media_hls_ingest_seen(ngx_media_hls_ingest_source_t *ingest,
 {
     ngx_uint_t  i;
 
+    /*
+     * The directory scan is lexical and the demuxer consumes segments in that
+     * order.  Keep a high-water mark as well as the bounded duplicate ring:
+     * once the ring wraps, an old immutable segment must not be replayed.
+     */
+    if (ingest->last_name_set
+        && strcmp((char *) name, (char *) ingest->last_name) <= 0)
+    {
+        return 1;
+    }
+
     for (i = 0; i < ingest->nseen; i++) {
 
         if (strlen((char *) ingest->seen[i]) == len
@@ -375,6 +389,13 @@ ngx_media_hls_ingest_record(ngx_media_hls_ingest_source_t *ingest,
 
     ngx_memcpy(ingest->seen[slot], name, len);
     ingest->seen[slot][len] = '\0';
+
+    if (!ingest->last_name_set
+        || strcmp((char *) name, (char *) ingest->last_name) > 0)
+    {
+        ngx_memcpy(ingest->last_name, name, len + 1);
+        ingest->last_name_set = 1;
+    }
 }
 
 /*
@@ -434,18 +455,15 @@ ngx_media_hls_ingest_next(ngx_media_hls_ingest_source_t *ingest, u_char *out,
 }
 
 /*
- * Whether the source behind this reader was removed through the control API.
- * source_remove() detaches it, or only flags it when a writer is in flight,
- * so both are checked.  This is the reader's own pointer, which only close()
- * clears, and close() cannot run while this thread is using the reader - it
- * joins the thread first - so the reader may read it as well as the worker.
+ * Source removal publishes pending_remove before detaching the source.  The
+ * reader owns its source pointer until close joins it, so the atomic flag is
+ * the only cross-thread lifetime check needed here.
  */
 static ngx_uint_t
 ngx_media_hls_ingest_source_removed(ngx_media_hls_ingest_source_t *ingest)
 {
     return (ingest->source == NULL
-            || ingest->source->stream == NULL
-            || ingest->source->pending_remove);
+            || ngx_atomic_fetch_add(&ingest->source->pending_remove, 0));
 }
 
 static void *

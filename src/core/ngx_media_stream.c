@@ -244,9 +244,16 @@ ngx_media_stream_source_remove(ngx_media_stream_t *stream,
 
     if (source->writers > 0) {
         /* in-flight writers must drain before destruction */
-        source->pending_remove = 1;
+        (void) ngx_atomic_cmp_set(&source->pending_remove, 0, 1);
         return;
     }
+
+    /*
+     * Publish removal before detaching the source pointer.  Reader threads
+     * use this atomic flag as their lifetime handoff; they must not race a
+     * plain source->stream read while the worker unlinks the source.
+     */
+    (void) ngx_atomic_cmp_set(&source->pending_remove, 0, 1);
 
     if (stream->active == source) {
         stream->active = NULL;
@@ -379,10 +386,13 @@ ngx_media_stream_switch_resolve(ngx_media_stream_t *stream)
 
         source = ngx_queue_data(q, ngx_media_source_t, queue);
 
-        if (source->pending_remove && source->writers == 0) {
-            source->pending_remove = 0;
-            ngx_media_stream_source_remove(stream, source);
-            continue;
+        if (ngx_atomic_fetch_add(&source->pending_remove, 0)
+            && source->writers == 0)
+        {
+            if (ngx_atomic_cmp_set(&source->pending_remove, 1, 0)) {
+                ngx_media_stream_source_remove(stream, source);
+                continue;
+            }
         }
 
         if (source->pending_switch

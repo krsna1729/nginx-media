@@ -1449,6 +1449,7 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
     ngx_media_stream_t    *stream;
     ngx_media_feed_conf_t  feed_conf;
     ngx_uint_t             existed;
+    ngx_int_t               rc;
 
     if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
         *last = ngx_snprintf(*last, end - *last,
@@ -1487,21 +1488,17 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
                                               ((ngx_cycle_t *) ngx_cycle)->log);
 
     /*
-     * The worker that creates a stream owns it.
+     * The stream's owner is the deterministic slot for its hash, not this
+     * worker: this request may have landed anywhere, and a program has one
+     * driver on every worker's reckoning (ngx_media_route_owner).
      *
-     * The alternative is the deterministic hash, which spreads programs
-     * evenly, and it does not work yet: a source that carries its own reader
-     * - a file, an origin, a directory - is opened by whoever applies the
-     * mutation, and only the owner materialises it.  With the hash, the
-     * originating worker is not the owner, so the reader it opened feeds a
-     * replica nobody drives.  Measured: eight programs over four workers kept
-     * 4000 frames with the claim and 1000 without, while the owners went from
-     * two to four.
-     *
-     * So ownership follows the creating worker for now, and the cost is that
-     * the spread follows nginx's accept distribution rather than a hash.
-     * Making the hash work means routing the originating apply through the
-     * owner-only materialisation path, which is the follow-up.
+     * Publishing a record here is how the owner announces that it has the
+     * stream; anywhere else it is a no-op, because the directory refuses a
+     * record for a slot the hash does not name.  It used to name the worker
+     * that answered the request instead, and that worker was then the owner
+     * on every worker's reading - including the driver's, which is how an
+     * accepting worker came to open a publisher's source locally while the
+     * graph reported another worker as the owner.
      */
     if (stream != NULL) {
         ngx_media_runtime_claim(&application, &name);
@@ -1524,7 +1521,18 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
      * special case: the operation is idempotent, and it is how a controller
      * replays desired state to a worker whose replica is behind.
      */
-    (void) ngx_media_graph_stream_set(stream);
+    rc = ngx_media_graph_stream_set(stream);
+
+    if (rc == NGX_ERROR) {
+        if (!existed) {
+            ngx_media_runtime_release(&application, &name);
+            (void) ngx_media_registry_stream_destroy(registry, stream);
+        }
+
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"runtime_output_capacity\"}");
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
 
     *last = ngx_snprintf(*last, end - *last, "{\"application\":");
 
@@ -2685,8 +2693,28 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
 
                 *last = ngx_snprintf(*last, end - *last,
                                      ",\"type\":%ui,\"priority\":%ui,"
-                                     "\"enabled\":%s,\"revision\":%uL}",
-                                     source->type, source->priority,
+                                     "\"path\":",
+                                     source->type, source->priority);
+
+                if (ngx_media_api_json_string(last, end, &source->path)
+                    != NGX_OK)
+                {
+                    return NGX_ERROR;
+                }
+
+                if (source->ca_file.len != 0) {
+                    *last = ngx_snprintf(*last, end - *last,
+                                         ",\"ca_file\":");
+
+                    if (ngx_media_api_json_string(last, end,
+                                                  &source->ca_file) != NGX_OK)
+                    {
+                        return NGX_ERROR;
+                    }
+                }
+
+                *last = ngx_snprintf(*last, end - *last,
+                                     ",\"enabled\":%s,\"revision\":%uL}",
                                      source->enabled ? "true" : "false",
                                      source->revision);
                 sfirst = 0;
@@ -2812,13 +2840,14 @@ static ngx_int_t
 ngx_media_api_desired_children(ngx_http_request_t *r,
     ngx_media_stream_t *stream, ngx_str_t *item, ngx_uint_t *created)
 {
-    ngx_str_t           array, child, value;
-    ngx_media_source_t *source;
+    ngx_str_t              array, child, value, id;
+    ngx_str_t              source_path, source_ca;
+    ngx_media_source_t    *source;
     ngx_media_destination_t  *destination;
-    ngx_uint_t          type, priority, port;
-    u_char             *p, *stop;
-    ngx_str_t          *copy;
-    ngx_int_t           n;
+    ngx_uint_t              type, priority, port;
+    u_char                 *p, *stop;
+    ngx_str_t              *copy;
+    ngx_int_t                n;
 
     if (ngx_media_api_json_array(item, "sources", &array) == NGX_OK) {
 
@@ -2866,9 +2895,7 @@ ngx_media_api_desired_children(ngx_http_request_t *r,
                 return NGX_ERROR;
             }
 
-            if (ngx_media_stream_source_find(stream, &value) != NULL) {
-                continue;
-            }
+            id = value;
 
             type = NGX_MEDIA_SOURCE_SRT;
 
@@ -2883,6 +2910,50 @@ ngx_media_api_desired_children(ngx_http_request_t *r,
                 }
             }
 
+            ngx_str_null(&source_path);
+            ngx_str_null(&source_ca);
+
+            if (ngx_media_api_json_field(&child, "path", &value) == NGX_OK) {
+                source_path = value;
+            }
+
+            if (ngx_media_api_json_field(&child, "ca_file", &value)
+                == NGX_OK)
+            {
+                source_ca = value;
+            }
+
+            if (source_path.len > NGX_MEDIA_GRAPH_MAX_PATH
+                || source_ca.len > NGX_MEDIA_GRAPH_MAX_PATH)
+            {
+                ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                              "media: desired: source path is too long");
+                return NGX_ERROR;
+            }
+
+            if ((type == NGX_MEDIA_SOURCE_FILE
+                 || type == NGX_MEDIA_SOURCE_HLS_PUSH
+                 || type == NGX_MEDIA_SOURCE_HLS_PULL)
+                && source_path.len == 0)
+            {
+                ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
+                              "media: desired: source %V needs a path",
+                              &id);
+                return NGX_ERROR;
+            }
+
+            source = ngx_media_stream_source_find(stream, &id);
+
+            if (source != NULL) {
+                if (source_path.len != 0 || source_ca.len != 0) {
+                    (void) ngx_media_graph_source_set(stream, source,
+                                                      &source_path,
+                                                      &source_ca);
+                }
+
+                continue;
+            }
+
             priority = 0;
 
             if (ngx_media_api_json_field(&child, "priority", &value)
@@ -2895,18 +2966,14 @@ ngx_media_api_desired_children(ngx_http_request_t *r,
                 }
             }
 
-            if (ngx_media_api_json_field(&child, "id", &value) != NGX_OK) {
-                return NGX_ERROR;
-            }
-
-            source = ngx_media_stream_source_add(stream, &value, type,
-                                                 priority,
+            source = ngx_media_graph_source_open(stream, &id, type, priority,
+                                                 &source_path, &source_ca,
                                                  r->connection->log);
 
             if (source == NULL) {
                 ngx_log_error(NGX_LOG_WARN, r->connection->log, 0,
-                              "media: desired: source %V could not be added",
-                              &value);
+                              "media: desired: source %V could not be opened",
+                              &id);
                 return NGX_ERROR;
             }
 
@@ -2914,11 +2981,12 @@ ngx_media_api_desired_children(ngx_http_request_t *r,
             (*created)++;
 
             /*
-             * A desired document names source identities, not paths, so the
-             * source is replicated as what it is here: a label a transport
-             * attaches to later.  No reader is opened for it on any worker.
+             * The owner materialises path-bearing sources; replicas retain
+             * the same desired path and wait for their owner.  SRT sources
+             * still remain labels until a publisher attaches.
              */
-            (void) ngx_media_graph_source_set(stream, source, NULL, NULL);
+            (void) ngx_media_graph_source_set(stream, source, &source_path,
+                                              &source_ca);
         }
     }
 
@@ -3144,8 +3212,8 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
     ngx_media_stream_t    *stream;
     ngx_media_feed_conf_t  feed_conf;
     u_char                *p, *stop;
-    ngx_uint_t             applied = 0, created = 0;
-    ngx_int_t              rc;
+    ngx_uint_t             applied = 0, created = 0, stream_existed;
+    ngx_int_t               rc;
 
     if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
         *last = ngx_snprintf(*last, end - *last,
@@ -3217,6 +3285,9 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
             return NGX_HTTP_BAD_REQUEST;
         }
 
+        stream_existed =
+            (ngx_media_registry_stream(registry, &application, &name) != NULL);
+
         stream = ngx_media_registry_stream_create(registry, &application,
                                                   &name, &feed_conf,
                                                   ((ngx_cycle_t *) ngx_cycle)
@@ -3269,7 +3340,18 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
          * document, whether this worker created the stream or re-used one it
          * already had.
          */
-        (void) ngx_media_graph_stream_set(stream);
+        rc = ngx_media_graph_stream_set(stream);
+
+        if (rc == NGX_ERROR) {
+            if (!stream_existed) {
+                ngx_media_runtime_release(&application, &name);
+                (void) ngx_media_registry_stream_destroy(registry, stream);
+            }
+
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"runtime_output_capacity\"}");
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
     }
 
     *last = ngx_snprintf(*last, end - *last,

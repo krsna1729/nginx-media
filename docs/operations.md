@@ -261,13 +261,14 @@ nothing: the scan offers the program's own HLS directory
 (`<media_hls>/<application>/<name>`), so a destination has to be pointed at the
 program it is meant to carry (`configuration.md`).
 
-There is a ceiling worth knowing about on long-running destinations: each one
-remembers the 256 most recent file names it has offered
-(`NGX_MEDIA_HLS_PUSH_SCAN_MAX`).  That list never shrinks, so after 256 distinct
-segment names — about 25 minutes at the default 6 s target — a new name cannot be
-recorded as seen and is offered again on every scan, which is roughly ten times a
-second.  The symptom is the same file arriving repeatedly at the remote and the
-destination's internal drop counter climbing; the program is still unaffected.
+The per-destination scan table is bounded at 256 names
+(`NGX_MEDIA_HLS_PUSH_SCAN_MAX`), but it is not the correctness boundary:
+immutable segment names also advance a lexical high-water mark.  Once a segment
+has been offered, a later scan never re-offers that name after the table wraps.
+The constant-name playlist is the exception; its mtime and size are tracked so
+rewrites are offered again.  A full upload queue can still drop a segment by
+policy, and that is reported by the destination's drop counter; the scan table
+does not turn a bounded queue into an unbounded one.
 
 ### A slow SRT or RTMP receiver
 
@@ -297,31 +298,43 @@ the worker that accepted it, which is the worker the kernel placed it on, with
 `media: no free ingest session slot` and `media: rtmp: no free session slot` in
 the log.
 
-### A worker that has stopped owning a program
+### A program whose owner worker is not there
 
-Only the owner drives a program: the tick skips streams whose ownership hash is
-not this worker's, so in a worker that has lost ownership of a stream nothing
-runs — no selection, no outputs, no log line.  Ownership is deterministic
-(64-bit FNV-1a over `application/stream`, modulo the worker count, so two
-distinct streams cannot hash alike and become one stream to the deployment) and
-never moves
-during a worker's life, so this is not a thing that drifts; it is a thing that
-is wrong from the start or that stops being right when the worker count changes.
+Only the owner drives a program: the tick asks the same deterministic question
+for every stream — `FNV-1a64(application/stream) % worker_count == this
+worker` — and a worker that is not the answer runs nothing for that stream: no
+selection, no outputs, no HLS writes, no log line.  Ownership is the same
+answer on every worker by construction (64-bit FNV-1a over
+`application/stream`; a hash collision still maps two names to the same owner,
+not to the same registry entry), so the worker that reports a program and the
+worker that drives it cannot disagree, and nothing an operator sends through the
+API can move it: which worker owns a program is a function of the program's name
+and `worker_processes`.  The graph reports it as `owner`, the same value
+everywhere.
 
 The shared owner directory (`src/core/ngx_media_owner_dir.c`, 256 slots in the
-master's mapping) holds only bookkeeping — owner slot, pid, generation, state,
-timestamp — and is used as a routing hint: a live record wins over the
-deterministic slot, and a record whose timestamp is more than ten seconds old,
-or whose pid is this worker's from an earlier generation, is reclaimable by the
-next claim.  A claim happens when a stream is created, which is the API path, a
-publisher attaching on its owner worker, or a routed publisher's `OPEN`.
+master's mapping) is bookkeeping about that owner and never the decision: the
+slot, its pid, the generation being served, the frame and source counts, the
+state, and a heartbeat the tick refreshes.  A read on another worker answers
+with those published figures, and a record whose owner has stopped heartbeating
+for more than ten seconds is reclaimable, which is how a program whose worker
+died gets a record again once the master has respawned it.  The pid is
+deliberately not part of that test: a pid equal to this worker's is the normal
+case for a stream this worker owns, and reading it as a record from an earlier
+cycle would disown the worker that holds the program.
 
-From outside, a stream that is inert in the worker holding it looks like this in
-the detail JSON: `active` unchanged or `none`, `program_frames` frozen, no
+When the owner is not there at all, every worker says so the same way: the
+detail JSON reports `owner` — the slot the hash names — with
+`observed_here:false`, `generation` and `program_frames` at whatever the owner
+last published (zero, if it never published), `active` unchanged or `none`, no
 `dispatched` growth, no HLS writes, and worker metrics that are perfectly
-healthy because the worker has nothing to do.  The fix is on the operator's
-side: the graph is worker state, so put the stream where it is owned — see the
-multi-worker note under reconciling.
+healthy because there is nothing to do.  Reads keep working, because the graph
+is replicated; the mutations that act on the running program are refused with
+`409 not_owner` naming that slot, so a controller is told the program cannot be
+driven instead of writing into a copy that nothing watches.  What puts it right
+is the owner coming back — a respawn, or a reload followed by replaying the
+desired-state document, because the graph is worker memory and a reload loses
+it.
 
 ## Routine operations
 
@@ -410,10 +423,11 @@ per stream":
 - **More programs, not more fanout.** One program's fanout is done by its
   owner, so that cost does not spread over workers at all. Adding workers adds
   room for more programs.
-- **Ownership follows the worker that created the program.** The graph is
-  replicated, but who owns what is decided when the program is created, so the
-  spread of programs over workers follows the spread of the requests that
-  created them.
+- **Programs spread by identity, not by request.** Ownership is
+  `FNV-1a64(application/stream) % worker_count`, so which worker drives a
+  program is a function of the program's name and the configured worker count —
+  the same answer on every worker, computable from a lookup, and unaffected by
+  where the create request happened to land.
 - **One listening endpoint is one receive thread.** The receive and
   per-session demultiplexing are done by the library, on a thread it owns per
   bound port, so the worker count does not divide that cost — the endpoint
@@ -421,13 +435,14 @@ per stream":
   threads it creates per unit, and the options that bound throughput.
 
 `make bench-worker-scaling` reports the first of those, and
-`make bench-ingest-egress` the second: eight programs created over four
-workers landed on two of them.  That is not our bug and nginx says so itself -
-its accept code notes that with `EPOLLEXCLUSIVE` "most of the connections are
-handled by the first worker process", which is why it re-adds the listening
-socket periodically.  Its answer is `reuseport`, and measured on the same
-listener the eight programs spread across all four workers.  Put it on any
-listener nginx creates:
+`make bench-ingest-egress` the second.  Those runs are also where the accept
+distribution showed up: an nginx listener without `reuseport` accepts unevenly,
+and nginx says so itself — its accept code notes that with `EPOLLEXCLUSIVE`
+"most of the connections are handled by the first worker process", which is why
+it re-adds the listening socket periodically.  That skew decides which worker
+answers a request; it does not decide who owns a program, because ownership is
+the hash.  It still decides how the API's own reads and writes are served, so
+put `reuseport` on any listener nginx creates:
 
 ```nginx
 server {
@@ -614,8 +629,10 @@ Three idle workers and their three endpoints add nothing to the one port
 carrying the load: the same media, the same receive thread, the same cost.
 
 **Egress: HLS spreads, live destinations do not.**  One program, two shapes of
-egress.  HLS is served from the shared segment store by nginx's own HTTP path,
-so the kernel's `reuseport` hash spreads the readers; live SRT destinations
+egress.  HLS is a directory the owner writes segments into
+(`<media_hls>/<application>/<name>`) and nginx's own HTTP path serves, so the
+kernel's `reuseport` hash spreads the readers and any worker can serve them;
+live SRT destinations
 are prepared and fed by the owner in process:
 
 | workers | HLS readers: requests/s | MiB/s | HTTP CPU per worker | requests per worker |
