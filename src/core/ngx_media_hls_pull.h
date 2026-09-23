@@ -38,10 +38,9 @@ void ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull);
 
 /*
  * Closes the readers whose source was removed through the control API and
- * whose thread has already stopped.  Called from the runtime tick: a delete
- * has to take the reader with it, and the reader holds a thread.
+ * whose thread has already stopped.  Called from the periodic runtime visit:
+ * a delete has to take the reader with it, and the reader holds a thread.
  */
-void ngx_media_hls_pull_reap(ngx_log_t *log);
 
 /*
  * How many pull readers still reference this stream, which is the pool-release
@@ -49,7 +48,8 @@ void ngx_media_hls_pull_reap(ngx_log_t *log);
  * so a count of zero means no thread can still be reading the stream's memory.
  */
 ngx_uint_t ngx_media_hls_pull_stream_readers(const ngx_media_stream_t *stream);
-/* transfers queued reader events to the owning worker; called from its tick */
+/* transfers queued reader events on its eventfd; periodic maintenance also
+ * drains all readers as a bounded shutdown/delete safety net */
 void ngx_media_hls_pull_drain_all(void);
 
 /* stops and joins every reader; called at shutdown */

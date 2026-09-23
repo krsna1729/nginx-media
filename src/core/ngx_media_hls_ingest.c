@@ -2,6 +2,10 @@
 #include "ngx_media_health.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_stream.h"
+#ifndef NGX_MEDIA_UNIT_TEST
+#include <ngx_event.h>
+#include <sys/eventfd.h>
+#endif
 
 #include <dirent.h>
 #include <pthread.h>
@@ -60,6 +64,11 @@ struct ngx_media_hls_ingest_source_s {
     uint64_t                 events_tail;
     pthread_mutex_t          events_mutex;
     ngx_uint_t               events_mutex_initialized;
+#ifndef NGX_MEDIA_UNIT_TEST
+    int                          notify_fd;
+    ngx_connection_t            *notify_connection;
+    ngx_atomic_t                  notified;
+#endif
     ngx_atomic_t             events_dropped;
 
     pthread_t                thread;
@@ -107,6 +116,16 @@ static void ngx_media_hls_ingest_event_clear(
     ngx_media_hls_ingest_source_t *ingest);
 static void ngx_media_hls_ingest_event_drain(
     ngx_media_hls_ingest_source_t *ingest);
+#ifndef NGX_MEDIA_UNIT_TEST
+static void ngx_media_hls_ingest_notify(
+    ngx_media_hls_ingest_source_t *ingest);
+static ngx_int_t ngx_media_hls_ingest_notify_start(
+    ngx_media_hls_ingest_source_t *ingest);
+static void ngx_media_hls_ingest_notify_stop(
+    ngx_media_hls_ingest_source_t *ingest);
+static void ngx_media_hls_ingest_notify_handler(
+    ngx_event_t *ev);
+#endif
 static void ngx_media_hls_ingest_transport(
     ngx_media_hls_ingest_source_t *ingest, ngx_uint_t healthy);
 static ngx_uint_t ngx_media_hls_ingest_source_removed(
@@ -213,8 +232,108 @@ ngx_media_hls_ingest_event_push(ngx_media_hls_ingest_source_t *ingest,
 
     (void) pthread_mutex_unlock(&ingest->events_mutex);
 
+#ifndef NGX_MEDIA_UNIT_TEST
+    ngx_media_hls_ingest_notify(ingest);
+#endif
+
     return NGX_OK;
 }
+
+#ifndef NGX_MEDIA_UNIT_TEST
+static void
+ngx_media_hls_ingest_notify(ngx_media_hls_ingest_source_t *ingest)
+{
+    uint64_t  one = 1;
+    ssize_t   n;
+
+    if (ingest != NULL
+        && ingest->notify_fd != -1
+        && ngx_atomic_cmp_set(&ingest->notified, 0, 1))
+    {
+        n = write(ingest->notify_fd, &one, sizeof(one));
+
+        if (n != (ssize_t) sizeof(one)) {
+            (void) ngx_atomic_cmp_set(&ingest->notified, 1, 0);
+        }
+    }
+}
+
+
+static void
+ngx_media_hls_ingest_notify_handler(ngx_event_t *ev)
+{
+    ngx_connection_t            *c;
+    ngx_media_hls_ingest_source_t *ingest;
+    uint64_t                     value;
+
+    c = ev->data;
+    ingest = c != NULL ? c->data : NULL;
+
+    if (ingest == NULL) {
+        return;
+    }
+
+    (void) read(ingest->notify_fd, &value, sizeof(value));
+    ingest->notified = 0;
+    ngx_media_hls_ingest_event_drain(ingest);
+}
+
+
+static ngx_int_t
+ngx_media_hls_ingest_notify_start(ngx_media_hls_ingest_source_t *ingest)
+{
+    ngx_connection_t  *c;
+
+    ingest->notify_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (ingest->notify_fd == -1) {
+        return NGX_ERROR;
+    }
+
+    c = ngx_get_connection(ingest->notify_fd, ingest->log);
+    if (c == NULL) {
+        (void) close(ingest->notify_fd);
+        ingest->notify_fd = -1;
+        return NGX_ERROR;
+    }
+
+    c->data = ingest;
+    c->read->handler = ngx_media_hls_ingest_notify_handler;
+    c->read->log = ingest->log;
+
+    if (ngx_add_event(c->read, NGX_READ_EVENT, 0) != NGX_OK) {
+        c->fd = (ngx_socket_t) -1;
+        ngx_free_connection(c);
+        (void) close(ingest->notify_fd);
+        ingest->notify_fd = -1;
+        return NGX_ERROR;
+    }
+
+    ingest->notify_connection = c;
+    return NGX_OK;
+}
+
+
+static void
+ngx_media_hls_ingest_notify_stop(ngx_media_hls_ingest_source_t *ingest)
+{
+    if (ingest == NULL) {
+        return;
+    }
+
+    if (ingest->notify_connection != NULL) {
+        (void) ngx_del_event(ingest->notify_connection->read,
+                             NGX_READ_EVENT, 0);
+        ingest->notify_connection->fd = (ngx_socket_t) -1;
+        ngx_free_connection(ingest->notify_connection);
+        ingest->notify_connection = NULL;
+    }
+
+    if (ingest->notify_fd != -1) {
+        (void) close(ingest->notify_fd);
+        ingest->notify_fd = -1;
+    }
+}
+#endif
 
 static ngx_int_t
 ngx_media_hls_ingest_event_pop(ngx_media_hls_ingest_source_t *ingest,
@@ -488,8 +607,8 @@ ngx_media_hls_ingest_thread(void *data)
         if (ngx_media_hls_ingest_source_removed(ingest)) {
             /*
              * The source was removed through the control API, so there is
-             * nothing left to read for.  Leave the loop: the tick reaps
-             * exited readers, and the stream's memory cannot be released
+             * nothing left to read for.  Leave the loop: the periodic visit
+             * reaps exited readers, and the stream's memory cannot be released
              * until it has.
              */
             break;
@@ -592,6 +711,9 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     if (ingest == NULL) {
         return NULL;
     }
+#ifndef NGX_MEDIA_UNIT_TEST
+    ingest->notify_fd = -1;
+#endif
 
     copy = ngx_pcalloc(stream->pool, sizeof(ngx_str_t));
 
@@ -679,6 +801,12 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     }
 
     ingest->events_mutex_initialized = 1;
+#ifndef NGX_MEDIA_UNIT_TEST
+    if (ngx_media_hls_ingest_notify_start(ingest) != NGX_OK) {
+        ngx_media_hls_ingest_close(ingest);
+        return NULL;
+    }
+#endif
 
     /*
      * Health has to be initialised before the first transport report.  A
@@ -737,6 +865,9 @@ ngx_media_hls_ingest_close(ngx_media_hls_ingest_source_t *ingest)
         (void) pthread_join(ingest->thread, NULL);
         ingest->thread_started = 0;
     }
+#ifndef NGX_MEDIA_UNIT_TEST
+    ngx_media_hls_ingest_notify_stop(ingest);
+#endif
 
     (void) pthread_mutex_lock(&ngx_media_hls_ingest_mutex);
 
@@ -798,14 +929,15 @@ ngx_media_hls_ingest_stream_readers(const ngx_media_stream_t *stream)
 
 /*
  * Closes every ingest reader whose source was removed through the control API
- * and whose thread has already left its loop.  Called from the runtime tick.
+ * and whose thread has already left its loop.  Called from the periodic
+ * runtime visit.
  *
  * A removed source has to take its reader with it: the reader holds a thread,
  * a demuxer and an 8 MiB segment buffer, and frames it publishes are dropped
  * once the source is detached, so leaving it running leaks all of that once
  * per create/delete cycle.  The reader notices the removal in its own loop and
  * exits; this collects it.  Only exited readers are closed, so the join in
- * close() cannot block the tick on a slow directory scan.
+ * close() cannot block the periodic visit on a slow directory scan.
  */
 void
 ngx_media_hls_ingest_reap(ngx_log_t *log)
@@ -880,6 +1012,9 @@ ngx_media_hls_ingest_stop_all(void)
             (void) pthread_join(ingest->thread, NULL);
             ingest->thread_started = 0;
         }
+#ifndef NGX_MEDIA_UNIT_TEST
+        ngx_media_hls_ingest_notify_stop(ingest);
+#endif
 
         ngx_media_hls_ingest_event_clear(ingest);
 

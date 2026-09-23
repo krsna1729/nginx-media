@@ -3,9 +3,9 @@
 # Worker scaling: what more workers buy, and what they do not.
 #
 # The architecture gives each logical program exactly one owner worker, and
-# the tick that drives selection, fanout and outputs runs there and nowhere
-# else.  That has a consequence worth measuring rather than assuming: one
-# program's egress cannot be spread over workers, so fanout for a single
+# the runtime visit that drives selection, fanout and outputs runs there and
+# nowhere else.  That has a consequence worth measuring rather than assuming:
+# one program's egress cannot be spread over workers, so fanout for a single
 # program is bound by one worker no matter how many exist.  Ingest is the
 # other half - publishers route to the owner - so what scales is the number
 # of programs, not the size of one.
@@ -18,8 +18,9 @@
 #           stream.  This is the number that says how usable the API is at a
 #           given worker count.
 #   single  one program carried to one consumer: frames out and fanout delay
-#   many    four programs carried at once: total frames, which is what should
-#           rise with workers
+#   many    four programs at once: total frames as sampled through the API.
+#           Owner telemetry and the error log are the ground truth when a
+#           load-balanced read lands on a replica and undercounts this column.
 #
 # Conditions are printed with the numbers, because a fanout figure without
 # them means nothing.
@@ -130,22 +131,76 @@ EOF
         -d "{\"id\":\"file1\",\"type\":\"file\",\"path\":\"$RUN/media/source.ts\"}" \
         "$API/streams/live/scale/sources" >/dev/null 2>&1
 
-    # Read until a worker that actually holds the stream answers.  With more
-    # than one worker a request can land on one that has never heard of it, so
-    # reading once measures the API's consistency rather than the program.
+    # Progress is shared from the owner directory; wait for positive progress
+    # so a replica's transient zero cannot become a benchmark result.  The
+    # telemetry below still reports whether the sampled response was local.
     read_field() {
-        local path="$1" field="$2" v
+        local path="$1" field="$2" doc v
+
         for _ in $(seq 1 40); do
-            v="$(curl -fsS "$API$path" 2>/dev/null \
-                | grep -o "\"$field\":[0-9]*" | head -1 | cut -d: -f2)"
-            [ -n "$v" ] && { printf '%s' "$v"; return; }
+            doc="$(curl -fsS "$API$path" 2>/dev/null || true)"
+            v="$(printf '%s' "$doc" | python3 -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin).get(sys.argv[1], "")
+    print(value)
+except Exception:
+    print("")
+' "$field")"
+            if [ -n "$v" ] && [ "$v" -gt 0 ]; then
+                printf '%s' "$v"
+                return
+            fi
             sleep 0.25
         done
+
         printf '0'
     }
+    stream_summary() {
+        local path="$1" doc here
+
+        for _ in $(seq 1 40); do
+            doc="$(curl -fsS "$API$path" 2>/dev/null || true)"
+            here="$(printf '%s' "$doc" | python3 -c '
+import json
+import sys
+
+try:
+    print(str(json.load(sys.stdin).get("observed_here", False)).lower())
+except Exception:
+    print("false")
+')"
+            [ "$here" = true ] && break
+            sleep 0.1
+        done
+
+        printf '%s' "$doc" | python3 -c '
+import json
+import sys
+
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("unavailable")
+    raise SystemExit
+
+sources = ";".join(
+    "%s=%s:%s/%s" % (
+        s.get("id", "?"), s.get("state", "?"),
+        s.get("frames_in", 0), s.get("frames_out", 0))
+    for s in d.get("sources", []))
+print("owner=%s observed_here=%s frames=%s active=%s sources=%s" % (
+    d.get("owner", "?"), d.get("observed_here", "?"),
+    d.get("program_frames", 0), d.get("active", "null"), sources or "none"))
+'
+    }
+
 
     sleep 6
     single="$(read_field /streams/live/scale program_frames)"
+    echo "   scale telemetry: $(stream_summary /streams/live/scale)"
 
     # four programs at once: this is the half that should scale
     for id in a b c d; do
@@ -159,6 +214,9 @@ EOF
     for id in a b c d; do
         n="$(read_field "/streams/live/w-$id" program_frames)"
         many=$(( many + ${n:-0} ))
+    done
+    for id in a b c d; do
+        echo "   w-$id telemetry: $(stream_summary /streams/live/w-$id)"
     done
 
     p99="$(curl -fsS "$API/metrics" 2>/dev/null \

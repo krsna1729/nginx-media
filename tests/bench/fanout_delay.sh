@@ -7,16 +7,16 @@
 # so this prints the percentiles from nginx_media_stream_fanout_delay_ms
 # alongside the worker count, the source, the segment duration, the consumer
 # count, the host and whether netem shaped the path -- and then the worker's
-# own tick cost, which is the bound the fanout has to hold inside.
+# own runtime-visit cost, which is the bound the fanout has to hold inside.
 #
 # It also asserts the things the numbers alone would let you miss:
 #   * all four percentiles are reported, they are ordered, and the program
 #     actually dispatched units: a percentile of nothing is not a measurement
-#   * one scheduler visit stays bounded under the load, so the worst tick
-#     service time is under the 100ms interval and no tick is late by more
-#     than half of it -- measured both under a paced source and under a burst
-#     source that leaves a multi-megabyte backlog in the ring for the visits
-#     to walk (goal doc 34 item 13)
+#   * one scheduler visit stays bounded under the load, so the worst runtime
+#     visit service time is under the 100ms interval and no periodic visit is
+#     late by more than half of it -- measured both under a paced source and
+#     under a burst source that leaves a multi-megabyte backlog in the ring for
+#     the visits to walk (goal doc 34 item 13)
 #   * seven more rtmp players do not cost the worker seven more copies of the
 #     media: the memory they add is a bound, not a multiple of the payload
 #     (goal doc 34 item 15)
@@ -347,6 +347,8 @@ MAX_SERVICE_MS="$(metric nginx_media_worker_max_service_ms)"
 LATE_TICKS="$(metric nginx_media_worker_late_ticks_total)"
 WAKEUPS="$(metric nginx_media_worker_wakeups_total)"
 WAKEUP_COALESCED="$(metric nginx_media_worker_wakeup_coalesced_total)"
+PERIODIC_VISITS="$(metric nginx_media_worker_periodic_visits_total)"
+MEDIA_ONLY_VISITS="$(metric nginx_media_worker_media_only_visits_total)"
 
 echo
 echo "== conditions"
@@ -370,12 +372,14 @@ echo "   program frames:   $PROGRAM_FRAMES"
 echo "   feed retained:    $FEED_UNITS units, $FEED_BYTES bytes"
 
 echo
-echo "== worker tick cost (bound: <${TICK_SERVICE_BOUND_MS}ms service,"
-echo "   no tick late by more than half the 100ms interval)"
+echo "== worker runtime-visit cost (bound: <${TICK_SERVICE_BOUND_MS}ms service,"
+echo "   no periodic visit late by more than half the 100ms interval)"
 echo "   last service:     $SERVICE_MS ms"
 echo "   worst service:    $MAX_SERVICE_MS ms"
 echo "   late ticks:       $LATE_TICKS"
-echo "   media wakeups:    $WAKEUPS (coalesced $WAKEUP_COALESCED)"
+echo "   periodic visits:   $PERIODIC_VISITS"
+echo "   media-only visits: $MEDIA_ONLY_VISITS"
+echo "   media wakeups:     $WAKEUPS (coalesced $WAKEUP_COALESCED)"
 
 for pair in "p50=$P50" "p95=$P95" "p99=$P99" "p99.9=$P999"; do
     [ -n "${pair#*=}" ] \
@@ -412,14 +416,18 @@ echo "   the delay histogram recorded the dispatch (p50 ${P50}ms)"
 echo "   worst scheduler visit ${MAX_SERVICE_MS}ms < ${TICK_SERVICE_BOUND_MS}ms"
 [ "${WAKEUPS:-0}" -gt 0 ] \
     || { echo "no posted media wakeups were recorded" >&2; exit 1; }
+[ "${PERIODIC_VISITS:-0}" -gt 0 ] \
+    || { echo "no periodic visits were recorded" >&2; exit 1; }
+[ "${MEDIA_ONLY_VISITS:-0}" -gt 0 ] \
+    || { echo "no media-only visits were recorded" >&2; exit 1; }
 
 echo "   posted media wakeups shortened the normal progression path"
 
 [ "${LATE_TICKS:-1}" -eq 0 ] \
-    || { echo "$LATE_TICKS ticks were late by more than half the interval" >&2
-         exit 1; }
+    || { echo "$LATE_TICKS periodic visits were late by more than half the" \
+         "interval" >&2; exit 1; }
 
-echo "   no tick missed its interval by more than half"
+echo "   no periodic visit missed its interval by more than half"
 
 # --- do rtmp players share the payloads or copy them per connection? ------
 

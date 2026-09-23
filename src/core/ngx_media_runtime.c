@@ -17,7 +17,7 @@
 #include "ngx_media_source.h"
 #include "ngx_media_ts_demux.h"
 /*
- * Per-stream outputs.  The program feed is drained on every runtime tick,
+ * Per-stream outputs.  The program feed is drained on every runtime visit,
  * muxed into one burst and handed to HLS and to the PROGRAM recording; the
  * ISO tap muxes a named source before the selector and the RAW tap records
  * transport bytes before normalization (goal doc 20).
@@ -1786,8 +1786,8 @@ ngx_media_runtime_wakeup(void)
     ngx_media_runtime_stats.wakeups++;
 }
 
-void
-ngx_media_runtime_tick(ngx_log_t *log)
+static void
+ngx_media_runtime_visit(ngx_log_t *log)
 {
     ngx_media_registry_t        *registry;
     ngx_media_registry_entry_t  *entry;
@@ -1795,7 +1795,7 @@ ngx_media_runtime_tick(ngx_log_t *log)
     ngx_media_stream_t          *stream;
     ngx_media_policy_t          *policy;
     ngx_queue_t                 *q;
-    uint64_t                     before;
+    uint64_t                     before = 0;
     ngx_msec_t                   now;
 
     if (ngx_media_runtime_in_tick) {
@@ -1833,10 +1833,16 @@ ngx_media_runtime_tick(ngx_log_t *log)
     }
 
     ngx_media_runtime_stats.ticks++;
+    if (ngx_media_runtime_timer_visit) {
+        ngx_media_runtime_stats.periodic_visits++;
+    } else {
+        ngx_media_runtime_stats.media_only_visits++;
+    }
 
-    ngx_media_graph_repair_tick(log);
-
-    ngx_media_runtime_stats.reconnecting = 0;
+    if (ngx_media_runtime_timer_visit) {
+        ngx_media_graph_repair_tick(log);
+        ngx_media_runtime_stats.reconnecting = 0;
+    }
 
     registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
 
@@ -1845,42 +1851,33 @@ ngx_media_runtime_tick(ngx_log_t *log)
         return;
     }
 
-    /*
-     * File sources (goal doc 21) are paced by the tick: one bounded chunk
-     * each, so a large file cannot stall a worker and the frames enter the
-     * program through the normal source gate.  This walks every file source,
-     * so it belongs to the tick, not to the per-stream body below -- running
-     * it inside the loop advanced every reader once per owned stream.
-     */
-    ngx_media_file_advance_all(log);
-    /*
-     * HLS readers only perform transport and demux work.  Their callbacks
-     * enqueue bounded events; the owner drains them here so source health,
-     * timeline, feed and publication remain worker-owned.
-     */
-    ngx_media_hls_pull_drain_all();
-    ngx_media_hls_ingest_drain_all();
+    if (ngx_media_runtime_timer_visit) {
+        /*
+         * File sources (goal doc 21) are paced by the periodic visit: one
+         * bounded chunk each, so a large file cannot stall a worker and the
+         * frames enter the program through the normal source gate.  This walks
+         * every file source, so it must not run in a posted media visit.
+         */
+        ngx_media_file_advance_all(log);
 
-    /*
-     * A source removed through the control API has to take its reader with
-     * it, and the pull and ingest readers own threads.  They notice the
-     * removal in their own loop and leave it; these collect the ones that
-     * have.  Reaping is a join on a reader that has already stopped touching
-     * itself, so it never waits on an origin or a directory - which is why it
-     * belongs to the tick and not to the delete itself, where it would block
-     * the event loop.
-     */
-    ngx_media_hls_pull_reap(log);
-    ngx_media_hls_ingest_reap(log);
+        /*
+         * HLS readers perform transport and demux work in their own threads
+         * and signal their owning worker through a source eventfd.  The
+         * periodic drain-all pass remains a bounded safety net for a source
+         * event that races teardown.
+         */
+        ngx_media_hls_pull_drain_all();
+        ngx_media_hls_ingest_drain_all();
+        ngx_media_hls_pull_reap(log);
+        ngx_media_hls_ingest_reap(log);
 
-    /*
-     * A deleted stream's pool is held until the last reader that references it
-     * has been closed, and closing a reader that holds a thread is the join
-     * the reap above just did - so this is where the memory a delete could not
-     * release becomes freeable, on the tick rather than in the delete, which
-     * must not wait on an origin.
-     */
-    ngx_media_registry_drain(registry, log);
+        /*
+         * A deleted stream's pool is held until the last reader that
+         * references it has been closed.  Reaping above makes the memory
+         * freeable without making the delete wait on an origin.
+         */
+        ngx_media_registry_drain(registry, log);
+    }
 
     for (q = ngx_queue_head(&registry->entries);
          q != (ngx_queue_t *) &registry->entries;
@@ -1897,46 +1894,38 @@ ngx_media_runtime_tick(ngx_log_t *log)
             continue;
         }
 
-        /*
-         * Refresh our claim on the stream.  Ownership is recorded in a shared
-         * directory with a heartbeat, and a record whose heartbeat has gone
-         * stale is reclaimable by another worker - so a worker that claims a
-         * program and never heartbeats loses it to whoever asks next.  The
-         * tick is the right place: it runs once per interval on every program
-         * this worker owns, which is exactly the liveness the record is meant
-         * to describe.
-         */
-        if (ngx_media_runtime_owners != NULL) {
-            uint64_t  hash = ngx_media_owner_hash(&stream->application,
-                                                  &stream->name);
-
+        if (ngx_media_runtime_timer_visit) {
             /*
-             * The slot is this worker's own.  A record can only have been
-             * published under the deterministic owner of this hash, and the
-             * tick only runs for streams this worker owns, so the hash owner
-             * and this worker are the same one the record names.
+             * Refresh our claim on the stream.  Ownership is recorded in a
+             * shared directory with a heartbeat, and a record whose heartbeat
+             * has gone stale is reclaimable by another worker.  Heartbeats
+             * therefore belong to the periodic visit, not to media rate.
              */
-            (void) ngx_media_owner_dir_heartbeat(
-                ngx_media_runtime_owners, hash, (ngx_uint_t) ngx_worker,
-                stream->generation, stream->program_frames,
-                ngx_media_stream_source_count(stream));
+            if (ngx_media_runtime_owners != NULL) {
+                uint64_t  hash = ngx_media_owner_hash(&stream->application,
+                                                      &stream->name);
+
+                (void) ngx_media_owner_dir_heartbeat(
+                    ngx_media_runtime_owners, hash, (ngx_uint_t) ngx_worker,
+                    stream->generation, stream->program_frames,
+                    ngx_media_stream_source_count(stream));
+            }
+
+            before = stream->switches;
+
+            (void) ngx_media_selector_run(stream, now, &res);
+
+            if (now - ngx_media_runtime_last_idle_log >= 1000) {
+                ngx_log_debug6(NGX_LOG_DEBUG_EVENT, log, 0,
+                               "media: selector tick stream=%V/%V active=%V "
+                               "active_healthy=%ui best=%ui emergency=%ui",
+                               &stream->application, &stream->name,
+                               stream->active != NULL ? &stream->active->id
+                                                      : &ngx_media_runtime_none,
+                               res.active_eligible, res.best != NULL,
+                               res.emergency != NULL);
+            }
         }
-
-        before = stream->switches;
-
-        (void) ngx_media_selector_run(stream, now, &res);
-
-        if (now - ngx_media_runtime_last_idle_log >= 1000) {
-            ngx_log_debug6(NGX_LOG_DEBUG_EVENT, log, 0,
-                           "media: selector tick stream=%V/%V active=%V "
-                           "active_healthy=%ui best=%ui emergency=%ui",
-                           &stream->application, &stream->name,
-                           stream->active != NULL ? &stream->active->id
-                                                  : &ngx_media_runtime_none,
-                           res.active_eligible, res.best != NULL,
-                           res.emergency != NULL);
-        }
-
         if (policy != NULL
             && (policy->hls_path.len > 0
                 || policy->record_program_path.len > 0
@@ -1949,14 +1938,12 @@ ngx_media_runtime_tick(ngx_log_t *log)
             if (out != NULL) {
 
                 /*
-                 * A push destination watches a directory, and a program's HLS
-                 * output is a directory of its own, so what is offered here is
-                 * this program's files - to the destinations pointed at it.
-                 * The scan is bounded per call, so each program's directory is
-                 * walked once per tick rather than the shared root once per
-                 * program.
+                 * A push destination watches a directory, and a program's
+                 * HLS output is a directory of its own.  Directory discovery
+                 * is periodic maintenance; output feed progress below is
+                 * allowed on a posted media visit.
                  */
-                if (out->hls_ready) {
+                if (ngx_media_runtime_timer_visit && out->hls_ready) {
                     ngx_media_hls_push_scan(&out->hls.conf.path, log);
                 }
 
@@ -1968,35 +1955,37 @@ ngx_media_runtime_tick(ngx_log_t *log)
             ngx_media_runtime_prepare_drain(stream, log);
         }
 
-        /*
-         * A source whose transport is up but which is not carrying media yet
-         * is reconnecting (goal doc 28): it is the population that says how
-         * much of the redundancy is actually available right now.
-         */
-        {
-            ngx_queue_t       *sq;
-            ngx_media_source_t *source;
-
-            for (sq = ngx_queue_head(&stream->sources);
-                 sq != (ngx_queue_t *) &stream->sources;
-                 sq = sq->next)
+        if (ngx_media_runtime_timer_visit) {
+            /*
+             * A source whose transport is up but which is not carrying media
+             * yet is reconnecting (goal doc 28).  Selector and liveness
+             * accounting stay at the periodic cadence.
+             */
             {
-                source = ngx_queue_data(sq, ngx_media_source_t, queue);
+                ngx_queue_t       *sq;
+                ngx_media_source_t *source;
 
-                if (source->state == NGX_MEDIA_SOURCE_AWAITING_SYNC) {
-                    ngx_media_runtime_stats.reconnecting++;
+                for (sq = ngx_queue_head(&stream->sources);
+                     sq != (ngx_queue_t *) &stream->sources;
+                     sq = sq->next)
+                {
+                    source = ngx_queue_data(sq, ngx_media_source_t, queue);
+
+                    if (source->state == NGX_MEDIA_SOURCE_AWAITING_SYNC) {
+                        ngx_media_runtime_stats.reconnecting++;
+                    }
                 }
             }
-        }
 
-        if (stream->switches != before) {
-            ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                          "media: selector switched stream=%V/%V active=%V "
-                          "generation=%ui switches=%uL",
-                          &stream->application, &stream->name,
-                          stream->active != NULL ? &stream->active->id
-                                                 : &ngx_media_runtime_none,
-                          stream->generation, stream->switches);
+            if (stream->switches != before) {
+                ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                              "media: selector switched stream=%V/%V "
+                              "active=%V generation=%ui switches=%uL",
+                              &stream->application, &stream->name,
+                              stream->active != NULL ? &stream->active->id
+                                                     : &ngx_media_runtime_none,
+                              stream->generation, stream->switches);
+            }
         }
     }
 
@@ -2015,6 +2004,23 @@ ngx_media_runtime_tick(ngx_log_t *log)
     }
     ngx_media_runtime_in_tick = 0;
 }
+void
+ngx_media_runtime_periodic_visit(ngx_log_t *log)
+{
+    ngx_media_runtime_timer_visit = 1;
+    ngx_media_runtime_visit(log);
+    ngx_media_runtime_timer_visit = 0;
+}
+
+
+void
+ngx_media_runtime_media_visit(ngx_log_t *log)
+{
+    ngx_media_runtime_timer_visit = 0;
+    ngx_media_runtime_visit(log);
+}
+
+
 
 static void
 ngx_media_runtime_wakeup_handler(ngx_event_t *ev)
@@ -2025,8 +2031,7 @@ ngx_media_runtime_wakeup_handler(ngx_event_t *ev)
         return;
     }
 
-    ngx_media_runtime_timer_visit = 0;
-    ngx_media_runtime_tick(ev->log);
+    ngx_media_runtime_media_visit(ev->log);
 }
 
 static void
@@ -2036,9 +2041,7 @@ ngx_media_runtime_handler(ngx_event_t *ev)
         return;
     }
 
-    ngx_media_runtime_timer_visit = 1;
-    ngx_media_runtime_tick(ev->log);
-    ngx_media_runtime_timer_visit = 0;
+    ngx_media_runtime_periodic_visit(ev->log);
 
     /* stop re-arming during shutdown so the worker can exit */
     if (ngx_exiting || ngx_terminate || ngx_quit) {

@@ -41,10 +41,9 @@ void ngx_media_hls_ingest_close(ngx_media_hls_ingest_source_t *source);
 
 /*
  * Closes the readers whose source was removed through the control API and
- * whose thread has already stopped.  Called from the runtime tick: a delete
- * has to take the reader with it, and the reader holds a thread.
+ * whose thread has already stopped.  Called from the periodic runtime visit:
+ * a delete has to take the reader with it, and the reader holds a thread.
  */
-void ngx_media_hls_ingest_reap(ngx_log_t *log);
 
 /*
  * How many ingest readers still reference this stream, which is the
@@ -54,7 +53,8 @@ void ngx_media_hls_ingest_reap(ngx_log_t *log);
  */
 ngx_uint_t ngx_media_hls_ingest_stream_readers(
     const ngx_media_stream_t *stream);
-/* transfers queued reader events to the owning worker; called from its tick */
+/* transfers queued reader events on its eventfd; periodic maintenance also
+ * drains all readers as a bounded shutdown/delete safety net */
 void ngx_media_hls_ingest_drain_all(void);
 
 /* stops and joins every reader; called at shutdown */

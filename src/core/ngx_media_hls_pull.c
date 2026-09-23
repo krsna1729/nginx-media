@@ -3,6 +3,10 @@
 #include "ngx_media_http.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_stream.h"
+#ifndef NGX_MEDIA_UNIT_TEST
+#include <ngx_event.h>
+#include <sys/eventfd.h>
+#endif
 
 #include <pthread.h>
 #include <string.h>
@@ -91,6 +95,11 @@ typedef struct ngx_media_hls_pull_s {
     uint64_t                 events_tail;
     pthread_mutex_t          events_mutex;
     ngx_uint_t               events_mutex_initialized;
+#ifndef NGX_MEDIA_UNIT_TEST
+    int                     notify_fd;
+    ngx_connection_t       *notify_connection;
+    ngx_atomic_t             notified;
+#endif
     ngx_atomic_t             events_dropped;
 
     pthread_t                thread;
@@ -139,6 +148,16 @@ static void ngx_media_hls_pull_event_clear(
     ngx_media_hls_pull_t *pull);
 static void ngx_media_hls_pull_event_drain(
     ngx_media_hls_pull_t *pull);
+#ifndef NGX_MEDIA_UNIT_TEST
+static void ngx_media_hls_pull_notify(
+    ngx_media_hls_pull_t *pull);
+static ngx_int_t ngx_media_hls_pull_notify_start(
+    ngx_media_hls_pull_t *pull);
+static void ngx_media_hls_pull_notify_stop(
+    ngx_media_hls_pull_t *pull);
+static void ngx_media_hls_pull_notify_handler(
+    ngx_event_t *ev);
+#endif
 static void ngx_media_hls_pull_transport(
     ngx_media_hls_pull_t *pull, ngx_uint_t healthy);
 static ngx_uint_t ngx_media_hls_pull_source_removed(
@@ -244,8 +263,109 @@ ngx_media_hls_pull_event_push(ngx_media_hls_pull_t *pull,
 
     (void) pthread_mutex_unlock(&pull->events_mutex);
 
+#ifndef NGX_MEDIA_UNIT_TEST
+    ngx_media_hls_pull_notify(pull);
+#endif
+
     return NGX_OK;
 }
+
+#ifndef NGX_MEDIA_UNIT_TEST
+static void
+ngx_media_hls_pull_notify(ngx_media_hls_pull_t *pull)
+{
+    uint64_t  one = 1;
+    ssize_t   n;
+
+    if (pull != NULL
+        && pull->notify_fd != -1
+        && ngx_atomic_cmp_set(&pull->notified, 0, 1))
+    {
+        n = write(pull->notify_fd, &one, sizeof(one));
+
+        if (n != (ssize_t) sizeof(one)) {
+            (void) ngx_atomic_cmp_set(&pull->notified, 1, 0);
+        }
+    }
+}
+
+
+static void
+ngx_media_hls_pull_notify_handler(ngx_event_t *ev)
+{
+    ngx_connection_t      *c;
+    ngx_media_hls_pull_t  *pull;
+    uint64_t               value;
+
+    c = ev->data;
+    pull = c != NULL ? c->data : NULL;
+
+    if (pull == NULL) {
+        return;
+    }
+
+    (void) read(pull->notify_fd, &value, sizeof(value));
+    pull->notified = 0;
+    ngx_media_hls_pull_event_drain(pull);
+}
+
+
+static ngx_int_t
+ngx_media_hls_pull_notify_start(ngx_media_hls_pull_t *pull)
+{
+    ngx_connection_t  *c;
+
+    pull->notify_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (pull->notify_fd == -1) {
+        return NGX_ERROR;
+    }
+
+    c = ngx_get_connection(pull->notify_fd, pull->log);
+    if (c == NULL) {
+        (void) close(pull->notify_fd);
+        pull->notify_fd = -1;
+        return NGX_ERROR;
+    }
+
+    c->data = pull;
+    c->read->handler = ngx_media_hls_pull_notify_handler;
+    c->read->log = pull->log;
+
+    if (ngx_add_event(c->read, NGX_READ_EVENT, 0) != NGX_OK) {
+        c->fd = (ngx_socket_t) -1;
+        ngx_free_connection(c);
+        (void) close(pull->notify_fd);
+        pull->notify_fd = -1;
+        return NGX_ERROR;
+    }
+
+    pull->notify_connection = c;
+    return NGX_OK;
+}
+
+
+static void
+ngx_media_hls_pull_notify_stop(ngx_media_hls_pull_t *pull)
+{
+    if (pull == NULL) {
+        return;
+    }
+
+    if (pull->notify_connection != NULL) {
+        (void) ngx_del_event(pull->notify_connection->read,
+                             NGX_READ_EVENT, 0);
+        pull->notify_connection->fd = (ngx_socket_t) -1;
+        ngx_free_connection(pull->notify_connection);
+        pull->notify_connection = NULL;
+    }
+
+    if (pull->notify_fd != -1) {
+        (void) close(pull->notify_fd);
+        pull->notify_fd = -1;
+    }
+}
+#endif
+
 
 static ngx_int_t
 ngx_media_hls_pull_event_pop(ngx_media_hls_pull_t *pull,
@@ -509,8 +629,8 @@ ngx_media_hls_pull_source_removed(ngx_media_hls_pull_t *pull)
  * Waits out one refresh interval in slices.  The cadence is the same - the
  * slices add up to the interval the pull used to sleep for - but a source
  * removed through the control API is noticed within a slice instead of up to
- * the whole interval later, and the reader still stops without the tick
- * having to wake or join it.
+ * the whole interval later, and the reader still stops without the periodic
+ * visit having to wake or join it.
  */
 #define NGX_MEDIA_HLS_PULL_IDLE_SLICE_US  100000
 #define NGX_MEDIA_HLS_PULL_IDLE_SLICES    20
@@ -556,8 +676,8 @@ ngx_media_hls_pull_thread(void *data)
         if (ngx_media_hls_pull_source_removed(pull)) {
             /*
              * The source was removed through the control API, so there is
-             * nothing left to fetch for.  Leave the loop: the tick reaps
-             * exited readers, and the stream's memory cannot be released
+             * nothing left to fetch for.  Leave the loop: the periodic visit
+             * reaps exited readers, and the stream's memory cannot be released
              * until it has.
              */
             break;
@@ -729,6 +849,9 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     if (pull == NULL) {
         return NULL;
     }
+#ifndef NGX_MEDIA_UNIT_TEST
+    pull->notify_fd = -1;
+#endif
 
     copy = ngx_pcalloc(stream->pool, sizeof(ngx_str_t));
 
@@ -873,6 +996,12 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     }
 
     pull->events_mutex_initialized = 1;
+#ifndef NGX_MEDIA_UNIT_TEST
+    if (ngx_media_hls_pull_notify_start(pull) != NGX_OK) {
+        ngx_media_hls_pull_close(pull);
+        return NULL;
+    }
+#endif
 
     /*
      * Health has to be initialised before the first transport report.  A
@@ -936,6 +1065,9 @@ ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull)
         (void) pthread_join(pull->thread, NULL);
         pull->thread_started = 0;
     }
+#ifndef NGX_MEDIA_UNIT_TEST
+    ngx_media_hls_pull_notify_stop(pull);
+#endif
 
     (void) pthread_mutex_lock(&ngx_media_hls_pull_mutex);
 
@@ -999,14 +1131,15 @@ ngx_media_hls_pull_stream_readers(const ngx_media_stream_t *stream)
 
 /*
  * Closes every pull reader whose source was removed through the control API
- * and whose thread has already left its loop.  Called from the runtime tick.
+ * and whose thread has already left its loop.  Called from the periodic
+ * runtime visit.
  *
  * A removed source has to take its reader with it: the reader holds a thread,
  * a demuxer and an 8 MiB segment buffer, and frames it publishes are dropped
  * once the source is detached, so leaving it running leaks all of that once
  * per create/delete cycle.  The reader notices the removal in its own loop and
  * exits; this collects it.  Only exited readers are closed, so the join in
- * close() cannot block the tick on an origin that is slow to answer.
+ * close() cannot block the periodic visit on an origin that is slow to answer.
  */
 void
 ngx_media_hls_pull_reap(ngx_log_t *log)
@@ -1071,6 +1204,9 @@ ngx_media_hls_pull_stop_all(void)
             (void) pthread_join(pull->thread, NULL);
             pull->thread_started = 0;
         }
+#ifndef NGX_MEDIA_UNIT_TEST
+        ngx_media_hls_pull_notify_stop(pull);
+#endif
 
         ngx_media_hls_pull_event_clear(pull);
 

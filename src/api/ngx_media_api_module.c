@@ -952,6 +952,15 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "periodic timer visits that missed their interval by "
                          "more than half\n"
                          "# TYPE nginx_media_worker_late_ticks_total counter\n"
+                         "# HELP nginx_media_worker_periodic_visits_total "
+                         "periodic maintenance visits executed by this worker\n"
+                         "# TYPE nginx_media_worker_periodic_visits_total "
+                         "counter\n"
+                         "# HELP nginx_media_worker_media_only_visits_total "
+                         "posted media-only runtime visits executed by this "
+                         "worker\n"
+                         "# TYPE nginx_media_worker_media_only_visits_total "
+                         "counter\n"
                          "# HELP nginx_media_worker_wakeups_total "
                          "posted media wakeups that ran a runtime visit\n"
                          "# TYPE nginx_media_worker_wakeups_total counter\n"
@@ -964,14 +973,16 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "nginx_media_worker_event_loop_delay_ms %M\n"
                          "nginx_media_worker_event_loop_max_delay_ms %M\n"
                          "nginx_media_worker_late_ticks_total %uL\n"
+                         "nginx_media_worker_periodic_visits_total %uL\n"
+                         "nginx_media_worker_media_only_visits_total %uL\n"
                          "nginx_media_worker_wakeups_total %uL\n"
                          "nginx_media_worker_wakeup_coalesced_total %uL\n"
                          "# HELP nginx_media_worker_service_ms "
-                         "how long the last runtime tick took, the time this "
-                         "worker spent serving every program it owns\n"
+                         "how long the last runtime visit took; periodic "
+                         "visits include maintenance and media progress\n"
                          "# TYPE nginx_media_worker_service_ms gauge\n"
                          "# HELP nginx_media_worker_max_service_ms "
-                         "worst tick duration this worker has seen\n"
+                         "worst runtime visit duration this worker has seen\n"
                          "# TYPE nginx_media_worker_max_service_ms gauge\n"
                          "# HELP nginx_media_reconnecting_sources "
                          "sources whose transport is up but which are not "
@@ -1016,6 +1027,7 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          ngx_media_runtime_outputs_active(),
                          ngx_media_registry_draining_count(registry),
                          stats.last_gap, stats.max_gap, stats.late_ticks,
+                         stats.periodic_visits, stats.media_only_visits,
                          stats.wakeups, stats.wakeup_coalesced,
                          stats.last_service, stats.max_service,
                          stats.reconnecting,
@@ -2248,11 +2260,11 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
 
     /*
      * A file source has to be opened, not merely registered: it owns a reader
-     * that the runtime tick advances.  Everything else is a label a transport
-     * attaches to later - and a reader is opened on the worker that drives the
-     * stream, with the other workers registering the desired state and letting
-     * the owner open it, so one program reads a file once rather than once per
-     * worker.
+     * that the periodic runtime visit advances.  Everything else is a label a
+     * transport attaches to later - and a reader is opened on the worker that
+     * drives the stream, with the other workers registering the desired state
+     * and letting the owner open it, so one program reads a file once rather
+     * than once per worker.
      */
     /* the reader this may open keeps the log, so it must outlive the request */
     source = ngx_media_graph_source_open(stream, &id, type, priority,

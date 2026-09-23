@@ -82,8 +82,11 @@ void ngx_media_runtime_stop(void);
  */
 void ngx_media_runtime_wakeup(void);
 
-/* one scheduler visit: selector, outputs and player preparation */
-void ngx_media_runtime_tick(ngx_log_t *log);
+/* periodic maintenance plus one bounded media visit for this worker */
+void ngx_media_runtime_periodic_visit(ngx_log_t *log);
+
+/* posted media progress only; periodic maintenance never runs here */
+void ngx_media_runtime_media_visit(ngx_log_t *log);
 
 /*
  * Worker-level health, the numbers that say whether this worker still has
@@ -98,22 +101,22 @@ void ngx_media_runtime_tick(ngx_log_t *log);
  */
 typedef struct {
     uint64_t    ticks;          /* timer and posted scheduler visits */
+    uint64_t    periodic_visits;    /* timer-driven maintenance visits */
+    uint64_t    media_only_visits;  /* posted media-only visits */
     ngx_msec_t  last_gap;       /* timer-to-timer interval */
     ngx_msec_t  max_gap;
     uint64_t    late_ticks;     /* late periodic timer visits */
-
     /*
-     * A posted wakeup runs the same bounded visit as the timer as soon as a
-     * transport callback publishes media.  The counters distinguish useful
-     * wakeups from calls coalesced into one posted event.
+     * Both visit kinds are counted, while the timer cadence counters above
+     * only describe periodic visits.
      */
     uint64_t    wakeups;
     uint64_t    wakeup_coalesced;
 
     /*
-     * How long the tick itself took.  This is the protocol-owner service
-     * duration (goal doc 28): the time one worker spends serving every
-     * program it owns, which is what bounds how many programs it can own.
+     * Duration of the current runtime visit.  A periodic visit includes
+     * maintenance and media progress; a posted visit includes media progress
+     * only.
      */
     ngx_msec_t  last_service;
     ngx_msec_t  max_service;
