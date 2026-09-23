@@ -200,26 +200,35 @@ one function changed, so it takes the two nginx binaries as its arguments
 (defaulting to `/tmp/nginx-sendfile` and `/tmp/nginx-buffered`); the target
 runs it with those defaults, which is only meaningful if you put them there.
 
-`bench-capacity-curve` holds the worker count constant (four by default) and
-sweeps active programs, encoded video bitrate, then SRT destinations per
-program; its last case is sustained and reports Jain's frame-progress fairness.
-Each case starts a fresh NGINX instance and enables HLS's shared transport mux,
-which supplies the SRT push sink; the HLS segmentation and file I/O overhead are
-part of the measured configuration.  Destinations and receivers are installed
-before publishers start.  The harness waits for program-frame and output-feed
-progress, then snapshots the baseline before the timed window so startup is
-excluded from throughput and histogram deltas.  The fresh stream also scopes
-the exact `fanout.max` to that load point.  It reports owner progress, worker
-CPU, visit maxima and budget reposts, feed pressure, per-worker `ss -m` socket
-memory, and host-global `/proc/net/sockstat` values.
+`bench-capacity-curve` holds worker count constant (four by default).  It steps
+program counts `1 2 4 8`, source bitrates `2M 6M 12M 20M`, then the exact
+single-program SRT and RTMP destination ladder `1 8 32 64 128 256 512 1000`.
+The remaining SRT cases isolate one stalled reader, saturate four programs with
+250 destinations each, and run a sustained four-program / four-destination
+fairness window.
+
+Each case starts a fresh NGINX instance with HLS's shared transport mux active;
+HLS segmentation and file I/O are part of the measured configuration.  The
+receivers and destination objects are installed first.  SRT publishers then
+start while nonblocking output handshakes settle, and the harness waits for all
+expected peers and for program-frame/output-feed progress before taking the
+measurement baseline.  The SRT receiver snapshots delivered payload bytes;
+the RTMP receiver reports delivered payload-byte counter deltas.  Reports also
+include per-destination and per-program fairness, first-byte spread, shard
+send/retransmission/queue counters, sender-thread CPU, worker RSS/PSS and
+event-loop delay, per-worker `ss -m` socket memory, and host-global
+`/proc/net/sockstat` values.
 
 `CAPACITY_WORKERS` chooses the fixed worker count.  `CAPACITY_WINDOW`,
 `CAPACITY_PROGRAM_STEPS`, `CAPACITY_BITRATE_STEPS`, and `CAPACITY_DEST_STEPS`
-bound the shorter sweeps; `CAPACITY_SUSTAINED_SECONDS` controls the fairness
-window.  The harness caps each source at 60 Mbit/s, nominal case egress at
-1000 Mbit/s, total destinations at 64, outputs per owner at 16, and each
-measurement window at 600 seconds.  This is an offered-load curve, not a
-worker-count sweep.
+bound the shorter sweeps; `CAPACITY_SLOW_SECONDS`,
+`CAPACITY_SATURATED_SECONDS`, and `CAPACITY_SUSTAINED_SECONDS` control the
+scenario windows.  RTMP ladder cases use one worker.  Per case the harness
+caps a source at 60 Mbit/s, nominal egress at 8000 Mbit/s, total destinations
+at 1000, outputs per owner at 1000, and each measurement window at 600 seconds.
+The focused `PHASES=capacity-slow-reader`, `capacity-saturated`, and
+`capacity-sustained` runs exercise one scenario without repeating the ladder.
+This is an offered-load curve, not a worker-count sweep.
 
 `bench-burst-sizing` runs the in-process demux/mux/remux fixture at each
 capacity in `CAPACITIES` (bytes).  It reports burst count, observed byte range,

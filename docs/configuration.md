@@ -240,10 +240,13 @@ operator configuration on purpose — an encoder cannot promote itself.
 
 ### `media_srt_output <application/stream> <host:port> [streamid];`
 
-Pushes that program to a destination as an SRT caller.  One sender thread per
-destination with a bounded queue and keyframe resynchronization: a destination
-that cannot keep up loses units and counts them, and never stalls the program.
-The optional stream id is announced to the destination.
+Pushes that program to an SRT destination as a caller.  Each worker shares a
+fixed pool of 16 egress shard threads across static and runtime destinations;
+the output table holds up to 1000 destinations per worker.  Each destination
+has a bounded queue of 256 units / 8 MiB, while each shard's feed queue is
+bounded at 64 units / 8 MiB.  Queue overrun drops bursts and resynchronizes at
+the next keyframe; a slow destination does not stall the program.  The optional
+stream id is announced to the destination.
 
 ### `media_srt_crypto <passphrase> [ctr|gcm] [0|16|24|32] [on|off];`
 

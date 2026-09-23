@@ -296,31 +296,30 @@ does not turn a bounded queue into an unbounded one.
 
 ### A slow SRT or RTMP receiver
 
-An SRT sender has its own thread and a queue of 256 units / 8 MiB per
-destination (`src/srt/ngx_media_srt_output.c`).  On overrun it drops whole bursts
-and resumes at the next sync boundary, so a receiver that cannot keep up loses
-media and never stalls the program.  RTMP is the same shape with a 128-message
-per-destination queue and a one-second reconnect backoff.
+SRT destinations share a fixed pool of 16 egress shard threads per worker; an
+output does not create a module sender thread.  Static and runtime outputs
+share 1000 destination slots per worker.  Each destination has a bounded queue
+of 256 units / 8 MiB, and each shard has a 64-unit / 8 MiB feed queue.  Queue
+overrun drops bursts and resynchronizes at the next keyframe, so a slow remote
+does not stall its program.  Queue occupancy and drops are available in the
+SRT shard metrics.  Connection state is also reported through the worker
+eventfd: `WARN` when an output is disconnected and `NOTICE` when it connects.
+The logged `<n>` is a destination-table slot, not the destination ID; correlate
+it with `media: srt destination <id> started ...`.  RTMP connect failures are
+logged as `media: rtmp destination <id> could not connect ...`.
 
-This one *is* reported: the sender thread hands status changes back through an
-eventfd and the worker logs them, so a slow receiver shows up as
-`media: srt output <n> not connected (attempts=... dropped=...)` at `WARN`, and
-the `NOTICE` line when it reconnects carries the cumulative drop count.  `<n>` is
-a slot in the destination table, not the destination id, so correlate it with
-`media: srt destination <id> started for app/stream -> host:port`, which is
-logged when the destination starts.  RTMP destinations log their own connect
-failures (`media: rtmp destination <id> could not connect to ...`).
+RTMP destinations have a 128-message / 512 KiB per-destination queue and a
+one-second reconnect backoff.  Their destination table holds up to 1000 active
+outputs per worker.
 
-Both transports are bounded by slots, and running out is a create that fails
-rather than a silently dead destination: SRT has 8 destination slots per worker
-shared by `media_srt_output` and runtime destinations, and a create when they
-are full returns `500 {"error":"destination_start_failed"}` and leaves no object
-behind.  SRT ingest is 16 concurrent sessions per worker and RTMP is 32 per
-worker, so the ceiling an instance offers is that number times the worker count
-(128 RTMP sessions at four workers); a publisher over the limit is refused by
-the worker that accepted it, which is the worker the kernel placed it on, with
-`media: no free ingest session slot` and `media: rtmp: no free session slot` in
-the log.
+Both destination tables reject creates at capacity: SRT returns
+`500 {"error":"destination_start_failed"}` and leaves no object behind; the
+RTMP destination allocator also refuses a create when its 1000 slots are full.
+SRT ingest allows 16 concurrent sessions per worker and RTMP allows 1024, so
+the per-instance session ceiling is that number times the worker count.  A
+publisher over the limit is refused by the worker that accepted it, which is
+the worker the kernel placed it on, with `media: no free ingest session slot`
+or `media: rtmp: no free session slot` in the log.
 
 ### A program whose owner worker is not there
 
@@ -549,8 +548,9 @@ window; the module's own threads are unnamed and are labelled once per
 instance from a stack backtrace, and libsrt's are named by the library
 (`SRT:RcvQ`, `SRT:SndQ`, `SRT:TsbPd`, `SRT:GC`).
 
-**Before the idle-wait fix, a worker with nothing to do burned a core.**  This
-was the floor in the pre-fix run, and it was not zero:
+**Historical pre-sharding idle-spin baseline.** Before the idle-wait fix, a
+worker with nothing to do burned a core.  These measurements remain regression
+evidence; they do not describe current live-egress capacity.
 
 | workers | idle CPU | of which the SRT sender thread |
 |---|---|---|
@@ -558,17 +558,12 @@ was the floor in the pre-fix run, and it was not zero:
 | 2 | 194% | 97% + 96% |
 | 4 | 380% | 95% + 95% + 94% + 94% |
 
-No publisher, no destination, no media: the sender pool thread
-(`ngx_media_srt_out_thread`) ran flat out.  Its loop took each of the eight
-destination slots' mutex, skipped the slot when it was unused, and returned to
-the top with nothing to wait on - so with no destination in use it spun.  It
-stopped as soon as one slot was used (the live-egress table below shows the
-same thread at 0.08%).  This was a defect, not a cost to size against.
-
-The sender now waits on a pool condition variable while no destination slot is
-used, and wakes for runtime adds or shutdown.  A post-fix `PHASES=floor` smoke
-run measured 0% idle sender CPU at one, two and four workers.  The pre-fix
-table remains as the regression evidence that motivated the change.
+With no publisher, destination or media, the old sender loop repeatedly took
+the eight destination slots' mutexes and spun.  The idle-wait fix made sender
+threads wait on a condition variable when no work is available; a post-fix
+`PHASES=floor` smoke run measured 0% idle sender CPU at one, two and four
+workers.  Current egress uses a fixed 16-shard pool per worker, independent of
+the number of destinations.
 
 **Ingest: one endpoint is one receive thread, and it is not the first thing to
 give.**  Sixteen publishers is the per-worker session ceiling, so the only
@@ -665,6 +660,9 @@ are prepared and fed by the owner in process:
 | 2 | 145 | 456.5 | 8.9%, 8.3% | 907, 878 |
 | 4 | 143 | 449.0 | 5.6%, 5.1%, 4.9%, 5.6% | 455, 434, 414, 477 |
 
+The live-SRT rows below are historical pre-sharding results for eight outputs;
+their single sender-thread figures are not current shard-pool measurements.
+
 | workers | live SRT destinations started | program frames/s | owner CPU | sender thread | other workers |
 |---|---|---|---|---|---|
 | 1 | 8/8 | 25.1 | 8% (receive 7.6%, tick 0.3%) | 0.08% | — |
@@ -677,12 +675,10 @@ are prepared and fed by the owner in process:
   egress is genuinely parallel across workers.  Throughput stays flat at about
   450 MiB/s because the bench's own reader pool is the limit there, not the
   server.
-- **Eight live destinations cost the owner less than a tenth of a core.**  The
-  same 128 Mbit/s of program media pushed to eight receivers is 0.08% of a
-  core of sender thread - it is eight sessions, not eight copies of the media,
-  and the price of a destination is its socket.  What it is not is spreadable:
-  the work is the owner's, and the other workers show their floor and nothing
-  else however many of them there are.
+- **Historical pre-sharding result:** eight live destinations cost the old
+  sender less than a tenth of a core.  The current 16-shard pool and 1000-output
+  limit are measured by `bench-capacity-curve`; do not use this row as a
+  current per-destination CPU estimate.
 
 **The price of misplacement.**  Twelve publishers, two workers, identical
 publisher commands and identical offered rate, one program per publisher,
@@ -907,15 +903,15 @@ does.  That is the same conclusion the endpoint table above reaches for
 placement, arrived at from the other side: a worker given its own port is given
 its own receive thread with it.
 
-**Every destination costs two more.**  An outgoing connection is autobound to
-its own ephemeral port, so it gets a multiplexer of its own: an `SRT:RcvQ` to
-receive the peer's acknowledgements and loss reports, and an `SRT:SndQ` to pace
-and transmit.  A worker at full occupancy — one listening endpoint, sixteen
-publishers, eight SRT destinations — is therefore one `SRT:GC`, one
-`SRT:RcvQ`/`SRT:SndQ` pair for the listener, sixteen `SRT:TsbPd`, sixteen more
-library threads for the destinations, plus this module's own ingest thread and
-its eight sender threads: 44 threads.  The eight-destination ceiling is what
-bounds it, and it bounds it per worker.
+**The module pool is fixed; Haivision transport threads remain per destination.**
+An outgoing connection is autobound to its own ephemeral port, so Haivision
+libsrt creates an `SRT:RcvQ`/`SRT:SndQ` pair for each destination; it also
+creates `SRT:TsbPd` work for live sessions.  Those are library costs and still
+grow with active transport sessions.  Separately, nginx-media uses a fixed
+pool of 16 `srt-egress-*` shard threads per worker, regardless of destination
+count.  A destination assigned to a shard changes which module thread calls
+the sender API; it does not remove the per-socket library cost.  The 1000-slot
+per-worker output limit bounds that socket-side growth.
 
 ### Which side does what
 
@@ -1061,10 +1057,9 @@ pools and their fixed thread cost.  The pool size is not an nginx option or a
 public Robotweax scaling API.
 
 The seven-thread figure is the Robotweax library only.  The worker also pays
-for nginx-media's ingest thread and its bounded output sender pool:
-`ngx_media_srt_output.c` starts up to `NGX_MEDIA_SRT_MAX_OUTPUTS` sender
-threads for the configured pool, while destinations added later reuse those
-threads.  Module queue, session-table and IPC limits therefore remain
+for nginx-media's ingest thread and its fixed 16-thread SRT egress-shard pool.
+`ngx_media_srt_output.c` reuses those shards for runtime destinations; the
+1000-slot output table, queue bounds, session-table and IPC limits are
 independent of the Robotweax scheduler limit.
 
 That is a different ceiling, not automatically a higher one:
@@ -1157,17 +1152,20 @@ approached is a reading, not a directive.
 | Outbound HTTP wait | 5 s to connect per address, 10 s without progress per read or write | a reader or uploader thread is released; the fetch or upload fails and is retried or counted, and the log says so |
 | Streams draining after a delete | unbounded, one per deleted stream whose reader thread is still stopping | `nginx_media_streams_draining`; it returns to zero within a tick or two, and a value that stays up is a reader that will not leave.  Each such stream holds its pool (its feed included) until then |
 | Standby GOP cache | 512 units / 4 MiB per source | `preroll_units`, `preroll_bytes`; `preroll_overflows` rising means the cache is being cleared instead of kept, so a switch has no cached GOP to land on |
-| SRT destinations | 8 slots per worker | create fails `500 destination_start_failed` |
-| SRT sender queue | 256 units / 8 MiB per destination | drop count in the `srt output` log lines |
+| SRT output destinations | 1000 slots per worker, shared by static and runtime outputs | API create fails with `500 destination_start_failed` |
+| SRT egress shard pool | 16 threads per worker, independent of destination count | `srt-egress-00` through `srt-egress-15` in `/proc/<pid>/task/*/comm` |
+| SRT shard feed queue | 64 units / 8 MiB per shard | `nginx_media_srt_egress_shard_feed_queue_*` gauges and drop counter |
+| SRT destination queue | 256 units / 8 MiB per destination | `nginx_media_srt_egress_shard_output_queue_*` gauges and drop counter |
 | SRT ingest sessions | 16 per worker | `media: no free ingest session slot` |
 | SRT ingest queue | 256 chunks / 8 MiB | new chunks dropped and counted; demuxer counts the continuity damage |
-| SRT session receive buffer (library) | 8192 packets / 12,058,624 bytes per session | `No room to store incoming packet` in the error log; the packet is lost before our counters see it |
-| SRT receive queue (Haivision library) | one `RcvQ` thread per listening endpoint, shared by every session on it | no metric, only the log.  Measured well below saturation: 36.8% of a core at 2.0 Gbit/s through sixteen sessions; Robotweax uses the fixed pool described above |
+| SRT session receive buffer (library) | 8192 packets / 12,058,624 bytes per session | `No room to store incoming packet` in the error log; packet is lost before our counters see it |
+| SRT receive queue (Haivision library) | one `RcvQ` thread per listening endpoint, shared by every session on it | no metric, only the log; Robotweax uses its fixed library pool instead |
 | SRT UDP receive buffer (kernel) | `net.core.rmem_max` per listening endpoint, shared by every session | `ss -ulmpn` shows `rb` for the port; overflow is silent and appears as loss and retransmission |
 | SRT flow window (library) | 25,600 packets in flight per session | caps one session's throughput at `FC × payload / RTT` on a lossy path |
-| Haivision SRT threads per worker (library) | 1 GC + 2 per bound port + 1 per live session + 2 per destination | `ps -L -o comm -p <worker-pid>`; 44 at one endpoint, sixteen publishers and eight destinations; Robotweax uses seven measured library threads instead |
-| RTMP sessions | 32 per worker, so 32 × workers in the instance | `media: rtmp: no free session slot` |
-| RTMP destination queue | 128 messages | drops to the next sync boundary |
+| Haivision SRT library threads | 1 GC + 2 per bound port + 1 per live session + 2 per destination | excludes nginx-media's 1 ingest thread and 16 egress shards; inspect with `ps -L -o comm -p <worker-pid>` |
+| RTMP sessions | 1024 per worker, so 1024 × workers in the instance | `media: rtmp: no free session slot` |
+| RTMP destinations | 1000 slots per worker | the destination allocator rejects creates when full |
+| RTMP destination queue | 128 messages / 512 KiB per destination | drops to the next sync boundary |
 | HLS push queue | 64 entries per destination, pool of 4 | internal counters only; nothing published |
 | HLS output window | 6 segments, 8 MiB per segment, 64 MiB retained | evicted segments are deleted from disk, so the directory does not grow |
 | Recording queue | 1024 jobs / 32 MiB pending, parts roll at 512 MiB | drops counted internally; the part-rolled file is the visible artefact |

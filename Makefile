@@ -205,9 +205,9 @@ bench-ingest-egress:
 bench-ingest-egress-fanout:
 	tests/bench/ingest_egress_fanout.sh
 
-# Fixed-worker capacity curve (four workers by default): progressively add
-# programs, encoded bitrate, and live SRT destinations; includes sustained
-# multi-program fairness.
+# Fixed-worker capacity curve through 1000 SRT/RTMP destinations, with delivered
+# bytes, shard/resource metrics, slow-reader isolation, saturated fanout, and
+# sustained multi-program fairness.
 bench-capacity-curve:
 	PHASES=capacity tests/bench/ingest_egress_fanout.sh
 

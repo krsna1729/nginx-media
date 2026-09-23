@@ -50,7 +50,7 @@ back to a worker through an eventfd rather than touching worker state directly:
 | Thread | Created by | Talks to the worker through |
 |---|---|---|
 | SRT ingest | `ngx_media_srt_ingest.c` | a bounded raw-TS queue plus an eventfd |
-| SRT destination sender (one per destination) | `ngx_media_srt_output.c` | a bounded per-destination subscriber queue |
+| SRT egress shard pool (fixed, 16 per worker) | `ngx_media_srt_output.c` | a bounded shard-feed queue and per-destination queues |
 | Recording writer | `ngx_media_record.c` | a work queue |
 | HLS ingest reader (one per ingest source) | `ngx_media_hls_ingest.c` | publishes frames through the stream's publish path |
 | HLS pull reader (one per pull source) | `ngx_media_hls_pull.c` | publishes frames through the stream's publish path |
@@ -514,7 +514,7 @@ flowchart LR
 | `listen`, `listen_bond`, `listen_shared` | endpoint policy and retry | socket binding, listener state, group admission, or acquired-socket attachment |
 | `poll_create`, `poll_add_*`, `poll_wait` | the ingest event loop | readiness and transport progress |
 | `accept`, `accept_ready`, `streamid`, `recv` | the ingest thread and caller buffers | handshake, UDP receive, packet demultiplexing, reassembly, loss handling and receive buffering |
-| `connect`, `send`, `stats` | destination queues and sender threads | connect, pacing, retransmission, UDP writes and transport statistics |
+| `connect`, `send`, `stats` | destination queues and the fixed egress shard pool | connect, pacing, retransmission, UDP writes and transport statistics |
 | `session_shutdown`, `session_close` | ordered thread teardown | waking blocked operations and releasing transport state |
 | `library_version`, `last_error`, `shutdown` | startup logging and lifecycle | implementation identity, diagnostics and backend-global cleanup |
 
@@ -542,19 +542,21 @@ The source-level path is intentionally visible:
   extraction and the ingest thread.  A full session table refuses a new
   session rather than growing the scheduler.
 - `src/srt/ngx_media_srt_output.c` and `ngx_media_srt_output_queue.*` own
-  per-destination queues and sender threads, then call only `connect`, `send`,
-  `stats`, `session_shutdown` and `session_close`.
+  bounded per-destination queues and a fixed pool of 16 egress shard threads
+  per worker.  Destination slots are assigned by slot index modulo 16; each
+  shard services its slots and calls only `connect`, `send`, `stats`,
+  `session_shutdown` and `session_close`.
 - `src/srt/ngx_media_srt_udp.c` is a plain-UDP conformance double.  It is not a
   third SRT runtime and must not be used to infer reliability, encryption,
   pacing, group or library-thread behavior.
 
-The runtime counts above exclude module-owned threads.  In particular,
-`ngx_media_srt_output.c` starts a bounded sender pool (up to
-`NGX_MEDIA_SRT_MAX_OUTPUTS` threads) that walks the destination table;
-runtime-added destinations reuse that pool rather than creating another
-thread.  The ingest thread, bounded session table and IPC/event-loop work are
-also nginx-media resources.  Robotweax bounds the library's transport cost,
-not the complete worker's thread or queue budget.
+The runtime counts above exclude module-owned threads.  Each worker's SRT
+destinations share the fixed 16-thread egress pool and a 1000-slot output
+table; adding runtime destinations does not create threads.  A destination
+queue is bounded at 256 units / 8 MiB, and each shard's feed queue at 64 units /
+8 MiB.  The ingest thread, bounded session table and IPC/event-loop work are
+also nginx-media resources.  Robotweax bounds the library transport cost, not
+the complete worker's thread or queue budget.
 
 `listen_shared` is an adapter capability, not an automatic property of every
 SRT library.  The module creates the native UDP socket, sets `SO_REUSEPORT`,

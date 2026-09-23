@@ -497,13 +497,25 @@ nginx_media_worker_event_loop_delay_ms 100
 nginx_media_worker_event_loop_max_delay_ms 143
 nginx_media_worker_late_ticks_total 2
 nginx_media_worker_info{worker="0",pid="1234"} 1
+nginx_media_source_payload_bytes_in_total{worker="0",application="live",name="news",source="encoder-a"} 8120000
+nginx_media_srt_egress_shard_destinations{worker="0",shard="0"} 2
+nginx_media_srt_egress_shard_feed_queue_units{worker="0",shard="0"} 0
+nginx_media_srt_egress_shard_feed_queue_bytes{worker="0",shard="0"} 0
+nginx_media_srt_egress_shard_feed_queue_dropped_total{worker="0",shard="0"} 0
+nginx_media_srt_egress_shard_output_queue_units{worker="0",shard="0"} 0
+nginx_media_srt_egress_shard_output_queue_bytes{worker="0",shard="0"} 0
+nginx_media_srt_egress_shard_output_dropped_total{worker="0",shard="0"} 0
+nginx_media_srt_egress_shard_sent_bytes_total{worker="0",shard="0"} 16240000
+nginx_media_srt_egress_shard_sent_bursts_total{worker="0",shard="0"} 400
+nginx_media_srt_egress_shard_blocked_sends_total{worker="0",shard="0"} 0
+nginx_media_srt_egress_shard_retransmitted_packets_total{worker="0",shard="0"} 2
 ```
 
 Series appear for every registered program and every source of it, so
 `nginx_media_source_active` is the cheapest way to alert on "the program lost
 its source": no source with value `1` means nothing is on air.
 
-Four groups are worth knowing:
+Capacity and health metrics include:
 
 - **Fanout delay.**  `nginx_media_stream_fanout_delay_ms{percentile="50|95|99"}`
   is `dispatch_time - program_publish_time`: how long a unit of media waits
@@ -516,10 +528,29 @@ Four groups are worth knowing:
 - **Worker identity.**  `nginx_media_worker_info{worker,pid}` identifies the
   worker that generated the current response; per-worker gauges and counters
   immediately above are not aggregated across the NGINX workers.
+- **Source payload bytes.** `nginx_media_source_payload_bytes_in_total` counts
+  media-payload bytes accepted by the parser for each source, labeled by
+  `worker`, `application`, `name`, and `source`.  It is source-side accounting,
+  not bytes delivered to each destination or transport-wire bytes.
 - **Feed lag.**  `nginx_media_stream_feed_units` and `_feed_bytes` are what the
   program feed still retains — the backlog a slow consumer is running against.
   Both are gauges with a ceiling, so a value pinned at the ceiling is the
   symptom to alert on, not a number to graph for trend.
+- **SRT egress shards.** `nginx_media_srt_egress_shard_*` series are labeled by
+  `worker` and one of the 16 fixed `shard` IDs.  `destinations` is the active
+  destination-count gauge.  `feed_queue_units`/`feed_queue_bytes` and
+  `output_queue_units`/`output_queue_bytes` are queue gauges; output values
+  aggregate the destinations assigned to that shard.
+  `nginx_media_srt_egress_shard_feed_queue_dropped_total` and
+  `nginx_media_srt_egress_shard_output_dropped_total` count bursts refused by
+  the bounded shard-feed and per-destination queues.  The feed queue is capped
+  at 64 units / 8 MiB per shard; each destination queue at 256 units / 8 MiB.
+  `nginx_media_srt_egress_shard_sent_bytes_total` counts payload accepted by
+  local SRT sender sockets, not receiver-delivered bytes.
+  `sent_bursts_total`, `blocked_sends_total`, and
+  `retransmitted_packets_total` expose completed bursts, send backpressure,
+  and transport retransmissions.  Receiver-delivered bytes require
+  receiver-side accounting, as used by `bench-capacity-curve`.
 - **Worker event loop.**  `nginx_media_worker_event_loop_delay_ms` is the gap
   between the last two runtime ticks, which the timer asks to be 100 ms, so
   anything above it is time the worker could not get back to its timer.
