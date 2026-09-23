@@ -273,11 +273,9 @@ thread_count(void)
 }
 
 /*
- * Several SRT destinations of one program are served by one shared sender
- * pool.  The observable is the thread count: destinations added at runtime
- * are picked up by senders that already exist, so the process gains no thread
- * per destination.  A per-destination sender would add one thread per add()
- * here and per destination in the integration run.
+ * SRT destinations share a fixed group of egress shards.  The observable is
+ * the thread count: the manager starts exactly NGX_MEDIA_SRT_EGRESS_SHARDS,
+ * and destinations added at runtime create no more threads.
  */
 static void
 test_shared_sender_pool(void)
@@ -291,8 +289,8 @@ test_shared_sender_pool(void)
     ngx_uint_t                   connected, i, n, tries;
     ngx_uint_t                   base, after_start, after_adds, after_media;
 
-    TEST_CASE("one sender pool serves every destination, no thread per "
-              "destination");
+    TEST_CASE("fixed egress shards serve destinations without per-output "
+              "threads");
 
     listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", 24590, NULL,
                                     NULL);
@@ -314,11 +312,15 @@ test_shared_sender_pool(void)
     conf.connect_timeout = 1000;
     conf.send_timeout = 1000;
 
-    /* one declared destination: the pool starts with exactly one sender */
+    /* the manager starts one fixed egress thread for each shard */
     CHECK(ngx_media_srt_outputs_start(&outs, &conf, 1, 16, NULL) == NGX_OK,
           "outputs started");
 
     after_start = thread_count();
+    CHECK(after_start == base + NGX_MEDIA_SRT_EGRESS_SHARDS,
+          "exactly %ui egress shard threads started: %lu -> %lu",
+          NGX_MEDIA_SRT_EGRESS_SHARDS, (unsigned long) base,
+          (unsigned long) after_start);
 
     for (i = 0; i < 3; i++) {
         CHECK(ngx_media_srt_outputs_add(outs, &conf, NULL, NULL) == NGX_OK,
@@ -328,10 +330,8 @@ test_shared_sender_pool(void)
     after_adds = thread_count();
 
     /*
-     * The senders belong to the pool and walk the whole table, so three more
-     * destinations are served by the thread that already exists.  An
-     * implementation that gave each destination its own sender shows four
-     * threads at this point.
+     * Three added destinations are served by their assigned existing shards;
+     * no per-destination thread is created.
      */
     CHECK(after_adds == after_start,
           "adding destinations created no sender: %lu -> %lu",
@@ -343,8 +343,8 @@ test_shared_sender_pool(void)
 
     for (i = 0; i < 8; i++) {
         CHECK(ngx_media_srt_outputs_push(outs, &conf.application, &conf.stream,
-                                         b, 1024, 1) == NGX_OK,
-              "burst offered to every destination");
+                                         1, 1, b, 1024, 1) == NGX_OK,
+              "prepared burst offered to each shard");
     }
 
     ngx_media_buf_unref(b);

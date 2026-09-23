@@ -899,7 +899,7 @@ ngx_media_srt_haivision_connect(const u_char *host, ngx_uint_t port,
     ngx_media_srt_session_t  *session;
     struct sockaddr_in        addr;
     SRTSOCKET                 sock;
-    int                       transtype, timeout;
+    int                       transtype, timeout, sndsyn;
 
     if (host == NULL || host[0] == '\0' || port == 0 || port > 65535) {
         ngx_media_srt_note_error("invalid destination");
@@ -924,6 +924,7 @@ ngx_media_srt_haivision_connect(const u_char *host, ngx_uint_t port,
     transtype = SRTT_LIVE;
     timeout = (timeout_ms > (ngx_msec_t) INT_MAX) ? INT_MAX
                                                   : (int) timeout_ms;
+    sndsyn = 0;
 
     if (srt_setsockopt(sock, 0, SRTO_TRANSTYPE, &transtype,
                        sizeof(transtype)) == SRT_ERROR
@@ -931,6 +932,8 @@ ngx_media_srt_haivision_connect(const u_char *host, ngx_uint_t port,
                           sizeof(timeout)) == SRT_ERROR
         || srt_setsockopt(sock, 0, SRTO_SNDTIMEO, &timeout,
                           sizeof(timeout)) == SRT_ERROR
+        || srt_setsockopt(sock, 0, SRTO_SNDSYN, &sndsyn,
+                          sizeof(sndsyn)) == SRT_ERROR
         || ngx_media_srt_haivision_apply_crypto(sock, params) != NGX_OK)
     {
         ngx_media_srt_note_error(srt_getlasterror_str());

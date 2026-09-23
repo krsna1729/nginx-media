@@ -13,19 +13,15 @@
 #include <pthread.h>
 
 /*
- * SRT output runtime (goal doc 11, 16, phase 7).
- *
- * One destination is one SRT caller session plus a bounded subscriber queue.
- * The worker never sends: it pushes references to the transport bursts the
- * program runtime already prepared for HLS and recording, so preparation is
- * shared and a destination costs one reference per burst, not a copy.  A
- * sender thread per destination performs transport progress, which keeps a
- * slow or stalled receiver from delaying any other output (goal doc 34 items
- * 11 and 14).
+ * SRT output runtime.  The program owner publishes immutable prepared bursts
+ * to the bounded feeds of matching egress shards; each shard fans the shared
+ * reference into its assigned destination queues and services them with
+ * nonblocking transport sends.
  */
 
-#define NGX_MEDIA_SRT_MAX_OUTPUTS 8
-#define NGX_MEDIA_SRT_OUT_MAX_EVENTS 64
+#define NGX_MEDIA_SRT_MAX_OUTPUTS 1000
+#define NGX_MEDIA_SRT_EGRESS_SHARDS 16
+#define NGX_MEDIA_SRT_OUT_MAX_EVENTS 2048
 
 #define NGX_MEDIA_SRT_OUT_EVENT_CONNECTED 1
 #define NGX_MEDIA_SRT_OUT_EVENT_FAILED    2
@@ -33,6 +29,8 @@
 typedef struct {
     ngx_str_t   application;
     ngx_str_t   stream;
+    uintptr_t   program_identity;  /* zero for a statically configured route */
+    uint64_t    incarnation;       /* stream object lifetime */
     ngx_str_t   host;
     ngx_uint_t  port;
     ngx_str_t   streamid;          /* optional publish stream id */
@@ -58,6 +56,21 @@ typedef struct {
     uint64_t    reconnects;
 } ngx_media_srt_out_event_t;
 
+typedef struct {
+    ngx_uint_t  shard;
+    ngx_uint_t  destinations;
+    ngx_uint_t  feed_queue_units;
+    size_t      feed_queue_bytes;
+    uint64_t    feed_queue_dropped;
+    ngx_uint_t  output_queue_units;
+    size_t      output_queue_bytes;
+    uint64_t    output_queue_dropped;
+    uint64_t    sent_bytes;
+    uint64_t    sent_bursts;
+    uint64_t    blocked_sends;
+    uint64_t    retransmitted_packets;
+} ngx_media_srt_egress_stats_t;
+
 typedef struct ngx_media_srt_outputs_s ngx_media_srt_outputs_t;
 
 ngx_int_t ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
@@ -66,9 +79,8 @@ ngx_int_t ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
 void ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs);
 
 /*
- * Runtime destinations (normative revision).  add() takes a free slot and the
- * existing sender pool picks it up; remove() stops the slot and releases it.
- * *index, when given, receives the slot so the caller can remove it later.
+ * Runtime destinations share the fixed egress shards.  add() takes a free
+ * slot; remove() stops it and releases it after any in-flight send completes.
  */
 ngx_int_t ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
     const ngx_media_srt_output_conf_t *conf, ngx_uint_t *index,
@@ -77,12 +89,19 @@ void ngx_media_srt_outputs_remove(ngx_media_srt_outputs_t *outs,
     ngx_uint_t index);
 
 /*
- * Offers one prepared burst to every destination bound to application/stream.
- * The burst is referenced, never copied and never owned by the destination.
+ * Publishes one immutable prepared burst to the shards owning matching
+ * destinations.  The shard queues and destination queues take references;
+ * neither copies nor owns the caller's buffer.
  */
 ngx_int_t ngx_media_srt_outputs_push(ngx_media_srt_outputs_t *outs,
     const ngx_str_t *application, const ngx_str_t *stream,
-    ngx_media_buf_t *burst, size_t len, ngx_uint_t keyframe);
+    uintptr_t program_identity, uint64_t incarnation, ngx_media_buf_t *burst,
+    size_t len, ngx_uint_t keyframe);
+
+ngx_uint_t ngx_media_srt_outputs_stats_get(ngx_media_srt_outputs_t *outs,
+    ngx_media_srt_egress_stats_t *stats, ngx_uint_t max);
+ngx_uint_t ngx_media_srt_module_stats_get(ngx_media_srt_egress_stats_t *stats,
+    ngx_uint_t max);
 
 /* the eventfd the worker registers in its own event loop */
 int ngx_media_srt_outputs_notify_fd(ngx_media_srt_outputs_t *outs);

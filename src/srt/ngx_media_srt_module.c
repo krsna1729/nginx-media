@@ -1061,6 +1061,8 @@ ngx_media_srt_destination_add(ngx_media_stream_t *stream,
 
     conf.application = stream->application;
     conf.stream = stream->name;
+    conf.incarnation = stream->incarnation;
+    conf.program_identity = (uintptr_t) stream;
     conf.host = destination->host;
     conf.port = destination->port;
     conf.streamid = destination->streamid;
@@ -1112,7 +1114,20 @@ ngx_media_srt_output_sink(void *ctx, ngx_media_stream_t *stream,
     }
 
     (void) ngx_media_srt_outputs_push(outs, &stream->application,
-                                      &stream->name, burst, len, keyframe);
+                                      &stream->name, (uintptr_t) stream,
+                                      stream->incarnation, burst, len,
+                                      keyframe);
+}
+
+ngx_uint_t
+ngx_media_srt_module_stats_get(ngx_media_srt_egress_stats_t *stats,
+    ngx_uint_t max)
+{
+    if (ngx_media_srt_outputs == NULL) {
+        return 0;
+    }
+
+    return ngx_media_srt_outputs_stats_get(ngx_media_srt_outputs, stats, max);
 }
 
 /* destination status changes arrive on their own eventfd */
