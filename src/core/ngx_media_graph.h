@@ -94,6 +94,7 @@ typedef struct {
     uint32_t   enabled;           /* source desired state, source operations */
     uint32_t   failure_timeout;   /* ms, stream operations */
     uint32_t   recovery_timeout;  /* ms, stream operations */
+    uint32_t   media_mode;        /* stream media intent */
     uint32_t   application_len;
     uint32_t   name_len;
     uint32_t   id_len;            /* source id, zero for a stream operation */
@@ -111,6 +112,7 @@ typedef struct {
     ngx_uint_t  enabled;
     ngx_uint_t  failure_timeout;
     ngx_uint_t  recovery_timeout;
+    ngx_uint_t  media_mode;
     ngx_str_t   application;
     ngx_str_t   name;
     ngx_str_t   id;

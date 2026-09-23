@@ -27,6 +27,7 @@
 #include "ngx_media_graph.h"
 #include "ngx_media_compat.h"
 #include "ngx_media_hls_profile.h"
+#include "ngx_media_policy.h"
 #include "ngx_media_hls_ingest.h"
 
 #include <fcntl.h>
@@ -104,7 +105,8 @@ static ngx_int_t ngx_media_api_prom_prefix(u_char **last, u_char *end,
     const ngx_str_t *source, const char *percentile);
 static ngx_int_t ngx_media_api_json_stream_name(u_char **last, u_char *end,
     const ngx_str_t *application, const ngx_str_t *name);
-
+static ngx_int_t ngx_media_api_media_mode(const ngx_str_t *text,
+    ngx_uint_t *mode);
 static ngx_command_t ngx_media_api_commands[] = {
 
     { ngx_string("media_api"),
@@ -688,7 +690,7 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
 
     *last = ngx_snprintf(*last, end - *last,
                          ",\"owner\":%ui,\"observed_here\":%s,"
-                         "\"revision\":%uL,"
+                         "\"revision\":%uL,\"media\":\"%s\","
                          "\"generation\":%ui,\"switches\":%uL,"
                          "\"emergency_switches\":%uL,"
                          "\"failure_timeout_ms\":%ui,"
@@ -696,6 +698,8 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
                          "\"program_frames\":%uL,\"active\":",
                          progress.owner, progress.local ? "true" : "false",
                          stream->revision,
+                         stream->media_mode == NGX_MEDIA_STREAM_MEDIA_PROFILE
+                         ? "profile" : "source",
                          progress.generation, stream->switches,
                          stream->emergency_switches,
                          stream->selector.failure_timeout,
@@ -1421,6 +1425,31 @@ ngx_media_api_json_field(const ngx_str_t *body, const char *key,
 
     return NGX_DECLINED;
 }
+static ngx_int_t
+ngx_media_api_media_mode(const ngx_str_t *text, ngx_uint_t *mode)
+{
+    if (text == NULL || mode == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (text->len == sizeof("source") - 1
+        && ngx_strncasecmp(text->data, (u_char *) "source",
+                           sizeof("source") - 1) == 0)
+    {
+        *mode = NGX_MEDIA_STREAM_MEDIA_SOURCE;
+        return NGX_OK;
+    }
+
+    if (text->len == sizeof("profile") - 1
+        && ngx_strncasecmp(text->data, (u_char *) "profile",
+                           sizeof("profile") - 1) == 0)
+    {
+        *mode = NGX_MEDIA_STREAM_MEDIA_PROFILE;
+        return NGX_OK;
+    }
+
+    return NGX_ERROR;
+}
 
 static ngx_int_t
 ngx_media_api_arg(ngx_http_request_t *r, const char *name, ngx_str_t *value)
@@ -1445,10 +1474,12 @@ static ngx_int_t
 ngx_media_api_stream_create(ngx_http_request_t *r,
     ngx_media_registry_t *registry, u_char **last, u_char *end)
 {
-    ngx_str_t              body, application, name;
+    ngx_str_t              body, application, name, media_text;
     ngx_media_stream_t    *stream;
     ngx_media_feed_conf_t  feed_conf;
-    ngx_uint_t             existed;
+    ngx_media_policy_t    *policy;
+    ngx_uint_t             existed, media_set = 0;
+    ngx_uint_t             media_mode = NGX_MEDIA_STREAM_MEDIA_SOURCE;
     ngx_int_t               rc;
 
     if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
@@ -1465,6 +1496,28 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
         *last = ngx_snprintf(*last, end - *last,
                              "{\"error\":\"application_and_name_required\"}");
         return NGX_HTTP_BAD_REQUEST;
+    }
+
+    if (ngx_media_api_json_field(&body, "media", &media_text) == NGX_OK) {
+        media_set = 1;
+
+        if (ngx_media_api_media_mode(&media_text, &media_mode) != NGX_OK) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"unknown_media_mode\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        if (media_mode == NGX_MEDIA_STREAM_MEDIA_PROFILE) {
+            policy = ngx_media_policy_get((ngx_cycle_t *) ngx_cycle);
+
+            if (policy == NULL
+                || policy->transform_executor.executable.len == 0)
+            {
+                *last = ngx_snprintf(*last, end - *last,
+                                     "{\"error\":\"transform_unavailable\"}");
+                return NGX_HTTP_BAD_REQUEST;
+            }
+        }
     }
 
     existed = (ngx_media_registry_stream(registry, &application, &name)
@@ -1510,7 +1563,10 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    if (!existed) {
+    if (media_set && stream->media_mode != media_mode) {
+        stream->media_mode = media_mode;
+        ngx_media_stream_touch(stream);
+    } else if (!existed) {
         ngx_media_stream_touch(stream);
     }
 
@@ -1547,7 +1603,10 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
     }
 
     *last = ngx_snprintf(*last, end - *last,
-                         ",\"revision\":%uL,\"created\":%s}",
+                         ",\"media\":\"%s\",\"revision\":%uL,"
+                         "\"created\":%s}",
+                         stream->media_mode == NGX_MEDIA_STREAM_MEDIA_PROFILE
+                         ? "profile" : "source",
                          stream->revision, existed ? "false" : "true");
 
     return existed ? NGX_HTTP_OK : NGX_HTTP_CREATED;
@@ -1694,8 +1753,10 @@ ngx_media_api_stream_patch(ngx_http_request_t *r,
     u_char **last, u_char *end)
 {
     ngx_media_stream_t  *stream;
-    ngx_str_t            body, value;
-    ngx_int_t            n;
+    ngx_str_t            body, value, media_text;
+    ngx_media_policy_t  *policy;
+    ngx_uint_t           media_mode;
+    ngx_int_t             n;
 
     stream = ngx_media_registry_stream(registry, application, name);
 
@@ -1719,6 +1780,31 @@ ngx_media_api_stream_patch(ngx_http_request_t *r,
                                  "\"revision\":%uL}",
                                  stream->revision);
             return NGX_HTTP_CONFLICT;
+        }
+    }
+
+    if (ngx_media_api_json_field(&body, "media", &media_text) == NGX_OK) {
+        if (ngx_media_api_media_mode(&media_text, &media_mode) != NGX_OK) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"unknown_media_mode\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        if (media_mode == NGX_MEDIA_STREAM_MEDIA_PROFILE) {
+            policy = ngx_media_policy_get((ngx_cycle_t *) ngx_cycle);
+
+            if (policy == NULL
+                || policy->transform_executor.executable.len == 0)
+            {
+                *last = ngx_snprintf(*last, end - *last,
+                                     "{\"error\":\"transform_unavailable\"}");
+                return NGX_HTTP_BAD_REQUEST;
+            }
+        }
+
+        if (stream->media_mode != media_mode) {
+            stream->media_mode = media_mode;
+            ngx_media_stream_touch(stream);
         }
     }
 
@@ -1767,7 +1853,10 @@ ngx_media_api_stream_patch(ngx_http_request_t *r,
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    *last = ngx_snprintf(*last, end - *last, ",\"revision\":%uL}",
+    *last = ngx_snprintf(*last, end - *last,
+                         ",\"media\":\"%s\",\"revision\":%uL}",
+                         stream->media_mode == NGX_MEDIA_STREAM_MEDIA_PROFILE
+                         ? "profile" : "source",
                          stream->revision);
 
     return NGX_HTTP_OK;
@@ -2669,8 +2758,11 @@ ngx_media_api_desired_get(ngx_media_registry_t *registry, u_char **last,
         }
 
         *last = ngx_snprintf(*last, end - *last,
-                             ",\"revision\":%uL,\"sources\":[",
-                             stream->revision);
+                             ",\"revision\":%uL,\"media\":\"%s\","
+                             "\"sources\":[",
+                             stream->revision,
+                             stream->media_mode == NGX_MEDIA_STREAM_MEDIA_PROFILE
+                             ? "profile" : "source");
         first = 0;
 
         {
@@ -3208,11 +3300,13 @@ static ngx_int_t
 ngx_media_api_desired_put(ngx_http_request_t *r,
     ngx_media_registry_t *registry, u_char **last, u_char *end)
 {
-    ngx_str_t              body, streams, item, application, name;
+    ngx_str_t              body, streams, item, application, name, media_text;
     ngx_media_stream_t    *stream;
     ngx_media_feed_conf_t  feed_conf;
+    ngx_media_policy_t    *policy;
     u_char                *p, *stop;
     ngx_uint_t             applied = 0, created = 0, stream_existed;
+    ngx_uint_t             media_mode;
     ngx_int_t               rc;
 
     if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
@@ -3285,6 +3379,30 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
             return NGX_HTTP_BAD_REQUEST;
         }
 
+        if (ngx_media_api_json_field(&item, "media", &media_text)
+            == NGX_OK)
+        {
+            if (ngx_media_api_media_mode(&media_text, &media_mode)
+                != NGX_OK)
+            {
+                *last = ngx_snprintf(*last, end - *last,
+                                     "{\"error\":\"unknown_media_mode\"}");
+                return NGX_HTTP_BAD_REQUEST;
+            }
+
+            if (media_mode == NGX_MEDIA_STREAM_MEDIA_PROFILE) {
+                policy = ngx_media_policy_get((ngx_cycle_t *) ngx_cycle);
+
+                if (policy == NULL
+                    || policy->transform_executor.executable.len == 0)
+                {
+                    *last = ngx_snprintf(*last, end - *last,
+                                         "{\"error\":\"transform_unavailable\"}");
+                    return NGX_HTTP_BAD_REQUEST;
+                }
+            }
+
+        }
         stream_existed =
             (ngx_media_registry_stream(registry, &application, &name) != NULL);
 
@@ -3300,6 +3418,13 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
         }
 
         applied++;
+        if (ngx_media_api_json_field(&item, "media", &media_text)
+            == NGX_OK && stream->media_mode != media_mode)
+        {
+            stream->media_mode = media_mode;
+            ngx_media_stream_touch(stream);
+        }
+
 
         rc = ngx_media_api_desired_children(r, stream, &item, &created);
 

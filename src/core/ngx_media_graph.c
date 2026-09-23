@@ -213,6 +213,7 @@ ngx_media_graph_encode(const ngx_media_graph_op_t *op,
     wire.priority = (uint32_t) op->priority;
     wire.enabled = op->enabled ? 1 : 0;
     wire.failure_timeout = (uint32_t) op->failure_timeout;
+    wire.media_mode = (uint32_t) op->media_mode;
     wire.recovery_timeout = (uint32_t) op->recovery_timeout;
     wire.application_len = (uint32_t) op->application.len;
     wire.name_len = (uint32_t) op->name.len;
@@ -268,6 +269,7 @@ ngx_media_graph_stream_set(const ngx_media_stream_t *stream)
     op.revision = stream->revision;
     op.failure_timeout = (ngx_uint_t) stream->selector.failure_timeout;
     op.recovery_timeout = (ngx_uint_t) stream->selector.recovery_timeout;
+    op.media_mode = stream->media_mode;
     op.application = stream->application;
     op.name = stream->name;
 
@@ -466,6 +468,9 @@ ngx_media_graph_decode(const ngx_media_ipc_header_t *header,
     {
         return NGX_ERROR;
     }
+    if (wire.media_mode > NGX_MEDIA_STREAM_MEDIA_PROFILE) {
+        return NGX_ERROR;
+    }
 
     ngx_memzero(op, sizeof(*op));
 
@@ -476,6 +481,7 @@ ngx_media_graph_decode(const ngx_media_ipc_header_t *header,
     op->priority = wire.priority;
     op->enabled = wire.enabled ? 1 : 0;
     op->failure_timeout = wire.failure_timeout;
+    op->media_mode = wire.media_mode;
     op->recovery_timeout = wire.recovery_timeout;
 
     p = ngx_media_buf_data(payload) + sizeof(wire);
@@ -708,6 +714,7 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
 
         stream->selector.failure_timeout = (ngx_msec_t) op.failure_timeout;
         stream->selector.recovery_timeout = (ngx_msec_t) op.recovery_timeout;
+        stream->media_mode = op.media_mode;
 
         /*
          * A replica mirrors the revision of the operation instead of bumping

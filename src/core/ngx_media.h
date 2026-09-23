@@ -31,6 +31,9 @@
 #define NGX_MEDIA_SOURCE_HLS_PULL  4
 #define NGX_MEDIA_SOURCE_HLS_PUSH  5
 
+/* desired media intent; codec execution remains external to nginx */
+#define NGX_MEDIA_STREAM_MEDIA_SOURCE  0
+#define NGX_MEDIA_STREAM_MEDIA_PROFILE 1
 /* source activation gate states (goal doc 5) */
 #define NGX_MEDIA_SOURCE_STANDBY        1
 #define NGX_MEDIA_SOURCE_AWAITING_SYNC  2
@@ -116,6 +119,7 @@ struct ngx_media_stream_s {
     ngx_media_timeline_t    timeline;
     ngx_media_selector_t    selector;
     ngx_media_feed_t        program_feed;
+    ngx_uint_t              media_mode;
     ngx_uint_t              generation;
 
     /*
