@@ -227,8 +227,9 @@ bound the shorter sweeps; `CAPACITY_SLOW_SECONDS`,
 scenario windows.  RTMP ladder cases use one worker.  Per case the harness
 caps a source at 60 Mbit/s, nominal egress at 8000 Mbit/s, total destinations
 at 1000, outputs per owner at 1000, and each measurement window at 600 seconds.
-The focused `PHASES=capacity-slow-reader`, `capacity-saturated`, and
-`capacity-sustained` runs exercise one scenario without repeating the ladder.
+The focused `PHASES=capacity-srt-ladder` run executes only the single-program
+SRT destination ladder. `capacity-slow-reader`, `capacity-saturated`, and
+`capacity-sustained` each run one scenario without repeating the ladder.
 This is an offered-load curve, not a worker-count sweep.
 
 `bench-burst-sizing` runs the in-process demux/mux/remux fixture at each

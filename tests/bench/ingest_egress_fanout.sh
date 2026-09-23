@@ -2643,6 +2643,18 @@ phase_capacity_sustained() {
         "$CAPACITY_SUSTAINED_SECONDS"
 }
 
+phase_capacity_srt_ladder() {
+    local destinations
+
+    echo
+    echo "== single-program SRT destination ladder"
+    for destinations in $CAPACITY_DEST_STEPS; do
+        capacity_case "destinations-$destinations-srt" \
+            1 "$CAPACITY_DEST_RATE" "$destinations" \
+            "$CAPACITY_WINDOW" srt || return 1
+    done
+}
+
 # --- run --------------------------------------------------------------------
 
 rm -rf "$RUN"
@@ -2678,6 +2690,7 @@ for phase in $PHASES; do
         misplace) phase_misplace ;;
         topology) phase_topology ;;
         capacity) phase_capacity || exit 1 ;;
+        capacity-srt-ladder) phase_capacity_srt_ladder || exit 1 ;;
         capacity-saturated) phase_capacity_saturated || exit 1 ;;
         capacity-slow-reader) phase_capacity_slow_reader || exit 1 ;;
         capacity-sustained) phase_capacity_sustained || exit 1 ;;
