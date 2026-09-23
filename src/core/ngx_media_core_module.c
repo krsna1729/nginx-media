@@ -33,6 +33,10 @@ static char *ngx_media_record_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_media_record_iso_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_media_transform_ffmpeg_cmd(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
+static char *ngx_media_transform_profile_cmd(ngx_conf_t *cf,
+    ngx_command_t *cmd, void *conf);
 static ngx_int_t ngx_media_parse_msec(const ngx_str_t *value,
     ngx_msec_t *out);
 
@@ -143,6 +147,20 @@ static ngx_command_t ngx_media_core_commands[] = {
     { ngx_string("media_record_iso"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2,
       ngx_media_record_iso_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_transform_ffmpeg"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_transform_ffmpeg_cmd,
+      0,
+      0,
+      NULL },
+
+    { ngx_string("media_transform_profile"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE4,
+      ngx_media_transform_profile_cmd,
       0,
       0,
       NULL },
@@ -307,6 +325,59 @@ ngx_media_record_iso_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     policy->record_iso_source = value[1];
     policy->record_iso_path = value[2];
+
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_media_transform_ffmpeg_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf)
+{
+    ngx_media_policy_t  *policy = conf;
+    ngx_str_t           *value = cf->args->elts;
+
+    (void) cmd;
+
+    if (value[1].len == 0
+        || value[1].len >= NGX_MEDIA_EXECUTOR_MAX_EXECUTABLE)
+    {
+        return "must be a non-empty executable path shorter than 4096 bytes";
+    }
+
+    policy->transform_executor.executable = value[1];
+
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_media_transform_profile_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf)
+{
+    ngx_media_policy_t  *policy = conf;
+    ngx_str_t           *value = cf->args->elts;
+    ngx_int_t            n[4];
+    ngx_uint_t           i;
+
+    (void) cmd;
+
+    for (i = 0; i < 4; i++) {
+        n[i] = ngx_atoi(value[i + 1].data, value[i + 1].len);
+
+        if (n[i] <= 0) {
+            return "profile values must be positive integers";
+        }
+    }
+
+    if (n[0] > 8192 || n[1] > 8192
+        || n[2] > 100000000 || n[3] > 10000000)
+    {
+        return "profile exceeds transform bounds";
+    }
+
+    policy->transform_executor.width = (ngx_uint_t) n[0];
+    policy->transform_executor.height = (ngx_uint_t) n[1];
+    policy->transform_executor.video_bitrate = (ngx_uint_t) n[2];
+    policy->transform_executor.audio_bitrate = (ngx_uint_t) n[3];
 
     return NGX_CONF_OK;
 }

@@ -114,6 +114,8 @@ ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/core/ngx_media_graph.c \
                  $ngx_addon_dir/src/core/ngx_media_owner_dir.c \
                  $ngx_addon_dir/src/core/ngx_media_buffer.c \
+                 $ngx_addon_dir/src/core/ngx_media_executor.c \
+                 $ngx_addon_dir/src/core/ngx_media_transform.c \
                  $ngx_addon_dir/src/core/ngx_media_frame.c \
                  $ngx_addon_dir/src/core/ngx_media_feed.c \
                  $ngx_addon_dir/src/core/ngx_media_track.c \

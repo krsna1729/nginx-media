@@ -3,6 +3,7 @@
 
 #include "ngx_media_platform.h"
 #include "ngx_media.h"
+#include "ngx_media_executor.h"
 
 /*
  * Selection policy (goal doc 8).
@@ -31,12 +32,13 @@ typedef struct {
     ngx_str_t    record_raw_path;
     ngx_str_t    record_iso_path;
     ngx_str_t    record_iso_source;   /* publisher identity for the ISO tap */
+    ngx_media_executor_conf_t transform_executor;
 } ngx_media_policy_t;
 
 #define NGX_MEDIA_POLICY_FAILURE_TIMEOUT_DEFAULT 1500
 #define NGX_MEDIA_POLICY_RECOVERY_TIMEOUT_DEFAULT 10000
 
-/* per-cycle policy; created with defaults on first use */
+/* configured core policy, with a default fallback for unit/runtime callers */
 ngx_media_policy_t *ngx_media_policy_get(ngx_cycle_t *cycle);
 ngx_media_policy_t *ngx_media_policy_init(ngx_media_policy_t *policy);
 
