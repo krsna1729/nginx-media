@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit tsan nginx graph-conflict incarnation smoke bench-worker-scaling bench-ingest-egress bench-ingest-egress-fanout test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
+.PHONY: unit tsan nginx graph-conflict incarnation smoke bench-worker-scaling bench-ingest-egress bench-ingest-egress-fanout bench-burst-sizing test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -125,7 +125,7 @@ DOCKER_CACHE_ARGS ?=
 BASE ?= debian:trixie
 TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
-    hls-profile file-source stream-delete graph-conflict churn \
+    hls-profile file-source stream-delete incarnation graph-conflict churn \
     rtmp \
     rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports \
     srt-shared-port multi-worker soak fault
@@ -167,6 +167,11 @@ bench-push-fanout:
 
 bench-fanout-delay:
 	tests/bench/fanout_delay.sh
+
+# Sweep the real-media MPEG-TS backing allocation and report the first
+# lossless capacity rather than treating bitrate as a sufficient proxy.
+bench-burst-sizing:
+	tests/bench/burst_sizing.sh
 
 # What more workers buy, and what they do not: the API is per-worker state,
 # and one program's fanout is owned by one worker.

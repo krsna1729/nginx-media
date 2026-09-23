@@ -10,6 +10,7 @@
  * transport, continuity, PSI, CRC or PES errors.
  */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -133,23 +134,40 @@ typedef struct {
                                               boundaries */
     ngx_uint_t             audio_index;
     uint64_t               burst_bytes;
+    uint64_t               burst_count;
+    uint64_t               burst_min;
+    uint64_t               burst_max;
+    size_t                 burst_capacity;
+
 } remux_t;
 
 static void
 remux_flush(remux_t *r)
 {
-    if (ngx_media_ts_burst_size(&r->burst) == 0) {
+    size_t  len;
+
+    len = ngx_media_ts_burst_size(&r->burst);
+    if (len == 0) {
         return;
     }
 
     (void) ngx_media_ts_mux_burst_end(&r->mux, &r->burst);
 
-    r->burst_bytes += ngx_media_ts_burst_size(&r->burst);
+    r->burst_bytes += len;
+    r->burst_count++;
+
+    if (r->burst_min == 0 || len < r->burst_min) {
+        r->burst_min = len;
+    }
+
+    if (len > r->burst_max) {
+        r->burst_max = len;
+    }
 
     /* feed the second pass in small chunks: packets span calls */
     {
         u_char  *data = ngx_media_buf_data(r->burst.backing);
-        size_t   len = ngx_media_ts_burst_size(&r->burst), off = 0;
+        size_t   off = 0;
 
         while (off < len) {
             size_t  take = (len - off > 1024) ? 1024 : len - off;
@@ -193,8 +211,8 @@ remux_source_frame(void *ctx, const ngx_media_frame_t *frame)
     }
 
     if (r->burst.backing == NULL
-        && ngx_media_ts_mux_burst_init(&r->mux, &r->burst, 64 * 1024)
-           != NGX_OK)
+        && ngx_media_ts_mux_burst_init(&r->mux, &r->burst,
+                                       r->burst_capacity) != NGX_OK)
     {
         return;
     }
@@ -203,8 +221,8 @@ remux_source_frame(void *ctx, const ngx_media_frame_t *frame)
     {
         remux_flush(r);
 
-        if (ngx_media_ts_mux_burst_init(&r->mux, &r->burst, 64 * 1024)
-            != NGX_OK)
+        if (ngx_media_ts_mux_burst_init(&r->mux, &r->burst,
+                                        r->burst_capacity) != NGX_OK)
         {
             return;
         }
@@ -288,6 +306,7 @@ int
 main(int argc, char **argv)
 {
     const char                 *path;
+    char                       *end;
     FILE                       *fp;
     fixture_t                   f;
     ngx_media_ts_demux_t        demux, demux_remux, demux_check;
@@ -296,11 +315,25 @@ main(int argc, char **argv)
     ngx_media_ts_demux_stats_t  stats, check_stats;
     remux_t                     r;
     u_char                      buf[4096];
-    size_t                      n;
+    size_t                      n, burst_capacity = 64 * 1024;
+    unsigned long long          requested;
     ngx_uint_t                  i;
     int                         rc = 1;
 
     path = (argc > 1) ? argv[1] : "fixture.ts";
+    if (argc > 2) {
+        requested = strtoull(argv[2], &end, 10);
+
+        if (argv[2][0] == '\0' || *end != '\0' || requested == 0
+            || requested > SIZE_MAX)
+        {
+            fprintf(stderr, "invalid burst capacity: %s\n", argv[2]);
+            return 2;
+        }
+
+        burst_capacity = (size_t) requested;
+    }
+
 
     fp = fopen(path, "rb");
     if (fp == NULL) {
@@ -381,6 +414,7 @@ main(int argc, char **argv)
      * muxer against real media and that burst preparation is lossless.
      */
     ngx_memzero(&r, sizeof(r));
+    r.burst_capacity = burst_capacity;
 
     if (ngx_media_ts_mux_init(&r.mux, NULL, NULL) != NGX_OK
         || ngx_media_ts_mux_set_tracks(&r.mux, &demux.trackset) != NGX_OK)
@@ -422,9 +456,11 @@ main(int argc, char **argv)
     ngx_media_ts_demux_flush(&demux_check);
     ngx_media_ts_demux_stats(&demux_check, &check_stats);
 
-    printf("REMUX frames=%llu (video=%llu audio=%llu) checked=%llu "
-           "matched=%llu mismatched=%llu bytes=%llu packets=%llu "
-           "continuity_errors=%llu pes_errors=%llu\n",
+    printf("REMUX capacity=%llu frames=%llu (video=%llu audio=%llu) "
+           "checked=%llu matched=%llu mismatched=%llu bytes=%llu "
+           "bursts=%llu min_burst=%llu max_burst=%llu frame_rollovers=%llu "
+           "packets=%llu continuity_errors=%llu pes_errors=%llu\n",
+           (unsigned long long) r.burst_capacity,
            (unsigned long long) r.nexpected,
            (unsigned long long) r.video_expected,
            (unsigned long long) r.audio_expected,
@@ -432,6 +468,10 @@ main(int argc, char **argv)
            (unsigned long long) r.nmatched,
            (unsigned long long) r.nmismatched,
            (unsigned long long) r.burst_bytes,
+           (unsigned long long) r.burst_count,
+           (unsigned long long) r.burst_min,
+           (unsigned long long) r.burst_max,
+           (unsigned long long) r.mux.frame_drops,
            (unsigned long long) r.mux.packets,
            (unsigned long long) check_stats.continuity_errors,
            (unsigned long long) check_stats.pes_errors);

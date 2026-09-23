@@ -188,6 +188,7 @@ drives one scenario against the SRT library and against the UDP test double.
 make bench-hls            # serving HLS: disk vs tmpfs, sendfile, kTLS
 make bench-hls-fanout     # many concurrent readers over a sliding window
 make bench-push-fanout    # the uploader's copy path, 8 destinations
+make bench-burst-sizing   # sweep TS backing capacity against real media
 ```
 
 These measure rather than assert, and their numbers are what the HLS and push
@@ -197,6 +198,12 @@ tmpfs mount and says so and skips that variant when it cannot have one.
 one function changed, so it takes the two nginx binaries as its arguments
 (defaulting to `/tmp/nginx-sendfile` and `/tmp/nginx-buffered`); the target
 runs it with those defaults, which is only meaningful if you put them there.
+
+`bench-burst-sizing` runs the in-process demux/mux/remux fixture at each
+capacity in `CAPACITIES` (bytes).  It reports burst count, observed byte range,
+frame rollovers and whether the remux remained lossless; the first lossless
+row is a measurement for the fixture's access-unit distribution, not a
+universal bitrate-derived setting.
 
 ## Conventions
 
@@ -343,12 +350,14 @@ register with.  A source type is a reader plus an API branch:
    control API and in health before any media arrives, which is what makes a
    file slate a normal source rather than a special case.
 4. If the type owns a reader, open it from the create branch instead of only
-   registering a label.  `file`, `hls_push` and `hls_pull` do this; each fails
-   the create with `400` and a named error (`file_open_failed`,
-   `hls_ingest_failed`, `hls_pull_failed`) rather than leaving a source that
-   never produces.  A `hls_pull` source is the exception to that: its reader
-   does the first fetch on its own thread, so an unreachable playlist is counted
-   and the source stays unproductive until the origin answers.
+   registering a label — in `ngx_media_graph_source_open()`, which is where the
+   graph decides whether this worker is the one that materialises it.
+   `file`, `hls_push` and `hls_pull` do this; when the reader cannot be opened
+   here the create fails with `400` and a named error (`source_open_failed`)
+   rather than leaving a source that never produces.  A `hls_pull` source is
+   the exception to that: its reader does the first fetch on its own thread, so
+   an unreachable playlist is counted and the source stays unproductive until
+   the origin answers.
 5. Publish through the gate.  A reader calls `ngx_media_health_media()` with the
    frame's DTS and the current time, then `ngx_media_stream_publish()` — the
    same path a publisher's frames take — so selection, health and compatibility
