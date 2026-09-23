@@ -868,12 +868,17 @@ for metric in \
     nginx_media_source_preroll_high_water_units \
     nginx_media_source_preroll_high_water_bytes
 do
-    printf '%s\n' "$METRICS" | grep -q "^$metric{" \
-        || { echo "metrics omitted $metric" >&2; exit 1; }
+    if ! printf '%s\n' "$METRICS" | grep "^$metric{" >/dev/null; then
+        echo "metrics omitted $metric" >&2
+        exit 1
+    fi
 done
-printf '%s\n' "$METRICS" \
-    | grep -Eq '^nginx_media_source_payload_bytes_in_total\{worker="[0-9]+",application="[^"]+",name="[^"]+",source="[^"]+"\} [0-9]+$' \
-    || { echo "source payload metric sample has malformed labels" >&2; exit 1; }
+if ! printf '%s\n' "$METRICS" \
+    | grep -E '^nginx_media_source_payload_bytes_in_total\{worker="[0-9]+",application="[^"]+",name="[^"]+",source="[^"]+"\} [0-9]+$' >/dev/null
+then
+    echo "source payload metric sample has malformed labels" >&2
+    exit 1
+fi
 
 for metric in \
     nginx_media_worker_periodic_visits_total \
@@ -887,13 +892,18 @@ for metric in \
     nginx_media_runtime_routed_reassembly_errors_total \
     nginx_media_runtime_routed_publish_errors_total
 do
-    printf '%s\n' "$METRICS" | grep -q "^$metric " \
-        || { echo "metrics omitted $metric" >&2; exit 1; }
+    if ! printf '%s\n' "$METRICS" | grep "^$metric " >/dev/null; then
+        echo "metrics omitted $metric" >&2
+        exit 1
+    fi
 done
 
-printf '%s\n' "$METRICS" \
-    | grep -Eq '^nginx_media_worker_info\{worker="[0-9]+",pid="[0-9]+"\} 1$' \
-    || { echo "metrics omitted the serving worker identity" >&2; exit 1; }
+if ! printf '%s\n' "$METRICS" \
+    | grep -E '^nginx_media_worker_info\{worker="[0-9]+",pid="[0-9]+"\} 1$' >/dev/null
+then
+    echo "metrics omitted the serving worker identity" >&2
+    exit 1
+fi
 
 [ "${ACTIVE:-99}" -le 2 ] \
     || { echo "runtime output slots leaked: $ACTIVE in use" >&2; exit 1; }
