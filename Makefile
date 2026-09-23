@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit tsan nginx graph-conflict incarnation smoke bench-worker-scaling bench-ingest-egress bench-ingest-egress-fanout bench-burst-sizing test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
+.PHONY: unit tsan nginx graph-conflict incarnation smoke bench-worker-scaling bench-ingest-egress bench-ingest-egress-fanout bench-burst-sizing test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source transform stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -55,6 +55,9 @@ churn:
 
 file-source:
 	tests/integration/file_source_nginx.sh
+
+transform:
+	tests/integration/transform_nginx.sh
 
 # Deleting a stream has to release the memory it held, including when a reader
 # thread or an in-flight upload is still looking at it: the pools come back
@@ -120,12 +123,9 @@ TEST_IMAGE ?= nginx-media:test
 # type=gha), which only exists where ACTIONS_RUNTIME_TOKEN does; passing those
 # flags locally would fail, so they stay out of the default.
 DOCKER_CACHE_ARGS ?=
-# The base the image and its test stage are built on.  sid is the canary for
-# the newest libraries; trixie is what ships.
-BASE ?= debian:trixie
 TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
-    hls-profile file-source stream-delete incarnation graph-conflict churn \
+    hls-profile file-source transform stream-delete incarnation graph-conflict churn \
     rtmp \
     rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports \
     srt-shared-port multi-worker soak fault

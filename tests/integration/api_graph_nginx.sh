@@ -134,6 +134,17 @@ COUNT="$(curl -fsS "$API/streams" \
 
 echo "   replay produced no duplicate"
 
+echo "== profile intent is rejected without an external executor"
+STATUS="$(curl -sS -o "$RUN/profile-unavailable.json" -w '%{http_code}' \
+    -X PATCH -H 'Content-Type: application/json' \
+    -d "{\"revision\":$REVISION,\"media\":\"profile\"}" \
+    "$API/streams/live/news")"
+
+[ "$STATUS" = "400" ] \
+    || { echo "profile intent should be unavailable: $STATUS" >&2; exit 1; }
+grep -q '"error":"transform_unavailable"' "$RUN/profile-unavailable.json" \
+    || { echo "missing transform_unavailable error" >&2; exit 1; }
+
 echo "== a mutation carries the revision"
 STATUS="$(curl -sS -o "$RUN/patch.json" -w '%{http_code}' \
     -X PATCH -H 'Content-Type: application/json' \
