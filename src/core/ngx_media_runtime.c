@@ -859,6 +859,7 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         for (i2 = 0; i2 < count; i2++) {
             uint32_t           fields[10];
             ngx_media_track_t  track;
+            size_t             config_len;
 
             if (left < sizeof(fields)) {
                 ngx_media_trackset_destroy(&set);
@@ -868,9 +869,10 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
             ngx_memcpy(fields, q, sizeof(fields));
             q += sizeof(fields);
             left -= sizeof(fields);
+            config_len = (size_t) fields[9];
 
-            if (fields[9] > left
-                || fields[9] > NGX_MEDIA_RUNTIME_MAX_TRACK_CONFIG)
+            if (config_len > left
+                || config_len > NGX_MEDIA_RUNTIME_MAX_TRACK_CONFIG)
             {
                 ngx_media_trackset_destroy(&set);
                 return NGX_ERROR;
@@ -888,16 +890,15 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
             track.width = fields[7];
             track.height = fields[8];
 
-            if (fields[9] > 0) {
-                ngx_media_buf_t  *config = ngx_media_buf_alloc(fields[9]);
-
+            if (config_len > 0) {
+                ngx_media_buf_t  *config = ngx_media_buf_alloc(config_len);
                 if (config == NULL) {
                     ngx_media_trackset_destroy(&set);
                     return NGX_ERROR;
                 }
 
-                ngx_memcpy(ngx_media_buf_data(config), q, fields[9]);
-                (void) ngx_media_buf_freeze(config, fields[9]);
+                ngx_memcpy(ngx_media_buf_data(config), q, config_len);
+                (void) ngx_media_buf_freeze(config, config_len);
 
                 track.config = config;
                 (void) ngx_media_trackset_add(&set, &track);
@@ -907,8 +908,8 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
                 (void) ngx_media_trackset_add(&set, &track);
             }
 
-            q += fields[9];
-            left -= fields[9];
+            q += config_len;
+            left -= config_len;
         }
 
         for (i2 = 0; i2 < NGX_MEDIA_RUNTIME_MAX_ROUTED; i2++) {
