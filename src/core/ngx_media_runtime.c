@@ -8,6 +8,7 @@
 #include "ngx_media_hls_push.h"
 
 #include <ngx_event.h>
+#include <ngx_event_posted.h>
 
 #include "ngx_media_hls_segmenter.h"
 #include "ngx_media_record.h"
@@ -108,6 +109,9 @@ static void                      *ngx_media_runtime_sink_ctx;
 static uint64_t                   ngx_media_runtime_prepared_next_id = 1;
 
 static ngx_event_t          ngx_media_runtime_timer;
+static ngx_event_t          ngx_media_runtime_wakeup_event;
+static ngx_uint_t           ngx_media_runtime_in_tick;
+static ngx_uint_t           ngx_media_runtime_timer_visit;
 static ngx_uint_t           ngx_media_runtime_armed;
 static ngx_msec_t           ngx_media_runtime_last_idle_log;
 
@@ -1764,6 +1768,25 @@ ngx_media_runtime_stats_get(ngx_media_runtime_stats_t *out)
 }
 
 void
+ngx_media_runtime_wakeup(void)
+{
+    if (!ngx_media_runtime_armed
+        || ngx_media_runtime_in_tick
+        || ngx_exiting || ngx_terminate || ngx_quit)
+    {
+        return;
+    }
+
+    if (ngx_media_runtime_wakeup_event.posted) {
+        ngx_media_runtime_stats.wakeup_coalesced++;
+        return;
+    }
+
+    ngx_post_event(&ngx_media_runtime_wakeup_event, &ngx_posted_events);
+    ngx_media_runtime_stats.wakeups++;
+}
+
+void
 ngx_media_runtime_tick(ngx_log_t *log)
 {
     ngx_media_registry_t        *registry;
@@ -1775,31 +1798,40 @@ ngx_media_runtime_tick(ngx_log_t *log)
     uint64_t                     before;
     ngx_msec_t                   now;
 
+    if (ngx_media_runtime_in_tick) {
+        return;
+    }
+
+    ngx_media_runtime_in_tick = 1;
+
     now = ngx_current_msec;
     policy = ngx_media_runtime_policy();
 
     /*
-     * The timer asks for a fixed interval, so the gap between two ticks is
-     * the event loop's own delay: nothing here sleeps, and anything above the
-     * interval is time this worker could not get back to its timer.
+     * Only timer visits measure event-loop cadence.  Posted media wakeups are
+     * intentionally much more frequent and must not make a healthy timer look
+     * late or turn the cadence metric into a media-rate metric.
      */
-    if (ngx_media_runtime_last_tick != 0) {
-        ngx_msec_t  gap = now - ngx_media_runtime_last_tick;
+    if (ngx_media_runtime_timer_visit) {
+        if (ngx_media_runtime_last_tick != 0) {
+            ngx_msec_t  gap = now - ngx_media_runtime_last_tick;
 
-        ngx_media_runtime_stats.last_gap = gap;
+            ngx_media_runtime_stats.last_gap = gap;
 
-        if (gap > ngx_media_runtime_stats.max_gap) {
-            ngx_media_runtime_stats.max_gap = gap;
+            if (gap > ngx_media_runtime_stats.max_gap) {
+                ngx_media_runtime_stats.max_gap = gap;
+            }
+
+            if (gap > NGX_MEDIA_RUNTIME_INTERVAL
+                       + NGX_MEDIA_RUNTIME_INTERVAL / 2)
+            {
+                ngx_media_runtime_stats.late_ticks++;
+            }
         }
 
-        if (gap > NGX_MEDIA_RUNTIME_INTERVAL
-                   + NGX_MEDIA_RUNTIME_INTERVAL / 2)
-        {
-            ngx_media_runtime_stats.late_ticks++;
-        }
+        ngx_media_runtime_last_tick = now;
     }
 
-    ngx_media_runtime_last_tick = now;
     ngx_media_runtime_stats.ticks++;
 
     ngx_media_graph_repair_tick(log);
@@ -1809,6 +1841,7 @@ ngx_media_runtime_tick(ngx_log_t *log)
     registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
 
     if (registry == NULL) {
+        ngx_media_runtime_in_tick = 0;
         return;
     }
 
@@ -1980,6 +2013,20 @@ ngx_media_runtime_tick(ngx_log_t *log)
     if (now - ngx_media_runtime_last_idle_log >= 1000) {
         ngx_media_runtime_last_idle_log = now;
     }
+    ngx_media_runtime_in_tick = 0;
+}
+
+static void
+ngx_media_runtime_wakeup_handler(ngx_event_t *ev)
+{
+    if (!ngx_media_runtime_armed
+        || ngx_exiting || ngx_terminate || ngx_quit)
+    {
+        return;
+    }
+
+    ngx_media_runtime_timer_visit = 0;
+    ngx_media_runtime_tick(ev->log);
 }
 
 static void
@@ -1989,7 +2036,9 @@ ngx_media_runtime_handler(ngx_event_t *ev)
         return;
     }
 
+    ngx_media_runtime_timer_visit = 1;
     ngx_media_runtime_tick(ev->log);
+    ngx_media_runtime_timer_visit = 0;
 
     /* stop re-arming during shutdown so the worker can exit */
     if (ngx_exiting || ngx_terminate || ngx_quit) {
@@ -2092,10 +2141,16 @@ ngx_media_runtime_arm(ngx_cycle_t *cycle, ngx_log_t *log)
     }
 
     ngx_memzero(&ngx_media_runtime_timer, sizeof(ngx_event_t));
+    ngx_memzero(&ngx_media_runtime_wakeup_event, sizeof(ngx_event_t));
 
     ngx_media_runtime_timer.handler = ngx_media_runtime_handler;
     ngx_media_runtime_timer.log = log;
     ngx_media_runtime_timer.data = cycle;
+
+    ngx_media_runtime_wakeup_event.handler = ngx_media_runtime_wakeup_handler;
+    ngx_media_runtime_wakeup_event.log = log;
+    ngx_media_runtime_wakeup_event.data = cycle;
+
     ngx_media_runtime_armed = 1;
 
     ngx_add_timer(&ngx_media_runtime_timer, NGX_MEDIA_RUNTIME_INTERVAL);
@@ -2111,9 +2166,15 @@ ngx_media_runtime_stop(void)
     }
 
     ngx_media_runtime_armed = 0;
+    ngx_media_runtime_in_tick = 0;
+    ngx_media_runtime_timer_visit = 0;
 
     if (ngx_media_runtime_timer.timer_set) {
         ngx_del_timer(&ngx_media_runtime_timer);
+    }
+
+    if (ngx_media_runtime_wakeup_event.posted) {
+        ngx_delete_posted_event(&ngx_media_runtime_wakeup_event);
     }
 }
 

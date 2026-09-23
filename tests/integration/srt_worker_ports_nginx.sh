@@ -153,10 +153,10 @@ want, workers = int(sys.argv[1]), int(sys.argv[2])
 
 for i in range(1, 500):
     name = "wp%d" % i
-    h = 2166136261
+    h = 14695981039346656037
     for b in b"live/" + name.encode():
         h ^= b
-        h = (h * 16777619) & 0xffffffff
+        h = (h * 1099511628211) & ((1 << 64) - 1)
     if h % workers == want:
         print(name)
         break

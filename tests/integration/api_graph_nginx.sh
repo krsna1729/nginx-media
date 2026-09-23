@@ -859,6 +859,8 @@ do
 done
 
 for metric in \
+    nginx_media_worker_wakeups_total \
+    nginx_media_worker_wakeup_coalesced_total \
     nginx_media_runtime_routed_identity_mismatches_total \
     nginx_media_runtime_routed_slot_overflows_total \
     nginx_media_runtime_routed_no_slot_total \

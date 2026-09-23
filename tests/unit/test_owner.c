@@ -118,7 +118,7 @@ test_stability(void)
 {
     ngx_str_t   app = str("live");
     ngx_str_t   stream = str("news");
-    uint32_t    hash = ngx_media_owner_hash(&app, &stream);
+    uint64_t    hash = ngx_media_owner_hash(&app, &stream);
     ngx_uint_t  slot2, slot4;
 
     TEST_CASE("ownership is stable across worker counts");

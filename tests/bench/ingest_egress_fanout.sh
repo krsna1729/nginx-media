@@ -36,6 +36,11 @@
 #            and the graph reports the owner, so streams can be named to own
 #            a chosen slot and placed on a chosen endpoint.
 #
+#   topology a four-worker owner-balanced matrix: all-local, all-routed,
+#            alternating, and one-program local/routed controls.  Every row
+#            includes input/program frames, feed pressure, preroll causes and
+#            route failures from the owning worker.
+#
 # Publishers stream a pre-encoded file with -c copy, so what is measured is
 # the receiver's cost and not ffmpeg's encoder.  `media_srt_listen` is given
 # once per worker, so worker i binds the i-th endpoint, and a publisher is
@@ -58,6 +63,7 @@
 #
 #   make bench-ingest-egress-fanout
 #   PHASES=misplace make bench-ingest-egress-fanout     one phase
+#   PHASES=topology make bench-ingest-egress-fanout    owner matrix
 #   HI_BITRATE=45M PHASES=ingest ...                    more aggressive
 
 set -uo pipefail
@@ -414,6 +420,36 @@ owner_metric() {   # <name> <metric>
     owner_metrics "$1" 2>/dev/null \
         | grep "^$2{application=\"live\",name=\"$1\"" | awk '{print $2}' | head -1
 }
+blob_label_metric() {   # <metrics> <metric> <stream>
+    printf '%s\n' "$1" \
+        | grep "^$2{application=\"live\",name=\"$3\"" \
+        | awk '{print $2}' | head -1 || true
+}
+
+blob_source_metric() {   # <metrics> <metric> <stream>
+    printf '%s\n' "$1" \
+        | grep "^$2{application=\"live\",name=\"$3\",source=\"enc-$3\"" \
+        | awk '{print $2}' | head -1 || true
+}
+
+blob_global_metric() {   # <metrics> <metric>
+    printf '%s\n' "$1" \
+        | sed -n "/^$2 /{s/^$2 //;p;q;}" || true
+}
+
+endpoint_worker() {   # <port> → the worker that logged the listener
+    local pid
+
+    pid="$(pid_of "$RUN/logs/error.log" \
+        "srt listener ready on 127.0.0.1:$1\$")"
+
+    if [ -n "$pid" ]; then
+        slot_name "$pid"
+    else
+        printf 'unknown'
+    fi
+}
+
 
 owner_percentile() {   # <name> <percentile>
     owner_metrics "$1" 2>/dev/null \
@@ -457,10 +493,10 @@ found = 0
 
 for i in range(1, 20000):
     name = "%s%d" % (prefix, i)
-    h = 2166136261
+    h = 14695981039346656037
     for b in b"live/" + name.encode():
         h ^= b
-        h = (h * 16777619) & 0xffffffff
+        h = (h * 1099511628211) & ((1 << 64) - 1)
     if h % workers == want:
         print(name)
         found += 1
@@ -1071,7 +1107,6 @@ phase_misplace() {
     echo
     echo "== placement: $n publishers on their owner's endpoint, and the same"
     echo "   $n on another worker's endpoint, where every one is routed"
-    echo "   $w workers, ~$MP_BITRATE each, ${WINDOW}s windows"
     echo
 
     make_source "$RUN/media/mp.ts" "$MP_BITRATE"
@@ -1207,6 +1242,198 @@ phase_misplace() {
     return 0
 }
 
+# --- deterministic topology matrix ------------------------------------------
+#
+# This phase removes ownership luck from the worker-scaling question.  One
+# stream is deliberately named for each owner slot, then the same balanced
+# programs are run with all publishers local, all routed, alternating local
+# and routed, and one-program local/routed controls.  Each row reports the
+# source input, program/feed output, feed pressure, preroll causes and route
+# failures from the program owner's own metrics response.
+
+phase_topology() {
+    local w="${TOPOLOGY_WORKERS:-4}"
+    local window="${TOPOLOGY_WINDOW:-8}"
+    local i case_idx name owner endpoint landing path metrics
+    local input program feed_units feed_bytes feed_high_units feed_high_bytes
+    local evictions overruns
+    local preroll_overflows unit_overflows byte_overflows route_identity
+    local route_slots route_no_slot route_no_payload route_reassembly
+    local route_publish route_fail
+    local -a names case_names case_endpoints found
+
+    [ "$w" -ge 2 ] || {
+        echo "topology needs at least two workers" >&2
+        return 1
+    }
+
+    mapfile -t names < <(owner_names 0 "$w" 1 topology-w)
+    for i in $(seq 1 $(( w - 1 ))); do
+        mapfile -t found < <(owner_names "$i" "$w" 1 topology-w)
+        names[$i]="${found[0]:-}"
+    done
+
+    for i in $(seq 0 $(( w - 1 ))); do
+        [ -n "${names[$i]:-}" ] \
+            || { echo "could not select a stream for owner $i" >&2; return 1; }
+    done
+
+    echo
+    echo "== deterministic worker topology matrix"
+    echo "   workers: $w, source: pre-encoded mpegts, window: ${window}s"
+    echo "   names are selected by the 64-bit FNV-1a owner hash"
+    for i in $(seq 0 $(( w - 1 ))); do
+        echo "   owner w$i: ${names[$i]}"
+    done
+
+    for case_idx in all-local all-routed alternating one-local one-routed; do
+        start_instance "$w" yes no
+        case_names=()
+        case_endpoints=()
+
+        case "$case_idx" in
+            all-local)
+                for i in $(seq 0 $(( w - 1 ))); do
+                    case_names+=("${names[$i]}")
+                    case_endpoints+=("$i")
+                done
+                ;;
+            all-routed)
+                for i in $(seq 0 $(( w - 1 ))); do
+                    case_names+=("${names[$i]}")
+                    case_endpoints+=("$(( (i + 1) % w ))")
+                done
+                ;;
+            alternating)
+                for i in $(seq 0 $(( w - 1 ))); do
+                    case_names+=("${names[$i]}")
+                    if [ $(( i % 2 )) -eq 0 ]; then
+                        case_endpoints+=("$i")
+                    else
+                        case_endpoints+=("$(( (i + 1) % w ))")
+                    fi
+                done
+                ;;
+            one-local)
+                case_names=("${names[0]}")
+                case_endpoints=(0)
+                ;;
+            one-routed)
+                case_names=("${names[0]}")
+                case_endpoints=(1)
+                ;;
+        esac
+
+        echo
+        echo "== topology case: $case_idx"
+        PUBS=()
+        for i in "${!case_names[@]}"; do
+            publish "${SRT_PORTS[${case_endpoints[$i]}]}" \
+                "${case_names[$i]}" "$RUN/media/lo.ts"
+            PUBS+=( $! )
+        done
+
+        for name in "${case_names[@]}"; do
+            field_any "$name" program_frames 80 >/dev/null 2>&1 || true
+        done
+        sleep "$window"
+
+        printf '   %-16s %s\n' case "$case_idx"
+        for i in "${!case_names[@]}"; do
+            name="${case_names[$i]}"
+            endpoint="${case_endpoints[$i]}"
+            metrics="$(owner_metrics "$name" 2>/dev/null || true)"
+            owner="$(owner_of "$name" 2>/dev/null || printf '?')"
+            landing="$(endpoint_worker "${SRT_PORTS[$endpoint]}")"
+
+            if [ "$owner" = "$endpoint" ]; then
+                path=local
+            else
+                path=routed
+            fi
+
+            input="$(blob_source_metric "$metrics" \
+                nginx_media_source_frames_in "$name")"
+            program="$(blob_label_metric "$metrics" \
+                nginx_media_stream_program_frames "$name")"
+            feed_units="$(blob_label_metric "$metrics" \
+                nginx_media_stream_feed_units "$name")"
+            feed_bytes="$(blob_label_metric "$metrics" \
+                nginx_media_stream_feed_bytes "$name")"
+            feed_high_units="$(blob_label_metric "$metrics" \
+                nginx_media_stream_feed_high_water_units "$name")"
+            feed_high_bytes="$(blob_label_metric "$metrics" \
+                nginx_media_stream_feed_high_water_bytes "$name")"
+            evictions="$(blob_label_metric "$metrics" \
+                nginx_media_stream_feed_evictions_total "$name")"
+            overruns="$(blob_label_metric "$metrics" \
+                nginx_media_stream_feed_overruns_total "$name")"
+            generation_mismatches="$(blob_label_metric "$metrics" \
+                nginx_media_stream_feed_generation_mismatches_total "$name")"
+            publish_errors="$(blob_label_metric "$metrics" \
+                nginx_media_stream_feed_publish_errors_total "$name")"
+            preroll_units="$(blob_source_metric "$metrics" \
+                nginx_media_source_preroll_high_water_units "$name")"
+            preroll_bytes="$(blob_source_metric "$metrics" \
+                nginx_media_source_preroll_high_water_bytes "$name")"
+            preroll_overflows="$(blob_source_metric "$metrics" \
+                nginx_media_source_preroll_overflows_total "$name")"
+            unit_overflows="$(blob_source_metric "$metrics" \
+                nginx_media_source_preroll_unit_overflows_total "$name")"
+            byte_overflows="$(blob_source_metric "$metrics" \
+                nginx_media_source_preroll_byte_overflows_total "$name")"
+            route_identity="$(blob_global_metric "$metrics" \
+                nginx_media_runtime_routed_identity_mismatches_total)"
+            route_slots="$(blob_global_metric "$metrics" \
+                nginx_media_runtime_routed_slot_overflows_total)"
+            route_no_slot="$(blob_global_metric "$metrics" \
+                nginx_media_runtime_routed_no_slot_total)"
+            route_no_payload="$(blob_global_metric "$metrics" \
+                nginx_media_runtime_routed_no_payload_total)"
+            route_reassembly="$(blob_global_metric "$metrics" \
+                nginx_media_runtime_routed_reassembly_errors_total)"
+            route_publish="$(blob_global_metric "$metrics" \
+                nginx_media_runtime_routed_publish_errors_total)"
+
+            input="${input:-0}"
+            program="${program:-0}"
+            route_identity="${route_identity:-0}"
+            route_slots="${route_slots:-0}"
+            route_no_slot="${route_no_slot:-0}"
+            route_no_payload="${route_no_payload:-0}"
+            route_reassembly="${route_reassembly:-0}"
+            route_publish="${route_publish:-0}"
+            route_fail=$(( route_identity + route_slots + route_no_slot
+                         + route_no_payload + route_reassembly + route_publish ))
+
+            echo "   $name owner=$owner landing=$landing path=$path" \
+                 "input_frames=$input program_frames=$program" \
+                 "feed_retained=${feed_units:-0}u/${feed_bytes:-0}B" \
+                 "feed_high_water=${feed_high_units:-0}u/${feed_high_bytes:-0}B" \
+                 "feed_evictions=${evictions:-0}" \
+                 "feed_overruns=${overruns:-0}" \
+                 "feed_generation_mismatches=${generation_mismatches:-0}" \
+                 "feed_publish_errors=${publish_errors:-0}" \
+                 "preroll_high_water=${preroll_units:-0}u/${preroll_bytes:-0}B" \
+                 "preroll_overflows=${preroll_overflows:-0}" \
+                 "preroll_unit_overflows=${unit_overflows:-0}" \
+                 "preroll_byte_overflows=${byte_overflows:-0}" \
+                 "route_failures=$route_fail" \
+                 "route_identity=$route_identity" \
+                 "route_slots=$route_slots" \
+                 "route_no_slot=$route_no_slot" \
+                 "route_no_payload=$route_no_payload" \
+                 "route_reassembly=$route_reassembly" \
+                 "route_publish=$route_publish"
+        done
+
+        kill_pubs
+        sleep 1
+    done
+
+    return 0
+}
+
 # --- run --------------------------------------------------------------------
 
 rm -rf "$RUN"
@@ -1240,6 +1467,7 @@ for phase in $PHASES; do
             phase_egress_live
             ;;
         misplace) phase_misplace ;;
+        topology) phase_topology ;;
     esac
 done
 

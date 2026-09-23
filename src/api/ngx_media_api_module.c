@@ -943,20 +943,29 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "reader that is stopping\n"
                          "# TYPE nginx_media_streams_draining gauge\n"
                          "# HELP nginx_media_worker_event_loop_delay_ms "
-                         "interval between the last two runtime ticks, which "
-                         "the timer asks to be 100ms\n"
+                         "interval between the last two periodic timer visits\n"
                          "# TYPE nginx_media_worker_event_loop_delay_ms gauge\n"
                          "# HELP nginx_media_worker_event_loop_max_delay_ms "
-                         "worst tick interval this worker has seen\n"
+                         "worst periodic timer interval this worker has seen\n"
                          "# TYPE nginx_media_worker_event_loop_max_delay_ms gauge\n"
                          "# HELP nginx_media_worker_late_ticks_total "
-                         "ticks that missed their interval by more than half\n"
+                         "periodic timer visits that missed their interval by "
+                         "more than half\n"
                          "# TYPE nginx_media_worker_late_ticks_total counter\n"
+                         "# HELP nginx_media_worker_wakeups_total "
+                         "posted media wakeups that ran a runtime visit\n"
+                         "# TYPE nginx_media_worker_wakeups_total counter\n"
+                         "# HELP nginx_media_worker_wakeup_coalesced_total "
+                         "media wakeup requests coalesced into a posted visit\n"
+                         "# TYPE nginx_media_worker_wakeup_coalesced_total "
+                         "counter\n"
                          "nginx_media_runtime_outputs %ui\n"
                          "nginx_media_streams_draining %ui\n"
                          "nginx_media_worker_event_loop_delay_ms %M\n"
                          "nginx_media_worker_event_loop_max_delay_ms %M\n"
                          "nginx_media_worker_late_ticks_total %uL\n"
+                         "nginx_media_worker_wakeups_total %uL\n"
+                         "nginx_media_worker_wakeup_coalesced_total %uL\n"
                          "# HELP nginx_media_worker_service_ms "
                          "how long the last runtime tick took, the time this "
                          "worker spent serving every program it owns\n"
@@ -1007,6 +1016,7 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          ngx_media_runtime_outputs_active(),
                          ngx_media_registry_draining_count(registry),
                          stats.last_gap, stats.max_gap, stats.late_ticks,
+                         stats.wakeups, stats.wakeup_coalesced,
                          stats.last_service, stats.max_service,
                          stats.reconnecting,
                          ngx_media_route_broadcast_undelivered(),

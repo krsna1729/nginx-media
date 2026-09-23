@@ -345,6 +345,8 @@ FEED_BYTES="$(metric 'nginx_media_stream_feed_bytes{application="live",name="ben
 SERVICE_MS="$(metric nginx_media_worker_service_ms)"
 MAX_SERVICE_MS="$(metric nginx_media_worker_max_service_ms)"
 LATE_TICKS="$(metric nginx_media_worker_late_ticks_total)"
+WAKEUPS="$(metric nginx_media_worker_wakeups_total)"
+WAKEUP_COALESCED="$(metric nginx_media_worker_wakeup_coalesced_total)"
 
 echo
 echo "== conditions"
@@ -373,6 +375,7 @@ echo "   no tick late by more than half the 100ms interval)"
 echo "   last service:     $SERVICE_MS ms"
 echo "   worst service:    $MAX_SERVICE_MS ms"
 echo "   late ticks:       $LATE_TICKS"
+echo "   media wakeups:    $WAKEUPS (coalesced $WAKEUP_COALESCED)"
 
 for pair in "p50=$P50" "p95=$P95" "p99=$P99" "p99.9=$P999"; do
     [ -n "${pair#*=}" ] \
@@ -391,12 +394,9 @@ echo "   $DISPATCHED units dispatched by consumers during the storm"
 [ "$P50" -le "$P95" ] && [ "$P95" -le "$P99" ] && [ "$P99" -le "$P999" ] \
     || { echo "the percentiles are not ordered: $P50 $P95 $P99 $P999" >&2
          exit 1; }
-
-echo "   percentiles are ordered"
-
-# a histogram that records nothing would report four zeroes; a realtime source
-# through a 100ms tick cannot dispatch every unit in the same millisecond as
-# it was published
+# a realtime source should now dispatch through the posted media wakeup rather
+# than waiting for the 100ms maintenance timer; non-zero values still prove
+# that the histogram recorded real dispatches under load
 [ $(( P50 + P95 + P99 + P999 )) -gt 0 ] \
     || { echo "every percentile is zero: the histogram is not recording" >&2
          exit 1; }
@@ -410,6 +410,10 @@ echo "   the delay histogram recorded the dispatch (p50 ${P50}ms)"
          exit 1; }
 
 echo "   worst scheduler visit ${MAX_SERVICE_MS}ms < ${TICK_SERVICE_BOUND_MS}ms"
+[ "${WAKEUPS:-0}" -gt 0 ] \
+    || { echo "no posted media wakeups were recorded" >&2; exit 1; }
+
+echo "   posted media wakeups shortened the normal progression path"
 
 [ "${LATE_TICKS:-1}" -eq 0 ] \
     || { echo "$LATE_TICKS ticks were late by more than half the interval" >&2

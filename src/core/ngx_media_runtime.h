@@ -9,11 +9,10 @@
 /*
  * Shared program runtime (goal doc 22 and 33).
  *
- * One timer in the owning worker drives everything that belongs to the
- * *program*: the selection tick, the per-stream outputs (HLS, PROGRAM/ISO/RAW
- * recording) and the FLV preparation that RTMP players share.  Transport
- * modules only register sources and publish frames, so SRT, RTMP and file
- * input all feed the same logical stream abstraction (goal doc 34 item 1).
+ * The owning worker uses a periodic timer for selection, file-source pacing,
+ * health and cleanup, plus coalesced posted wakeups for program outputs after
+ * transport callbacks publish media.  SRT, RTMP and file input all feed the
+ * same logical stream abstraction (goal doc 34 item 1).
  */
 
 #define NGX_MEDIA_RUNTIME_INTERVAL        100
@@ -76,6 +75,13 @@ void ngx_media_runtime_release(const ngx_str_t *application,
 ngx_uint_t ngx_media_runtime_arm(ngx_cycle_t *cycle, ngx_log_t *log);
 void ngx_media_runtime_stop(void);
 
+/*
+ * Post a coalesced media wakeup for this worker.  Transport callbacks call
+ * this after publishing to an active program; the periodic timer remains the
+ * health, file-source and cleanup cadence.
+ */
+void ngx_media_runtime_wakeup(void);
+
 /* one scheduler visit: selector, outputs and player preparation */
 void ngx_media_runtime_tick(ngx_log_t *log);
 
@@ -84,16 +90,25 @@ void ngx_media_runtime_tick(ngx_log_t *log);
  * headroom (goal doc 32: event-loop delay is the first symptom of a worker
  * that is falling behind).
  *
- * `gap` is the interval between the last two runtime ticks; the timer asks for
+ * `gap` is the interval between the last two timer-driven visits; posted
+ * media wakeups deliberately do not affect it.  The timer asks for
  * NGX_MEDIA_RUNTIME_INTERVAL, so anything above it is time the event loop
- * spent unable to run this timer.  `late` counts ticks that missed by more
- * than half an interval.
+ * spent unable to run this timer.  `late` counts timer visits that missed by
+ * more than half an interval.
  */
 typedef struct {
-    uint64_t    ticks;
-    ngx_msec_t  last_gap;
+    uint64_t    ticks;          /* timer and posted scheduler visits */
+    ngx_msec_t  last_gap;       /* timer-to-timer interval */
     ngx_msec_t  max_gap;
-    uint64_t    late_ticks;
+    uint64_t    late_ticks;     /* late periodic timer visits */
+
+    /*
+     * A posted wakeup runs the same bounded visit as the timer as soon as a
+     * transport callback publishes media.  The counters distinguish useful
+     * wakeups from calls coalesced into one posted event.
+     */
+    uint64_t    wakeups;
+    uint64_t    wakeup_coalesced;
 
     /*
      * How long the tick itself took.  This is the protocol-owner service
@@ -113,6 +128,7 @@ typedef struct {
     uint64_t    routed_reassembly_errors;
     uint64_t    routed_publish_errors;
 } ngx_media_runtime_stats_t;
+
 
 void ngx_media_runtime_stats_get(ngx_media_runtime_stats_t *out);
 

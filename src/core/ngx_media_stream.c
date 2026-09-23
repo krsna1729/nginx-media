@@ -1,6 +1,9 @@
 #include "ngx_media_destination.h"
 #include "ngx_media_stream.h"
 #include "ngx_media_timeline.h"
+#ifndef NGX_MEDIA_UNIT_TEST
+#include "ngx_media_runtime.h"
+#endif
 
 static uint64_t ngx_media_stream_incarnation;
 
@@ -342,6 +345,12 @@ ngx_media_stream_publish(ngx_media_stream_t *stream,
 
         ngx_media_stream_switch_resolve(stream);
 
+        if (rc == NGX_OK) {
+#ifndef NGX_MEDIA_UNIT_TEST
+            ngx_media_runtime_wakeup();
+#endif
+        }
+
         return rc;
     }
 
@@ -477,6 +486,9 @@ ngx_media_stream_switch_now(ngx_media_stream_t *stream,
     ngx_media_source_preroll_replay(source, ngx_media_stream_replay_frame,
                                     &replay);
     ngx_media_source_preroll_reset(source);
+#ifndef NGX_MEDIA_UNIT_TEST
+    ngx_media_runtime_wakeup();
+#endif
 
     return NGX_OK;
 }

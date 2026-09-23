@@ -1,6 +1,13 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit tsan nginx graph-conflict incarnation smoke bench-worker-scaling bench-ingest-egress bench-ingest-egress-fanout bench-burst-sizing test-image test-in-container srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull hls-ingest hls-profile file-source transform stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout bench-push-fanout bench-fanout-delay clean
+.PHONY: unit tsan nginx graph-conflict incarnation smoke bench-worker-scaling \
+    bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
+    bench-burst-sizing test-image test-in-container srt-ingest srt-ingest-nginx \
+    ts-fixture source-switch api-switch api-graph failover hls hls-push hls-pull \
+    hls-ingest hls-profile file-source transform stream-delete churn rtmp \
+    rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports \
+    multi-worker soak fault netns srt-qualify bench-hls bench-hls-fanout \
+    bench-push-fanout bench-fanout-delay clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -177,6 +184,11 @@ bench-burst-sizing:
 # and one program's fanout is owned by one worker.
 bench-worker-scaling:
 	tests/bench/worker_scaling.sh
+
+# Deterministic four-worker owner/topology matrix with per-program pressure and
+# route outcome counters, not arbitrary names whose hash distribution is luck.
+bench-worker-topology:
+	PHASES=topology tests/bench/ingest_egress_fanout.sh
 
 # Ingest and egress scale differently: one program has one owner worker, so
 # its fanout is bound by that worker, while more programs spread across more
