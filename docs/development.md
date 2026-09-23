@@ -213,11 +213,12 @@ receivers and destination objects are installed first.  SRT publishers then
 start while nonblocking output handshakes settle, and the harness waits for all
 expected peers and for program-frame/output-feed progress before taking the
 measurement baseline.  The SRT receiver snapshots delivered payload bytes;
-the RTMP receiver reports delivered payload-byte counter deltas.  Reports also
-include per-destination and per-program fairness, first-byte spread, shard
-send/retransmission/queue counters, sender-thread CPU, worker RSS/PSS and
-event-loop delay, per-worker `ss -m` socket memory, and host-global
-`/proc/net/sockstat` values.
+the RTMP receiver reports delivered payload-byte counter deltas.
+Reports include overall `destination_fairness_jain` and
+`healthy_destination_fairness_jain` (excludes the deliberately stalled reader),
+per-program Jain fairness, first-byte spread, shard send/retransmission/queue
+counters, sender-thread CPU, worker RSS/PSS, event-loop delay, per-worker
+`ss -m` socket memory, and host-global `/proc/net/sockstat` values.
 
 `CAPACITY_WORKERS` chooses the fixed worker count.  `CAPACITY_WINDOW`,
 `CAPACITY_PROGRAM_STEPS`, `CAPACITY_BITRATE_STEPS`, and `CAPACITY_DEST_STEPS`
