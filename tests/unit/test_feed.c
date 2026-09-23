@@ -289,12 +289,16 @@ main(void)
     TEST_ASSERT_EQ_U64(ngx_media_feed_tail(&feed), 2);
     TEST_ASSERT_EQ_U64(ngx_media_feed_head(&feed), 6);
     TEST_ASSERT_EQ_U64(ngx_media_feed_bytes(&feed), 40);
+    TEST_ASSERT_EQ_U64(ngx_media_feed_evictions(&feed), 2);
+    TEST_ASSERT_EQ_U64(ngx_media_feed_high_water_units(&feed), 4);
+    TEST_ASSERT_EQ_U64(ngx_media_feed_high_water_bytes(&feed), 40);
 
     cursor.generation = ngx_media_feed_generation(&feed);
     cursor.next_sequence = 0;
     status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_OVERRUN);
     TEST_ASSERT_EQ_U64(cursor.next_sequence, 0);
+    TEST_ASSERT_EQ_U64(ngx_media_feed_overruns(&feed), 1);
 
     TEST_CASE("resync to latest recovers from overrun");
     TEST_ASSERT_EQ_INT(ngx_media_feed_resync(&feed, &cursor,
@@ -353,6 +357,7 @@ main(void)
 
     status = ngx_media_feed_read(&feed, &cursor, 8, 0, 1000, out, &count);
     TEST_ASSERT_EQ_U64(status, NGX_MEDIA_FEED_GENERATION_MISMATCH);
+    TEST_ASSERT_EQ_U64(ngx_media_feed_generation_mismatches(&feed), 1);
     TEST_ASSERT_EQ_U64(cursor.generation, 1);
     TEST_ASSERT_EQ_U64(cursor.next_sequence, 3);
 

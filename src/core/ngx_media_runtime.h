@@ -105,6 +105,13 @@ typedef struct {
 
     /* sources that are up but not yet carrying media, per doc 28 */
     ngx_uint_t  reconnecting;
+    /* routed media drops, split by the bounded queue or protocol failure */
+    uint64_t    routed_slot_overflows;
+    uint64_t    routed_identity_mismatches;
+    uint64_t    routed_no_slot;
+    uint64_t    routed_no_payload;
+    uint64_t    routed_reassembly_errors;
+    uint64_t    routed_publish_errors;
 } ngx_media_runtime_stats_t;
 
 void ngx_media_runtime_stats_get(ngx_media_runtime_stats_t *out);

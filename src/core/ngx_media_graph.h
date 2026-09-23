@@ -88,6 +88,7 @@ typedef struct {
     uint32_t   kind;              /* NGX_MEDIA_GRAPH_* */
     uint32_t   flags;             /* reserved, senders write zero */
     uint64_t   revision;          /* the stream's revision after the change */
+    uint64_t   incarnation;       /* stream object lifetime identity */
     uint64_t   source_revision;   /* the source's revision, source operations */
     uint32_t   type;              /* source type, source operations */
     uint32_t   priority;          /* source priority, source operations */
@@ -106,6 +107,7 @@ typedef struct {
 typedef struct {
     ngx_uint_t  kind;
     uint64_t    revision;
+    uint64_t    incarnation;
     uint64_t    source_revision;
     ngx_uint_t  type;
     ngx_uint_t  priority;
@@ -130,7 +132,7 @@ typedef struct {
  */
 ngx_int_t ngx_media_graph_stream_set(const ngx_media_stream_t *stream);
 ngx_int_t ngx_media_graph_stream_delete(const ngx_str_t *application,
-    const ngx_str_t *name, uint64_t revision);
+    const ngx_str_t *name, uint64_t incarnation, uint64_t revision);
 ngx_int_t ngx_media_graph_source_set(const ngx_media_stream_t *stream,
     const ngx_media_source_t *source, const ngx_str_t *path,
     const ngx_str_t *ca_file);

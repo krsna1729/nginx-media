@@ -228,6 +228,15 @@ sleep 3
 SOURCES="$(curl -fsS "$API/streams/live/news/sources")"
 printf '%s\n' "$SOURCES"
 
+for field in preroll_unit_overflows preroll_byte_overflows \
+             preroll_high_water_units preroll_high_water_bytes
+do
+    printf '%s' "$SOURCES" | grep -q "\"$field\":" \
+        || { echo "source response omitted $field" >&2; exit 1; }
+done
+
+echo "   source exposes cause-specific overflow and high-water counters"
+
 printf '%s' "$SOURCES" | grep -q '"id":"encoder-a".*"state":"active"' \
     || { echo "the original source did not stay active" >&2; exit 1; }
 
@@ -828,6 +837,38 @@ ACTIVE="$(curl -fsS "$API/metrics" \
     | grep '^nginx_media_runtime_outputs ' | awk '{print $2}')"
 
 echo "   runtime output slots in use: ${ACTIVE:-?}"
+
+METRICS="$(curl -fsS "$API/metrics")"
+for metric in \
+    nginx_media_stream_feed_evictions_total \
+    nginx_media_stream_feed_overruns_total \
+    nginx_media_stream_feed_generation_mismatches_total \
+    nginx_media_stream_feed_publish_errors_total \
+    nginx_media_stream_feed_high_water_units \
+    nginx_media_stream_feed_high_water_bytes \
+    nginx_media_source_preroll_units \
+    nginx_media_source_preroll_bytes \
+    nginx_media_source_preroll_overflows_total \
+    nginx_media_source_preroll_unit_overflows_total \
+    nginx_media_source_preroll_byte_overflows_total \
+    nginx_media_source_preroll_high_water_units \
+    nginx_media_source_preroll_high_water_bytes
+do
+    printf '%s\n' "$METRICS" | grep -q "^$metric{" \
+        || { echo "metrics omitted $metric" >&2; exit 1; }
+done
+
+for metric in \
+    nginx_media_runtime_routed_identity_mismatches_total \
+    nginx_media_runtime_routed_slot_overflows_total \
+    nginx_media_runtime_routed_no_slot_total \
+    nginx_media_runtime_routed_no_payload_total \
+    nginx_media_runtime_routed_reassembly_errors_total \
+    nginx_media_runtime_routed_publish_errors_total
+do
+    printf '%s\n' "$METRICS" | grep -q "^$metric " \
+        || { echo "metrics omitted $metric" >&2; exit 1; }
+done
 
 [ "${ACTIVE:-99}" -le 2 ] \
     || { echo "runtime output slots leaked: $ACTIVE in use" >&2; exit 1; }

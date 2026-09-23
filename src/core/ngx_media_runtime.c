@@ -90,6 +90,7 @@ typedef struct {
      * truncated identity that could resolve to another stream's slot.
      */
     uint64_t                hash;
+    uint64_t                incarnation;
     ngx_media_stream_t     *stream;
     ngx_media_source_t     *source;
     /* reassembly of one publisher's chunked frames, one per routed endpoint */
@@ -101,6 +102,7 @@ static ngx_media_runtime_routed_t ngx_media_runtime_routed[
 static uint64_t                   ngx_media_runtime_routed_frames;
 static uint64_t                   ngx_media_runtime_routed_msgs;
 static uint64_t                   ngx_media_runtime_routed_nopayload;
+static ngx_media_runtime_stats_t  ngx_media_runtime_stats;
 static ngx_media_runtime_sink_pt  ngx_media_runtime_sink;
 static void                      *ngx_media_runtime_sink_ctx;
 static uint64_t                   ngx_media_runtime_prepared_next_id = 1;
@@ -1046,7 +1048,6 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
     ngx_media_registry_t  *registry;
     ngx_media_stream_t    *stream;
     ngx_media_source_t    *source;
-    ngx_media_frame_t      frame;
     ngx_str_t              application, name, source_id;
     u_char                *p, *slash;
     ngx_media_feed_conf_t  feed_conf;
@@ -1077,7 +1078,9 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
 
     if (header->type == NGX_MEDIA_IPC_MSG_OPEN) {
 
-        if (payload == NULL || ngx_media_buf_size(payload) < 3) {
+        if (header->incarnation == 0
+            || payload == NULL || ngx_media_buf_size(payload) < 3)
+        {
             return NGX_ERROR;
         }
 
@@ -1125,9 +1128,24 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         feed_conf.max_bytes = 32 * 1024 * 1024;
         feed_conf.max_age = 10000;
 
-        stream = ngx_media_registry_stream_create(registry, &application,
-                                                  &name, &feed_conf,
-                                                  ngx_cycle->log);
+        stream = ngx_media_registry_stream(registry, &application, &name);
+
+        if (stream != NULL
+            && stream->incarnation != header->incarnation)
+        {
+            ngx_media_runtime_stats.routed_identity_mismatches++;
+            return NGX_OK;
+        }
+
+        if (stream == NULL) {
+            stream = ngx_media_registry_stream_create(registry, &application,
+                                                      &name, &feed_conf,
+                                                      ngx_cycle->log);
+
+            if (stream != NULL) {
+                stream->incarnation = header->incarnation;
+            }
+        }
 
         if (stream == NULL) {
             return NGX_ERROR;
@@ -1188,10 +1206,18 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
                 if (!ngx_media_runtime_routed[i].used) {
                     ngx_media_runtime_routed[i].used = 1;
                     ngx_media_runtime_routed[i].hash = hash;
+                    ngx_media_runtime_routed[i].incarnation =
+                        header->incarnation;
                     ngx_media_runtime_routed[i].stream = stream;
                     ngx_media_runtime_routed[i].source = source;
                     break;
                 }
+            }
+
+            if (i == NGX_MEDIA_RUNTIME_MAX_ROUTED) {
+                ngx_media_runtime_stats.routed_slot_overflows++;
+                ngx_media_stream_source_remove(stream, source);
+                return NGX_OK;
             }
         }
 
@@ -1304,7 +1330,9 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         for (i2 = 0; i2 < NGX_MEDIA_RUNTIME_MAX_ROUTED; i2++) {
 
             if (ngx_media_runtime_routed[i2].used
-                && ngx_media_runtime_routed[i2].hash == hash)
+                && ngx_media_runtime_routed[i2].hash == hash
+                && ngx_media_runtime_routed[i2].incarnation
+                   == header->incarnation)
             {
                 (void) ngx_media_source_tracks_set(
                     ngx_media_runtime_routed[i2].source, &set, ngx_cycle->log);
@@ -1320,6 +1348,17 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
             }
         }
 
+        if (i2 == NGX_MEDIA_RUNTIME_MAX_ROUTED) {
+            for (i2 = 0; i2 < NGX_MEDIA_RUNTIME_MAX_ROUTED; i2++) {
+                if (ngx_media_runtime_routed[i2].used
+                    && ngx_media_runtime_routed[i2].hash == hash)
+                {
+                    ngx_media_runtime_stats.routed_identity_mismatches++;
+                    break;
+                }
+            }
+        }
+
         ngx_media_trackset_destroy(&set);
 
         return NGX_OK;
@@ -1332,7 +1371,9 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
 
             if (ngx_media_runtime_routed[i].used
-                && ngx_media_runtime_routed[i].hash == hash)
+                && ngx_media_runtime_routed[i].hash == hash
+                && ngx_media_runtime_routed[i].incarnation
+                   == header->incarnation)
             {
                 ngx_media_stream_t  *gone_stream =
                     ngx_media_runtime_routed[i].stream;
@@ -1358,6 +1399,17 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
             }
         }
 
+        if (i == NGX_MEDIA_RUNTIME_MAX_ROUTED) {
+            for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
+                if (ngx_media_runtime_routed[i].used
+                    && ngx_media_runtime_routed[i].hash == hash)
+                {
+                    ngx_media_runtime_stats.routed_identity_mismatches++;
+                    break;
+                }
+            }
+        }
+
         ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
                       "media: routed source closed hash=%uL frames=%uL msgs=%uL "
                       "nopayload=%uL", header->hash,
@@ -1377,13 +1429,15 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
     {
         ngx_media_ipc_message_t  message;
         ngx_media_buf_t         *assembled;
+        ngx_media_frame_t        frame;
         ngx_uint_t               i;
         ngx_int_t                status;
-
         for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
 
             if (ngx_media_runtime_routed[i].used
-                && ngx_media_runtime_routed[i].hash == hash)
+                && ngx_media_runtime_routed[i].hash == hash
+                && ngx_media_runtime_routed[i].incarnation
+                   == header->incarnation)
             {
                 break;
             }
@@ -1392,13 +1446,27 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         ngx_media_runtime_routed_msgs++;
 
         if (i == NGX_MEDIA_RUNTIME_MAX_ROUTED) {
+            ngx_uint_t  j;
+
+            for (j = 0; j < NGX_MEDIA_RUNTIME_MAX_ROUTED; j++) {
+                if (ngx_media_runtime_routed[j].used
+                    && ngx_media_runtime_routed[j].hash == hash)
+                {
+                    ngx_media_runtime_stats.routed_identity_mismatches++;
+                    return NGX_OK;
+                }
+            }
+
+            ngx_media_runtime_stats.routed_no_slot++;
             return NGX_OK;
         }
 
         if (payload == NULL) {
             ngx_media_runtime_routed_nopayload++;
+            ngx_media_runtime_stats.routed_no_payload++;
             return NGX_OK;
         }
+
 
         /*
          * A frame larger than one datagram arrives as a run of chunks, each
@@ -1420,6 +1488,7 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         }
 
         if (status != NGX_OK) {
+            ngx_media_runtime_stats.routed_reassembly_errors++;
             return NGX_ERROR;   /* inconsistent run: the frame was dropped */
         }
 
@@ -1450,8 +1519,11 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
 
         ngx_media_health_media(&source->health, frame.dts, ngx_current_msec);
 
-        (void) ngx_media_stream_publish(stream, source, &frame,
-                                        ngx_current_msec);
+        if (ngx_media_stream_publish(stream, source, &frame,
+                                     ngx_current_msec) != NGX_OK)
+        {
+            ngx_media_runtime_stats.routed_publish_errors++;
+        }
 
         ngx_media_frame_release(&frame);
 
@@ -1582,12 +1654,11 @@ found:
         }
 
         ngx_media_feed_release(frames, count);
-    }
+}
 }
 
 /* --- timer --------------------------------------------------------------- */
 
-static ngx_media_runtime_stats_t  ngx_media_runtime_stats;
 
 void
 ngx_media_runtime_claim(const ngx_str_t *application, const ngx_str_t *name)

@@ -66,6 +66,17 @@ ngx_uint_t ngx_media_source_preroll_units(const ngx_media_source_t *source);
 size_t ngx_media_source_preroll_bytes(const ngx_media_source_t *source);
 ngx_uint_t ngx_media_source_preroll_ready(const ngx_media_source_t *source);
 
+uint64_t ngx_media_source_preroll_overflows(
+    const ngx_media_source_t *source);
+uint64_t ngx_media_source_preroll_unit_overflows(
+    const ngx_media_source_t *source);
+uint64_t ngx_media_source_preroll_byte_overflows(
+    const ngx_media_source_t *source);
+ngx_uint_t ngx_media_source_preroll_high_water_units(
+    const ngx_media_source_t *source);
+size_t ngx_media_source_preroll_high_water_bytes(
+    const ngx_media_source_t *source);
+
 void ngx_media_source_lease_begin(ngx_media_source_t *source);
 void ngx_media_source_lease_end(ngx_media_source_t *source);
 

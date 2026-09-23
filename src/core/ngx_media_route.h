@@ -42,9 +42,11 @@ ngx_uint_t ngx_media_route_is_owner(ngx_cycle_t *cycle, uint64_t hash);
  * queueing without bound.
  */
 ngx_int_t ngx_media_route_open(ngx_cycle_t *cycle, uint64_t hash,
-    const ngx_str_t *application, const ngx_str_t *stream,
-    const ngx_str_t *source_id, ngx_uint_t source_type, ngx_uint_t priority);
-ngx_int_t ngx_media_route_close(ngx_cycle_t *cycle, uint64_t hash);
+    uint64_t incarnation, const ngx_str_t *application,
+    const ngx_str_t *stream, const ngx_str_t *source_id,
+    ngx_uint_t source_type, ngx_uint_t priority);
+ngx_int_t ngx_media_route_close(ngx_cycle_t *cycle, uint64_t hash,
+    uint64_t incarnation);
 
 /*
  * Forwards the track contract of a routed source.  The owner needs it before
@@ -52,9 +54,9 @@ ngx_int_t ngx_media_route_close(ngx_cycle_t *cycle, uint64_t hash);
  * as the source announces its tracks.
  */
 ngx_int_t ngx_media_route_tracks(ngx_cycle_t *cycle, uint64_t hash,
-    const ngx_media_trackset_t *tracks);
+    uint64_t incarnation, const ngx_media_trackset_t *tracks);
 ngx_int_t ngx_media_route_frame(ngx_cycle_t *cycle, uint64_t hash,
-    const ngx_media_frame_t *frame, uint64_t sequence);
+    uint64_t incarnation, const ngx_media_frame_t *frame, uint64_t sequence);
 
 /* frames received from other workers, handed to the program owner */
 typedef ngx_int_t (*ngx_media_route_frame_pt)(void *ctx, uint64_t hash,

@@ -2,11 +2,26 @@
 #include "ngx_media_stream.h"
 #include "ngx_media_timeline.h"
 
+static uint64_t ngx_media_stream_incarnation;
+
 typedef struct {
     ngx_media_stream_t  *stream;
     ngx_media_source_t  *source;
     ngx_msec_t           now;
 } ngx_media_stream_replay_t;
+
+uint64_t
+ngx_media_stream_incarnation_next(void)
+{
+    ngx_media_stream_incarnation =
+        ngx_media_revision_next(ngx_media_stream_incarnation);
+
+    if (ngx_media_stream_incarnation == 0) {
+        ngx_media_stream_incarnation = 1;
+    }
+
+    return ngx_media_stream_incarnation;
+}
 
 static ngx_int_t ngx_media_stream_write_program(ngx_media_stream_t *stream,
     ngx_media_source_t *source, const ngx_media_frame_t *frame, ngx_msec_t now);
@@ -43,11 +58,11 @@ ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
     ngx_log_t *log, const ngx_str_t *application, const ngx_str_t *name,
     const ngx_media_feed_conf_t *feed_conf)
 {
+    ngx_media_policy_t  defaults;
+
     if (stream == NULL || pool == NULL || name == NULL || name->len == 0) {
         return NGX_ERROR;
     }
-
-    ngx_media_policy_t  defaults;
 
     ngx_memzero(stream, sizeof(ngx_media_stream_t));
 
@@ -87,6 +102,7 @@ ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
     }
 
     stream->generation = 1;
+    stream->incarnation = ngx_media_stream_incarnation_next();
     stream->running = 1;
 
     return NGX_OK;

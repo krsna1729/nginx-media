@@ -208,6 +208,7 @@ ngx_media_graph_encode(const ngx_media_graph_op_t *op,
 
     wire.kind = (uint32_t) op->kind;
     wire.revision = op->revision;
+    wire.incarnation = op->incarnation;
     wire.source_revision = op->source_revision;
     wire.type = (uint32_t) op->type;
     wire.priority = (uint32_t) op->priority;
@@ -239,6 +240,7 @@ ngx_media_graph_encode(const ngx_media_graph_op_t *op,
     header->version = NGX_MEDIA_IPC_VERSION;
     header->type = NGX_MEDIA_IPC_MSG_GRAPH;
     header->hash = ngx_media_owner_hash(&op->application, &op->name);
+    header->incarnation = op->incarnation;
 
     *payload = buf;
     *length = ngx_media_buf_size(buf);
@@ -267,6 +269,7 @@ ngx_media_graph_stream_set(const ngx_media_stream_t *stream)
 
     op.kind = NGX_MEDIA_GRAPH_STREAM_SET;
     op.revision = stream->revision;
+    op.incarnation = stream->incarnation;
     op.failure_timeout = (ngx_uint_t) stream->selector.failure_timeout;
     op.recovery_timeout = (ngx_uint_t) stream->selector.recovery_timeout;
     op.media_mode = stream->media_mode;
@@ -278,7 +281,7 @@ ngx_media_graph_stream_set(const ngx_media_stream_t *stream)
 
 ngx_int_t
 ngx_media_graph_stream_delete(const ngx_str_t *application,
-    const ngx_str_t *name, uint64_t revision)
+    const ngx_str_t *name, uint64_t incarnation, uint64_t revision)
 {
     ngx_media_graph_op_t  op;
 
@@ -290,6 +293,7 @@ ngx_media_graph_stream_delete(const ngx_str_t *application,
 
     op.kind = NGX_MEDIA_GRAPH_STREAM_DELETE;
     op.revision = revision;
+    op.incarnation = incarnation;
     op.application = *application;
     op.name = *name;
 
@@ -374,6 +378,7 @@ ngx_media_graph_source_set(const ngx_media_stream_t *stream,
 
     op.kind = NGX_MEDIA_GRAPH_SOURCE_SET;
     op.revision = stream->revision;
+    op.incarnation = stream->incarnation;
     op.source_revision = source->revision;
     op.type = source->type;
     op.priority = source->priority;
@@ -409,6 +414,7 @@ ngx_media_graph_source_delete(const ngx_media_stream_t *stream,
 
     op.kind = NGX_MEDIA_GRAPH_SOURCE_DELETE;
     op.revision = revision;
+    op.incarnation = stream->incarnation;
     op.application = stream->application;
     op.name = stream->name;
     op.id = *id;
@@ -468,6 +474,12 @@ ngx_media_graph_decode(const ngx_media_ipc_header_t *header,
     {
         return NGX_ERROR;
     }
+
+    if (wire.kind != NGX_MEDIA_GRAPH_STREAM_DELETE
+        && wire.incarnation == 0)
+    {
+        return NGX_ERROR;
+    }
     if (wire.media_mode > NGX_MEDIA_STREAM_MEDIA_PROFILE) {
         return NGX_ERROR;
     }
@@ -503,6 +515,7 @@ ngx_media_graph_decode(const ngx_media_ipc_header_t *header,
     op->path.len = wire.path_len;
     offset += wire.path_len;
 
+    op->incarnation = wire.incarnation;
     op->ca_file.data = p + offset;
     op->ca_file.len = wire.ca_file_len;
 
@@ -621,7 +634,8 @@ ngx_media_graph_stream(ngx_media_registry_t *registry,
     ngx_media_stream_t    *stream;
     ngx_media_feed_conf_t  feed_conf;
 
-    stream = ngx_media_registry_stream(registry, &op->application, &op->name);
+    stream = ngx_media_registry_stream(registry, &op->application,
+                                       &op->name);
 
     if (stream != NULL) {
         return stream;
@@ -638,8 +652,14 @@ ngx_media_graph_stream(ngx_media_registry_t *registry,
     feed_conf.max_bytes = NGX_MEDIA_GRAPH_FEED_BYTES;
     feed_conf.max_age = NGX_MEDIA_GRAPH_FEED_AGE;
 
-    return ngx_media_registry_stream_create(registry, &op->application,
-                                            &op->name, &feed_conf, log);
+    stream = ngx_media_registry_stream_create(registry, &op->application,
+                                              &op->name, &feed_conf, log);
+
+    if (stream != NULL && op->incarnation != 0) {
+        stream->incarnation = op->incarnation;
+    }
+
+    return stream;
 }
 
 ngx_int_t
@@ -705,12 +725,28 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
     switch (op.kind) {
 
     case NGX_MEDIA_GRAPH_STREAM_SET:
+        if (stream != NULL && stream->incarnation != op.incarnation) {
+            if (op.revision <= stream->revision) {
+                return NGX_OK;
+            }
+
+            ngx_media_runtime_release(&stream->application, &stream->name);
+
+            if (ngx_media_registry_stream_destroy(registry, stream)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+
+            stream = NULL;
+        }
 
         stream = ngx_media_graph_stream(registry, &op, log);
 
         if (stream == NULL) {
             return NGX_ERROR;
         }
+        stream->incarnation = op.incarnation;
 
         stream->selector.failure_timeout = (ngx_msec_t) op.failure_timeout;
         stream->selector.recovery_timeout = (ngx_msec_t) op.recovery_timeout;
@@ -733,6 +769,11 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
         return NGX_OK;
 
     case NGX_MEDIA_GRAPH_STREAM_DELETE:
+        if (stream != NULL && op.incarnation != 0
+            && stream->incarnation != op.incarnation)
+        {
+            return NGX_OK;
+        }
 
         if (stream == NULL) {
             /*
@@ -776,12 +817,16 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
         return NGX_OK;
 
     case NGX_MEDIA_GRAPH_SOURCE_SET:
+        if (stream != NULL && stream->incarnation != op.incarnation) {
+            return NGX_OK;
+        }
 
         stream = ngx_media_graph_stream(registry, &op, log);
 
         if (stream == NULL || op.id.len == 0) {
             return NGX_ERROR;
         }
+        stream->incarnation = op.incarnation;
 
         source = ngx_media_stream_source_find(stream, &op.id);
 
@@ -820,6 +865,11 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
         return NGX_OK;
 
     case NGX_MEDIA_GRAPH_SOURCE_DELETE:
+        if (stream != NULL && op.incarnation != 0
+            && stream->incarnation != op.incarnation)
+        {
+            return NGX_OK;
+        }
 
         if (stream == NULL || op.id.len == 0) {
             return NGX_OK;   /* idempotent */

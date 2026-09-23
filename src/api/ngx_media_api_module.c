@@ -637,7 +637,11 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
                              "\"container_errors\":%uL,\"frames_in\":%uL,"
                              "\"frames_out\":%uL,\"writers\":%ui,"
                              "\"preroll_units\":%ui,\"preroll_bytes\":%uz,"
-                             "\"preroll_overflows\":%uL}",
+                             "\"preroll_overflows\":%uL,"
+                             "\"preroll_unit_overflows\":%uL,"
+                             "\"preroll_byte_overflows\":%uL,"
+                             "\"preroll_high_water_units\":%ui,"
+                             "\"preroll_high_water_bytes\":%uz}",
                              source->type,
                              ngx_media_api_state_name(source->state),
                              source->priority,
@@ -653,7 +657,11 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
                              source->writers,
                              ngx_media_source_preroll_units(source),
                              ngx_media_source_preroll_bytes(source),
-                             source->preroll.overflows);
+                             ngx_media_source_preroll_overflows(source),
+                             ngx_media_source_preroll_unit_overflows(source),
+                             ngx_media_source_preroll_byte_overflows(source),
+                             ngx_media_source_preroll_high_water_units(source),
+                             ngx_media_source_preroll_high_water_bytes(source));
 
         if (*last >= end - 1) {
             return NGX_ERROR;
@@ -690,14 +698,14 @@ ngx_media_api_stream_json(u_char **last, u_char *end, ngx_media_stream_t *stream
 
     *last = ngx_snprintf(*last, end - *last,
                          ",\"owner\":%ui,\"observed_here\":%s,"
-                         "\"revision\":%uL,\"media\":\"%s\","
-                         "\"generation\":%ui,\"switches\":%uL,"
-                         "\"emergency_switches\":%uL,"
+                         "\"revision\":%uL,\"incarnation\":%uL,"
+                         "\"media\":\"%s\",\"generation\":%ui,"
+                         "\"switches\":%uL,\"emergency_switches\":%uL,"
                          "\"failure_timeout_ms\":%ui,"
                          "\"recovery_timeout_ms\":%ui,\"switchback\":%ui,"
                          "\"program_frames\":%uL,\"active\":",
                          progress.owner, progress.local ? "true" : "false",
-                         stream->revision,
+                         stream->revision, stream->incarnation,
                          stream->media_mode == NGX_MEDIA_STREAM_MEDIA_PROFILE
                          ? "profile" : "source",
                          progress.generation, stream->switches,
@@ -866,6 +874,32 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "# HELP nginx_media_source_active "
                          "1 when the source is on air\n"
                          "# TYPE nginx_media_source_active gauge\n"
+                         "# HELP nginx_media_source_preroll_units "
+                         "units retained in the source preroll cache\n"
+                         "# TYPE nginx_media_source_preroll_units gauge\n"
+                         "# HELP nginx_media_source_preroll_bytes "
+                         "payload bytes retained in the source preroll cache\n"
+                         "# TYPE nginx_media_source_preroll_bytes gauge\n"
+                         "# HELP nginx_media_source_preroll_overflows_total "
+                         "source preroll resets caused by a retention ceiling\n"
+                         "# TYPE nginx_media_source_preroll_overflows_total "
+                         "counter\n"
+                         "# HELP nginx_media_source_preroll_unit_overflows_total "
+                         "source preroll resets caused by the unit ceiling\n"
+                         "# TYPE nginx_media_source_preroll_unit_overflows_total "
+                         "counter\n"
+                         "# HELP nginx_media_source_preroll_byte_overflows_total "
+                         "source preroll resets caused by the byte ceiling\n"
+                         "# TYPE nginx_media_source_preroll_byte_overflows_total "
+                         "counter\n"
+                         "# HELP nginx_media_source_preroll_high_water_units "
+                         "highest source preroll units retained\n"
+                         "# TYPE nginx_media_source_preroll_high_water_units "
+                         "gauge\n"
+                         "# HELP nginx_media_source_preroll_high_water_bytes "
+                         "highest source preroll payload bytes retained\n"
+                         "# TYPE nginx_media_source_preroll_high_water_bytes "
+                         "gauge\n"
                          "# HELP nginx_media_stream_fanout_delay_ms "
                          "dispatch_time minus program_publish_time, upper "
                          "bound of the bucket the percentile falls in\n"
@@ -880,6 +914,27 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "# HELP nginx_media_stream_feed_bytes "
                          "payload bytes retained by the program feed\n"
                          "# TYPE nginx_media_stream_feed_bytes gauge\n"
+                         "# HELP nginx_media_stream_feed_evictions_total "
+                         "program feed units removed by a capacity ceiling\n"
+                         "# TYPE nginx_media_stream_feed_evictions_total "
+                         "counter\n"
+                         "# HELP nginx_media_stream_feed_overruns_total "
+                         "consumer reads that fell behind the retained window\n"
+                         "# TYPE nginx_media_stream_feed_overruns_total counter\n"
+                         "# HELP nginx_media_stream_feed_generation_mismatches_total "
+                         "consumer reads rejected for a stale generation or cursor\n"
+                         "# TYPE nginx_media_stream_feed_generation_mismatches_total "
+                         "counter\n"
+                         "# HELP nginx_media_stream_feed_publish_errors_total "
+                         "program feed publish failures\n"
+                         "# TYPE nginx_media_stream_feed_publish_errors_total "
+                         "counter\n"
+                         "# HELP nginx_media_stream_feed_high_water_units "
+                         "highest retained program feed units\n"
+                         "# TYPE nginx_media_stream_feed_high_water_units gauge\n"
+                         "# HELP nginx_media_stream_feed_high_water_bytes "
+                         "highest retained program feed payload bytes\n"
+                         "# TYPE nginx_media_stream_feed_high_water_bytes gauge\n"
                          "# HELP nginx_media_runtime_outputs "
                          "runtime output slots in use\n"
                          "# TYPE nginx_media_runtime_outputs gauge\n"
@@ -917,16 +972,50 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "graph operations this worker could not hand to a "
                          "peer worker, cumulative\n"
                          "# TYPE nginx_media_graph_undelivered_total counter\n"
+                         "# HELP nginx_media_runtime_routed_identity_mismatches_total "
+                         "routed messages rejected for a different stream incarnation\n"
+                         "# TYPE nginx_media_runtime_routed_identity_mismatches_total "
+                         "counter\n"
+                         "# HELP nginx_media_runtime_routed_slot_overflows_total "
+                         "routed opens rejected because the fixed slot table was full\n"
+                         "# TYPE nginx_media_runtime_routed_slot_overflows_total "
+                         "counter\n"
+                         "# HELP nginx_media_runtime_routed_no_slot_total "
+                         "routed media messages received after their slot was removed\n"
+                         "# TYPE nginx_media_runtime_routed_no_slot_total counter\n"
+                         "# HELP nginx_media_runtime_routed_no_payload_total "
+                         "routed media messages without a payload\n"
+                         "# TYPE nginx_media_runtime_routed_no_payload_total counter\n"
+                         "# HELP nginx_media_runtime_routed_reassembly_errors_total "
+                         "routed frames rejected by the bounded reassembler\n"
+                         "# TYPE nginx_media_runtime_routed_reassembly_errors_total "
+                         "counter\n"
+                         "# HELP nginx_media_runtime_routed_publish_errors_total "
+                         "routed frames rejected by source or program publication\n"
+                         "# TYPE nginx_media_runtime_routed_publish_errors_total "
+                         "counter\n"
                          "nginx_media_worker_service_ms %M\n"
                          "nginx_media_worker_max_service_ms %M\n"
                          "nginx_media_reconnecting_sources %ui\n"
-                         "nginx_media_graph_undelivered_total %uL\n",
+                         "nginx_media_graph_undelivered_total %uL\n"
+                         "nginx_media_runtime_routed_identity_mismatches_total %uL\n"
+                         "nginx_media_runtime_routed_slot_overflows_total %uL\n"
+                         "nginx_media_runtime_routed_no_slot_total %uL\n"
+                         "nginx_media_runtime_routed_no_payload_total %uL\n"
+                         "nginx_media_runtime_routed_reassembly_errors_total %uL\n"
+                         "nginx_media_runtime_routed_publish_errors_total %uL\n",
                          ngx_media_runtime_outputs_active(),
                          ngx_media_registry_draining_count(registry),
                          stats.last_gap, stats.max_gap, stats.late_ticks,
                          stats.last_service, stats.max_service,
                          stats.reconnecting,
-                         ngx_media_route_broadcast_undelivered());
+                         ngx_media_route_broadcast_undelivered(),
+                         stats.routed_identity_mismatches,
+                         stats.routed_slot_overflows,
+                         stats.routed_no_slot,
+                         stats.routed_no_payload,
+                         stats.routed_reassembly_errors,
+                         stats.routed_publish_errors);
 
     for (q = ngx_queue_head(&registry->entries);
          q != (ngx_queue_t *) &registry->entries;
@@ -1034,6 +1123,65 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
         *last = ngx_snprintf(*last, end - *last, "} %uz\n",
                              ngx_media_feed_bytes(&stream->program_feed));
 
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_feed_evictions_total",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                             ngx_media_feed_evictions(&stream->program_feed));
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_feed_overruns_total",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                             ngx_media_feed_overruns(&stream->program_feed));
+
+        if (ngx_media_api_prom_prefix(
+                last, end,
+                "nginx_media_stream_feed_generation_mismatches_total",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                             ngx_media_feed_generation_mismatches(
+                                 &stream->program_feed));
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_feed_publish_errors_total",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                             ngx_media_feed_publish_errors(
+                                 &stream->program_feed));
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_feed_high_water_units",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %ui\n",
+                             ngx_media_feed_high_water_units(
+                                 &stream->program_feed));
+
+        if (ngx_media_api_prom_prefix(
+                last, end, "nginx_media_stream_feed_high_water_bytes",
+                &stream->application, &stream->name, NULL, NULL) != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+        *last = ngx_snprintf(*last, end - *last, "} %uz\n",
+                             ngx_media_feed_high_water_bytes(
+                                 &stream->program_feed));
+
         for (sq = ngx_queue_head(&stream->sources);
              sq != (ngx_queue_t *) &stream->sources;
              sq = sq->next)
@@ -1079,6 +1227,82 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
             }
             *last = ngx_snprintf(*last, end - *last, "} %d\n",
                                  source->active ? 1 : 0);
+
+            if (ngx_media_api_prom_prefix(
+                    last, end, "nginx_media_source_preroll_units",
+                    &stream->application, &stream->name, &source->id, NULL)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            *last = ngx_snprintf(*last, end - *last, "} %ui\n",
+                                 ngx_media_source_preroll_units(source));
+
+            if (ngx_media_api_prom_prefix(
+                    last, end, "nginx_media_source_preroll_bytes",
+                    &stream->application, &stream->name, &source->id, NULL)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            *last = ngx_snprintf(*last, end - *last, "} %uz\n",
+                                 ngx_media_source_preroll_bytes(source));
+
+            if (ngx_media_api_prom_prefix(
+                    last, end, "nginx_media_source_preroll_overflows_total",
+                    &stream->application, &stream->name, &source->id, NULL)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                                 ngx_media_source_preroll_overflows(source));
+
+            if (ngx_media_api_prom_prefix(
+                    last, end,
+                    "nginx_media_source_preroll_unit_overflows_total",
+                    &stream->application, &stream->name, &source->id, NULL)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                                 ngx_media_source_preroll_unit_overflows(
+                                     source));
+
+            if (ngx_media_api_prom_prefix(
+                    last, end,
+                    "nginx_media_source_preroll_byte_overflows_total",
+                    &stream->application, &stream->name, &source->id, NULL)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                                 ngx_media_source_preroll_byte_overflows(
+                                     source));
+
+            if (ngx_media_api_prom_prefix(
+                    last, end, "nginx_media_source_preroll_high_water_units",
+                    &stream->application, &stream->name, &source->id, NULL)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            *last = ngx_snprintf(*last, end - *last, "} %ui\n",
+                                 ngx_media_source_preroll_high_water_units(
+                                     source));
+
+            if (ngx_media_api_prom_prefix(
+                    last, end, "nginx_media_source_preroll_high_water_bytes",
+                    &stream->application, &stream->name, &source->id, NULL)
+                != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            *last = ngx_snprintf(*last, end - *last, "} %uz\n",
+                                 ngx_media_source_preroll_high_water_bytes(
+                                     source));
         }
     }
 
@@ -1604,10 +1828,11 @@ ngx_media_api_stream_create(ngx_http_request_t *r,
 
     *last = ngx_snprintf(*last, end - *last,
                          ",\"media\":\"%s\",\"revision\":%uL,"
-                         "\"created\":%s}",
+                         "\"incarnation\":%uL,\"created\":%s}",
                          stream->media_mode == NGX_MEDIA_STREAM_MEDIA_PROFILE
                          ? "profile" : "source",
-                         stream->revision, existed ? "false" : "true");
+                         stream->revision, stream->incarnation,
+                         existed ? "false" : "true");
 
     return existed ? NGX_HTTP_OK : NGX_HTTP_CREATED;
 }
@@ -1671,7 +1896,7 @@ ngx_media_api_stream_delete(ngx_http_request_t *r,
         ngx_media_registry_tombstone(
             registry, ngx_media_owner_hash(application, name), op_revision);
 
-        (void) ngx_media_graph_stream_delete(application, name, op_revision);
+        (void) ngx_media_graph_stream_delete(application, name, 0, op_revision);
 
         *last = ngx_snprintf(*last, end - *last, "{\"application\":");
 
@@ -1714,7 +1939,7 @@ ngx_media_api_stream_delete(ngx_http_request_t *r,
      * stream only disappears here.
      */
     (void) ngx_media_graph_stream_delete(&stream->application, &stream->name,
-                                         op_revision);
+                                         stream->incarnation, op_revision);
 
     if (ngx_media_registry_stream_destroy(registry, stream) != NGX_OK) {
         *last = ngx_snprintf(*last, end - *last,

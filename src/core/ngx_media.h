@@ -83,6 +83,10 @@ typedef struct {
     uint64_t            tail;
     size_t              bytes;
     uint64_t            overflows;   /* resets caused by the ceilings */
+    uint64_t            unit_overflows;
+    uint64_t            byte_overflows;
+    ngx_uint_t          high_water_units;
+    size_t              high_water_bytes;
     unsigned            have_boundary:1;
 } ngx_media_preroll_t;
 
@@ -123,10 +127,17 @@ struct ngx_media_stream_s {
     ngx_uint_t              generation;
 
     /*
+     * Stream object identity.  It changes on delete/create even when the
+     * application/name key is reused, so delayed routed media cannot attach
+     * to a newer object.
+     */
+    uint64_t                incarnation;
+
+    /*
      * Object revision (normative revision): bumped by every mutation of the
      * desired state, so a controller can send the revision it last saw and
-     * have a stale write rejected instead of silently overwriting a newer
-     * one.  Distinct from generation, which counts media switches.
+     * have a stale write rejected instead of silently overwriting it.  Distinct
+     * from generation, which counts media switches.
      */
     uint64_t                revision;
 

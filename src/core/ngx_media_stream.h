@@ -29,6 +29,9 @@ void ngx_media_stream_set_policy(ngx_media_stream_t *stream,
 /* bumps the object revision: call it from every desired-state mutation */
 void ngx_media_stream_touch(ngx_media_stream_t *stream);
 
+/* unique identity for one application/name object lifetime */
+uint64_t ngx_media_stream_incarnation_next(void);
+
 ngx_int_t ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
     ngx_log_t *log, const ngx_str_t *application, const ngx_str_t *name,
     const ngx_media_feed_conf_t *feed_conf);

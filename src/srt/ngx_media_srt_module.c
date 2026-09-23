@@ -162,6 +162,7 @@ typedef struct {
     /* set when this worker does not own the stream and routes to the owner */
     unsigned               routed:1;
     uint64_t               hash;
+    uint64_t               routed_incarnation;
     uint64_t               routed_sequence;
     ngx_media_ts_demux_t   demux;
     ngx_uint_t             demux_ready;
@@ -215,6 +216,8 @@ static void ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
     ngx_media_srt_streamid_t *id);
 static void ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id);
 static ngx_media_srt_slot_t *ngx_media_srt_slot_find(uint64_t id);
+static ngx_uint_t ngx_media_srt_stream_live(
+    const ngx_media_stream_t *stream);
 static ngx_media_srt_slot_t *ngx_media_srt_slot_alloc(void);
 
 static ngx_media_srt_ingest_t   ngx_media_srt_ingest;
@@ -351,6 +354,16 @@ ngx_media_srt_slot_find(uint64_t id)
     return NULL;
 }
 
+static ngx_uint_t
+ngx_media_srt_stream_live(const ngx_media_stream_t *stream)
+{
+    ngx_media_registry_t  *registry;
+
+    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+
+    return ngx_media_registry_stream_is_live(registry, stream);
+}
+
 static ngx_media_srt_slot_t *
 ngx_media_srt_slot_alloc(void)
 {
@@ -381,10 +394,13 @@ ngx_media_srt_sink_frame(void *ctx, const ngx_media_frame_t *frame)
     if (session->routed) {
         /* the program lives on another worker: hand the frame over once */
         (void) ngx_media_route_frame((ngx_cycle_t *) ngx_cycle, session->hash,
-                                     frame, session->routed_sequence);
+                                     session->routed_incarnation, frame,
+                                     session->routed_sequence);
     }
 
-    if (session->stream != NULL && session->source != NULL) {
+    if (session->stream != NULL && session->source != NULL
+        && ngx_media_srt_stream_live(session->stream))
+    {
         ngx_media_health_media(&session->source->health, frame->dts,
                                ngx_current_msec);
 
@@ -424,10 +440,12 @@ ngx_media_srt_sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
 
     if (session != NULL && session->routed) {
         (void) ngx_media_route_tracks((ngx_cycle_t *) ngx_cycle, session->hash,
-                                      tracks);
+                                      session->routed_incarnation, tracks);
     }
 
-    if (session != NULL && session->source != NULL) {
+    if (session != NULL && session->source != NULL
+        && ngx_media_srt_stream_live(session->stream))
+    {
         (void) ngx_media_source_tracks_set(session->source, tracks,
                                            ngx_cycle->log);
     }
@@ -435,7 +453,8 @@ ngx_media_srt_sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
     for (i = 0; i < tracks->count; i++) {
 
         if (tracks->tracks[i].media_type == NGX_MEDIA_TYPE_VIDEO
-            && session != NULL && session->source != NULL)
+            && session != NULL && session->source != NULL
+            && ngx_media_srt_stream_live(session->stream))
         {
             /* the standby cache opens at a video keyframe only */
             session->source->has_video = 1;
@@ -499,7 +518,6 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
                       session_id);
         return;
     }
-
     session->id = session_id;
 
     /*
@@ -509,10 +527,29 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
      */
     session->hash = ngx_media_owner_hash(&id->application, &id->stream);
 
+    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+
+    if (registry == NULL) {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "media: no stream registry in this worker");
+        ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
+        return;
+    }
+
+    stream = ngx_media_registry_stream(registry, &id->application,
+                                       &id->stream);
+
+    if (stream != NULL && stream->incarnation != 0) {
+        session->routed_incarnation = stream->incarnation;
+    } else {
+        session->routed_incarnation = ngx_media_stream_incarnation_next();
+    }
+
     if (!ngx_media_route_is_owner((ngx_cycle_t *) ngx_cycle, session->hash)) {
         session->routed = 1;
 
         if (ngx_media_route_open((ngx_cycle_t *) ngx_cycle, session->hash,
+                                 session->routed_incarnation,
                                  &id->application, &id->stream, &id->source,
                                  NGX_MEDIA_SOURCE_SRT,
                                  ngx_media_srt_priority(&id->source))
@@ -532,14 +569,6 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
                       "media: srt publisher routed to the owner stream=%V/%V "
                       "source=%V", &id->application, &id->stream, &id->source);
 
-        return;
-    }
-
-    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
-
-    if (registry == NULL) {
-        ngx_log_error(NGX_LOG_ERR, log, 0,
-                      "media: no stream registry in this worker");
         return;
     }
 
@@ -667,7 +696,8 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
     }
 
     if (session->routed) {
-        (void) ngx_media_route_close((ngx_cycle_t *) ngx_cycle, session->hash);
+        (void) ngx_media_route_close((ngx_cycle_t *) ngx_cycle, session->hash,
+                                     session->routed_incarnation);
 
         ngx_log_error(NGX_LOG_NOTICE, log, 0,
                       "media: routed srt publisher closed hash=%uL frames=%uL",
@@ -678,6 +708,11 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
     }
 
     stream = session->stream;
+
+    if (stream != NULL && !ngx_media_srt_stream_live(stream)) {
+        ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
+        return;
+    }
 
     if (session->source != NULL) {
         ngx_media_health_transport(&session->source->health, 0,
@@ -690,7 +725,6 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
     }
 
     if (stream != NULL) {
-
         if (stream->active != NULL) {
             ngx_log_error(NGX_LOG_NOTICE, log, 0,
                           "media: srt program stream=%V/%V frames=%uL "

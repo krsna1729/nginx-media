@@ -59,6 +59,10 @@ void ngx_media_registry_destroy(ngx_media_registry_t *registry);
 
 ngx_media_stream_t *ngx_media_registry_stream(ngx_media_registry_t *registry,
     const ngx_str_t *application, const ngx_str_t *name);
+
+/* Pointer-liveness check for transport sessions that outlive a delete. */
+ngx_uint_t ngx_media_registry_stream_is_live(
+    const ngx_media_registry_t *registry, const ngx_media_stream_t *stream);
 /*
  * log is kept: the stream's pool and everything built from it log through it,
  * and a stream outlives the connection that created it.  Pass the worker's

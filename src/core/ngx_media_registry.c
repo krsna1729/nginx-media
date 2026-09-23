@@ -177,6 +177,31 @@ ngx_media_registry_stream(ngx_media_registry_t *registry,
     return NULL;
 }
 
+ngx_uint_t
+ngx_media_registry_stream_is_live(const ngx_media_registry_t *registry,
+    const ngx_media_stream_t *stream)
+{
+    ngx_queue_t                 *q;
+    ngx_media_registry_entry_t  *entry;
+
+    if (registry == NULL || stream == NULL) {
+        return 0;
+    }
+
+    for (q = ngx_queue_head((ngx_queue_t *) &registry->entries);
+         q != (ngx_queue_t *) &registry->entries;
+         q = q->next)
+    {
+        entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
+
+        if (&entry->stream == stream) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 ngx_media_stream_t *
 ngx_media_registry_stream_create(ngx_media_registry_t *registry,
     const ngx_str_t *application, const ngx_str_t *name,

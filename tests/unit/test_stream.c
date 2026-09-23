@@ -183,6 +183,10 @@ main(void)
     TEST_ASSERT_EQ_INT(publish(&stream, a, NGX_MEDIA_TYPE_VIDEO, 7000, 0, 40),
                        NGX_OK);
     TEST_ASSERT_EQ_U64(ngx_media_source_preroll_units(a), 0);
+    TEST_ASSERT_EQ_U64(ngx_media_source_preroll_unit_overflows(a), 0);
+    TEST_ASSERT_EQ_U64(ngx_media_source_preroll_byte_overflows(a), 1);
+    TEST_ASSERT_EQ_U64(ngx_media_source_preroll_high_water_units(a), 3);
+    TEST_ASSERT_EQ_U64(ngx_media_source_preroll_high_water_bytes(a), 120);
     TEST_ASSERT_EQ_U64(a->preroll.overflows, 1);
     TEST_ASSERT_EQ_U64(ngx_media_source_preroll_ready(a), 0);
 
@@ -203,6 +207,8 @@ main(void)
         ngx_media_frame_release(&frame);
         TEST_ASSERT_EQ_INT(rc, NGX_AGAIN);
         TEST_ASSERT_EQ_U64(a->preroll.overflows, 2);
+        TEST_ASSERT_EQ_U64(ngx_media_source_preroll_unit_overflows(a), 0);
+        TEST_ASSERT_EQ_U64(ngx_media_source_preroll_byte_overflows(a), 2);
         ngx_media_source_preroll_reset(a);
     }
 

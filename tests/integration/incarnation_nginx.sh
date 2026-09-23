@@ -1,33 +1,18 @@
 #!/usr/bin/env bash
 #
-# A stream deleted and created again under the same name.
+# A stream is owned by the deterministic hash slot, not by the worker that
+# accepted the API request or publisher.  This regression drives a publisher
+# through the routing layer, deletes its stream, and creates the same logical
+# name again while the old session is still sending.  The old routed session
+# must not attach to the new object.
 #
-# Identity is the application and the name, so the two incarnations are the
-# same stream to every worker: the same owner, the same owner-directory record,
-# the same routed slot.  What must not happen is the *old* incarnation reaching
-# the new one.  A publisher whose session was routed to the deleted stream is
-# still connected and still sending, and those frames belong to a stream the
-# operator removed - they must not appear in the one created afterwards.
+# The test also proves the owner consistency invariant: the API's owner is
+# worker 1, while the single SRT endpoint is accepted by worker 0, and the
+# routed-open log must appear before media reaches the owner's program feed.
 #
-# What it would catch: a routed slot that outlives its stream, a delete that
-# leaves a publisher attached to the identity, and a replica that rebuilds a
-# stream from a message that was in flight when the delete was applied.
-#
-# NOT in TEST_TARGETS yet: it currently fails earlier than the case it is
-# written for.  Observed in one run (worker pids from the error log, the
-# listener line says worker 0 owns the single endpoint):
-#
-#   worker 0: media: srt listener ready on 127.0.0.1:24720
-#   worker 0: media: srt source open app=live stream=inc-2 source=enc-a
-#   GET .../streams/live/inc-2  ->  {"owner":1,...}
-#
-# so the worker that accepts the publisher opened the source locally while the
-# graph reported another worker as the owner.  Two paths can disagree here -
-# the driver is `ngx_media_route_is_owner()` and the reported owner is
-# `ngx_media_route_owner()`, which prefers a live owner-directory record over
-# the deterministic hash, while the record is written by whichever worker took
-# the API request - and which one was decisive in that run is not yet pinned.
-# What is certain is that the answer must be the same on every worker.
+# What it catches: a routed slot that outlives its stream, a delete that leaves
+# a publisher attached to the identity, and a replica that rebuilds a stream
+# from a message in flight when the delete was applied.
 
 set -uo pipefail
 
@@ -165,6 +150,12 @@ echo "   routed and carrying frames: ${FRAMES:-0}"
 [ "${FRAMES:-0}" -gt 0 ] \
     || { echo "the routed program carried no frames" >&2
          printf '%s\n' "$STATE" >&2; exit 1; }
+INCARNATION="$(field "$STATE" incarnation)"
+echo "   routed stream incarnation: ${INCARNATION:-missing}"
+
+[ -n "$INCARNATION" ] && [ "$INCARNATION" != "0" ] \
+    || { echo "the stream did not expose a non-zero incarnation" >&2
+         printf '%s\n' "$STATE" >&2; exit 1; }
 
 echo "== the stream is deleted while the publisher is still sending"
 
@@ -192,10 +183,16 @@ sleep 5
 
 STATE="$(curl -fsS "$API/streams/live/$NAME")"
 
+NEW_INCARNATION="$(field "$STATE" incarnation)"
 FRAMES="$(field "$STATE" program_frames)"
 SOURCES="$(field "$STATE" sources)"
 
-echo "   the new incarnation holds: frames=${FRAMES:-0} sources=${SOURCES:-?}"
+echo "   the new incarnation holds: incarnation=${NEW_INCARNATION:-missing}"
+echo "frames=${FRAMES:-0} sources=${SOURCES:-?}"
+
+[ -n "$NEW_INCARNATION" ] && [ "$NEW_INCARNATION" != "$INCARNATION" ] \
+    || { echo "the recreated stream reused its incarnation" >&2
+         printf '%s\n' "$STATE" >&2; exit 1; }
 
 # the old session's frames belong to the stream that was deleted: they are
 # dropped at the owner, because the routed slot went with it, and the new

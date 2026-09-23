@@ -83,6 +83,12 @@ typedef struct {
     uint64_t                tail;       /* oldest retained sequence */
     uint64_t                last_keyframe;
     size_t                  bytes;      /* retained payload bytes */
+    ngx_uint_t              high_water_units;
+    size_t                  high_water_bytes;
+    uint64_t                evictions;
+    uint64_t                overruns;
+    uint64_t                generation_mismatches;
+    uint64_t                publish_errors;
     unsigned                has_keyframe:1;
 
     ngx_media_feed_hist_t   fanout;     /* dispatch delay, all consumers */
@@ -118,6 +124,14 @@ uint64_t ngx_media_feed_tail(const ngx_media_feed_t *feed);
 ngx_uint_t ngx_media_feed_units(const ngx_media_feed_t *feed);
 size_t ngx_media_feed_bytes(const ngx_media_feed_t *feed);
 uint64_t ngx_media_feed_last_keyframe(const ngx_media_feed_t *feed);
+
+ngx_uint_t ngx_media_feed_high_water_units(const ngx_media_feed_t *feed);
+size_t ngx_media_feed_high_water_bytes(const ngx_media_feed_t *feed);
+uint64_t ngx_media_feed_evictions(const ngx_media_feed_t *feed);
+uint64_t ngx_media_feed_overruns(const ngx_media_feed_t *feed);
+uint64_t ngx_media_feed_generation_mismatches(
+    const ngx_media_feed_t *feed);
+uint64_t ngx_media_feed_publish_errors(const ngx_media_feed_t *feed);
 
 /*
  * The delay at the given percentile, in ms; 0 when nothing was dispatched.

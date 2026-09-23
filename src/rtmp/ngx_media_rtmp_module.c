@@ -104,8 +104,8 @@ struct ngx_media_rtmp_session_s {
     /* set when this worker does not own the stream and routes to the owner */
     unsigned                      routed:1;
     uint64_t                      routed_hash;
+    uint64_t                      routed_incarnation;
     uint64_t                      routed_sequence;
-
     /* playing */
     ngx_media_rtmp_prepare_t     *prepare;
     uint64_t                      cursor;
@@ -481,7 +481,8 @@ ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
 
     if (session->routed) {
         (void) ngx_media_route_close((ngx_cycle_t *) ngx_cycle,
-                                     session->routed_hash);
+                                     session->routed_hash,
+                                     session->routed_incarnation);
 
         ngx_log_error(NGX_LOG_NOTICE, session->log, 0,
                       "media: routed rtmp publisher closed hash=%uL",
@@ -955,7 +956,8 @@ ngx_media_rtmp_frame_cb(void *ctx, const ngx_media_frame_t *frame)
 
     if (session->routed) {
         (void) ngx_media_route_frame((ngx_cycle_t *) ngx_cycle,
-                                     session->routed_hash, frame,
+                                     session->routed_hash,
+                                     session->routed_incarnation, frame,
                                      session->routed_sequence++);
         return NGX_OK;
     }
@@ -983,7 +985,8 @@ ngx_media_rtmp_tracks_cb(void *ctx, const ngx_media_trackset_t *tracks)
 
     if (session->routed) {
         (void) ngx_media_route_tracks((ngx_cycle_t *) ngx_cycle,
-                                      session->routed_hash, tracks);
+                                      session->routed_hash,
+                                      session->routed_incarnation, tracks);
         return NGX_OK;
     }
 
@@ -1083,6 +1086,20 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
      */
     session->routed_hash = ngx_media_owner_hash(app, name);
 
+    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+
+    if (registry == NULL) {
+        return NGX_ERROR;
+    }
+
+    stream = ngx_media_registry_stream(registry, app, name);
+
+    if (stream != NULL && stream->incarnation != 0) {
+        session->routed_incarnation = stream->incarnation;
+    } else {
+        session->routed_incarnation = ngx_media_stream_incarnation_next();
+    }
+
     if (!ngx_media_route_is_owner((ngx_cycle_t *) ngx_cycle,
                                   session->routed_hash))
     {
@@ -1094,7 +1111,8 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
         }
 
         if (ngx_media_route_open((ngx_cycle_t *) ngx_cycle,
-                                 session->routed_hash, app, name, name,
+                                 session->routed_hash,
+                                 session->routed_incarnation, app, name, name,
                                  NGX_MEDIA_SOURCE_RTMP,
                                  ngx_media_rtmp_priority(name)) != NGX_OK)
         {
@@ -1115,12 +1133,6 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
                                    "NetStream.Publish.Start", "publishing");
 
         return NGX_OK;
-    }
-
-    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
-
-    if (registry == NULL) {
-        return NGX_ERROR;
     }
 
     if (ngx_media_rtmp_keep(session, app) != NGX_OK

@@ -34,6 +34,7 @@ ngx_media_feed_evict(ngx_media_feed_t *feed)
     slot->publish_time = 0;
 
     feed->tail++;
+    feed->evictions++;
 }
 
 /*
@@ -146,10 +147,12 @@ ngx_media_feed_publish(ngx_media_feed_t *feed, const ngx_media_frame_t *frame,
 
     if (slot->frame.payload != NULL) {
         /* ring accounting invariant: the slot must have been evicted first */
+        feed->publish_errors++;
         return NGX_ERROR;
     }
 
     if (ngx_media_frame_copy(&slot->frame, frame) != NGX_OK) {
+        feed->publish_errors++;
         return NGX_ERROR;
     }
 
@@ -162,6 +165,14 @@ ngx_media_feed_publish(ngx_media_feed_t *feed, const ngx_media_frame_t *frame,
     }
 
     feed->head++;
+
+    if (feed->head - feed->tail > feed->high_water_units) {
+        feed->high_water_units = (ngx_uint_t) (feed->head - feed->tail);
+    }
+
+    if (feed->bytes > feed->high_water_bytes) {
+        feed->high_water_bytes = feed->bytes;
+    }
 
     return NGX_OK;
 }
@@ -212,18 +223,19 @@ ngx_media_feed_read(ngx_media_feed_t *feed, ngx_media_cursor_t *cursor,
         return NGX_MEDIA_FEED_ERROR;
     }
 
-    *out_count = 0;
-
     if (cursor->generation != feed->generation) {
+        feed->generation_mismatches++;
         return NGX_MEDIA_FEED_GENERATION_MISMATCH;
     }
 
     if (cursor->next_sequence < feed->tail) {
+        feed->overruns++;
         return NGX_MEDIA_FEED_OVERRUN;
     }
 
     if (cursor->next_sequence > feed->head) {
         /* a cursor ahead of the producer belongs to a previous ring */
+        feed->generation_mismatches++;
         return NGX_MEDIA_FEED_GENERATION_MISMATCH;
     }
 
@@ -376,6 +388,42 @@ ngx_media_feed_last_keyframe(const ngx_media_feed_t *feed)
     }
 
     return feed->last_keyframe;
+}
+
+ngx_uint_t
+ngx_media_feed_high_water_units(const ngx_media_feed_t *feed)
+{
+    return (feed != NULL) ? feed->high_water_units : 0;
+}
+
+size_t
+ngx_media_feed_high_water_bytes(const ngx_media_feed_t *feed)
+{
+    return (feed != NULL) ? feed->high_water_bytes : 0;
+}
+
+uint64_t
+ngx_media_feed_evictions(const ngx_media_feed_t *feed)
+{
+    return (feed != NULL) ? feed->evictions : 0;
+}
+
+uint64_t
+ngx_media_feed_overruns(const ngx_media_feed_t *feed)
+{
+    return (feed != NULL) ? feed->overruns : 0;
+}
+
+uint64_t
+ngx_media_feed_generation_mismatches(const ngx_media_feed_t *feed)
+{
+    return (feed != NULL) ? feed->generation_mismatches : 0;
+}
+
+uint64_t
+ngx_media_feed_publish_errors(const ngx_media_feed_t *feed)
+{
+    return (feed != NULL) ? feed->publish_errors : 0;
 }
 
 ngx_msec_t

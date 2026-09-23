@@ -22,7 +22,7 @@
  * that does not fit the bound is rejected instead of being truncated.
  */
 
-#define NGX_MEDIA_IPC_VERSION        1
+#define NGX_MEDIA_IPC_VERSION        2
 
 #define NGX_MEDIA_IPC_MSG_OPEN       1
 #define NGX_MEDIA_IPC_MSG_CLOSE      2
@@ -81,6 +81,7 @@ typedef struct {
     uint32_t    total;          /* whole frame length, for chunked frames */
     uint32_t    offset;         /* this chunk's offset in the frame */
     uint64_t    hash;           /* stream hash the message belongs to */
+    uint64_t    incarnation;    /* stream object lifetime identity */
     uint64_t    sequence;       /* frame sequence within the source */
     int64_t     pts;
     int64_t     dts;

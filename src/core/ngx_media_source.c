@@ -163,6 +163,7 @@ ngx_media_source_preroll_push(ngx_media_source_t *source,
     if (preroll->head - preroll->tail >= preroll->capacity) {
         /* defensive: the ring must always have room for one more unit */
         preroll->overflows++;
+        preroll->unit_overflows++;
         ngx_media_source_preroll_reset(source);
         return NGX_AGAIN;
     }
@@ -176,6 +177,15 @@ ngx_media_source_preroll_push(ngx_media_source_t *source,
     preroll->head++;
     preroll->bytes += len;
 
+    if (preroll->head - preroll->tail > preroll->high_water_units) {
+        preroll->high_water_units =
+            (ngx_uint_t) (preroll->head - preroll->tail);
+    }
+
+    if (preroll->bytes > preroll->high_water_bytes) {
+        preroll->high_water_bytes = preroll->bytes;
+    }
+
     if (preroll->head - preroll->tail > preroll->max_units
         || preroll->bytes > preroll->max_bytes)
     {
@@ -184,6 +194,15 @@ ngx_media_source_preroll_push(ngx_media_source_t *source,
          * for a later promotion.
          */
         preroll->overflows++;
+
+        if (preroll->head - preroll->tail > preroll->max_units) {
+            preroll->unit_overflows++;
+        }
+
+        if (preroll->bytes > preroll->max_bytes) {
+            preroll->byte_overflows++;
+        }
+
         ngx_media_source_preroll_reset(source);
         return NGX_AGAIN;
     }
@@ -207,6 +226,36 @@ ngx_media_source_preroll_replay(ngx_media_source_t *source,
     for (seq = preroll->tail; seq < preroll->head; seq++) {
         (void) cb(ctx, &preroll->units[seq & (preroll->capacity - 1)]);
     }
+}
+
+uint64_t
+ngx_media_source_preroll_overflows(const ngx_media_source_t *source)
+{
+    return (source != NULL) ? source->preroll.overflows : 0;
+}
+
+uint64_t
+ngx_media_source_preroll_unit_overflows(const ngx_media_source_t *source)
+{
+    return (source != NULL) ? source->preroll.unit_overflows : 0;
+}
+
+uint64_t
+ngx_media_source_preroll_byte_overflows(const ngx_media_source_t *source)
+{
+    return (source != NULL) ? source->preroll.byte_overflows : 0;
+}
+
+ngx_uint_t
+ngx_media_source_preroll_high_water_units(const ngx_media_source_t *source)
+{
+    return (source != NULL) ? source->preroll.high_water_units : 0;
+}
+
+size_t
+ngx_media_source_preroll_high_water_bytes(const ngx_media_source_t *source)
+{
+    return (source != NULL) ? source->preroll.high_water_bytes : 0;
 }
 
 ngx_uint_t
