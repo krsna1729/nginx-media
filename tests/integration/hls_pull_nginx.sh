@@ -24,9 +24,39 @@ mkdir -p "$RUN/origin/conf" "$RUN/origin/logs" "$RUN/origin/hls" \
          "$RUN/puller/conf" "$RUN/puller/logs" "$RUN/puller/hls"
 
 PUB=0
+
+# The master is stopped and waited for, and its children are then killed by
+# parent: nginx rewrites a worker's argv to "nginx: worker process", so a
+# pattern that matches the configuration path matches the master only, and a
+# worker whose master was killed outright is reparented to init and keeps the
+# ports the next run needs.
+stop_instance() {
+    local prefix="$1" pid child
+
+    [ -f "$prefix/logs/nginx.pid" ] || return 0
+
+    pid="$(cat "$prefix/logs/nginx.pid")"
+
+    kill -QUIT "$pid" 2>/dev/null
+
+    for _ in $(seq 1 100); do
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.05
+    done
+
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill -KILL "$child" 2>/dev/null
+    done
+
+    kill -KILL "$pid" 2>/dev/null
+
+    return 0
+}
+
 cleanup() {
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null
-    pkill -KILL -f 'nginx: ' 2>/dev/null
+    stop_instance "$RUN/origin"
+    stop_instance "$RUN/puller"
     return 0
 }
 trap cleanup EXIT

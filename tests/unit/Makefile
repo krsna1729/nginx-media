@@ -59,7 +59,7 @@ test: $(BINS)
 # The suites that drive threads, rebuilt under ThreadSanitizer.  They live in
 # a separate directory so a normal build never mixes instrumentation.
 TSAN_TESTS := test_record test_lifecycle test_feed test_stream test_owner \
-              test_srt_output
+              test_srt_output test_hls_ingest
 TSAN_BINS  := $(addprefix build/tsan/,$(TSAN_TESTS))
 
 tsan: $(TSAN_BINS)
@@ -68,6 +68,15 @@ tsan: $(TSAN_BINS)
 build/tsan/%: %.c ngx_media_test.h $(CORE) $(SHIM)
 	@mkdir -p build/tsan
 	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) -fsanitize=thread -o $@ $< $(CORE) $(SHIM) -lpthread
+
+# The HLS ingest reader is host-side code - it reads a directory, demuxes and
+# sleeps - and no other suite links it, so it gets its own rule instead of a
+# place in CORE.  Without it the queue the reader thread fills and the worker
+# drains is the one threaded path under a sanitizer that is never run.
+build/tsan/test_hls_ingest: test_hls_ingest.c ngx_media_test.h $(CORE) $(SHIM)
+	@mkdir -p build/tsan
+	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) -fsanitize=thread -o $@ $< \
+	    ../../src/core/ngx_media_hls_ingest.c $(CORE) $(SHIM) -lpthread
 
 clean:
 	rm -rf build

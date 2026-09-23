@@ -6,9 +6,6 @@
 # created at runtime: the stream, then its sources, then the publisher that
 # attaches to them.  Deleting the active source has to fail over through the
 # normal selector path, and deletion has to be idempotent.
-#
-# One known gap is asserted at the end and currently fails: see the note
-# there.  Everything before it passes.
 
 set -uo pipefail
 
@@ -246,20 +243,26 @@ done
 grep -q 'srt source open app=live stream=news' "$RUN/logs/error.log" \
     || { cat "$RUN/pub.log"; echo "the publisher did not attach" >&2; exit 1; }
 
-# the playlist only appears once a segment closes, so this is checked while
-# the publisher is still running
+HLS_READY=0
 for _ in $(seq 1 200); do
-    [ -f "$RUN/hls/live/news/index.m3u8" ] \
-        && [ "$(grep -c '^#EXTINF' "$RUN/hls/live/news/index.m3u8" || true)" -ge 1 ] \
-        && break
+    if [ -f "$RUN/hls/live/news/index.m3u8" ] \
+        && [ "$(grep -c '^#EXTINF' "$RUN/hls/live/news/index.m3u8" || true)" -ge 1 ]
+    then
+        HLS_READY=1
+        break
+    fi
     sleep 0.1
 done
+
+[ "$HLS_READY" = "1" ] \
+    || { echo "the api-created stream produced no hls output" >&2
+         cat "$RUN/logs/error.log" >&2; exit 1; }
 
 kill -KILL "$PUB" 2>/dev/null
 wait "$PUB" 2>/dev/null
 PUB=0
 
-echo "   the publisher attached to the api-created stream"
+echo "   the publisher attached and HLS carried the api-created stream"
 
 echo "== disabling a source takes it out of selection"
 curl -fsS -X POST "$API/streams/live/news/sources/encoder-b/disable" >/dev/null
@@ -479,21 +482,36 @@ curl -fsS "$API/streams" | grep -q '"streams":\[\]' \
     || { echo "the graph is not empty after deletion" >&2; exit 1; }
 
 echo "   deleted, and deleting again is a no-op"
+echo "== runtime output capacity is admitted before graph creation"
+for i in $(seq 0 15); do
+    cap_name="$(printf 'capacity-%02d' "$i")"
+    STATUS="$(curl -sS -o "$RUN/capacity-$i.json" -w '%{http_code}' \
+        -X POST -H 'Content-Type: application/json' \
+        -d "{\"application\":\"live\",\"name\":\"$cap_name\"}" \
+        "$API/streams")"
+    [ "$STATUS" = "201" ] \
+        || { echo "capacity stream $cap_name was refused: $STATUS" >&2
+             exit 1; }
+done
 
-# KNOWN GAP, left failing on purpose.  An ingest-created stream writes HLS
-# segments; a stream created through the API logs "hls output started" and
-# then produces nothing, even though its program runs and carries frames.
-# That is exactly the "no separate static and dynamic implementation"
-# requirement, so it is a defect rather than a test artefact: the segmenter
-# is started for this stream and then never fed.  Remove this block once the
-# cause is found; do not paper over it.
-if [ ! -f "$RUN/hls/live/news/index.m3u8" ]; then
-    echo "FAIL: an api-created stream produced no hls output" >&2
-    echo "      (program ran: $(grep -c 'srt program stream=live/news frames' \
-        "$RUN/logs/error.log") ticks; hls started: $(grep -c 'hls output started' \
-        "$RUN/logs/error.log"))" >&2
-    exit 1
-fi
+STATUS="$(curl -sS -o "$RUN/capacity-full.json" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d '{"application":"live","name":"capacity-full"}' "$API/streams")"
+
+[ "$STATUS" = "500" ] \
+    || { echo "the seventeenth output stream was admitted: $STATUS" >&2
+         cat "$RUN/capacity-full.json" >&2; exit 1; }
+grep -q '"error":"runtime_output_capacity"' "$RUN/capacity-full.json" \
+    || { echo "capacity refusal had the wrong error" >&2; exit 1; }
+
+for i in $(seq 0 15); do
+    cap_name="$(printf 'capacity-%02d' "$i")"
+    curl -fsS -X DELETE "$API/streams/live/$cap_name" >/dev/null
+done
+
+echo "   sixteen output slots admitted, the seventeenth refused, and slots released"
+
+
 
 echo "== desired state is a replayable document"
 # its own stream, so this section does not depend on what earlier ones left

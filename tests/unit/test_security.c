@@ -239,10 +239,6 @@ static const char *hls_seg_paths[] = {
     "src/hls/ngx_media_hls_segmenter.c",
 };
 
-static const char *rtmp_mod_paths[] = {
-    "../../src/rtmp/ngx_media_rtmp_module.c",
-    "src/rtmp/ngx_media_rtmp_module.c",
-};
 
 static const char *srt_tr_paths[] = {
     "../../src/srt/ngx_media_srt_transport.c",
@@ -1266,46 +1262,34 @@ test_hls_segmenter_psi_bytes(void)
 static void
 test_rtmp_player_reserve(void)
 {
-    /* a 300 KiB keyframe: the writer emits ceil(len/4096) payload slices */
-    size_t  len = 300 * 1024;
-    size_t  chunks = (len + SEC_RTMP_OUT_CHUNK - 1) / SEC_RTMP_OUT_CHUNK;
-    size_t  old_reserve_chain = 1 * 2 + 1;
-    size_t  old_reserve_refs = 1;
-    size_t  need_chain = chunks * 2 + 1;
-    size_t  need_refs = chunks;
+    ngx_media_rtmp_writer_t    writer;
+    ngx_media_rtmp_footprint_t footprint;
+    size_t                     len = 300 * 1024;
+    size_t                     chunks = (len + SEC_RTMP_OUT_CHUNK - 1)
+                                         / SEC_RTMP_OUT_CHUNK;
+    size_t                     small = (100 * 1024 + SEC_RTMP_OUT_CHUNK - 1)
+                                         / SEC_RTMP_OUT_CHUNK;
 
     TEST_CASE("rtmp: player queue reserves per-chunk, not per-message");
 
+    ngx_media_rtmp_writer_init(&writer, SEC_RTMP_OUT_CHUNK, 1024 * 1024);
+
     CHECK(chunks == 75, "300 KiB is 75 chunks: %lu", chunks);
-    CHECK(old_reserve_chain < need_chain && old_reserve_refs < need_refs,
-          "the old per-message reservation demonstrably undercounts "
-          "(chain %lu<%lu, refs %lu<%lu)",
-          old_reserve_chain, need_chain, old_reserve_refs, need_refs);
+    CHECK(ngx_media_rtmp_message_footprint(&writer, len, &footprint)
+          == NGX_OK,
+          "writer computes a footprint for a bounded message");
+    CHECK(footprint.parts == chunks * 2 && footprint.refs == chunks,
+          "footprint counts every chunk (parts %lu, refs %lu)",
+          (size_t) footprint.parts, (size_t) footprint.refs);
+    CHECK(footprint.parts > SEC_RTMP_MAX_QUEUE
+          || footprint.refs > SEC_RTMP_MAX_QUEUE,
+          "the 300 KiB message cannot fit the 64-slot queue");
 
-    /*
-     * Admission outcome from an empty queue: the old check passes and the
-     * message proceeds into the 64-slot ring (overflow past 64 refs); the
-     * fixed check refuses with AGAIN.  A 100 KiB message (25 chunks) still
-     * fits under the fixed accounting.
-     */
-    CHECK(old_reserve_chain <= SEC_RTMP_MAX_QUEUE
-          && old_reserve_refs <= SEC_RTMP_MAX_QUEUE,
-          "old check admits the 75-chunk message (then overflows)");
-    CHECK(need_chain > SEC_RTMP_MAX_QUEUE || need_refs > SEC_RTMP_MAX_QUEUE,
-          "fixed check refuses it instead (chain %lu, refs %lu)",
-          need_chain, need_refs);
-    {
-        size_t  small = (100 * 1024 + SEC_RTMP_OUT_CHUNK - 1)
-                        / SEC_RTMP_OUT_CHUNK;
-
-        CHECK(small * 2 + 1 <= SEC_RTMP_MAX_QUEUE
-              && small <= SEC_RTMP_MAX_QUEUE,
-              "a 100 KiB message (%lu chunks) is still admitted", small);
-    }
-    CHECK(file_contains(rtmp_mod_paths,
-                        sizeof(rtmp_mod_paths) / sizeof(rtmp_mod_paths[0]),
-                        "(len + NGX_MEDIA_RTMP_OUT_CHUNK - 1)"),
-          "player queue sizes the reservation by chunk count");
+    CHECK(ngx_media_rtmp_message_footprint(&writer, 100 * 1024,
+                                           &footprint) == NGX_OK,
+          "a bounded message still has a footprint");
+    CHECK(footprint.parts == small * 2 && footprint.refs == small,
+          "the smaller message is admitted by the same per-chunk contract");
 }
 
 static void

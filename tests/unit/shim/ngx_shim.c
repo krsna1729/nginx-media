@@ -1,6 +1,7 @@
 #include "ngx_shim.h"
 
 #include <stdlib.h>
+#include <time.h>
 
 size_t ngx_media_test_allocs;
 size_t ngx_media_test_frees;
@@ -143,6 +144,18 @@ ngx_destroy_pool(ngx_pool_t *pool)
     }
 
     ngx_media_test_free(pool);
+}
+
+/* see ngx_shim.h: the unit build has no event loop refreshing this clock */
+ngx_msec_t
+ngx_media_test_msec(void)
+{
+    struct timespec  ts;
+
+    (void) clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return (ngx_msec_t) ((uint64_t) ts.tv_sec * 1000
+                         + (uint64_t) ts.tv_nsec / 1000000);
 }
 
 /* see ngx_shim.h: the unit build has no log target */

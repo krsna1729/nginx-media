@@ -18,6 +18,7 @@ SRT_PORT="${FAULT_SRT_PORT:-$BASE}"
 HTTP_PORT="${FAULT_HTTP_PORT:-$(( BASE + 1 ))}"
 PUB_A=0
 PUB_B=0
+PUB_CORRUPT=0
 
 if [ ! -x "$NGINX" ]; then
     echo "nginx is not built; run: make nginx" >&2
@@ -27,6 +28,8 @@ fi
 cleanup() {
     [ "$PUB_A" != "0" ] && kill -KILL "$PUB_A" 2>/dev/null || true
     [ "$PUB_B" != "0" ] && kill -KILL "$PUB_B" 2>/dev/null || true
+    [ "$PUB_CORRUPT" != "0" ] \
+        && kill -KILL "$PUB_CORRUPT" 2>/dev/null || true
     "$NGINX" -p "$RUN" -c conf/nginx.conf -s quit 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -153,7 +156,7 @@ echo "== corrupt source a"
 kill -KILL "$PUB_A" 2>/dev/null || true
 PUB_A=0
 publish_corrupt 8
-
+PUB_CORRUPT=$!
 sleep 4
 
 # the corrupt publisher must not disturb the program: b is still serving
@@ -185,13 +188,14 @@ echo "   hls segments after the faults: $SEGMENTS"
 
 grep -aq 'continuity_errors' "$RUN/logs/error.log" \
     || { echo "no demux statistics were reported" >&2; exit 1; }
-
 echo "== stop"
 [ "$PUB_A" != "0" ] && kill -KILL "$PUB_A" 2>/dev/null || true
 [ "$PUB_B" != "0" ] && kill -KILL "$PUB_B" 2>/dev/null || true
+[ "$PUB_CORRUPT" != "0" ] \
+    && kill -KILL "$PUB_CORRUPT" 2>/dev/null || true
 PUB_A=0
 PUB_B=0
-pkill -KILL -f "mode=caller&streamid=#!::r=live/fault" 2>/dev/null || true
+PUB_CORRUPT=0
 
 sleep 1
 

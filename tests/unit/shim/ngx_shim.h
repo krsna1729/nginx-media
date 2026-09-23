@@ -8,6 +8,17 @@
  * Keep this surface tiny: only types and primitives the core actually uses.
  */
 
+/*
+ * The production build is handed its POSIX feature macros by ngx_config.h,
+ * which is included before any libc header.  Host-side sources the unit
+ * harness compiles - the HLS readers, which sleep with usleep() and read a
+ * directory with stdio - are written against that surface, so the same macro
+ * has to be set here, and before the first libc header below.
+ */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+
 #include <stddef.h>
 #include <stdint.h>
 #include <errno.h>
@@ -107,6 +118,16 @@ extern int ngx_media_test_fail_alloc;
 #define NGX_LOG_DEBUG   8
 
 #define ngx_errno       errno
+
+/*
+ * nginx keeps the millisecond clock in a global its event loop refreshes.
+ * A unit build has no event loop, so the shim reads the monotonic clock on
+ * every use instead of caching it: the value the health model sees is then
+ * always fresh and never goes backwards.
+ */
+ngx_msec_t ngx_media_test_msec(void);
+
+#define ngx_current_msec  ngx_media_test_msec()
 
 void ngx_log_error(ngx_uint_t level, ngx_log_t *log, int err,
     const char *fmt, ...);

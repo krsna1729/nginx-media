@@ -90,10 +90,10 @@ for i in $(seq 1 40); do
     NAME="news$i"
     HASH="$(python3 - "$NAME" <<'PY'
 import sys
-h = 2166136261
+h = 14695981039346656037
 for b in b"live/" + sys.argv[1].encode():
     h ^= b
-    h = (h * 16777619) & 0xffffffff
+    h = (h * 1099511628211) & ((1 << 64) - 1)
 print(h % 2)
 PY
 )"
@@ -155,6 +155,49 @@ printf '%s' "$PROBE" | grep -q ',aac,audio' \
 # the program is owned by worker 1, so its outputs were driven there
 grep -q 'worker 1 routing ready' "$RUN/logs/error.log" \
     || { echo "worker 1 was not serving" >&2; exit 1; }
+
+echo "== destination mutations are refused on a replica"
+python3 - "$HTTP_PORT" "$OWNER1" <<'PY'
+import http.client
+import json
+import sys
+
+port = int(sys.argv[1])
+name = sys.argv[2]
+detail_path = f"/media/api/v1/streams/live/{name}"
+dest_path = f"{detail_path}/destinations"
+body = json.dumps({
+    "id": "wrong-worker",
+    "type": "srt",
+    "host": "127.0.0.1",
+    "port": 1,
+    "streamid": "#!::r=live/%s,m=publish,s=wrong-worker" % name,
+})
+
+for _ in range(100):
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+    conn.request("GET", detail_path)
+    response = conn.getresponse()
+    detail = json.loads(response.read())
+
+    if not detail.get("observed_here", True):
+        conn.request("POST", dest_path, body=body,
+                     headers={"Content-Type": "application/json"})
+        response = conn.getresponse()
+        result = response.read().decode()
+        if response.status != 409 or '"error":"not_owner"' not in result:
+            raise SystemExit(
+                "replica accepted destination mutation: "
+                f"{response.status} {result}"
+            )
+        print("   replica refused the destination mutation with 409")
+        conn.close()
+        break
+
+    conn.close()
+else:
+    raise SystemExit("HTTP requests never reached the replica worker")
+PY
 
 echo "== stop"
 kill -KILL "$PUB" 2>/dev/null || true
