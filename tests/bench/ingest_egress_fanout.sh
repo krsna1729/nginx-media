@@ -73,6 +73,8 @@
 #   HI_BITRATE=45M PHASES=ingest ...                    more aggressive
 #   make bench-capacity-curve
 #   PHASES=capacity-saturated ...                  only 4x250 SRT fanout
+#   PHASES=capacity-slow-reader ...               only SRT slow-reader case
+#   PHASES=capacity-sustained ...                  only sustained case
 
 set -uo pipefail
 
@@ -2628,6 +2630,18 @@ phase_capacity_saturated() {
         "$CAPACITY_SATURATED_SECONDS" srt
 }
 
+phase_capacity_slow_reader() {
+    echo "   slow-reader: rate=$CAPACITY_SLOW_RATE window=${CAPACITY_SLOW_SECONDS}s"
+    capacity_case "slow-reader-isolation" 1 "$CAPACITY_SLOW_RATE" 4 \
+        "$CAPACITY_SLOW_SECONDS" srt d0000
+}
+
+phase_capacity_sustained() {
+    capacity_case "sustained" "$CAPACITY_SUSTAINED_PROGRAMS" \
+        "$CAPACITY_SUSTAINED_RATE" "$CAPACITY_SUSTAINED_DESTS" \
+        "$CAPACITY_SUSTAINED_SECONDS"
+}
+
 # --- run --------------------------------------------------------------------
 
 rm -rf "$RUN"
@@ -2664,6 +2678,8 @@ for phase in $PHASES; do
         topology) phase_topology ;;
         capacity) phase_capacity || exit 1 ;;
         capacity-saturated) phase_capacity_saturated || exit 1 ;;
+        capacity-slow-reader) phase_capacity_slow_reader || exit 1 ;;
+        capacity-sustained) phase_capacity_sustained || exit 1 ;;
     esac
 done
 
@@ -2679,7 +2695,9 @@ echo "               answers, metrics read on the owner's own connection"
 echo "   throughput: chunks/s and bytes/s are the workers' own drained totals"
 echo "   cpu:        per thread, percent of one core, over the measured window"
 if [[ " $PHASES " == *" capacity "* \
-   || " $PHASES " == *" capacity-saturated "* ]]; then
+   || " $PHASES " == *" capacity-saturated "* \
+   || " $PHASES " == *" capacity-slow-reader "* \
+   || " $PHASES " == *" capacity-sustained "* ]]; then
     echo "   receivers:  one shared SRT listener per SRT case; RTMP receiver"
     echo "               payload is counted on the RTMP listener; the harness"
     echo "               process CPU rows cover nginx workers only"
