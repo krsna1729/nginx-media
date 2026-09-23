@@ -36,7 +36,7 @@ HTTP_PORT="${FANOUT_HTTP_PORT:-$(( BASE + 1 ))}"
 RTMP_PORT="${FANOUT_RTMP_PORT:-$(( BASE + 2 ))}"
 
 API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
-HLS_URL="http://127.0.0.1:$HTTP_PORT/hls"
+HLS_URL="http://127.0.0.1:$HTTP_PORT/hls/live/bench"
 
 WORKERS="${WORKERS:-1}"
 CONSUMERS="${CONSUMERS:-16}"
@@ -54,14 +54,12 @@ PUB_SECONDS="${PUB_SECONDS:-75}"
 # noise.
 PLAYER_MEMORY_BOUND_KB="${PLAYER_MEMORY_BOUND_KB:-8192}"
 
-# one tick is 100ms; a visit that took a tenth of that would already be a
-# stall, and under this load a visit is over in under a millisecond
+# the worker tick is 100ms; visits should remain below the 10ms service bound
+# under this load, leaving headroom for scheduling and clock granularity.
 TICK_SERVICE_BOUND_MS="${TICK_SERVICE_BOUND_MS:-10}"
 
-# the backlog the burst phase has to build for the per-visit bound to mean
-# anything.  The program feed retains at most 2048 units, and a burst faster
-# than the reaper fills it: this is the backlog that says the visits really did
-# have tens of 64-unit reads to do, not the handful a paced source leaves.
+# A burst should bring the retained feed near its 2048-unit capacity. This
+# checks retention only; the budget-requeue counter proves work yielded.
 BACKLOG_BOUND_UNITS="${BACKLOG_BOUND_UNITS:-2000}"
 
 PUB=0
@@ -199,12 +197,17 @@ require_worker() {
 metric() {
     local out
 
-    # the first matching sample; sed quits on the match so nothing gets a
-    # SIGPIPE that pipefail would turn into a failure
-    out="$(curl -fsS "$API/metrics" 2>/dev/null \
-           | sed -n "/^$1 /{s/^$1 //;p;q;}")" \
-        || { echo "the metrics endpoint did not answer: something outside" \
-                  "this bench killed this run's nginx" >&2
+    # Consume the full response so curl does not see EPIPE after the sample.
+    out="$(curl -fsS --max-time 5 "$API/metrics" 2>&1 \
+           | sed -n "/^$1 /{s/^$1 //;p;}")" \
+        || { echo "metrics request error: $out" >&2
+             if [ -n "$(worker_pids)" ]; then
+                 echo "metrics request failed while this bench's worker" \
+                      "was present" >&2
+             else
+                 echo "metrics request failed after this bench's worker" \
+                      "disappeared" >&2
+             fi
              exit 1; }
 
     printf '%s' "$out"
@@ -298,25 +301,25 @@ echo "   $SEGMENTS segments closed, program frames $(stream_field program_frames
 
 echo "== receiver storm: $CONSUMERS concurrent hls fetches for 12s"
 
-# one curl process holds the consumer count open: --parallel-max is the number
-# of concurrent connections, and the loop re-reads the playlist so freshly
-# closed segments are fetched too
+# Re-read the playlist as it advances and issue one current-segment request per
+# consumer. Avoid stale historical URIs that the segmenter has already pruned.
 storm() {
-    local list="$RUN/urls.txt" name
+    local list="$RUN/urls.txt" name i
 
     while :; do
-        : > "$list"
+        name="$(awk '/\.ts$/ { name = $0 } END { print name }' \
+                "$RUN/hls/live/bench/index.m3u8" 2>/dev/null || true)"
 
-        for name in $(grep -v '^#' "$RUN/hls/live/bench/index.m3u8" 2>/dev/null \
-                      | grep '\.ts$' || true); do
-            printf 'url = "%s/%s"\noutput = "/dev/null"\n' \
-                "$HLS_URL" "$name" >> "$list"
-        done
-
-        if [ ! -s "$list" ]; then
+        if [ -z "$name" ]; then
             sleep 0.2
             continue
         fi
+
+        : > "$list"
+        for ((i = 0; i < CONSUMERS; i++)); do
+            printf 'url = "%s/%s"\noutput = "/dev/null"\n' \
+                "$HLS_URL" "$name" >> "$list"
+        done
 
         curl -fsS --parallel --parallel-max "$CONSUMERS" \
             --config "$list" >/dev/null 2>&1 || true
@@ -490,12 +493,12 @@ echo "   seven more players added ${ADDED_KB} kB" \
      "< ${PLAYER_MEMORY_BOUND_KB} kB bound: a connection costs a session" \
      "and its chunk headers, not a copy of the program's media"
 
-# --- a deep backlog: what one scheduler visit costs -----------------------
+# --- a saturated feed: what one scheduler visit costs --------------------
 
 echo
-echo "== burst source: a real backlog, to price one scheduler visit"
-echo "   (a visit takes the feed in 64-unit reads, so a backlog this deep"
-echo "    needs several reads per visit -- and stays bounded regardless)"
+echo "== burst source: bound visit work while the feed is saturated"
+echo "   (a visit yields at its shared 64-frame budget and reposts if work"
+echo "    remains, rather than draining the feed before other nginx work)"
 
 for p in $PLAYERS; do
     kill_pid "$p"
@@ -505,9 +508,10 @@ PLAYERS=""
 kill_pid "$PUB"
 PUB=0
 
-# no -re: the encoder publishes 60s of media in a couple of seconds, so the
-# program feed fills to its 2048-unit ceiling and the visits have tens of
-# 64-unit reads to do instead of the handful a paced source leaves behind
+REPOSTS_BEFORE="$(metric nginx_media_worker_budget_reposts_total)"
+
+# no -re: the encoder publishes 60s of media in a couple of seconds, driving
+# the feed toward its retained-window ceiling and forcing bounded visits.
 ffmpeg -hide_banner -loglevel error \
     -f lavfi -i "testsrc2=size=1280x720:rate=25" \
     -f lavfi -i "sine=frequency=440:sample_rate=48000" -ac 2 \
@@ -521,7 +525,7 @@ PUB=$!
 wait "$PUB" 2>/dev/null || true
 PUB=0
 
-# let the remaining ticks walk what the burst left in the ring
+# allow queued visits to consume remaining work after the burst
 sleep 3
 
 require_worker "the burst"
@@ -529,21 +533,23 @@ require_worker "the burst"
 BACKLOG_BYTES="$(metric 'nginx_media_stream_feed_bytes{application="live",name="bench"}')"
 BACKLOG_UNITS="$(metric 'nginx_media_stream_feed_units{application="live",name="bench"}')"
 BURST_SERVICE_MS="$(metric nginx_media_worker_max_service_ms)"
+BURST_REPOSTS="$(metric nginx_media_worker_budget_reposts_total)"
 BURST_LATE="$(metric nginx_media_worker_late_ticks_total)"
 
-echo "   backlog:          ${BACKLOG_UNITS} units, ${BACKLOG_BYTES} bytes retained"
+echo "   feed retained:   ${BACKLOG_UNITS} units, ${BACKLOG_BYTES} bytes"
 echo "                     (paced source left ${FEED_BYTES} bytes)"
 echo "   worst visit:      ${BURST_SERVICE_MS} ms"
 echo "   late ticks:       ${BURST_LATE}"
+echo "   budget reposts:   $(( BURST_REPOSTS - REPOSTS_BEFORE ))"
 
 [ "${BACKLOG_UNITS:-0}" -ge "$BACKLOG_BOUND_UNITS" ] \
-    || { echo "the burst left only ${BACKLOG_UNITS} units retained, under" \
-              "the ${BACKLOG_BOUND_UNITS} the per-visit bound is supposed to" \
-              "hold against" >&2
+    || { echo "the burst retained only ${BACKLOG_UNITS} units, below" \
+              "the ${BACKLOG_BOUND_UNITS} needed to exercise a saturated" \
+              "feed" >&2
          exit 1; }
 
-echo "   the backlog is ${BACKLOG_UNITS} units deep, so visits really did" \
-     "have tens of 64-unit reads to do"
+echo "   the feed retained ${BACKLOG_UNITS} units; the requeue counter" \
+     "confirms a visit yielded while media work remained"
 
 [ "${BURST_SERVICE_MS:-9999}" -lt "$TICK_SERVICE_BOUND_MS" ] \
     || { echo "a scheduler visit took ${BURST_SERVICE_MS}ms with a" \
@@ -556,6 +562,10 @@ echo "   the backlog is ${BACKLOG_UNITS} units deep, so visits really did" \
     || { echo "$BURST_LATE ticks were late by more than half the interval" \
               "with a deep backlog" >&2
          exit 1; }
+
+[ "$BURST_REPOSTS" -gt "$REPOSTS_BEFORE" ] \
+    || { echo "a full visit did not requeue its remaining media backlog" \
+         >&2; exit 1; }
 
 echo "   every visit stayed under ${TICK_SERVICE_BOUND_MS}ms and on schedule"
 

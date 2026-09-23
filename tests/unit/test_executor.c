@@ -31,6 +31,8 @@ typedef struct {
     ngx_uint_t failed;
     ngx_uint_t stopped;
     ngx_uint_t epochs;
+    ngx_uint_t io_active;
+    ngx_uint_t io_inactive;
     size_t     output_bytes;
 } executor_test_state_t;
 
@@ -67,6 +69,17 @@ executor_event(void *ctx, const ngx_media_executor_event_t *event)
         break;
     }
 }
+static void
+executor_io(void *ctx, ngx_uint_t active)
+{
+    executor_test_state_t *state = ctx;
+
+    if (active) {
+        state->io_active++;
+    } else {
+        state->io_inactive++;
+    }
+}
 
 int
 main(void)
@@ -91,6 +104,7 @@ main(void)
     TEST_ASSERT_EQ_INT(ngx_media_executor_init(&executor, &conf,
                                                executor_output, executor_event,
                                                &state, NULL), NGX_OK);
+    ngx_media_executor_set_io_callback(&executor, executor_io);
     payload = ngx_media_buf_alloc(8);
     TEST_ASSERT_NOT_NULL(payload);
     (void) ngx_media_buf_freeze(payload, 8);
@@ -99,6 +113,7 @@ main(void)
 
     TEST_CASE("child exit is reaped and restart is bounded");
     TEST_ASSERT_EQ_INT(ngx_media_executor_start(&executor, 0, NULL), NGX_OK);
+    TEST_ASSERT(state.io_active > 0);
     TEST_ASSERT_EQ_INT(ngx_media_executor_feed(&executor, payload, 0, 8),
                        NGX_OK);
 
@@ -111,6 +126,7 @@ main(void)
     TEST_ASSERT_EQ_INT(ngx_media_executor_state(&executor),
                        NGX_MEDIA_EXECUTOR_RESTARTING);
     TEST_ASSERT_EQ_U64(ngx_media_executor_pending(&executor), 0);
+    TEST_ASSERT(state.io_inactive > 0);
     TEST_ASSERT(state.epochs > 0);
 
     TEST_CASE("stop closes descriptors and emits lifecycle event");
@@ -119,6 +135,7 @@ main(void)
                        NGX_MEDIA_EXECUTOR_STOPPED);
     TEST_ASSERT(state.stopped > 0);
     TEST_ASSERT_EQ_U64(ngx_media_executor_pending_bytes(&executor), 0);
+    TEST_ASSERT(state.io_inactive > 0);
 
     ngx_media_buf_unref(payload);
     ngx_memzero(&event, sizeof(event));

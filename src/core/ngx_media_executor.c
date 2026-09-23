@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #ifndef PATH_MAX
@@ -36,6 +37,9 @@ static void ngx_media_executor_read_error(ngx_media_executor_t *executor,
     ngx_log_t *log);
 static void ngx_media_executor_write_input(ngx_media_executor_t *executor,
     ngx_log_t *log);
+static void ngx_media_executor_reap(ngx_media_executor_t *executor,
+    ngx_msec_t now, ngx_log_t *log);
+static int ngx_media_executor_pidfd(pid_t pid);
 
 void
 ngx_media_executor_conf_default(ngx_media_executor_conf_t *conf)
@@ -106,6 +110,7 @@ ngx_media_executor_init(ngx_media_executor_t *executor,
     executor->event = event;
     executor->ctx = ctx;
     executor->pid = -1;
+    executor->pid_fd = -1;
     executor->input_fd = -1;
     executor->output_fd = -1;
     executor->error_fd = -1;
@@ -114,6 +119,15 @@ ngx_media_executor_init(ngx_media_executor_t *executor,
 
     return NGX_OK;
 }
+void
+ngx_media_executor_set_io_callback(ngx_media_executor_t *executor,
+    ngx_media_executor_io_pt io)
+{
+    if (executor != NULL) {
+        executor->io = io;
+    }
+}
+
 
 static void
 ngx_media_executor_close_fd(int *fd)
@@ -123,6 +137,17 @@ ngx_media_executor_close_fd(int *fd)
         *fd = -1;
     }
 }
+static int
+ngx_media_executor_pidfd(pid_t pid)
+{
+#if defined(__linux__) && defined(SYS_pidfd_open)
+    return (int) syscall(SYS_pidfd_open, pid, 0);
+#else
+    (void) pid;
+    return -1;
+#endif
+}
+
 
 static void
 ngx_media_executor_close_inherited(void)
@@ -326,6 +351,7 @@ ngx_media_executor_spawn(ngx_media_executor_t *executor, ngx_msec_t now,
     (void) close(error_pipe[1]);
 
     executor->pid = pid;
+    executor->pid_fd = ngx_media_executor_pidfd(pid);
     executor->input_fd = input_pipe[1];
     executor->output_fd = output_pipe[0];
     executor->error_fd = error_pipe[0];
@@ -333,6 +359,10 @@ ngx_media_executor_spawn(ngx_media_executor_t *executor, ngx_msec_t now,
     executor->started_at = now;
     executor->restart_at = 0;
     executor->epoch++;
+
+    if (executor->io != NULL) {
+        executor->io(executor->ctx, 1);
+    }
 
     ngx_media_executor_event(executor,
                              (executor->restarts == 0)
@@ -459,12 +489,22 @@ ngx_media_executor_read_error(ngx_media_executor_t *executor, ngx_log_t *log)
 {
     u_char  buffer[4096];
     ssize_t n;
+    size_t  total = 0;
+    size_t  amount;
 
-    while (executor->error_fd >= 0) {
-        n = read(executor->error_fd, buffer, sizeof(buffer) - 1);
+    while (executor->error_fd >= 0
+           && total < NGX_MEDIA_EXECUTOR_IO_BUDGET)
+    {
+        amount = sizeof(buffer) - 1;
+        if (amount > NGX_MEDIA_EXECUTOR_IO_BUDGET - total) {
+            amount = NGX_MEDIA_EXECUTOR_IO_BUDGET - total;
+        }
+
+        n = read(executor->error_fd, buffer, amount);
 
         if (n > 0) {
             executor->error_bytes += (uint64_t) n;
+            total += (size_t) n;
             buffer[n] = '\0';
             ngx_log_error(NGX_LOG_WARN, log, 0, "media executor: %s", buffer);
             continue;
@@ -533,16 +573,52 @@ ngx_media_executor_write_input(ngx_media_executor_t *executor, ngx_log_t *log)
 }
 
 static void
+ngx_media_executor_reap(ngx_media_executor_t *executor, ngx_msec_t now,
+    ngx_log_t *log)
+{
+    int    status;
+    pid_t  result;
+
+    if (executor == NULL || executor->state != NGX_MEDIA_EXECUTOR_RUNNING
+        || executor->pid <= 0)
+    {
+        return;
+    }
+
+    result = waitpid(executor->pid, &status, WNOHANG);
+
+    if (result == executor->pid) {
+        ngx_media_executor_dead(executor, now, status, log);
+        return;
+    }
+
+    if (result == -1 && errno != EINTR) {
+        ngx_media_executor_dead(executor, now, errno, log);
+        return;
+    }
+
+    if (executor->started_at != 0 && now - executor->started_at > 10000) {
+        executor->restarts = 0;
+        executor->backoff = executor->conf.restart_min;
+    }
+}
+
+static void
 ngx_media_executor_dead(ngx_media_executor_t *executor, ngx_msec_t now,
     int status, ngx_log_t *log)
 {
     pid_t pid;
+
+    if (executor->io != NULL) {
+        executor->io(executor->ctx, 0);
+    }
 
     if (executor->pid > 0) {
         pid = executor->pid;
         (void) kill(-pid, SIGKILL);
         (void) waitpid(pid, NULL, 0);
     }
+    ngx_media_executor_close_fd(&executor->pid_fd);
     ngx_media_executor_close_fd(&executor->input_fd);
     ngx_media_executor_close_fd(&executor->output_fd);
     ngx_media_executor_close_fd(&executor->error_fd);
@@ -576,22 +652,12 @@ ngx_media_executor_dead(ngx_media_executor_t *executor, ngx_msec_t now,
 }
 
 void
-ngx_media_executor_tick(ngx_media_executor_t *executor, ngx_msec_t now,
+ngx_media_executor_io(ngx_media_executor_t *executor, ngx_msec_t now,
     ngx_log_t *log)
 {
-    int     status;
-    pid_t   result;
-
-    if (executor == NULL) {
-        return;
-    }
-
-    if (executor->state == NGX_MEDIA_EXECUTOR_RESTARTING) {
-        (void) ngx_media_executor_start(executor, now, log);
-        return;
-    }
-
-    if (executor->state != NGX_MEDIA_EXECUTOR_RUNNING) {
+    if (executor == NULL
+        || executor->state != NGX_MEDIA_EXECUTOR_RUNNING)
+    {
         return;
     }
 
@@ -604,22 +670,35 @@ ngx_media_executor_tick(ngx_media_executor_t *executor, ngx_msec_t now,
         return;
     }
 
-    result = waitpid(executor->pid, &status, WNOHANG);
+    ngx_media_executor_reap(executor, now, log);
+}
 
-    if (result == executor->pid) {
-        ngx_media_executor_dead(executor, now, status, log);
+void
+ngx_media_executor_maintenance(ngx_media_executor_t *executor,
+    ngx_msec_t now, ngx_log_t *log)
+{
+    if (executor == NULL) {
         return;
     }
 
-    if (result == -1 && errno != EINTR) {
-        ngx_media_executor_dead(executor, now, errno, log);
+    if (executor->state == NGX_MEDIA_EXECUTOR_RESTARTING) {
+        (void) ngx_media_executor_start(executor, now, log);
         return;
     }
 
-    if (executor->started_at != 0 && now - executor->started_at > 10000) {
-        executor->restarts = 0;
-        executor->backoff = executor->conf.restart_min;
+    ngx_media_executor_reap(executor, now, log);
+}
+
+void
+ngx_media_executor_tick(ngx_media_executor_t *executor, ngx_msec_t now,
+    ngx_log_t *log)
+{
+    if (executor == NULL) {
+        return;
     }
+
+    ngx_media_executor_maintenance(executor, now, log);
+    ngx_media_executor_io(executor, now, log);
 }
 
 void
@@ -633,6 +712,10 @@ ngx_media_executor_stop(ngx_media_executor_t *executor, ngx_log_t *log)
         return;
     }
 
+    if (executor->io != NULL) {
+        executor->io(executor->ctx, 0);
+    }
+
     pid = executor->pid;
 
     if (pid > 0) {
@@ -641,6 +724,7 @@ ngx_media_executor_stop(ngx_media_executor_t *executor, ngx_log_t *log)
         (void) waitpid(pid, NULL, 0);
     }
 
+    ngx_media_executor_close_fd(&executor->pid_fd);
     ngx_media_executor_close_fd(&executor->input_fd);
     ngx_media_executor_close_fd(&executor->output_fd);
     ngx_media_executor_close_fd(&executor->error_fd);

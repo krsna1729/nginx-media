@@ -968,6 +968,11 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "media wakeup requests coalesced into a posted visit\n"
                          "# TYPE nginx_media_worker_wakeup_coalesced_total "
                          "counter\n"
+                         "# HELP nginx_media_worker_budget_reposts_total "
+                         "runtime visits that exhausted their budget and "
+                         "requested another media wakeup; posts may coalesce\n"
+                         "# TYPE nginx_media_worker_budget_reposts_total "
+                         "counter\n"
                          "nginx_media_runtime_outputs %ui\n"
                          "nginx_media_streams_draining %ui\n"
                          "nginx_media_worker_event_loop_delay_ms %M\n"
@@ -977,6 +982,7 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "nginx_media_worker_media_only_visits_total %uL\n"
                          "nginx_media_worker_wakeups_total %uL\n"
                          "nginx_media_worker_wakeup_coalesced_total %uL\n"
+                         "nginx_media_worker_budget_reposts_total %uL\n"
                          "# HELP nginx_media_worker_service_ms "
                          "how long the last runtime visit took; periodic "
                          "visits include maintenance and media progress\n"
@@ -1029,6 +1035,7 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          stats.last_gap, stats.max_gap, stats.late_ticks,
                          stats.periodic_visits, stats.media_only_visits,
                          stats.wakeups, stats.wakeup_coalesced,
+                         stats.budget_reposts,
                          stats.last_service, stats.max_service,
                          stats.reconnecting,
                          ngx_media_route_broadcast_undelivered(),

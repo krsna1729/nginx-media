@@ -44,6 +44,7 @@ void ngx_media_hls_ingest_close(ngx_media_hls_ingest_source_t *source);
  * whose thread has already stopped.  Called from the periodic runtime visit:
  * a delete has to take the reader with it, and the reader holds a thread.
  */
+void ngx_media_hls_ingest_reap(ngx_log_t *log);
 
 /*
  * How many ingest readers still reference this stream, which is the

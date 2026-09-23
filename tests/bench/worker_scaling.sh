@@ -17,10 +17,10 @@
 #           so a request can land on a worker that has never heard of the
 #           stream.  This is the number that says how usable the API is at a
 #           given worker count.
-#   single  one program carried to one consumer: frames out and fanout delay
-#   many    four programs at once: total frames as sampled through the API.
-#           Owner telemetry and the error log are the ground truth when a
-#           load-balanced read lands on a replica and undercounts this column.
+#   single  one program carried to one consumer: owner-side program frames and
+#           fanout delay.
+#   many    four programs at once: the sum of owner-side program frames.  API
+#           reads/writes remain a separate load-balanced control-plane metric.
 #
 # Conditions are printed with the numbers, because a fanout figure without
 # them means nothing.
@@ -78,7 +78,7 @@ http {
     access_log off;
 
     server {
-        listen 127.0.0.1:$HTTP_PORT;
+        listen 127.0.0.1:$HTTP_PORT reuseport;
 
         location /media/api/ { media_api; }
         location /hls/       { alias $RUN/hls/; }
@@ -131,37 +131,13 @@ EOF
         -d "{\"id\":\"file1\",\"type\":\"file\",\"path\":\"$RUN/media/source.ts\"}" \
         "$API/streams/live/scale/sources" >/dev/null 2>&1
 
-    # Progress is shared from the owner directory; wait for positive progress
-    # so a replica's transient zero cannot become a benchmark result.  The
-    # telemetry below still reports whether the sampled response was local.
-    read_field() {
-        local path="$1" field="$2" doc v
-
-        for _ in $(seq 1 40); do
-            doc="$(curl -fsS "$API$path" 2>/dev/null || true)"
-            v="$(printf '%s' "$doc" | python3 -c '
-import json
-import sys
-
-try:
-    value = json.load(sys.stdin).get(sys.argv[1], "")
-    print(value)
-except Exception:
-    print("")
-' "$field")"
-            if [ -n "$v" ] && [ "$v" -gt 0 ]; then
-                printf '%s' "$v"
-                return
-            fi
-            sleep 0.25
-        done
-
-        printf '0'
-    }
-    stream_summary() {
+    # The headline counters must come from the deterministic owner.  The
+    # benchmark still reports arbitrary API read/write success separately, but
+    # never treats a replica's zero as media loss.
+    owner_doc() {
         local path="$1" doc here
 
-        for _ in $(seq 1 40); do
+        for _ in $(seq 1 80); do
             doc="$(curl -fsS "$API$path" 2>/dev/null || true)"
             here="$(printf '%s' "$doc" | python3 -c '
 import json
@@ -172,9 +148,41 @@ try:
 except Exception:
     print("false")
 ')"
-            [ "$here" = true ] && break
+            if [ "$here" = true ]; then
+                printf '%s' "$doc"
+                return 0
+            fi
             sleep 0.1
         done
+
+        return 1
+    }
+    owner_field() {
+        local path="$1" field="$2" doc v
+
+        doc="$(owner_doc "$path")" || return 1
+        v="$(printf '%s' "$doc" | python3 -c '
+import json
+import sys
+
+try:
+    print(json.load(sys.stdin).get(sys.argv[1], ""))
+except Exception:
+    print("")
+' "$field")"
+        case "$v" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        printf '%s' "$v"
+    }
+    stream_summary() {
+        local path="$1" doc
+
+        doc="$(owner_doc "$path" 2>/dev/null || true)"
+        if [ -z "$doc" ]; then
+            echo "owner=unavailable"
+            return
+        fi
 
         printf '%s' "$doc" | python3 -c '
 import json
@@ -199,7 +207,8 @@ print("owner=%s observed_here=%s frames=%s active=%s sources=%s" % (
 
 
     sleep 6
-    single="$(read_field /streams/live/scale program_frames)"
+    single="$(owner_field /streams/live/scale program_frames)" \
+        || { echo "could not sample scale owner progress" >&2; exit 1; }
     echo "   scale telemetry: $(stream_summary /streams/live/scale)"
 
     # four programs at once: this is the half that should scale
@@ -212,8 +221,9 @@ print("owner=%s observed_here=%s frames=%s active=%s sources=%s" % (
     sleep 6
     many=0
     for id in a b c d; do
-        n="$(read_field "/streams/live/w-$id" program_frames)"
-        many=$(( many + ${n:-0} ))
+        n="$(owner_field "/streams/live/w-$id" program_frames)" \
+            || { echo "could not sample w-$id owner progress" >&2; exit 1; }
+        many=$(( many + n ))
     done
     for id in a b c d; do
         echo "   w-$id telemetry: $(stream_summary /streams/live/w-$id)"

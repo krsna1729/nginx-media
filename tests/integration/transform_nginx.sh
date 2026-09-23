@@ -164,6 +164,9 @@ printf '%s' "$PROBE" | grep -q '^h264,320,180$' \
 grep -q 'transform executor started' "$RUN/logs/error.log" \
     || { echo "the external executor did not start" >&2; exit 1; }
 
+grep -q 'transform executor event wiring ready' "$RUN/logs/error.log" \
+    || { echo "the external executor was not wired into nginx events" >&2; exit 1; }
+
 grep -q 'transform executor' "$RUN/logs/error.log" \
     || { echo "the executor emitted no lifecycle log" >&2; exit 1; }
 

@@ -48,6 +48,8 @@ typedef void (*ngx_media_executor_output_pt)(void *ctx, const u_char *data,
     size_t len, uint64_t epoch);
 typedef void (*ngx_media_executor_event_pt)(void *ctx,
     const ngx_media_executor_event_t *event);
+typedef void (*ngx_media_executor_io_pt)(void *ctx, ngx_uint_t active);
+
 
 typedef struct {
     ngx_media_buf_t *buf;
@@ -56,11 +58,11 @@ typedef struct {
 } ngx_media_executor_chunk_t;
 
 typedef struct {
-    ngx_media_executor_conf_t  conf;
+    ngx_media_executor_conf_t   conf;
     ngx_media_executor_output_pt output;
     ngx_media_executor_event_pt  event;
+    ngx_media_executor_io_pt     io;
     void                        *ctx;
-
     ngx_media_executor_chunk_t  input[NGX_MEDIA_EXECUTOR_MAX_INPUT_CHUNKS];
     ngx_uint_t                  input_head;
     ngx_uint_t                  input_tail;
@@ -68,6 +70,7 @@ typedef struct {
     size_t                      input_bytes;
 
     pid_t                       pid;
+    int                         pid_fd;
     int                         input_fd;
     int                         output_fd;
     int                         error_fd;
@@ -88,6 +91,8 @@ ngx_int_t ngx_media_executor_init(ngx_media_executor_t *executor,
     const ngx_media_executor_conf_t *conf,
     ngx_media_executor_output_pt output, ngx_media_executor_event_pt event,
     void *ctx, ngx_log_t *log);
+void ngx_media_executor_set_io_callback(ngx_media_executor_t *executor,
+    ngx_media_executor_io_pt io);
 
 /* Starts one direct-exec ffmpeg child.  No worker thread is created. */
 ngx_int_t ngx_media_executor_start(ngx_media_executor_t *executor,
@@ -96,6 +101,19 @@ ngx_int_t ngx_media_executor_start(ngx_media_executor_t *executor,
 /* Queues one immutable MPEG-TS burst without blocking the caller. */
 ngx_int_t ngx_media_executor_feed(ngx_media_executor_t *executor,
     ngx_media_buf_t *buf, size_t offset, size_t len);
+
+/*
+ * Drains child I/O without blocking and reaps an observed exit.  Descriptor
+ * handlers call this; it never waits for the child or restarts it.
+ */
+void ngx_media_executor_io(ngx_media_executor_t *executor, ngx_msec_t now,
+    ngx_log_t *log);
+/*
+ * Performs restart scheduling and the fallback child reaper.  It never reads
+ * or writes the executor pipes when the caller has installed I/O events.
+ */
+void ngx_media_executor_maintenance(ngx_media_executor_t *executor,
+    ngx_msec_t now, ngx_log_t *log);
 
 /* Drains child I/O, reaps exits, and performs bounded restart work. */
 void ngx_media_executor_tick(ngx_media_executor_t *executor, ngx_msec_t now,

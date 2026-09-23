@@ -29,6 +29,7 @@
  */
 #define NGX_MEDIA_HLS_PULL_URL_MAX       4096
 #define NGX_MEDIA_HLS_EVENT_CAPACITY     128
+#define NGX_MEDIA_HLS_EVENT_DRAIN_MAX    32
 #define NGX_MEDIA_HLS_EVENT_MAX_TRACKS   NGX_MEDIA_TS_DEFAULT_TRACKS
 
 enum {
@@ -144,9 +145,11 @@ static ngx_int_t ngx_media_hls_pull_event_push(
     ngx_media_hls_pull_t *pull, ngx_media_hls_event_t *event);
 static ngx_int_t ngx_media_hls_pull_event_pop(
     ngx_media_hls_pull_t *pull, ngx_media_hls_event_t *event);
+static ngx_uint_t ngx_media_hls_pull_event_pending(
+    ngx_media_hls_pull_t *pull);
 static void ngx_media_hls_pull_event_clear(
     ngx_media_hls_pull_t *pull);
-static void ngx_media_hls_pull_event_drain(
+static ngx_uint_t ngx_media_hls_pull_event_drain(
     ngx_media_hls_pull_t *pull);
 #ifndef NGX_MEDIA_UNIT_TEST
 static void ngx_media_hls_pull_notify(
@@ -306,7 +309,11 @@ ngx_media_hls_pull_notify_handler(ngx_event_t *ev)
 
     (void) read(pull->notify_fd, &value, sizeof(value));
     pull->notified = 0;
-    ngx_media_hls_pull_event_drain(pull);
+    if (ngx_media_hls_pull_event_drain(pull)) {
+#ifndef NGX_MEDIA_UNIT_TEST
+        ngx_media_hls_pull_notify(pull);
+#endif
+    }
 }
 
 
@@ -395,6 +402,22 @@ ngx_media_hls_pull_event_pop(ngx_media_hls_pull_t *pull,
 
     return NGX_OK;
 }
+static ngx_uint_t
+ngx_media_hls_pull_event_pending(ngx_media_hls_pull_t *pull)
+{
+    ngx_uint_t  pending;
+
+    if (pull == NULL || !pull->events_mutex_initialized) {
+        return 0;
+    }
+
+    (void) pthread_mutex_lock(&pull->events_mutex);
+    pending = pull->events_tail != pull->events_head;
+    (void) pthread_mutex_unlock(&pull->events_mutex);
+
+    return pending;
+}
+
 
 static void
 ngx_media_hls_pull_event_clear(ngx_media_hls_pull_t *pull)
@@ -410,20 +433,21 @@ ngx_media_hls_pull_event_clear(ngx_media_hls_pull_t *pull)
     }
 }
 
-static void
+static ngx_uint_t
 ngx_media_hls_pull_event_drain(ngx_media_hls_pull_t *pull)
 {
+    ngx_uint_t             i;
     ngx_media_hls_event_t  event;
     ngx_media_trackset_t   tracks;
     ngx_media_source_t    *source;
 
     if (pull == NULL) {
-        return;
+        return 0;
     }
 
-    for ( ;; ) {
+    for (i = 0; i < NGX_MEDIA_HLS_EVENT_DRAIN_MAX; i++) {
         if (ngx_media_hls_pull_event_pop(pull, &event) != NGX_OK) {
-            return;
+            return 0;
         }
 
         source = pull->source;
@@ -464,6 +488,8 @@ ngx_media_hls_pull_event_drain(ngx_media_hls_pull_t *pull)
 
         ngx_media_hls_pull_event_release(&event);
     }
+
+    return ngx_media_hls_pull_event_pending(pull);
 }
 
 static void
@@ -1181,7 +1207,11 @@ ngx_media_hls_pull_drain_all(void)
     (void) pthread_mutex_lock(&ngx_media_hls_pull_mutex);
 
     for (pull = ngx_media_hls_pull_all; pull != NULL; pull = pull->next) {
-        ngx_media_hls_pull_event_drain(pull);
+        if (ngx_media_hls_pull_event_drain(pull)) {
+#ifndef NGX_MEDIA_UNIT_TEST
+            ngx_media_hls_pull_notify(pull);
+#endif
+        }
     }
 
     (void) pthread_mutex_unlock(&ngx_media_hls_pull_mutex);

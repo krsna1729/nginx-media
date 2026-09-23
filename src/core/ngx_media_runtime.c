@@ -16,6 +16,8 @@
 #include "ngx_media_selector.h"
 #include "ngx_media_source.h"
 #include "ngx_media_ts_demux.h"
+
+#include <time.h>
 /*
  * Per-stream outputs.  The program feed is drained on every runtime visit,
  * muxed into one burst and handed to HLS and to the PROGRAM recording; the
@@ -51,11 +53,77 @@ typedef struct {
     ngx_media_trackset_t  *package_tracks;
     unsigned               package_burst_open:1;
     unsigned               transform_ready:1;
+    unsigned               executor_events_ready:1;
+
+    ngx_connection_t      *executor_input_connection;
+    ngx_connection_t      *executor_output_connection;
+    ngx_connection_t      *executor_error_connection;
+    ngx_connection_t      *executor_pid_connection;
 
     uint64_t               generation;
     uint64_t               frames;
     uint64_t               bursts;
 } ngx_media_runtime_outputs_t;
+
+typedef struct {
+    ngx_uint_t  frames;
+    size_t      bytes;
+    ngx_msec_t  started;
+    ngx_uint_t  exhausted;
+} ngx_media_runtime_budget_t;
+
+static ngx_msec_t
+ngx_media_runtime_clock_msec(void)
+{
+#if defined(CLOCK_MONOTONIC)
+    struct timespec  ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return (ngx_msec_t) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    }
+#endif
+
+    return ngx_current_msec;
+}
+
+static ngx_uint_t
+ngx_media_runtime_budget_ready(ngx_media_runtime_budget_t *budget)
+{
+    if (budget == NULL) {
+        return 0;
+    }
+
+    if (budget->frames >= NGX_MEDIA_RUNTIME_VISIT_MAX_FRAMES
+        || budget->bytes >= NGX_MEDIA_RUNTIME_VISIT_MAX_BYTES
+        || (budget->frames > 0
+            && ngx_media_runtime_clock_msec() - budget->started
+               >= NGX_MEDIA_RUNTIME_VISIT_MAX_MS))
+    {
+        budget->exhausted = 1;
+        return 0;
+    }
+
+    return 1;
+}
+
+static void
+ngx_media_runtime_budget_account(ngx_media_runtime_budget_t *budget,
+    ngx_media_frame_t *frames, ngx_uint_t count)
+{
+    ngx_uint_t  i;
+
+    if (budget == NULL) {
+        return;
+    }
+
+    budget->frames += count;
+
+    for (i = 0; i < count; i++) {
+        if (frames[i].payload != NULL) {
+            budget->bytes += frames[i].payload->len;
+        }
+    }
+}
 
 /* Per-stream player preparation: one conversion shared by every RTMP player. */
 typedef struct {
@@ -236,6 +304,240 @@ static void ngx_media_runtime_transform_output(void *ctx, const u_char *data,
     size_t len, uint64_t epoch);
 static void ngx_media_runtime_transform_event(void *ctx,
     const ngx_media_executor_event_t *event);
+static void ngx_media_runtime_executor_io(void *ctx, ngx_uint_t active);
+static void ngx_media_runtime_executor_output_handler(ngx_event_t *ev);
+static void ngx_media_runtime_executor_error_handler(ngx_event_t *ev);
+static void ngx_media_runtime_executor_input_handler(ngx_event_t *ev);
+static void ngx_media_runtime_executor_pid_handler(ngx_event_t *ev);
+static void ngx_media_runtime_executor_update_input(
+    ngx_media_runtime_outputs_t *out);
+static void
+ngx_media_runtime_executor_close_connection(ngx_connection_t **connection,
+    ngx_uint_t write)
+{
+    ngx_connection_t  *c;
+
+    if (connection == NULL || *connection == NULL) {
+        return;
+    }
+
+    c = *connection;
+
+    if (write) {
+        if (c->write->active) {
+            (void) ngx_del_event(c->write, NGX_WRITE_EVENT, 0);
+        }
+
+    } else {
+        if (c->read->active) {
+            (void) ngx_del_event(c->read, NGX_READ_EVENT, 0);
+        }
+    }
+
+    c->fd = (ngx_socket_t) -1;
+    ngx_free_connection(c);
+    *connection = NULL;
+}
+static void
+ngx_media_runtime_executor_unwire(ngx_media_runtime_outputs_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+
+    out->executor_events_ready = 0;
+    ngx_media_runtime_executor_close_connection(
+        &out->executor_input_connection, 1);
+    ngx_media_runtime_executor_close_connection(
+        &out->executor_output_connection, 0);
+    ngx_media_runtime_executor_close_connection(
+        &out->executor_error_connection, 0);
+    ngx_media_runtime_executor_close_connection(
+        &out->executor_pid_connection, 0);
+}
+
+
+static void
+ngx_media_runtime_executor_io(void *ctx, ngx_uint_t active)
+{
+    ngx_media_runtime_outputs_t  *out = ctx;
+    ngx_connection_t             *c;
+    ngx_log_t                     *log;
+
+    if (out == NULL) {
+        return;
+    }
+
+    if (!active) {
+        ngx_media_runtime_executor_unwire(out);
+        return;
+    }
+
+    log = ngx_cycle->log;
+    ngx_media_runtime_executor_unwire(out);
+
+    c = ngx_get_connection(out->executor.output_fd, log);
+    if (c == NULL) {
+        goto failed;
+    }
+    out->executor_output_connection = c;
+    c->data = out;
+    c->read->handler = ngx_media_runtime_executor_output_handler;
+    c->read->log = log;
+
+    if (ngx_add_event(c->read, NGX_READ_EVENT, 0) != NGX_OK) {
+        goto failed;
+    }
+
+    c = ngx_get_connection(out->executor.error_fd, log);
+    if (c == NULL) {
+        goto failed;
+    }
+    out->executor_error_connection = c;
+    c->data = out;
+    c->read->handler = ngx_media_runtime_executor_error_handler;
+    c->read->log = log;
+
+    if (ngx_add_event(c->read, NGX_READ_EVENT, 0) != NGX_OK) {
+        goto failed;
+    }
+
+    c = ngx_get_connection(out->executor.input_fd, log);
+    if (c == NULL) {
+        goto failed;
+    }
+    out->executor_input_connection = c;
+    c->data = out;
+    c->write->handler = ngx_media_runtime_executor_input_handler;
+    c->write->log = log;
+
+    if (out->executor.pid_fd >= 0) {
+        c = ngx_get_connection(out->executor.pid_fd, log);
+        if (c == NULL) {
+            goto failed;
+        }
+        out->executor_pid_connection = c;
+        c->data = out;
+        c->read->handler = ngx_media_runtime_executor_pid_handler;
+        c->read->log = log;
+
+        if (ngx_add_event(c->read, NGX_READ_EVENT, 0) != NGX_OK) {
+            goto failed;
+        }
+    }
+
+    out->executor_events_ready = 1;
+    ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                  "media: transform executor event wiring ready for %V/%V "
+                  "pidfd=%ui",
+                  &out->stream->application, &out->stream->name,
+                  (ngx_uint_t) (out->executor.pid_fd >= 0));
+    ngx_media_runtime_executor_update_input(out);
+    return;
+
+failed:
+    ngx_log_error(NGX_LOG_WARN, log, 0,
+                  "media: transform executor event wiring failed for %V/%V; "
+                  "using runtime fallback",
+                  &out->stream->application, &out->stream->name);
+    ngx_media_runtime_executor_unwire(out);
+}
+
+static void
+ngx_media_runtime_executor_update_input(ngx_media_runtime_outputs_t *out)
+{
+    ngx_connection_t  *c;
+    ngx_uint_t         want;
+
+    if (out == NULL || !out->executor_events_ready
+        || out->executor_input_connection == NULL)
+    {
+        return;
+    }
+
+    c = out->executor_input_connection;
+    want = (ngx_media_executor_state(&out->executor)
+            == NGX_MEDIA_EXECUTOR_RUNNING
+            && ngx_media_executor_pending(&out->executor) > 0);
+
+    if (want && !c->write->active) {
+        if (ngx_add_event(c->write, NGX_WRITE_EVENT, 0) != NGX_OK) {
+            ngx_media_runtime_executor_unwire(out);
+        }
+
+    } else if (!want && c->write->active) {
+        (void) ngx_del_event(c->write, NGX_WRITE_EVENT, 0);
+    }
+}
+
+static void
+ngx_media_runtime_executor_output_handler(ngx_event_t *ev)
+{
+    ngx_connection_t            *c;
+    ngx_media_runtime_outputs_t *out;
+
+    c = ev != NULL ? ev->data : NULL;
+    out = c != NULL ? c->data : NULL;
+    if (out == NULL) {
+        return;
+    }
+
+    ngx_media_executor_io(&out->executor, ngx_current_msec, ev->log);
+    ngx_media_runtime_executor_update_input(out);
+    ngx_media_runtime_wakeup();
+}
+
+static void
+ngx_media_runtime_executor_error_handler(ngx_event_t *ev)
+{
+    ngx_connection_t            *c;
+    ngx_media_runtime_outputs_t *out;
+
+    c = ev != NULL ? ev->data : NULL;
+    out = c != NULL ? c->data : NULL;
+    if (out == NULL) {
+        return;
+    }
+
+    ngx_media_executor_io(&out->executor, ngx_current_msec, ev->log);
+    ngx_media_runtime_executor_update_input(out);
+    ngx_media_runtime_wakeup();
+}
+
+static void
+ngx_media_runtime_executor_input_handler(ngx_event_t *ev)
+{
+    ngx_connection_t            *c;
+    ngx_media_runtime_outputs_t *out;
+
+    c = ev != NULL ? ev->data : NULL;
+    out = c != NULL ? c->data : NULL;
+    if (out == NULL) {
+        return;
+    }
+
+    ngx_media_executor_io(&out->executor, ngx_current_msec, ev->log);
+    ngx_media_runtime_executor_update_input(out);
+    ngx_media_runtime_wakeup();
+}
+
+static void
+ngx_media_runtime_executor_pid_handler(ngx_event_t *ev)
+{
+    ngx_connection_t            *c;
+    ngx_media_runtime_outputs_t *out;
+
+    c = ev != NULL ? ev->data : NULL;
+    out = c != NULL ? c->data : NULL;
+    if (out == NULL) {
+        return;
+    }
+
+    ngx_media_executor_io(&out->executor, ngx_current_msec, ev->log);
+    ngx_media_runtime_executor_update_input(out);
+    ngx_media_runtime_wakeup();
+}
+
 static void ngx_media_runtime_transform_tracks(void *ctx,
     const ngx_media_trackset_t *tracks);
 static void ngx_media_runtime_transform_frame(void *ctx,
@@ -243,7 +545,8 @@ static void ngx_media_runtime_transform_frame(void *ctx,
 static void ngx_media_runtime_package_flush(
     ngx_media_runtime_outputs_t *out);
 static void ngx_media_runtime_package_drain(
-    ngx_media_runtime_outputs_t *out, ngx_log_t *log);
+    ngx_media_runtime_outputs_t *out, ngx_log_t *log,
+    ngx_media_runtime_budget_t *budget);
 static ngx_uint_t ngx_media_runtime_burst_keyframe(
     const ngx_media_ts_burst_t *burst);
 static ngx_int_t
@@ -311,6 +614,8 @@ ngx_media_runtime_transform_init(ngx_media_runtime_outputs_t *out,
         ngx_media_ts_mux_destroy(&out->package_mux);
         return NGX_ERROR;
     }
+    ngx_media_executor_set_io_callback(&out->executor,
+                                      ngx_media_runtime_executor_io);
 
     out->transform_ready = 1;
 
@@ -451,15 +756,47 @@ ngx_media_runtime_package_flush(ngx_media_runtime_outputs_t *out)
 
 static void
 ngx_media_runtime_package_drain(ngx_media_runtime_outputs_t *out,
-    ngx_log_t *log)
+    ngx_log_t *log, ngx_media_runtime_budget_t *budget)
 {
     ngx_media_frame_t  frames[64];
-    ngx_uint_t          count, i, status;
+    ngx_uint_t          count, i, status, max_units;
+    size_t              max_bytes;
 
     for (;;) {
+        if (!ngx_media_runtime_budget_ready(budget)) {
+            break;
+        }
+
+        max_units = 64;
+        max_bytes = 512 * 1024;
+
+        if (budget != NULL) {
+            if (max_units > NGX_MEDIA_RUNTIME_VISIT_MAX_FRAMES
+                              - budget->frames)
+            {
+                max_units = NGX_MEDIA_RUNTIME_VISIT_MAX_FRAMES
+                            - budget->frames;
+            }
+
+            if (max_bytes > NGX_MEDIA_RUNTIME_VISIT_MAX_BYTES
+                              - budget->bytes)
+            {
+                max_bytes = NGX_MEDIA_RUNTIME_VISIT_MAX_BYTES
+                            - budget->bytes;
+            }
+        }
+
+        if (max_units == 0 || max_bytes == 0) {
+            if (budget != NULL) {
+                budget->exhausted = 1;
+            }
+            break;
+        }
+
         status = ngx_media_feed_read(&out->prepared_feed.feed,
-                                     &out->prepared_cursor, 64, 512 * 1024,
-                                     ngx_current_msec, frames, &count);
+                                     &out->prepared_cursor, max_units,
+                                     max_bytes, ngx_current_msec, frames,
+                                     &count);
 
         if (status == NGX_MEDIA_FEED_GENERATION_MISMATCH
             || status == NGX_MEDIA_FEED_OVERRUN)
@@ -477,6 +814,8 @@ ngx_media_runtime_package_drain(ngx_media_runtime_outputs_t *out,
         if (status != NGX_MEDIA_FEED_BATCH) {
             break;
         }
+
+        ngx_media_runtime_budget_account(budget, frames, count);
 
         if (out->package_tracks != NULL
             && ngx_media_ts_mux_set_tracks(&out->package_mux,
@@ -746,6 +1085,7 @@ ngx_media_runtime_outputs_flush(ngx_media_runtime_outputs_t *out)
                               &out->stream->application, &out->stream->name);
             }
         }
+        ngx_media_runtime_executor_update_input(out);
 
         out->bursts++;
         ngx_media_ts_mux_burst_destroy(&out->burst);
@@ -808,11 +1148,12 @@ ngx_media_runtime_iso_flush(ngx_media_runtime_outputs_t *out)
 
 static void
 ngx_media_runtime_outputs_drain(ngx_media_runtime_outputs_t *out,
-    ngx_log_t *log)
+    ngx_log_t *log, ngx_media_runtime_budget_t *budget)
 {
     ngx_media_frame_t   frames[64];
     ngx_media_stream_t  *stream = out->stream;
-    ngx_uint_t           count, i, status;
+    ngx_uint_t           count, i, status, max_units;
+    size_t               max_bytes;
 
     if (out->generation != stream->generation) {
         out->generation = stream->generation;
@@ -837,9 +1178,39 @@ ngx_media_runtime_outputs_drain(ngx_media_runtime_outputs_t *out,
 
 
     for ( ;; ) {
-        status = ngx_media_feed_read(&stream->program_feed, &out->cursor, 64,
-                                     512 * 1024, ngx_current_msec, frames,
-                                     &count);
+        if (!ngx_media_runtime_budget_ready(budget)) {
+            break;
+        }
+
+        max_units = 64;
+        max_bytes = 512 * 1024;
+
+        if (budget != NULL) {
+            if (max_units > NGX_MEDIA_RUNTIME_VISIT_MAX_FRAMES
+                              - budget->frames)
+            {
+                max_units = NGX_MEDIA_RUNTIME_VISIT_MAX_FRAMES
+                            - budget->frames;
+            }
+
+            if (max_bytes > NGX_MEDIA_RUNTIME_VISIT_MAX_BYTES
+                              - budget->bytes)
+            {
+                max_bytes = NGX_MEDIA_RUNTIME_VISIT_MAX_BYTES
+                            - budget->bytes;
+            }
+        }
+
+        if (max_units == 0 || max_bytes == 0) {
+            if (budget != NULL) {
+                budget->exhausted = 1;
+            }
+            break;
+        }
+
+        status = ngx_media_feed_read(&stream->program_feed, &out->cursor,
+                                     max_units, max_bytes, ngx_current_msec,
+                                     frames, &count);
 
         if (status == NGX_MEDIA_FEED_GENERATION_MISMATCH) {
             /* a switch is a discontinuity for every consumer */
@@ -862,6 +1233,7 @@ ngx_media_runtime_outputs_drain(ngx_media_runtime_outputs_t *out,
         if (status != NGX_MEDIA_FEED_BATCH) {
             break;
         }
+        ngx_media_runtime_budget_account(budget, frames, count);
 
         if (stream->active != NULL && stream->active->tracks != NULL
             && out->tracks != stream->active->tracks)
@@ -910,8 +1282,12 @@ ngx_media_runtime_outputs_drain(ngx_media_runtime_outputs_t *out,
         ngx_media_runtime_outputs_flush(out);
     }
     if (out->transform_ready) {
-        ngx_media_executor_tick(&out->executor, ngx_current_msec, log);
-        ngx_media_runtime_package_drain(out, log);
+        ngx_media_executor_maintenance(&out->executor, ngx_current_msec, log);
+
+        if (!out->executor_events_ready) {
+            ngx_media_executor_io(&out->executor, ngx_current_msec, log);
+        }
+        ngx_media_runtime_package_drain(out, log, budget);
     }
 
 }
@@ -1590,11 +1966,13 @@ ngx_media_runtime_prepare(ngx_media_stream_t *stream, ngx_log_t *log)
 }
 
 static void
-ngx_media_runtime_prepare_drain(ngx_media_stream_t *stream, ngx_log_t *log)
+ngx_media_runtime_prepare_drain(ngx_media_stream_t *stream, ngx_log_t *log,
+    ngx_media_runtime_budget_t *budget)
 {
     ngx_media_runtime_prepare_t  *slot;
     ngx_media_frame_t             frames[NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK];
-    ngx_uint_t                    count, i, status;
+    ngx_uint_t                    count, i, status, max_units;
+    size_t                        max_bytes;
 
     for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_PREPARE; i++) {
 
@@ -1611,10 +1989,39 @@ ngx_media_runtime_prepare_drain(ngx_media_stream_t *stream, ngx_log_t *log)
 found:
 
     for ( ;; ) {
+        if (!ngx_media_runtime_budget_ready(budget)) {
+            break;
+        }
+
+        max_units = NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK;
+        max_bytes = 1024 * 1024;
+
+        if (budget != NULL) {
+            if (max_units > NGX_MEDIA_RUNTIME_VISIT_MAX_FRAMES
+                              - budget->frames)
+            {
+                max_units = NGX_MEDIA_RUNTIME_VISIT_MAX_FRAMES
+                            - budget->frames;
+            }
+
+            if (max_bytes > NGX_MEDIA_RUNTIME_VISIT_MAX_BYTES
+                              - budget->bytes)
+            {
+                max_bytes = NGX_MEDIA_RUNTIME_VISIT_MAX_BYTES
+                            - budget->bytes;
+            }
+        }
+
+        if (max_units == 0 || max_bytes == 0) {
+            if (budget != NULL) {
+                budget->exhausted = 1;
+            }
+            break;
+        }
+
         status = ngx_media_feed_read(&stream->program_feed, &slot->cursor,
-                                     NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK,
-                                     1024 * 1024, ngx_current_msec, frames,
-                                     &count);
+                                     max_units, max_bytes, ngx_current_msec,
+                                     frames, &count);
 
         if (status == NGX_MEDIA_FEED_GENERATION_MISMATCH
             || status == NGX_MEDIA_FEED_OVERRUN)
@@ -1628,6 +2035,7 @@ found:
         if (status != NGX_MEDIA_FEED_BATCH) {
             break;
         }
+        ngx_media_runtime_budget_account(budget, frames, count);
 
         if (stream->active != NULL && stream->active->tracks != NULL
             && slot->tracks != stream->active->tracks)
@@ -1786,7 +2194,7 @@ ngx_media_runtime_wakeup(void)
     ngx_media_runtime_stats.wakeups++;
 }
 
-static void
+static ngx_uint_t
 ngx_media_runtime_visit(ngx_log_t *log)
 {
     ngx_media_registry_t        *registry;
@@ -1794,17 +2202,20 @@ ngx_media_runtime_visit(ngx_log_t *log)
     ngx_media_selector_result_t  res;
     ngx_media_stream_t          *stream;
     ngx_media_policy_t          *policy;
+    ngx_msec_t                   now;
+    ngx_media_runtime_budget_t   budget;
     ngx_queue_t                 *q;
     uint64_t                     before = 0;
-    ngx_msec_t                   now;
 
     if (ngx_media_runtime_in_tick) {
-        return;
+        return 0;
     }
 
     ngx_media_runtime_in_tick = 1;
 
     now = ngx_current_msec;
+    ngx_memzero(&budget, sizeof(budget));
+    budget.started = ngx_media_runtime_clock_msec();
     policy = ngx_media_runtime_policy();
 
     /*
@@ -1848,7 +2259,7 @@ ngx_media_runtime_visit(ngx_log_t *log)
 
     if (registry == NULL) {
         ngx_media_runtime_in_tick = 0;
-        return;
+        return 0;
     }
 
     if (ngx_media_runtime_timer_visit) {
@@ -1883,6 +2294,10 @@ ngx_media_runtime_visit(ngx_log_t *log)
          q != (ngx_queue_t *) &registry->entries;
          q = q->next)
     {
+        if (!ngx_media_runtime_budget_ready(&budget)) {
+            break;
+        }
+
         entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
         stream = &entry->stream;
 
@@ -1929,7 +2344,8 @@ ngx_media_runtime_visit(ngx_log_t *log)
         if (policy != NULL
             && (policy->hls_path.len > 0
                 || policy->record_program_path.len > 0
-                || policy->record_iso_path.len > 0))
+                || policy->record_iso_path.len > 0
+                || policy->transform_executor.executable.len > 0))
         {
             ngx_media_runtime_outputs_t  *out;
 
@@ -1947,12 +2363,16 @@ ngx_media_runtime_visit(ngx_log_t *log)
                     ngx_media_hls_push_scan(&out->hls.conf.path, log);
                 }
 
-                ngx_media_runtime_outputs_drain(out, log);
+                ngx_media_runtime_outputs_drain(out, log, &budget);
             }
         }
 
         if (stream->active != NULL && stream->active->tracks != NULL) {
-            ngx_media_runtime_prepare_drain(stream, log);
+            ngx_media_runtime_prepare_drain(stream, log, &budget);
+        }
+
+        if (budget.exhausted) {
+            break;
         }
 
         if (ngx_media_runtime_timer_visit) {
@@ -1990,7 +2410,7 @@ ngx_media_runtime_visit(ngx_log_t *log)
     }
 
     {
-        ngx_msec_t  service = ngx_current_msec - now;
+        ngx_msec_t  service = ngx_media_runtime_clock_msec() - budget.started;
 
         ngx_media_runtime_stats.last_service = service;
 
@@ -2003,21 +2423,36 @@ ngx_media_runtime_visit(ngx_log_t *log)
         ngx_media_runtime_last_idle_log = now;
     }
     ngx_media_runtime_in_tick = 0;
+    return budget.exhausted;
 }
 void
 ngx_media_runtime_periodic_visit(ngx_log_t *log)
 {
+    ngx_uint_t  more;
+
     ngx_media_runtime_timer_visit = 1;
-    ngx_media_runtime_visit(log);
+    more = ngx_media_runtime_visit(log);
     ngx_media_runtime_timer_visit = 0;
+
+    if (more) {
+        ngx_media_runtime_stats.budget_reposts++;
+        ngx_media_runtime_wakeup();
+    }
 }
 
 
 void
 ngx_media_runtime_media_visit(ngx_log_t *log)
 {
+    ngx_uint_t  more;
+
     ngx_media_runtime_timer_visit = 0;
-    ngx_media_runtime_visit(log);
+    more = ngx_media_runtime_visit(log);
+
+    if (more) {
+        ngx_media_runtime_stats.budget_reposts++;
+        ngx_media_runtime_wakeup();
+    }
 }
 
 

@@ -19,6 +19,14 @@
 #define NGX_MEDIA_RUNTIME_MAX_OUTPUTS     16
 #define NGX_MEDIA_RUNTIME_MAX_PREPARE     16
 #define NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK 64
+
+/*
+ * A visit is a fairness slice, not a drain-until-empty operation.  When work
+ * remains, another posted media wakeup gives other nginx work a turn first.
+ */
+#define NGX_MEDIA_RUNTIME_VISIT_MAX_FRAMES 64
+#define NGX_MEDIA_RUNTIME_VISIT_MAX_BYTES  (4 * 1024 * 1024)
+#define NGX_MEDIA_RUNTIME_VISIT_MAX_MS     2
 #define NGX_MEDIA_RUNTIME_HLS_TARGET      6000
 
 /*
@@ -112,6 +120,7 @@ typedef struct {
      */
     uint64_t    wakeups;
     uint64_t    wakeup_coalesced;
+    uint64_t    budget_reposts;  /* budget exhaustion requeue requests */
 
     /*
      * Duration of the current runtime visit.  A periodic visit includes

@@ -42,6 +42,7 @@ void ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull);
  * a delete has to take the reader with it, and the reader holds a thread.
  */
 
+void ngx_media_hls_pull_reap(ngx_log_t *log);
 /*
  * How many pull readers still reference this stream, which is the pool-release
  * gate: a reader is unlinked by its close, and close() joins its thread first,

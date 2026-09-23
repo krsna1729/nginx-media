@@ -18,6 +18,7 @@
 #define NGX_MEDIA_HLS_INGEST_SEEN         256
 #define NGX_MEDIA_HLS_INGEST_NAME_MAX     256
 #define NGX_MEDIA_HLS_EVENT_CAPACITY      128
+#define NGX_MEDIA_HLS_EVENT_DRAIN_MAX     32
 #define NGX_MEDIA_HLS_EVENT_MAX_TRACKS    NGX_MEDIA_TS_DEFAULT_TRACKS
 
 enum {
@@ -112,9 +113,11 @@ static ngx_int_t ngx_media_hls_ingest_event_push(
     ngx_media_hls_ingest_source_t *ingest, ngx_media_hls_event_t *event);
 static ngx_int_t ngx_media_hls_ingest_event_pop(
     ngx_media_hls_ingest_source_t *ingest, ngx_media_hls_event_t *event);
+static ngx_uint_t ngx_media_hls_ingest_event_pending(
+    ngx_media_hls_ingest_source_t *ingest);
 static void ngx_media_hls_ingest_event_clear(
     ngx_media_hls_ingest_source_t *ingest);
-static void ngx_media_hls_ingest_event_drain(
+static ngx_uint_t ngx_media_hls_ingest_event_drain(
     ngx_media_hls_ingest_source_t *ingest);
 #ifndef NGX_MEDIA_UNIT_TEST
 static void ngx_media_hls_ingest_notify(
@@ -275,7 +278,11 @@ ngx_media_hls_ingest_notify_handler(ngx_event_t *ev)
 
     (void) read(ingest->notify_fd, &value, sizeof(value));
     ingest->notified = 0;
-    ngx_media_hls_ingest_event_drain(ingest);
+    if (ngx_media_hls_ingest_event_drain(ingest)) {
+#ifndef NGX_MEDIA_UNIT_TEST
+        ngx_media_hls_ingest_notify(ingest);
+#endif
+    }
 }
 
 
@@ -364,6 +371,22 @@ ngx_media_hls_ingest_event_pop(ngx_media_hls_ingest_source_t *ingest,
 
     return NGX_OK;
 }
+static ngx_uint_t
+ngx_media_hls_ingest_event_pending(ngx_media_hls_ingest_source_t *ingest)
+{
+    ngx_uint_t  pending;
+
+    if (ingest == NULL || !ingest->events_mutex_initialized) {
+        return 0;
+    }
+
+    (void) pthread_mutex_lock(&ingest->events_mutex);
+    pending = ingest->events_tail != ingest->events_head;
+    (void) pthread_mutex_unlock(&ingest->events_mutex);
+
+    return pending;
+}
+
 
 static void
 ngx_media_hls_ingest_event_clear(ngx_media_hls_ingest_source_t *ingest)
@@ -379,20 +402,21 @@ ngx_media_hls_ingest_event_clear(ngx_media_hls_ingest_source_t *ingest)
     }
 }
 
-static void
+static ngx_uint_t
 ngx_media_hls_ingest_event_drain(ngx_media_hls_ingest_source_t *ingest)
 {
+    ngx_uint_t             i;
     ngx_media_hls_event_t  event;
     ngx_media_trackset_t   tracks;
     ngx_media_source_t    *source;
 
     if (ingest == NULL) {
-        return;
+        return 0;
     }
 
-    for ( ;; ) {
+    for (i = 0; i < NGX_MEDIA_HLS_EVENT_DRAIN_MAX; i++) {
         if (ngx_media_hls_ingest_event_pop(ingest, &event) != NGX_OK) {
-            return;
+            return 0;
         }
 
         source = ingest->source;
@@ -433,6 +457,8 @@ ngx_media_hls_ingest_event_drain(ngx_media_hls_ingest_source_t *ingest)
 
         ngx_media_hls_ingest_event_release(&event);
     }
+
+    return ngx_media_hls_ingest_event_pending(ingest);
 }
 
 static void
@@ -984,7 +1010,11 @@ ngx_media_hls_ingest_drain_all(void)
     for (ingest = ngx_media_hls_ingest_all; ingest != NULL;
          ingest = ingest->next)
     {
-        ngx_media_hls_ingest_event_drain(ingest);
+        if (ngx_media_hls_ingest_event_drain(ingest)) {
+#ifndef NGX_MEDIA_UNIT_TEST
+            ngx_media_hls_ingest_notify(ingest);
+#endif
+        }
     }
 
     (void) pthread_mutex_unlock(&ngx_media_hls_ingest_mutex);
