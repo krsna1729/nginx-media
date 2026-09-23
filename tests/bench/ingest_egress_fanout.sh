@@ -40,11 +40,11 @@
 #            alternating, and one-program local/routed controls.  Every row
 #            includes input/program frames, feed pressure, preroll causes and
 #            route failures from the owning worker.
-#   capacity a fixed-worker offered-load curve: first add programs, then
-#            encoded bitrate, then destinations per program, followed by a
-#            sustained multi-program fairness window.  Each point records
-#            owner progress/fanout, per-worker CPU and visit metrics, feed
-#            pressure, and socket memory.
+#   capacity a fixed-worker offered-load curve: add programs, bitrate, and an
+#            exact single-program output ladder over SRT and RTMP, followed by
+#            a stalled-reader isolation case, saturated 4x250 SRT fanout, and
+#            sustained multi-program fairness.  Reports receiver bytes,
+#            sender-shard counters/CPU, per-worker resources, and fairness.
 #
 #
 # Publishers stream a pre-encoded file with -c copy, so what is measured is
@@ -52,14 +52,14 @@
 # once per worker, so worker i binds the i-th endpoint, and a publisher is
 # placed by choosing the endpoint it connects to.
 #
-# Thread identification: the threads this module creates are unnamed, and
-# nginx names every thread "nginx" (its own, the HLS push pool, the SRT
-# sender, the SRT ingest thread).  libsrt names its own - `SRT:RcvQ:wN`,
-# `SRT:SndQ:wN`, `SRT:TsbPd`, `SRT:GC` - so those are read from
-# /proc/<tid>/comm.  The worker's own threads are labelled once per instance
-# from a stack backtrace, because a detached thread is otherwise
-# indistinguishable from the worker's event loop; if that is unavailable the
-# labels fall back to comm and the conditions say so.
+# Thread identification: the fixed SRT egress shards name themselves
+# `srt-egress-00` through `srt-egress-15`, and the benchmark reads those names
+# from /proc/<tid>/comm.  libsrt names its own threads - `SRT:RcvQ:wN`,
+# `SRT:SndQ:wN`, `SRT:TsbPd`, `SRT:GC` - there too.  The worker's own
+# threads are labelled once per instance from a stack backtrace, because a
+# detached thread is otherwise indistinguishable from the worker's event
+# loop; if that is unavailable the labels fall back to comm and the
+# conditions say so.
 #
 # CPU is per thread from /proc/<pid>/task/<tid>/stat, and the window is the
 # wall time the two samples were taken over, not the sleep between them.
@@ -72,7 +72,7 @@
 #   PHASES=topology make bench-ingest-egress-fanout    owner matrix
 #   HI_BITRATE=45M PHASES=ingest ...                    more aggressive
 #   make bench-capacity-curve
-#   CAPACITY_WINDOW=2 CAPACITY_PROGRAM_STEPS="1 4" PHASES=capacity ... smoke
+#   PHASES=capacity-saturated ...                  only 4x250 SRT fanout
 
 set -uo pipefail
 
@@ -81,8 +81,8 @@ NGINX="$ROOT/.build/nginx-install/sbin/nginx"
 RUN="$ROOT/.build/ingest-egress-fanout"
 
 # ports from the pid, so two runs on one host cannot collide.  Each instance
-# owns a 256-wide block: endpoints 0-3, http and rtmp at +0/+1, destination
-# sinks from +20.
+# owns a 256-wide block: endpoints 0-3, http and rtmp at +0/+1; the shared
+# capacity receiver listens on +20.
 BASE=$(( 30000 + ($$ % 80) * 256 ))
 HTTP_PORT="$BASE"
 RTMP_PORT="$(( BASE + 1 ))"
@@ -129,13 +129,15 @@ CAPACITY_PROGRAM_DESTS="${CAPACITY_PROGRAM_DESTS:-1}"
 CAPACITY_BITRATE_STEPS="${CAPACITY_BITRATE_STEPS:-2M 6M 12M 20M}"
 CAPACITY_BITRATE_PROGRAMS="${CAPACITY_BITRATE_PROGRAMS:-4}"
 CAPACITY_BITRATE_DESTS="${CAPACITY_BITRATE_DESTS:-1}"
-CAPACITY_DEST_STEPS="${CAPACITY_DEST_STEPS:-1 2 4 8}"
-CAPACITY_DEST_PROGRAMS="${CAPACITY_DEST_PROGRAMS:-4}"
+CAPACITY_DEST_STEPS="${CAPACITY_DEST_STEPS:-1 8 32 64 128 256 512 1000}"
 CAPACITY_DEST_RATE="${CAPACITY_DEST_RATE:-6M}"
+CAPACITY_SLOW_RATE="${CAPACITY_SLOW_RATE:-20M}"
+CAPACITY_SLOW_SECONDS="${CAPACITY_SLOW_SECONDS:-30}"
 CAPACITY_SUSTAINED_SECONDS="${CAPACITY_SUSTAINED_SECONDS:-60}"
 CAPACITY_SUSTAINED_PROGRAMS="${CAPACITY_SUSTAINED_PROGRAMS:-4}"
 CAPACITY_SUSTAINED_RATE="${CAPACITY_SUSTAINED_RATE:-6M}"
 CAPACITY_SUSTAINED_DESTS="${CAPACITY_SUSTAINED_DESTS:-4}"
+CAPACITY_SATURATED_SECONDS="${CAPACITY_SATURATED_SECONDS:-15}"
 # -muxrate makes the offered rate a parameter, so the placed and routed runs
 # carry the same media and the CPU comparison is per unit carried
 MP_RATE="${MP_RATE:-20M}"
@@ -297,15 +299,18 @@ label_all() {
     done
 }
 
-role_of() {   # <pid> <tid> ; the backtrace label first, the comm name after
+role_of() {   # <pid> <tid> ; stable egress shard comm names take precedence
     local pid="$1" tid="$2" comm
+
+    comm="$(cat "/proc/$pid/task/$tid/comm" 2>/dev/null || echo unknown)"
+    case "$comm" in
+        srt-egress-*) printf '%s' "$comm"; return 0 ;;
+    esac
 
     if [ -n "${ROLE[$tid]:-}" ]; then
         printf '%s' "${ROLE[$tid]}"
         return 0
     fi
-
-    comm="$(cat "/proc/$pid/task/$tid/comm" 2>/dev/null || echo unknown)"
 
     case "$comm" in
         SRT:RcvQ*) printf 'SRT:RcvQ' ;;
@@ -371,7 +376,8 @@ detail_cpu() {   # <before> <after> <seconds>
     report_cpu "$1" "$2" "$3" | awk '
         $2 == "SRT:RcvQ" || $2 == "SRT:SndQ" || $2 == "SRT:TsbPd" \
         || $2 == "ingest" || $2 == "worker" || $2 == "srt-send" \
-        || $2 == "SRT:GC" || $2 == "hls-push" { print; next }
+        || $2 == "SRT:GC" || $2 == "hls-push" || $2 ~ /^srt-egress-/ \
+        { print; next }
         { other[$1] += $3 }
         END { for (w in other) printf "%s other %d\n", w, other[w] }
     ' | sort
@@ -1479,6 +1485,108 @@ capacity_metric() {   # <metrics snapshot> <metric>
     awk -v metric="$2" '$1 == metric { print $2; exit }' "$1"
 }
 
+capacity_rtmp_receiver_ready() {   # <metrics file> <programs> <destinations>
+    python3 - "$1" "$2" "$3" <<'PY'
+import re
+import sys
+
+programs = int(sys.argv[2])
+per_program = int(sys.argv[3])
+expected = {
+    (f"d{destination:04d}" if programs == 1
+     else f"p{program:04d}-d{destination:04d}")
+    for program in range(programs)
+    for destination in range(per_program)
+}
+received = {}
+with open(sys.argv[1], encoding="utf-8") as source:
+    for line in source:
+        match = re.match(
+            r"^nginx_media_source_payload_bytes_in_total\{(.*?)\}\s+([0-9]+)\s*$",
+            line,
+        )
+        if match is None:
+            continue
+        labels = dict(re.findall(
+            r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"])*)"',
+            match.group(1),
+        ))
+        name = labels.get("name")
+        if (labels.get("application") == "live"
+                and name in expected and labels.get("source") == name):
+            received[name] = int(match.group(2))
+raise SystemExit(
+    0 if received.keys() >= expected and all(received[name] > 0 for name in expected)
+    else 1
+)
+PY
+}
+
+capacity_rtmp_payload_report() {   # <before prefix> <after prefix> <programs> <destinations>
+    python3 - "$1" "$2" "$3" "$4" <<'PY'
+import glob
+import re
+import sys
+
+programs = int(sys.argv[3])
+per_program = int(sys.argv[4])
+expected = {
+    (f"d{destination:04d}" if programs == 1
+     else f"p{program:04d}-d{destination:04d}")
+    for program in range(programs)
+    for destination in range(per_program)
+}
+
+def read(prefix):
+    values = {}
+    for path in glob.glob(prefix + ".*"):
+        with open(path, encoding="utf-8") as source:
+            for line in source:
+                match = re.match(
+                    r"^nginx_media_source_payload_bytes_in_total\{(.*?)\}\s+([0-9]+)\s*$",
+                    line,
+                )
+                if match is None:
+                    continue
+                labels = dict(re.findall(
+                    r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"])*)"',
+                    match.group(1),
+                ))
+                name = labels.get("name")
+                if (labels.get("application") == "live"
+                        and name in expected and labels.get("source") == name):
+                    values[name] = values.get(name, 0) + int(match.group(2))
+    return values
+
+before = read(sys.argv[1])
+after = read(sys.argv[2])
+for label, values in (("before", before), ("after", after)):
+    missing = sorted(expected - values.keys())
+    if missing:
+        raise SystemExit(
+            f"RTMP {label} metrics missing destination streams: {missing[:4]}"
+        )
+deltas = {name: after[name] - before[name] for name in expected}
+undelivered = sorted(name for name, value in deltas.items() if value <= 0)
+if undelivered:
+    raise SystemExit(
+        f"RTMP destinations received no measured payload: {undelivered[:4]}"
+    )
+print(f"receiver_delivered_rtmp_payload_bytes={sum(deltas.values())}")
+print(f"rtmp_receiver_count={len(deltas)}")
+for name in sorted(deltas):
+    print(f"destination_{name} receiver_delivered_rtmp_payload_bytes={deltas[name]}")
+PY
+}
+
+capacity_destination_id() {   # <program index> <destination index> <program count>
+    if [ "$3" -eq 1 ]; then
+        printf 'd%04d' "$2"
+    else
+        printf 'p%04d-d%04d' "$1" "$2"
+    fi
+}
+
 capacity_percentile() {   # <metrics snapshot> <stream> <percentile>
     awk -v name="$2" -v percentile="$3" '
         index($1, "nginx_media_stream_fanout_delay_ms{") == 1 &&
@@ -1602,6 +1710,335 @@ if bps <= 0 or bps > 60_000_000:
 print(bps)
 PY
 }
+capacity_build_srt_sink() {
+    local source="$ROOT/tests/bench/srt_fanout_sink.c"
+    local binary="$RUN/srt_fanout_sink"
+    local -a cflags=() libs=()
+
+    [ -x "$binary" ] && return 0
+    command -v cc >/dev/null && command -v pkg-config >/dev/null \
+        && pkg-config --exists srt \
+        || { echo "cc, pkg-config, and libsrt are required for SRT capacity cases" \
+                 >&2; return 1; }
+    [ -f "$source" ] \
+        || { echo "missing shared SRT receiver helper: $source" >&2; return 1; }
+    read -r -a cflags <<< "$(pkg-config --cflags srt)"
+    read -r -a libs <<< "$(pkg-config --libs srt)"
+    cc -O2 -g -Wall -Wextra -Werror -std=c11 "${cflags[@]}" \
+        "$source" -o "$binary" "${libs[@]}" \
+        || { echo "could not build the shared SRT receiver helper" >&2; return 1; }
+}
+
+capacity_srt_csv_report() {   # <receiver CSV> <programs> <destinations> <stall ID> <before snapshot> <after snapshot>
+    python3 - "$1" "$2" "$3" "${4:-}" "$5" "$6" <<'PY'
+import csv
+import math
+import re
+import sys
+
+programs = int(sys.argv[2])
+per_program = int(sys.argv[3])
+expected = programs * per_program
+expected_stall = sys.argv[4]
+expected_ids = {
+    (f"d{destination:04d}" if programs == 1
+     else f"p{program:04d}-d{destination:04d}")
+    for program in range(programs)
+    for destination in range(per_program)
+}
+
+def snapshot(path):
+    values = {}
+    with open(path, newline="", encoding="utf-8") as source:
+        reader = csv.DictReader(source)
+        required = {"destination_id", "bytes_received"}
+        if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+            raise SystemExit(f"SRT snapshot {path} does not match its schema")
+        for row in reader:
+            destination = row["destination_id"]
+            try:
+                received = int(row["bytes_received"])
+            except (TypeError, ValueError):
+                raise SystemExit(f"invalid snapshot byte count for {destination}")
+            if received < 0 or destination in values:
+                raise SystemExit(f"invalid or duplicate snapshot row for {destination}")
+            values[destination] = received
+    if set(values) != expected_ids:
+        missing = sorted(expected_ids - set(values))
+        unexpected = sorted(set(values) - expected_ids)
+        raise SystemExit(
+            f"SRT snapshot IDs mismatch; missing={missing[:4]} "
+            f"unexpected={unexpected[:4]}"
+        )
+    return values
+
+before = snapshot(sys.argv[5])
+after = snapshot(sys.argv[6])
+if any(after[name] < before[name] for name in expected_ids):
+    raise SystemExit("SRT receiver byte counter decreased between snapshots")
+
+rows = []
+with open(sys.argv[1], newline="", encoding="utf-8") as source:
+    reader = csv.DictReader(source)
+    required = {"destination_id", "bytes_received", "first_ms", "stalled"}
+    if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+        raise SystemExit("SRT receiver CSV does not match its documented schema")
+    for row in reader:
+        destination = row["destination_id"]
+        try:
+            total_received = int(row["bytes_received"])
+        except (TypeError, ValueError):
+            raise SystemExit(f"invalid receiver byte count for {destination}")
+        if total_received < 0:
+            raise SystemExit(f"negative receiver byte count for {destination}")
+        try:
+            first_ms = float(row["first_ms"]) if row["first_ms"] else 0.0
+        except ValueError:
+            raise SystemExit(f"invalid first_ms for {destination}")
+        if not math.isfinite(first_ms):
+            raise SystemExit(f"invalid first_ms for {destination}")
+        stalled = row["stalled"].lower() in ("1", "true", "yes")
+        match = re.search(r"(?:^|-)p([0-9]+)-d[0-9]+$", destination)
+        program = int(match.group(1)) if match else 0
+        rows.append((destination, after[destination] - before[destination],
+                     total_received, first_ms, stalled, program))
+
+if len(rows) != expected:
+    raise SystemExit(
+        f"SRT receiver CSV has {len(rows)} destinations; expected {expected}"
+    )
+destinations = [row[0] for row in rows]
+if len(set(destinations)) != len(destinations):
+    raise SystemExit("SRT receiver CSV contains duplicate destination IDs")
+if set(destinations) != expected_ids:
+    missing = sorted(expected_ids - set(destinations))
+    unexpected = sorted(set(destinations) - expected_ids)
+    raise SystemExit(
+        f"SRT receiver IDs mismatch; missing={missing[:4]} "
+        f"unexpected={unexpected[:4]}"
+    )
+undelivered = [row[0] for row in rows if not row[4] and row[1] == 0]
+if undelivered:
+    raise SystemExit(
+        f"healthy SRT destinations received no payload in the measured window: "
+        f"{undelivered[:4]}"
+    )
+if expected_stall:
+    stalled_rows = [row for row in rows if row[0] == expected_stall]
+    if len(stalled_rows) != 1 or not stalled_rows[0][4]:
+        raise SystemExit(
+            f"slow-reader destination {expected_stall} was not reported stalled"
+        )
+    if stalled_rows[0][1] != 0:
+        raise SystemExit("the deliberately stalled SRT reader was consumed")
+    if sum(1 for row in rows if row[4]) != 1:
+        raise SystemExit("slow-reader case must report exactly one stalled destination")
+    if not any(row[1] > 0 and not row[4] for row in rows):
+        raise SystemExit("healthy SRT destinations received no payload in the measured window")
+
+def jain(values):
+    total = sum(values)
+    squares = sum(value * value for value in values)
+    return total * total / (len(values) * squares) if squares else 0.0
+
+totals = {}
+for _, received, _, _, _, program in rows:
+    totals[program] = totals.get(program, 0) + received
+stalled = [row for row in rows if row[4]]
+healthy = [row for row in rows if not row[4]]
+stalled_bytes = sum(row[1] for row in stalled)
+healthy_bytes = sum(row[1] for row in healthy)
+spread = max(row[3] for row in rows)
+print(f"receiver_delivered_bytes={sum(row[1] for row in rows)}")
+print(f"receiver_total_bytes={sum(row[2] for row in rows)}")
+print(f"destination_fairness_jain={jain([row[1] for row in rows]):.4f}")
+print(f"healthy_receiver_delivered_bytes={healthy_bytes}")
+print(f"healthy_destination_count={len(healthy)}")
+print(f"stalled_destination_count={len(stalled)}")
+print(f"stalled_receiver_delivered_bytes={stalled_bytes}")
+print(f"first_byte_spread_ms={spread:.3f}")
+print(f"program_fairness_jain={jain(list(totals.values())):.4f}")
+for program, received in sorted(totals.items()):
+    print(f"program_p{program:04d}_receiver_delivered_bytes={received}")
+for destination, received, total_received, first_ms, stalled, _ in rows:
+    print(f"destination_{destination} receiver_delivered_bytes={received} "
+          f"receiver_total_bytes={total_received} first_ms={first_ms:.3f} "
+          f"stalled={'yes' if stalled else 'no'}")
+PY
+}
+
+capacity_srt_receiver_snapshot() {   # <receiver PID> <snapshot path> <copy path>
+    local pid="$1" snapshot="$2" output="$3" attempt
+
+    rm -f "$snapshot" "$output" || return 1
+    kill -USR1 "$pid" 2>/dev/null \
+        || { echo "could not request SRT receiver snapshot" >&2; return 1; }
+    for attempt in $(seq 1 100); do
+        [ -s "$snapshot" ] && break
+        kill -0 "$pid" 2>/dev/null \
+            || { echo "SRT receiver exited before writing a snapshot" >&2; return 1; }
+        sleep 0.01
+    done
+    [ -s "$snapshot" ] \
+        || { echo "SRT receiver snapshot was not written" >&2; return 1; }
+    cp "$snapshot" "$output"
+}
+
+capacity_srt_incomplete_report() {   # <receiver snapshot> <programs> <destinations>
+    python3 - "$1" "$2" "$3" <<'PY'
+import csv
+import sys
+
+programs = int(sys.argv[2])
+per_program = int(sys.argv[3])
+expected_ids = {
+    (f"d{destination:04d}" if programs == 1
+     else f"p{program:04d}-d{destination:04d}")
+    for program in range(programs)
+    for destination in range(per_program)
+}
+with open(sys.argv[1], newline="", encoding="utf-8") as source:
+    reader = csv.DictReader(source)
+    if reader.fieldnames is None or "destination_id" not in reader.fieldnames:
+        raise SystemExit(f"SRT snapshot {sys.argv[1]} does not match its schema")
+    accepted = {row["destination_id"] for row in reader}
+missing = sorted(expected_ids - accepted)
+unexpected = sorted(accepted - expected_ids)
+print(f"SRT receiver accepted {len(accepted)} of {len(expected_ids)} peers; "
+      f"missing={missing[:16]} unexpected={unexpected[:4]}")
+PY
+}
+
+
+capacity_srt_metrics_report() {   # <before worker-metrics prefix> <after prefix>
+    python3 - "$1" "$2" <<'PY'
+import glob
+import math
+import os
+import re
+import sys
+
+metrics = (
+    "nginx_media_srt_egress_shard_destinations",
+    "nginx_media_srt_egress_shard_feed_queue_units",
+    "nginx_media_srt_egress_shard_feed_queue_bytes",
+    "nginx_media_srt_egress_shard_feed_queue_dropped_total",
+    "nginx_media_srt_egress_shard_output_queue_units",
+    "nginx_media_srt_egress_shard_output_queue_bytes",
+    "nginx_media_srt_egress_shard_output_dropped_total",
+    "nginx_media_srt_egress_shard_sent_bytes_total",
+    "nginx_media_srt_egress_shard_sent_bursts_total",
+    "nginx_media_srt_egress_shard_blocked_sends_total",
+    "nginx_media_srt_egress_shard_retransmitted_packets_total",
+)
+
+def read_snapshot(prefix):
+    values = {}
+    for path in glob.glob(prefix + ".*"):
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as source:
+            for line in source:
+                match = re.match(
+                    r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*?)\})?\s+"
+                    r"([-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)",
+                    line,
+                )
+                if not match or match.group(1) not in metrics:
+                    continue
+                labels = dict(re.findall(
+                    r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"])*)"',
+                    match.group(2) or "",
+                ))
+                if "worker" not in labels or "shard" not in labels:
+                    continue
+                try:
+                    value = float(match.group(3))
+                except ValueError:
+                    continue
+                if math.isfinite(value):
+                    values[(labels["worker"], labels["shard"],
+                            match.group(1))] = value
+    return values
+
+before = read_snapshot(sys.argv[1])
+after = read_snapshot(sys.argv[2])
+all_keys = {(worker, shard) for worker, shard, _ in set(before) | set(after)}
+keys = sorted(
+    (key for key in all_keys
+     if after.get((key[0], key[1], metrics[0]), 0.0) > 0
+     or before.get((key[0], key[1], metrics[0]), 0.0) > 0),
+    key=lambda key: (key[0], key[1]),
+)
+if not all_keys:
+    print("srt_shard_metrics=unavailable")
+    raise SystemExit(0)
+if not keys:
+    print("srt_shard_metrics=no_active_destinations")
+    raise SystemExit(0)
+
+sent = []
+for worker, shard in keys:
+    def value(snapshot, metric):
+        return snapshot.get((worker, shard, metric), 0.0)
+    deltas = {
+        "sent_bytes_delta": value(after, metrics[7]) - value(before, metrics[7]),
+        "sent_bursts_delta": value(after, metrics[8]) - value(before, metrics[8]),
+        "blocked_sends_delta": value(after, metrics[9]) - value(before, metrics[9]),
+        "retransmitted_packets_delta": value(after, metrics[10]) - value(before, metrics[10]),
+        "feed_drops_delta": value(after, metrics[3]) - value(before, metrics[3]),
+        "output_drops_delta": value(after, metrics[6]) - value(before, metrics[6]),
+    }
+    sent.append(deltas["sent_bytes_delta"])
+    gauge = {
+        "destinations": value(after, metrics[0]),
+        "feed_queue_units": value(after, metrics[1]),
+        "feed_queue_bytes": value(after, metrics[2]),
+        "output_queue_units": value(after, metrics[4]),
+        "output_queue_bytes": value(after, metrics[5]),
+    }
+    fields = []
+    for key, number in (*gauge.items(), *deltas.items()):
+        formatted = str(int(number)) if number.is_integer() else f"{number:g}"
+        fields.append(f"{key}={formatted}")
+    print(f"shard worker={worker} shard={shard} " + " ".join(fields))
+total = sum(sent)
+squares = sum(value * value for value in sent)
+jain = total * total / (len(sent) * squares) if squares else 0.0
+print(f"shard_sent_bytes_spread={min(sent):.0f}..{max(sent):.0f} "
+      f"range={(max(sent) - min(sent)):.0f} jain={jain:.4f}")
+PY
+}
+
+capacity_memory_snapshot() {   # <file>
+    local output="$1" pid
+
+    : > "$output" || return 1
+    for pid in $(worker_pids); do
+        awk -v pid="$pid" '
+            $1 == "Rss:" { rss = $2 }
+            $1 == "Pss:" { pss = $2 }
+            END {
+                if (rss == "" || pss == "") exit 1
+                print pid, rss, pss
+            }
+        ' "/proc/$pid/smaps_rollup" >> "$output" \
+            || { echo "could not read worker $pid smaps_rollup" >&2; return 1; }
+    done
+}
+
+capacity_memory_report() {   # <before file> <after file>
+    awk '
+        NR == FNR { rss[$1] = $2; pss[$1] = $3; next }
+        {
+            br = rss[$1] + 0
+            bp = pss[$1] + 0
+            printf "      pid=%s rss_kb=%d->%d delta_kb=%+d pss_kb=%d->%d delta_kb=%+d\n",
+                   $1, br, $2, $2 - br, bp, $3, $3 - bp
+        }
+    ' "$1" "$2"
+}
+
 
 capacity_worker_cpu() {   # <before> <after> <seconds> <slot>
     report_cpu "$1" "$2" "$3" \
@@ -1609,12 +2046,15 @@ capacity_worker_cpu() {   # <before> <after> <seconds> <slot>
             END { printf "%.1f", total }'
 }
 
-capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds>
+capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt|rtmp] [stall destination ID]
     local label="$1" programs="$2" rate="$3" destinations="$4" seconds="$5"
+    local protocol="${6:-srt}" stall_id="${7:-}"
     local workers="$CAPACITY_WORKERS" case_id source rate_bps offered_in
     local offered_out owner name slot index depth total_dest total_started
-    local owner_streams
-    local port sink_id sink_pid attempt progress_ready
+    local owner_streams connect_wait sink_port
+    local sink_ready sink_csv sink_snapshot_before sink_snapshot_after
+    local stall_seen connect_attempts rtmp_ready
+    local sink_pid publisher_pid receiver_pid
     local before_frames after_frames before_dispatched after_dispatched
     local fanout_max p50 p95 p99 p999 frame_rate frame_delta fairness
     local measure_start measure_end measure_seconds
@@ -1629,6 +2069,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds>
     local socket_before socket_after sock_tcp_before sock_tcp_after
     local sock_udp_before sock_udp_after tcp_inuse_before tcp_inuse_after
     local udp_inuse_before udp_inuse_after socket_row
+    local slow_drops
     local -a owner_pool=() one_owner=() names=() owners=()
     local -a counts_before=() counts_after=() bounds=()
     local -a progress_frames=()
@@ -1640,22 +2081,36 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds>
        && "$workers" =~ ^[1-9][0-9]*$ \
        && "$seconds" =~ ^[1-9][0-9]*$ ]] \
         || { echo "invalid capacity case: $label" >&2; return 1; }
+    case "$protocol" in
+        srt|rtmp) ;;
+        *) echo "invalid capacity protocol: $protocol" >&2; return 1 ;;
+    esac
+    if [ "$protocol" = rtmp ]; then
+        [ -z "$stall_id" ] \
+            || { echo "RTMP capacity cases do not support a stalled SRT peer" \
+                     >&2; return 1; }
+        workers=1
+    fi
     [ "$seconds" -le 600 ] \
         || { echo "capacity window must be at most 600 seconds" \
                  >&2; return 1; }
-    owner_streams=$(( (programs + workers - 1) / workers ))
     [ "$workers" -le 16 ] && [ "$programs" -le 32 ] \
-        && [ "$destinations" -le 16 ] \
-        && [ "$(( programs * destinations ))" -le 64 ] \
-        && [ "$(( owner_streams * destinations ))" -le 16 ] \
-        || { echo "capacity case exceeds bounded worker/output/port limits" \
+        && [ "$destinations" -le 1000 ] \
+        && [ "$(( programs * destinations ))" -le 1000 ] \
+        || { echo "capacity case exceeds bounded worker/output limits" \
                  >&2; return 1; }
+    owner_streams=$(( (programs + workers - 1) / workers ))
+    [ "$(( owner_streams * destinations ))" -le 1000 ] \
+        || { echo "capacity case exceeds per-owner output limit" >&2; return 1; }
     command -v ss >/dev/null \
         || { echo "ss is required for socket memory snapshots" >&2; return 1; }
+    if [ "$protocol" = srt ]; then
+        capacity_build_srt_sink || return 1
+    fi
 
     rate_bps="$(capacity_rate_bps "$rate")" || return 1
-    [ "$(( rate_bps * programs * destinations ))" -le 1000000000 ] \
-        || { echo "capacity case nominal egress exceeds 1000 Mbit/s" \
+    [ "$(( rate_bps * programs * destinations ))" -le 8000000000 ] \
+        || { echo "capacity case nominal egress exceeds 8000 Mbit/s" \
                  >&2; return 1; }
     offered_in="$(awk -v b="$(( programs * rate_bps ))" \
         'BEGIN { printf "%.1f", b / 1000000 }')"
@@ -1700,15 +2155,36 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds>
     done
 
     echo
-    echo "== capacity $label: workers=$workers programs=$programs"
+    echo "== capacity $protocol $label: workers=$workers programs=$programs"
     echo "   video_rate=$rate offered_ingress=${offered_in}Mbit/s"
     echo "   destinations_per_program=$destinations total_destinations=$total_dest"
     echo "   offered_egress=${offered_out}Mbit/s window=${seconds}s"
 
-    # SRT pushes use the shared transport mux; HLS enables that output path.
-    start_instance "$workers" yes no
+    # SRT uses one shared mux and one multi-peer listener; RTMP receives on
+    # the instance's single local listener.  HLS keeps the shared TS mux active.
+    start_instance "$workers" yes "$([ "$protocol" = rtmp ] && echo yes || echo no)"
     PUBS=()
     SINKS=()
+    sink_port=$(( BASE + 20 ))
+    if [ "$protocol" = srt ]; then
+        sink_ready="$case_dir/srt.ready"
+        sink_csv="$case_dir/srt.csv"
+        sink_snapshot_before="$case_dir/srt.before.csv"
+        sink_snapshot_after="$case_dir/srt.after.csv"
+        rm -f "$sink_ready" "$sink_csv" "$sink_csv.snapshot" \
+            "$sink_snapshot_before" "$sink_snapshot_after"
+        if [ -n "$stall_id" ]; then
+            "$RUN/srt_fanout_sink" "$sink_port" "$total_dest" \
+                "$sink_ready" "$sink_csv" "$stall_id" \
+                >"$case_dir/srt-receiver.log" 2>&1 &
+        else
+            "$RUN/srt_fanout_sink" "$sink_port" "$total_dest" \
+                "$sink_ready" "$sink_csv" \
+                >"$case_dir/srt-receiver.log" 2>&1 &
+        fi
+        sink_pid="$!"
+        SINKS+=( "$sink_pid" )
+    fi
 
     for name in "${names[@]}"; do
         curl -fsS -X POST -H 'Content-Type: application/json' \
@@ -1728,49 +2204,65 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds>
                      >&2; return 1; }
 
         for (( attempt = 0; attempt < destinations; attempt++ )); do
-            sink_id="cap${case_id}-p${index}-d${attempt}"
-            port=$(( BASE + 20 + index * destinations + attempt ))
-            ffmpeg -hide_banner -loglevel error \
-                -i "srt://127.0.0.1:$port?mode=listener" -c copy -f null - \
-                >"$case_dir/$sink_id.log" 2>&1 &
-            SINKS+=( "$!" )
+            sink_id="$(capacity_destination_id "$index" "$attempt" "$programs")"
+            if [ "$protocol" = srt ]; then
+                post_owner "/streams/live/$name/destinations" \
+                    "{\"id\":\"$sink_id\",\"type\":\"srt\",\"host\":\"127.0.0.1\",\"port\":$sink_port,\"streamid\":\"#!::r=live/$name,m=publish,s=$sink_id\"}" \
+                    || return 1
+            else
+                post_owner "/streams/live/$name/destinations" \
+                    "{\"id\":\"$sink_id\",\"type\":\"rtmp\",\"host\":\"127.0.0.1\",\"port\":$RTMP_PORT,\"streamid\":\"$sink_id\"}" \
+                    || return 1
+            fi
+            [ "$sink_id" = "$stall_id" ] && stall_seen=1
         done
     done
+    if [ -n "$stall_id" ] && [ "${stall_seen:-0}" -ne 1 ]; then
+        echo "slow-reader destination ID $stall_id was not configured" >&2
+        return 1
+    fi
 
-    sleep 1
-    for sink_pid in "${SINKS[@]}"; do
-        kill -0 "$sink_pid" 2>/dev/null \
-            || { echo "an SRT receiver exited before connect" >&2; return 1; }
-    done
-
+    connect_wait=$(( 30 + total_dest / 10 ))
+    connect_attempts=$(( connect_wait * 10 ))
     total_started=0
-    for (( index = 0; index < programs; index++ )); do
-        name="${names[$index]}"
-        for (( attempt = 0; attempt < destinations; attempt++ )); do
-            sink_id="cap${case_id}-p${index}-d${attempt}"
-            port=$(( BASE + 20 + index * destinations + attempt ))
-            post_owner "/streams/live/$name/destinations" \
-                "{\"id\":\"$sink_id\",\"type\":\"srt\",\"host\":\"127.0.0.1\",\"port\":$port,\"streamid\":\"#!::r=live/$name,m=publish,s=$sink_id\"}" \
-                || return 1
-        done
-    done
-
-    for attempt in $(seq 1 100); do
+    for attempt in $(seq 1 "$connect_attempts"); do
         total_started="$(grep -cE \
-            "media: srt destination cap${case_id}-.* started" \
+            "media: $protocol destination .* started" \
             "$RUN/logs/error.log" 2>/dev/null || true)"
         [ "${total_started:-0}" -ge "$total_dest" ] && break
         sleep 0.1
     done
-    [ "${total_started:-0}" -eq "$total_dest" ] \
-        || { echo "only $total_started of $total_dest SRT destinations started" \
+    [ "${total_started:-0}" -ge "$total_dest" ] \
+        || { echo "only $total_started of $total_dest $protocol destinations started" \
                  >&2; return 1; }
-
-
+    # Start media while nonblocking SRT handshakes settle; send errors trigger the
+    # output's normal retry path for a connection that did not establish.
     for (( index = 0; index < programs; index++ )); do
         publish "${SRT_PORTS[${owners[$index]}]}" "${names[$index]}" "$source"
         PUBS+=( "$!" )
     done
+    if [ "$protocol" = srt ]; then
+        for attempt in $(seq 1 "$connect_attempts"); do
+            [ -f "$sink_ready" ] && break
+            kill -0 "$sink_pid" 2>/dev/null \
+                || { echo "shared SRT receiver exited before accepting all peers" \
+                     >&2; return 1; }
+            sleep 0.1
+        done
+        if [ ! -f "$sink_ready" ]; then
+            if capacity_srt_receiver_snapshot "$sink_pid" \
+                "$sink_csv.snapshot" "$case_dir/srt.incomplete.csv"; then
+                capacity_srt_incomplete_report "$case_dir/srt.incomplete.csv" \
+                    "$programs" "$destinations" || return 1
+            else
+                echo "could not capture incomplete SRT receiver snapshot" >&2
+            fi
+            echo "shared SRT receiver accepted fewer than $total_dest peers" >&2
+            return 1
+        fi
+    fi
+
+
     # Exclude publisher connection and the first output burst from measurement.
     for attempt in $(seq 1 120); do
         progress_ready=1
@@ -1791,6 +2283,23 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds>
     [ "$progress_ready" -eq 1 ] \
         || { echo "capacity streams never reached program/output progress" \
                  >&2; return 1; }
+    if [ "$protocol" = rtmp ]; then
+        rtmp_ready=0
+        for attempt in $(seq 1 "$connect_attempts"); do
+            curl -fsS "$(api)/metrics" > "$case_dir/rtmp-warmup.metrics" \
+                || { echo "could not scrape RTMP receiver metrics" >&2; return 1; }
+            if capacity_rtmp_receiver_ready "$case_dir/rtmp-warmup.metrics" \
+                "$programs" "$destinations"
+            then
+                rtmp_ready=1
+                break
+            fi
+            sleep 0.1
+        done
+        [ "$rtmp_ready" -eq 1 ] \
+            || { echo "RTMP capacity receivers did not all accept media" \
+                 >&2; return 1; }
+    fi
 
     for name in "${names[@]}"; do
         owner_metrics "$name" > "$case_dir/stream.$name.before" \
@@ -1798,14 +2307,23 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds>
     done
     capacity_worker_metrics "$case_dir/workers.before" || return 1
     capacity_socket_snapshot "$case_dir/before" || return 1
+    capacity_memory_snapshot "$case_dir/memory.before" || return 1
+    if [ "$protocol" = srt ]; then
+        capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
+            "$sink_snapshot_before" || return 1
+    fi
     measure_start="$(date +%s.%N)"
 
     cpu_window "$seconds"
+    if [ "$protocol" = srt ]; then
+        capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
+            "$sink_snapshot_after" || return 1
+    fi
 
-    for sink_pid in "${PUBS[@]}"; do
-        kill -0 "$sink_pid" 2>/dev/null \
+    for publisher_pid in "${PUBS[@]}"; do
+        kill -0 "$publisher_pid" 2>/dev/null \
             || { echo "a capacity publisher exited during the window" \
-                     >&2; return 1; }
+                 >&2; return 1; }
     done
     for name in "${names[@]}"; do
         owner_metrics "$name" > "$case_dir/stream.$name.after" \
@@ -1816,6 +2334,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds>
         'BEGIN { printf "%.2f", b - a }')"
     capacity_worker_metrics "$case_dir/workers.after" || return 1
     capacity_socket_snapshot "$case_dir/after" || return 1
+    capacity_memory_snapshot "$case_dir/memory.after" || return 1
 
     echo "   measurement_s=$measure_seconds cpu_window_s=$W_DUR"
 
@@ -1941,6 +2460,64 @@ print(f"{total * total / (len(frames) * squares):.4f}" if squares else "0")
 PY
 )"
     echo "   program_frame_fairness_jain=$fairness (1.0 is equal progress)"
+    if [ "$protocol" = srt ]; then
+        if kill -0 "$sink_pid" 2>/dev/null; then
+            kill -TERM "$sink_pid" 2>/dev/null || true
+        fi
+        if ! wait "$sink_pid"; then
+            echo "shared SRT receiver did not stop cleanly" >&2
+            return 1
+        fi
+        SINKS=()
+        [ -s "$sink_csv" ] \
+            || { echo "shared SRT receiver produced no result CSV" >&2; return 1; }
+        capacity_srt_csv_report "$sink_csv" "$programs" "$destinations" \
+            "$stall_id" "$sink_snapshot_before" "$sink_snapshot_after" \
+            > "$case_dir/receiver-report.txt" || return 1
+        echo "   receiver-delivered SRT payload bytes in measured window, per destination:"
+        cat "$case_dir/receiver-report.txt"
+    else
+        capacity_rtmp_payload_report "$case_dir/workers.before" \
+            "$case_dir/workers.after" "$programs" "$destinations" \
+            > "$case_dir/rtmp-receiver-report.txt" || return 1
+        echo "   receiver-delivered RTMP payload bytes (per destination):"
+        cat "$case_dir/rtmp-receiver-report.txt"
+    fi
+
+    if [ "$protocol" = srt ]; then
+        echo "   SRT sender-shard counters and queue snapshots:"
+        capacity_srt_metrics_report "$case_dir/workers.before" \
+            "$case_dir/workers.after" > "$case_dir/srt-shards.txt" \
+            || return 1
+        cat "$case_dir/srt-shards.txt"
+        if [ -n "$stall_id" ]; then
+            slow_drops="$(awk '
+                {
+                    for (i = 1; i <= NF; i++) {
+                        if ($i ~ /^output_drops_delta=/) {
+                            split($i, field, "=")
+                            total += field[2]
+                        }
+                    }
+                }
+                END { print total + 0 }
+            ' "$case_dir/srt-shards.txt")"
+            [ "$slow_drops" -gt 0 ] \
+                || { echo "slow SRT reader caused no destination-queue drops" \
+                         >&2; return 1; }
+            echo "   slow-reader destination queue drops=$slow_drops"
+        fi
+        echo "   sender shard CPU from /proc thread comm srt-egress-*:"
+        report_cpu "$W_BEFORE" "$W_AFTER" "$W_DUR" \
+            | awk '$2 ~ /^srt-egress-/ {
+                       printf "      worker=%s thread=%s cpu=%.1f%%\n", $1, $2, $3
+                       found = 1
+                   }
+                   END { if (!found) print "      no srt-egress-* thread rows" }'
+    fi
+    echo "   worker process RSS/PSS from smaps_rollup:"
+    capacity_memory_report "$case_dir/memory.before" "$case_dir/memory.after"
+
 
     echo "   worker visit and scheduling metrics:"
     for worker_pid in $(worker_pids); do
@@ -2001,7 +2578,7 @@ PY
     echo "      UDP inuse=${udp_inuse_before:-0}->${udp_inuse_after:-0}"
 
     kill_pubs
-    for sink_pid in "${SINKS[@]}"; do kill_one "$sink_pid"; done
+    for receiver_pid in "${SINKS[@]}"; do kill_one "$receiver_pid"; done
     SINKS=()
     stop_instance
 }
@@ -2011,9 +2588,9 @@ phase_capacity() {
 
     echo
     echo "== offered-load capacity curve (fixed worker count)"
-    echo "   programs, bitrate and destinations vary independently; each case"
-    echo "   starts a fresh NGINX instance so fanout maxima and histograms are"
-    echo "   scoped to that case; HLS's TS mux feeds the SRT push sink."
+    echo "   program and bitrate cases use one shared SRT receiver per case."
+    echo "   The destination ladder runs every exact rung over SRT and RTMP;"
+    echo "   RTMP cases use one worker and both protocols count receiver bytes."
     echo "   Publishers and outputs warm up before the timed baseline."
 
     for programs in $CAPACITY_PROGRAM_STEPS; do
@@ -2028,14 +2605,27 @@ phase_capacity() {
     done
 
     for destinations in $CAPACITY_DEST_STEPS; do
-        capacity_case "destinations-$destinations" \
-            "$CAPACITY_DEST_PROGRAMS" "$CAPACITY_DEST_RATE" "$destinations" \
-            "$CAPACITY_WINDOW" || return 1
+        capacity_case "destinations-$destinations-srt" \
+            1 "$CAPACITY_DEST_RATE" "$destinations" \
+            "$CAPACITY_WINDOW" srt || return 1
+        capacity_case "destinations-$destinations-rtmp" \
+            1 "$CAPACITY_DEST_RATE" "$destinations" \
+            "$CAPACITY_WINDOW" rtmp || return 1
     done
 
+    echo "   slow-reader: rate=$CAPACITY_SLOW_RATE window=${CAPACITY_SLOW_SECONDS}s"
+    capacity_case "slow-reader-isolation" 1 "$CAPACITY_SLOW_RATE" 4 \
+        "$CAPACITY_SLOW_SECONDS" srt d0000 || return 1
+    capacity_case "saturated-multiprogram" 4 6M 250 \
+        "$CAPACITY_SATURATED_SECONDS" srt || return 1
     capacity_case "sustained" "$CAPACITY_SUSTAINED_PROGRAMS" \
         "$CAPACITY_SUSTAINED_RATE" "$CAPACITY_SUSTAINED_DESTS" \
         "$CAPACITY_SUSTAINED_SECONDS"
+}
+
+phase_capacity_saturated() {
+    capacity_case "saturated-multiprogram" 4 6M 250 \
+        "$CAPACITY_SATURATED_SECONDS" srt
 }
 
 # --- run --------------------------------------------------------------------
@@ -2073,6 +2663,7 @@ for phase in $PHASES; do
         misplace) phase_misplace ;;
         topology) phase_topology ;;
         capacity) phase_capacity || exit 1 ;;
+        capacity-saturated) phase_capacity_saturated || exit 1 ;;
     esac
 done
 
@@ -2087,9 +2678,11 @@ echo "   api:        listen ... reuseport; mutations retried until the owner"
 echo "               answers, metrics read on the owner's own connection"
 echo "   throughput: chunks/s and bytes/s are the workers' own drained totals"
 echo "   cpu:        per thread, percent of one core, over the measured window"
-if [[ " $PHASES " == *" capacity "* ]]; then
-    echo "   clients:    ffmpeg publishers/receivers run in this command;"
-    echo "               worker CPU rows cover nginx workers only"
+if [[ " $PHASES " == *" capacity "* \
+   || " $PHASES " == *" capacity-saturated "* ]]; then
+    echo "   receivers:  one shared SRT listener per SRT case; RTMP receiver"
+    echo "               payload is counted on the RTMP listener; the harness"
+    echo "               process CPU rows cover nginx workers only"
 fi
 echo "   labels:     SRT:* from comm; this module's threads from a stack" \
      "backtrace ($([ "$LABELLED" = 1 ] && echo 'attached and labelled' \

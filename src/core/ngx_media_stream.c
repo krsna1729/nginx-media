@@ -333,6 +333,9 @@ ngx_media_stream_publish(ngx_media_stream_t *stream,
     }
 
     source->frames_in++;
+    if (frame->payload != NULL) {
+        source->payload_bytes_in += ngx_media_buf_size(frame->payload);
+    }
     source->last_media = now;
 
     if (source->state == NGX_MEDIA_SOURCE_ACTIVE) {

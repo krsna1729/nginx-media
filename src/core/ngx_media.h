@@ -177,6 +177,7 @@ struct ngx_media_source_s {
     ngx_uint_t              compat;    /* vs the program track contract */
     ngx_uint_t              writers;   /* outstanding write leases */
     uint64_t                frames_in;
+    uint64_t                payload_bytes_in;
     uint64_t                frames_out;
     unsigned                healthy:1;
     unsigned                eligible:1;

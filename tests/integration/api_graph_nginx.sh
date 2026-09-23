@@ -859,6 +859,7 @@ for metric in \
     nginx_media_stream_feed_publish_errors_total \
     nginx_media_stream_feed_high_water_units \
     nginx_media_stream_feed_high_water_bytes \
+    nginx_media_source_payload_bytes_in_total \
     nginx_media_source_preroll_units \
     nginx_media_source_preroll_bytes \
     nginx_media_source_preroll_overflows_total \
@@ -870,6 +871,9 @@ do
     printf '%s\n' "$METRICS" | grep -q "^$metric{" \
         || { echo "metrics omitted $metric" >&2; exit 1; }
 done
+printf '%s\n' "$METRICS" \
+    | grep -Eq '^nginx_media_source_payload_bytes_in_total\{worker="[0-9]+",application="[^"]+",name="[^"]+",source="[^"]+"\} [0-9]+$' \
+    || { echo "source payload metric sample has malformed labels" >&2; exit 1; }
 
 for metric in \
     nginx_media_worker_periodic_visits_total \

@@ -46,14 +46,12 @@
 #endif
 
 /*
- * The session table is per process, so with a shared listener this is the
- * ceiling per worker: 32 x worker_processes in total (128 at four workers,
- * docs/operations.md), and the number a publisher sees depends on which
- * worker the kernel placed it on.  Where the listener is not shared every
- * session in the instance lives in worker 0, so the instance-wide ceiling is
- * this number.
+ * The per-worker session table bounds accepted RTMP publisher/player
+ * connections.  A single-process listener can therefore receive the full
+ * 1000-destination fanout benchmark without confusing per-worker capacity
+ * with the number of SRT ingest sessions.
  */
-#define NGX_MEDIA_RTMP_MAX_SESSIONS      32
+#define NGX_MEDIA_RTMP_MAX_SESSIONS      1024
 #define NGX_MEDIA_RTMP_DEFAULT_PRIORITY  50
 #define NGX_MEDIA_RTMP_OUT_CHUNK         4096
 #define NGX_MEDIA_RTMP_MAX_OUT_QUEUE     64

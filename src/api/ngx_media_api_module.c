@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include "ngx_media_hls_pull.h"
 #include "ngx_media_runtime.h"
+#include "ngx_media_srt_output.h"
 #include "ngx_media_selector.h"
 
 #include <ngx_http.h>
@@ -42,7 +43,8 @@
 #define NGX_MEDIA_API_FEED_BYTES   (32 * 1024 * 1024)
 #define NGX_MEDIA_API_FEED_AGE     10000
 
-#define NGX_MEDIA_API_BUF_SIZE  (64 * 1024)
+#define NGX_MEDIA_API_BUF_SIZE      (64 * 1024)
+#define NGX_MEDIA_API_BUF_MAX_SIZE  (64 * 1024 * 1024)
 
 static ngx_str_t  ngx_media_api_none = ngx_string("none");
 
@@ -103,6 +105,8 @@ static ngx_int_t ngx_media_api_json_string(u_char **last, u_char *end,
 static ngx_int_t ngx_media_api_prom_prefix(u_char **last, u_char *end,
     const char *metric, const ngx_str_t *application, const ngx_str_t *name,
     const ngx_str_t *source, const char *percentile);
+static ngx_int_t ngx_media_api_prom_source_bytes_prefix(u_char **last,
+    u_char *end, ngx_media_stream_t *stream, ngx_media_source_t *source);
 static ngx_int_t ngx_media_api_json_stream_name(u_char **last, u_char *end,
     const ngx_str_t *application, const ngx_str_t *name);
 static ngx_int_t ngx_media_api_media_mode(const ngx_str_t *text,
@@ -607,6 +611,32 @@ ngx_media_api_prom_prefix(u_char **last, u_char *end, const char *metric,
 }
 
 static ngx_int_t
+ngx_media_api_prom_source_bytes_prefix(u_char **last, u_char *end,
+    ngx_media_stream_t *stream, ngx_media_source_t *source)
+{
+    *last = ngx_snprintf(*last, end - *last,
+                         "nginx_media_source_payload_bytes_in_total{"
+                         "worker=\"%i\",application=\"",
+                         ngx_worker);
+
+    if (*last >= end
+        || ngx_media_api_prom_string(last, end, &stream->application)
+           != NGX_OK
+        || ngx_media_api_put_bytes(last, end, (u_char *) "\",name=\"", 8)
+           != NGX_OK
+        || ngx_media_api_prom_string(last, end, &stream->name) != NGX_OK
+        || ngx_media_api_put_bytes(last, end, (u_char *) "\",source=\"", 10)
+           != NGX_OK
+        || ngx_media_api_prom_string(last, end, &source->id) != NGX_OK
+        || ngx_media_api_put_bytes(last, end, (u_char *) "\"", 1) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+static ngx_int_t
 ngx_media_api_sources_json(u_char **last, u_char *end,
     ngx_media_stream_t *stream)
 {
@@ -880,8 +910,11 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
     ngx_media_source_t             *source;
     ngx_media_runtime_stats_t       stats;
     ngx_media_runtime_progress_t    progress;
-
+    ngx_media_srt_egress_stats_t    srt_stats[NGX_MEDIA_SRT_EGRESS_SHARDS];
+    ngx_uint_t                      n_srt_stats, i;
     ngx_media_runtime_stats_get(&stats);
+    n_srt_stats = ngx_media_srt_module_stats_get(
+        srt_stats, NGX_MEDIA_SRT_EGRESS_SHARDS);
 
     *last = ngx_snprintf(*last, end - *last,
                          "# HELP nginx_media_stream_generation "
@@ -1083,9 +1116,89 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "nginx_media_worker_info{worker=\"%i\",pid=\"%P\"} "
                          "1\n",
                          ngx_worker, ngx_pid);
+    *last = ngx_snprintf(*last, end - *last,
+                         "# HELP nginx_media_source_payload_bytes_in_total "
+                         "source media payload bytes accepted by the parser\n"
+                         "# TYPE nginx_media_source_payload_bytes_in_total "
+                         "counter\n"
+                         "# HELP nginx_media_srt_egress_shard_destinations "
+                         "active destinations assigned to the SRT egress shard\n"
+                         "# TYPE nginx_media_srt_egress_shard_destinations "
+                         "gauge\n"
+                         "# HELP nginx_media_srt_egress_shard_feed_queue_units "
+                         "prepared bursts waiting in the SRT shard feed queue\n"
+                         "# TYPE nginx_media_srt_egress_shard_feed_queue_units "
+                         "gauge\n"
+                         "# HELP nginx_media_srt_egress_shard_feed_queue_bytes "
+                         "payload bytes waiting in the SRT shard feed queue\n"
+                         "# TYPE nginx_media_srt_egress_shard_feed_queue_bytes "
+                         "gauge\n"
+                         "# HELP nginx_media_srt_egress_shard_feed_queue_dropped_total "
+                         "bursts refused by the bounded SRT shard feed queue\n"
+                         "# TYPE nginx_media_srt_egress_shard_feed_queue_dropped_total "
+                         "counter\n"
+                         "# HELP nginx_media_srt_egress_shard_output_queue_units "
+                         "bursts waiting in SRT destination queues\n"
+                         "# TYPE nginx_media_srt_egress_shard_output_queue_units "
+                         "gauge\n"
+                         "# HELP nginx_media_srt_egress_shard_output_queue_bytes "
+                         "payload bytes waiting in SRT destination queues\n"
+                         "# TYPE nginx_media_srt_egress_shard_output_queue_bytes "
+                         "gauge\n"
+                         "# HELP nginx_media_srt_egress_shard_output_dropped_total "
+                         "bursts refused by bounded SRT destination queues\n"
+                         "# TYPE nginx_media_srt_egress_shard_output_dropped_total "
+                         "counter\n"
+                         "# HELP nginx_media_srt_egress_shard_sent_bytes_total "
+                         "payload bytes accepted by local SRT sender sockets\n"
+                         "# TYPE nginx_media_srt_egress_shard_sent_bytes_total "
+                         "counter\n"
+                         "# HELP nginx_media_srt_egress_shard_sent_bursts_total "
+                         "fully sent media bursts on SRT destinations\n"
+                         "# TYPE nginx_media_srt_egress_shard_sent_bursts_total "
+                         "counter\n"
+                         "# HELP nginx_media_srt_egress_shard_blocked_sends_total "
+                         "nonblocking SRT sends that encountered backpressure\n"
+                         "# TYPE nginx_media_srt_egress_shard_blocked_sends_total "
+                         "counter\n"
+                         "# HELP nginx_media_srt_egress_shard_retransmitted_packets_total "
+                         "SRT transport packets retransmitted by the sender\n"
+                         "# TYPE nginx_media_srt_egress_shard_retransmitted_packets_total "
+                         "counter\n");
 
     if (*last >= end) {
         return NGX_ERROR;
+    }
+    for (i = 0; i < n_srt_stats; i++) {
+        *last = ngx_snprintf(
+            *last, end - *last,
+            "nginx_media_srt_egress_shard_destinations{worker=\"%i\",shard=\"%ui\"} %ui\n"
+            "nginx_media_srt_egress_shard_feed_queue_units{worker=\"%i\",shard=\"%ui\"} %ui\n"
+            "nginx_media_srt_egress_shard_feed_queue_bytes{worker=\"%i\",shard=\"%ui\"} %uz\n"
+            "nginx_media_srt_egress_shard_feed_queue_dropped_total{worker=\"%i\",shard=\"%ui\"} %uL\n"
+            "nginx_media_srt_egress_shard_output_queue_units{worker=\"%i\",shard=\"%ui\"} %ui\n"
+            "nginx_media_srt_egress_shard_output_queue_bytes{worker=\"%i\",shard=\"%ui\"} %uz\n"
+            "nginx_media_srt_egress_shard_output_dropped_total{worker=\"%i\",shard=\"%ui\"} %uL\n"
+            "nginx_media_srt_egress_shard_sent_bytes_total{worker=\"%i\",shard=\"%ui\"} %uL\n"
+            "nginx_media_srt_egress_shard_sent_bursts_total{worker=\"%i\",shard=\"%ui\"} %uL\n"
+            "nginx_media_srt_egress_shard_blocked_sends_total{worker=\"%i\",shard=\"%ui\"} %uL\n"
+            "nginx_media_srt_egress_shard_retransmitted_packets_total{worker=\"%i\",shard=\"%ui\"} %uL\n",
+            ngx_worker, srt_stats[i].shard, srt_stats[i].destinations,
+            ngx_worker, srt_stats[i].shard, srt_stats[i].feed_queue_units,
+            ngx_worker, srt_stats[i].shard, srt_stats[i].feed_queue_bytes,
+            ngx_worker, srt_stats[i].shard, srt_stats[i].feed_queue_dropped,
+            ngx_worker, srt_stats[i].shard, srt_stats[i].output_queue_units,
+            ngx_worker, srt_stats[i].shard, srt_stats[i].output_queue_bytes,
+            ngx_worker, srt_stats[i].shard, srt_stats[i].output_queue_dropped,
+            ngx_worker, srt_stats[i].shard, srt_stats[i].sent_bytes,
+            ngx_worker, srt_stats[i].shard, srt_stats[i].sent_bursts,
+            ngx_worker, srt_stats[i].shard, srt_stats[i].blocked_sends,
+            ngx_worker, srt_stats[i].shard,
+            srt_stats[i].retransmitted_packets);
+
+        if (*last >= end) {
+            return NGX_ERROR;
+        }
     }
 
     for (q = ngx_queue_head(&registry->entries);
@@ -1268,6 +1381,13 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
             }
             *last = ngx_snprintf(*last, end - *last, "} %uL\n",
                                  source->frames_in);
+            if (ngx_media_api_prom_source_bytes_prefix(
+                    last, end, stream, source) != NGX_OK)
+            {
+                return NGX_ERROR;
+            }
+            *last = ngx_snprintf(*last, end - *last, "} %uL\n",
+                                 source->payload_bytes_in);
 
             if (ngx_media_api_prom_prefix(
                     last, end, "nginx_media_source_frames_out",
@@ -4128,6 +4248,133 @@ ngx_media_api_send(ngx_http_request_t *r, ngx_int_t status, ngx_str_t *body)
     return ngx_http_output_filter(r, &out);
 }
 
+static size_t
+ngx_media_api_response_capacity(ngx_http_request_t *r,
+    ngx_media_registry_t *registry)
+{
+    size_t                      capacity, label_bytes;
+    size_t                      streams_uri_len;
+    ngx_queue_t                *q, *sq, *dq;
+    ngx_media_registry_entry_t *entry;
+    ngx_media_stream_t         *stream;
+    ngx_media_source_t         *source;
+    ngx_media_destination_t    *destination;
+    ngx_str_t                   application, name, action;
+    ngx_uint_t                  all_streams, include_destinations;
+
+    capacity = NGX_MEDIA_API_BUF_SIZE;
+
+    if (r->method != NGX_HTTP_GET || registry == NULL) {
+        return capacity;
+    }
+
+    streams_uri_len = sizeof("/media/api/v1/streams") - 1;
+
+    if (r->uri.len == sizeof("/media/api/v1/metrics") - 1
+        && ngx_memcmp(r->uri.data, "/media/api/v1/metrics",
+                      sizeof("/media/api/v1/metrics") - 1) == 0)
+    {
+        all_streams = 1;
+        include_destinations = 0;
+
+    } else if (r->uri.len == streams_uri_len
+               && ngx_memcmp(r->uri.data, "/media/api/v1/streams",
+                             streams_uri_len) == 0)
+    {
+        all_streams = 1;
+        include_destinations = 1;
+
+    } else if (r->uri.len > streams_uri_len
+               && ngx_memcmp(r->uri.data, "/media/api/v1/streams",
+                             streams_uri_len) == 0
+               && r->uri.data[streams_uri_len] == '/')
+    {
+        if (ngx_media_api_parse(r->uri.data, r->uri.len, &application, &name,
+                                &action) != NGX_OK)
+        {
+            return capacity;
+        }
+        all_streams = 0;
+        include_destinations = 1;
+
+    } else {
+        return capacity;
+    }
+
+    for (q = ngx_queue_head(&registry->entries);
+         q != ngx_queue_sentinel(&registry->entries); q = ngx_queue_next(q))
+    {
+        entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
+        stream = &entry->stream;
+
+        if (!all_streams
+            && (application.len != stream->application.len
+                || name.len != stream->name.len
+                || ngx_memcmp(application.data, stream->application.data,
+                              application.len) != 0
+                || ngx_memcmp(name.data, stream->name.data, name.len) != 0))
+        {
+            continue;
+        }
+
+        if (capacity > NGX_MEDIA_API_BUF_MAX_SIZE - 4096) {
+            return NGX_MEDIA_API_BUF_MAX_SIZE;
+        }
+        capacity += 4096;
+
+        label_bytes = stream->application.len + stream->name.len;
+        if (label_bytes > (NGX_MEDIA_API_BUF_MAX_SIZE - capacity) / 34) {
+            return NGX_MEDIA_API_BUF_MAX_SIZE;
+        }
+        capacity += label_bytes * 34;
+
+        for (sq = ngx_queue_head(&stream->sources);
+             sq != ngx_queue_sentinel(&stream->sources);
+             sq = ngx_queue_next(sq))
+        {
+            source = ngx_queue_data(sq, ngx_media_source_t, queue);
+
+            if (capacity > NGX_MEDIA_API_BUF_MAX_SIZE - 4096) {
+                return NGX_MEDIA_API_BUF_MAX_SIZE;
+            }
+            capacity += 4096;
+
+            label_bytes = stream->application.len + stream->name.len
+                          + source->id.len;
+            if (label_bytes
+                > (NGX_MEDIA_API_BUF_MAX_SIZE - capacity) / 24)
+            {
+                return NGX_MEDIA_API_BUF_MAX_SIZE;
+            }
+            capacity += label_bytes * 24;
+        }
+
+        if (include_destinations) {
+            for (dq = ngx_queue_head(&stream->destinations);
+                 dq != ngx_queue_sentinel(&stream->destinations);
+                 dq = ngx_queue_next(dq))
+            {
+                destination = ngx_queue_data(dq,
+                                             ngx_media_destination_t, queue);
+
+                if (capacity > NGX_MEDIA_API_BUF_MAX_SIZE - 4096) {
+                    return NGX_MEDIA_API_BUF_MAX_SIZE;
+                }
+                capacity += 4096;
+
+                if (destination->id.len
+                    > (NGX_MEDIA_API_BUF_MAX_SIZE - capacity) / 6)
+                {
+                    return NGX_MEDIA_API_BUF_MAX_SIZE;
+                }
+                capacity += destination->id.len * 6;
+            }
+        }
+    }
+
+    return capacity;
+}
+
 static void
 ngx_media_api_body_ready(ngx_http_request_t *r)
 {
@@ -4135,17 +4382,19 @@ ngx_media_api_body_ready(ngx_http_request_t *r)
     ngx_str_t              body;
     u_char                *buf, *last, *end;
     ngx_int_t              status;
+    size_t                 capacity;
 
-    buf = ngx_pnalloc(r->pool, NGX_MEDIA_API_BUF_SIZE);
+    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+    capacity = ngx_media_api_response_capacity(r, registry);
+    buf = ngx_pnalloc(r->pool, capacity);
     if (buf == NULL) {
         ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
         return;
     }
 
     last = buf;
-    end = buf + NGX_MEDIA_API_BUF_SIZE;
+    end = buf + capacity;
 
-    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
 
     if (registry == NULL) {
         last = ngx_snprintf(last, end - last, "{\"error\":\"no_registry\"}");
