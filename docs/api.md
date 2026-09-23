@@ -61,7 +61,7 @@ a controller restart survivable.
 ```json
 {"streams":[
   {"application":"live","name":"news","owner":0,"observed_here":true,
-   "revision":9,
+   "revision":9,"media":"source",
    "generation":2,"switches":1,"emergency_switches":0,
    "failure_timeout_ms":1500,"recovery_timeout_ms":10000,
    "switchback":1,"program_frames":696,
@@ -168,6 +168,22 @@ returns `201` with `{"application":"live","name":"news","revision":1,
 object exists before anything publishes to it and a source can be attached
 first.  Creating one that already exists returns `200` with `"created":false`
 and the object's current revision.
+
+The optional `media` field selects the stream's representation:
+
+```json
+{"application":"live","name":"news","media":"profile"}
+```
+
+`"source"` (the default) forwards the selected source representation.
+`"profile"` sends the program through the configured external FFmpeg adapter
+before package and egress stages.  A profile request is validated before graph
+activation and returns `400` with `{"error":"transform_unavailable"}` when
+`media_transform_ffmpeg` is not configured; an unknown value returns
+`{"error":"unknown_media_mode"}`.  The current mode is returned as
+`"media":"source"` or `"media":"profile"` by create, patch, collection and
+stream detail responses.  `PATCH` and `PUT /desired` accept the same field and
+advance the stream revision when it changes.
 
 `GET /media/api/v1/streams/{application}/{name}` reports the program with
 both of the lists it owns: `sources` in the shape the collection route uses,
@@ -405,7 +421,7 @@ An apply is accepted as `PUT` or as `POST`.
 
 ```json
 {"streams":[
-  {"application":"live","name":"news","revision":9,
+  {"application":"live","name":"news","revision":9,"media":"source",
    "sources":[{"id":"encoder-a","type":1,"priority":100,"enabled":true,
                "revision":2}],
    "destinations":[{"id":"cdn","type":3,"host":"http://origin/","port":0,

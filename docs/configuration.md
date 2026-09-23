@@ -39,6 +39,25 @@ name and renamed into place, the way the playlist is, so a reader that watches
 the directory - an `hls_push` destination, or a viewer that fetched the name
 from the playlist - never sees a name with a partial segment behind it.
 
+### `media_transform_ffmpeg <path>;`
+
+Configures the external profile executor.  The worker launches `<path>` with
+`execv()` and a fixed, structured FFmpeg argument vector; it never passes the
+value through a shell.  The worker owns the child process group, uses
+nonblocking pipes, bounds the input journal at eight bursts and 8 MiB, and
+restarts an exited child with 250 ms to 5 s exponential backoff.  The path
+must be executable by the worker user.  The directive is optional and unset by
+default.
+
+### `media_transform_profile <width> <height> <video_bitrate> <audio_bitrate>;`
+
+Sets the validated profile used when a stream requests `"media":"profile"`.
+All four values are positive integers; width and height are capped at 8192,
+video bitrate at 100,000,000 bits/s and audio bitrate at 10,000,000 bits/s.
+The current adapter emits H.264/AAC MPEG-TS through the configured external
+FFmpeg process.  A profile request is rejected by the API unless
+`media_transform_ffmpeg` is configured.
+
 ### `media_record <file>;`
 
 Records the post-selection, timeline-normalized program — what went to air — as

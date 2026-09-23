@@ -56,13 +56,11 @@
 # full one for testing.
 #
 # Three stages.  The build stage has the toolchain, the pinned nginx source
-# and the module.  The runtime stage has the runtime libraries and the
-# installed prefix and nothing else: no compiler, no source tree, no headers.
-# The test stage is the build stage plus what the integration suite needs, and
-# it is what runs the suite in CI so that a local run and a CI run are the
-# same run.  ffmpeg is deliberately absent from the runtime stage - the media
-# core does not decode, and an image that carries a decoder invites a
-# deployment that uses one.
+# and the module.  The runtime stage has the runtime libraries, the external
+# FFmpeg executor used by profile transforms, and the installed prefix - no
+# compiler, source tree, or headers.  The test stage is the build stage plus
+# what the integration suite needs, and it is what runs the suite in CI so
+# that a local run and a CI run are the same run.
 
 # The base is an argument so CI can run the same suite against a different
 # Debian without editing this file: trixie is the shipped image, sid is the
@@ -170,7 +168,9 @@ LABEL org.opencontainers.image.title="nginx-media" \
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Runtime libraries only, and three of them are load-bearing:
+# Runtime libraries only, plus the external process that performs profile
+# transforms.  NGINX supervises FFmpeg; it does not link libavcodec or
+# libavfilter into the worker:
 #
 #   libsrt          the SRT transport links against it
 #   ca-certificates an HLS destination pulls and pushes over HTTPS, and with
@@ -180,13 +180,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 #   curl            the healthcheck below, which asks the control API rather
 #                   than asking nginx whether its own config parses
 #   gettext-base    envsubst, which the entrypoint uses to render the template
+#   ffmpeg          the supervised external profile executor
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        libpcre2-8-0 zlib1g libssl3t64 libsrt1.5-openssl ca-certificates \
-        curl gettext-base \
+        ffmpeg libpcre2-8-0 zlib1g libssl3t64 libsrt1.5-openssl \
+        ca-certificates curl gettext-base \
     && rm -rf /var/lib/apt/lists/*
-
-COPY --from=build /usr/local/nginx /usr/local/nginx
 RUN ln -s /usr/local/nginx/sbin/nginx /usr/local/sbin/nginx
 
 COPY container/nginx.conf /etc/nginx/nginx.conf

@@ -107,6 +107,30 @@ consumer took it; a consumer whose position is behind the retained tail is
 overrun and resumes at the next keyframe, which is a discontinuity in the HLS
 output and a gap in a recording, not an error anywhere.
 
+### External profile transform
+
+A stream with `"media":"profile"` is not transcoded in the NGINX worker.  The
+owner launches the configured FFmpeg executable as a direct child, places it
+in its own process group, and feeds bounded MPEG-TS bursts through
+nonblocking pipes.  The current limits are eight queued bursts, 8 MiB of
+queued input and 256 KiB of executor I/O per runtime tick.  A full input
+journal drops the newest burst and logs `transform input journal is full`;
+the worker never blocks waiting for FFmpeg.
+
+The child is restarted after EOF or abnormal exit with 250 ms to 5 s
+exponential backoff and a hard restart ceiling.  A restart increments the
+executor epoch, resets the transformed demux/package cursor and emits an HLS
+discontinuity; destinations remain attached to the same stream.  Watch
+`media: transform executor started`, `restarted` and `failed` in the
+`info`-level error log.  `media_transform_ffmpeg` is a direct executable path,
+not a shell command, and the worker passes only structured arguments derived
+from `media_transform_profile`.
+
+Admission fails before graph activation when a stream requests `profile` but
+no executor path is configured.  The profile adapter currently emits
+H.264/AAC MPEG-TS.  The source representation remains the default and avoids
+the executor entirely.
+
 ### Sources on air
 
 `nginx_media_source_active` is the cheapest alert in the set: summed per stream,
@@ -1128,6 +1152,7 @@ approached is a reading, not a directive.
 | What | Bound | Where it shows |
 |---|---|---|
 | Program feed backlog | 2048 units, 32 MiB, 10 s age per stream | `feed_units`, `feed_bytes`; eviction at a ceiling is a discontinuity downstream |
+| Transform input journal | 8 MPEG-TS bursts / 8 MiB per profile stream | newest burst is dropped and `transform input journal is full` is logged |
 | Runtime output slots | 16 per worker, one per stream with an output configured | `nginx_media_runtime_outputs`; a count that does not fall is a leak, and 16 is the stream ceiling per worker |
 | Outbound HTTP wait | 5 s to connect per address, 10 s without progress per read or write | a reader or uploader thread is released; the fetch or upload fails and is retried or counted, and the log says so |
 | Streams draining after a delete | unbounded, one per deleted stream whose reader thread is still stopping | `nginx_media_streams_draining`; it returns to zero within a tick or two, and a value that stays up is a reader that will not leave.  Each such stream holds its pool (its feed included) until then |
@@ -1159,9 +1184,15 @@ responsibility.
   reconciled against, and the server never deletes what the document omits.
   The controller owns the truth; the graph lives in worker memory and does not
   survive a reload, a restart, or a worker process dying.
-- It does not convert media.  The timeline composes a source onto the program's
-  clock, preserving `pts - dts`; it does not transcode, rescale or re-encode, so
-  a switch to an incompatible source is an emergency rather than a conversion.
+- It does not convert source media by default.  The timeline still composes a
+  source onto the program's clock, preserving `pts - dts`; when a stream
+  explicitly requests `"media":"profile"`, the owner instead feeds bounded
+  compressed bursts to the configured external FFmpeg adapter, whose output
+  is packaged and sent to the same destinations.
+- It does not perform codec work in an NGINX worker.  FFmpeg is a supervised
+  child process, and an unavailable or repeatedly failing executor makes the
+  profile stream unavailable rather than silently passing through a different
+  representation.
 - It does not authenticate the control API.  There is no key, token or plugin in
   the module: the API is exactly as protected as the location that serves it, and
   that is the operator's decision.

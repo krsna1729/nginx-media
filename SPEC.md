@@ -1490,3 +1490,312 @@ The implementation is incomplete until these pass:
 13. Replayed create/delete requests satisfy documented idempotency semantics.
 14. Churn streams/sources/destinations during fanout load without violating health/fanout deadline SLA.
 15. Secrets used by HLS destinations never appear in normal diagnostics.
+
+---
+
+# Normative Revision: External Transform Execution and Shared Media Stages
+
+This revision defines the transform architecture.  It does not move codec
+execution into an NGINX worker.  NGINX owns control, source arbitration,
+timeline/epoch state, bounded compressed journals, package planning and
+network egress.  An external transform executor owns decode, scale, audio
+processing and encode.
+
+The invariant is:
+
+```text
+source arbitration
+        |
+logical tracks
+        |
+bounded compressed track journals
+        |
+shared transform/package plan
+        |
+prepared compressed feeds
+        |
+protocol egress
+```
+
+CPU software execution is the baseline executor.  Hardware execution is an
+optional placement of the same logical plan.  GPU availability, device choice,
+NUMA placement and codec implementation/version must never change destination
+identity or egress topology.
+
+## External executor boundary
+
+The executor is a supervised child process (or a supervised executor service)
+launched by the deployment.  NGINX does not link libavcodec, libavfilter,
+NVDEC/NVENC, VAAPI, QSV or another codec SDK.
+
+The process boundary carries compressed media only:
+
+```text
+NGINX worker
+    |
+    | bounded local control/media transport
+    v
+transform executor
+    |
+    +-- ffmpeg child: decode -> scale/audio -> encode
+    |
+    v
+encoded rendition journal
+```
+
+Raw CPU frames remain inside one executor transform island.  GPU surfaces
+remain on the device from decode through scale and encode.  Only compressed
+input and compressed output cross the boundary.
+
+The generic executor-service transport is a bounded framed protocol over a
+local `SOCK_SEQPACKET` or equivalent local channel.  It MUST NOT be an
+unbounded stdin/stdout pipe or an ad-hoc line protocol.
+
+The shipped FFmpeg adapter is intentionally narrower: NGINX launches the
+configured FFmpeg executable directly and connects it with nonblocking
+stdin/stdout/stderr pipes.  The supervisor's input journal is bounded by both
+chunk count and bytes, each tick has an I/O budget, and the adapter never
+exposes an unbounded pipe as a generic executor interface.  A future executor
+service uses the framed transport above.
+
+Every generic-service message has:
+
+```c
+struct media_transform_message {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t type;
+    uint32_t length;
+    uint64_t sequence;
+    uint64_t epoch;
+};
+```
+
+The implementation MUST validate `magic`, `version`, `type`, `length`,
+`sequence`, `epoch` and the maximum message size before allocation or use.
+Media payloads are immutable references in NGINX and bounded byte copies at
+the process boundary; one receiver never receives one unbounded allocation.
+
+The control types are:
+
+```text
+HELLO       executor capability/version negotiation
+START       physical transform plan and input contract
+INPUT       compressed track-journal units
+DISCONTINUITY  program epoch/source boundary
+END         end of one input epoch
+STOP        drain/cancel one physical stage
+```
+
+The executor events are:
+
+```text
+READY       accepted physical plan and capability result
+OUTPUT      encoded rendition unit
+DRAINED     stage stopped at an epoch boundary
+ERROR       bounded machine-readable failure
+EXIT        executor/ffmpeg child exited
+```
+
+An executor MUST identify the physical implementation and version in `READY`.
+That identity is part of the physical stage key because CPU and hardware
+encoders with nominally equal settings need not produce byte-identical output.
+
+## Supervision and failure
+
+The supervisor owns the process group, control channel, restart backoff and
+bounded restart count.  Framed services add heartbeat/deadline handling; the
+direct FFmpeg adapter uses its bounded nonblocking I/O budget.  It MUST:
+
+1. launch the configured external executor with a closed inherited descriptor
+   set except for the framed contract channel, or the direct adapter's
+   stdin/stdout/stderr pipes and explicitly declared resources;
+2. put the child in its own process group;
+3. detect EOF, protocol failure, service heartbeat failure and abnormal exit;
+4. terminate the complete process group, including an ffmpeg descendant;
+5. restart with bounded exponential backoff and a hard restart ceiling;
+6. increment the physical stage epoch and emit a discontinuity after restart;
+7. keep destinations attached to the same logical prepared-feed identity;
+8. refuse admission when the executor cannot satisfy the requested capability
+   or the configured resource ceiling.
+
+An executor failure MUST NOT free a destination, source or logical stream
+while callbacks or journal readers still reference them.  A failed stage
+enters `FAILED`/`RESTARTING`; its bounded input/output journals are drained,
+discarded or resynchronized according to stage policy.  No process restart
+may create an unbounded queue or silently splice bytes from two epochs.
+
+The supervisor MUST never execute a controller-supplied shell string.  The
+executable path and the argument vector are configured/validated values;
+profiles select structured arguments from an allowlisted capability model.
+
+## Logical track identity
+
+MPEG-TS PID and source-local track index are transport metadata, not stable
+downstream identity.  A logical track is identified by program scope plus:
+
+```text
+media type
+language
+role
+channel/layout identity
+```
+
+Source adapters maintain a source-track-to-logical-track mapping.  A failover
+may change PID, stream index or codec configuration while preserving the
+logical identity.  The source mapping is replaced; the transform/package
+graph is not recreated merely because the source changed.
+
+Each logical track publishes immutable bounded units:
+
+```c
+struct logical_media_unit {
+    uint64_t       sequence;
+    uint64_t       epoch;
+    uint32_t       logical_track_id;
+    int64_t        pts;
+    int64_t        dts;
+    uint32_t       flags;       /* keyframe/config/discontinuity */
+    ngx_media_buf_t *payload;
+};
+```
+
+The journal contract is one writer, many cursors, monotonic sequence, explicit
+epoch, hard byte/unit/age ceilings, keyframe resynchronization and
+`OVERRUN`/`GENERATION_MISMATCH` results.  Track selection is a metadata view:
+selecting English and video does not decode, copy or remux Hindi and other
+tracks.
+
+A source may become eligible only when its required logical-track contract is
+satisfied.  The policy MUST explicitly choose between global ineligibility and
+degraded destinations when a backup lacks a required track; it MUST NOT
+silently remove a language during failover.
+
+## Shared transform and package stages
+
+The planner hash-conses stages by complete result-affecting keys:
+
+```text
+TransformSpec:
+    input logical tracks
+    codec/profile/level
+    geometry/crop/pixel format
+    frame rate/GOP/rate control
+    color/HDR policy
+    audio mapping/sample rate/layout
+    quality/encoder behavior
+    executor policy
+```
+
+The realized physical key is:
+
+```text
+PhysicalStageKey = TransformSpec + executor + implementation/version
+```
+
+Destination identity, hostname, credentials, retry policy, reconnect policy
+and protocol socket state MUST NOT be in a transform key.
+
+Packaging is a separate hash-consed layer.  Examples:
+
+```text
+RTMP package key = video representation + selected audio representation
+TS package key   = video + audio set + PID/PCR policy + mux settings
+HLS package key  = rendition set + segment policy + container format
+```
+
+One unique stage/package result is built once and exposed as a prepared feed.
+Destinations hold:
+
+```text
+prepared_feed_id
+cursor
+epoch
+protocol state
+partial write state
+retry/health state
+```
+
+They MUST NOT hold a pointer to the physical encoder, source PID, or executor
+device.  Adding destinations that use an existing prepared feed costs
+connection state only.  Deleting the final consumer releases the stage after
+its bounded warm-retention policy, if configured.
+
+## API media intent and capability validation
+
+Desired state describes media intent, not an executor command:
+
+```json
+{
+  "video": {"mode": "profile", "profile": "720p-3m"},
+  "audio": {"mode": "select", "languages": ["en"]},
+  "executor": "auto"
+}
+```
+
+`source` means passthrough of the logical source representation.  `profile`
+means a validated transform profile.  `select` is a zero-copy logical-track
+view; `all` is valid only for packages whose protocol can represent all
+selected tracks.  Legacy single-audio protocols MUST reject an incompatible
+multi-audio request or require an explicit mix/downmix policy.
+
+Validation and resource admission happen before graph activation.  The
+controller receives a bounded capability/resource error rather than a
+destination that starts and silently drops tracks.  `auto` chooses
+passthrough first, then a capable hardware executor, then the CPU executor.
+`hardware_required` fails admission if the requested profile cannot be
+realized by hardware.
+
+## Shipped direct FFmpeg adapter profile
+
+The current worker integration exposes a deliberately small first profile:
+`"media":"source"` is passthrough and `"media":"profile"` transforms the
+selected whole program with the configured external FFmpeg executable.  The
+profile is configured by `media_transform_profile`; it is not an executor
+command supplied by the API.  One owner creates one external transform and
+one prepared package feed for a profile stream, so all destinations of that
+stream consume the same transformed result.
+
+Logical-track metadata, hash-consed stage keys and bounded feed primitives are
+defined independently of the direct adapter.  The current API does not expose
+per-language track selection or hardware-specific capability requests; those
+requests MUST NOT be silently interpreted as whole-program passthrough.
+
+## Program epochs and source failover
+
+The logical program epoch is the shared discontinuity boundary for every track,
+transform stage, package stage and rendition.  A source switch performs:
+
+```text
+program epoch++
+replace source-track mapping
+emit DISCONTINUITY
+resynchronize transform/package cursors
+resume prepared feeds
+```
+
+Every HLS rendition and every protocol package derived from the program
+observes the same epoch.  A physical executor restart uses the same rule.
+Destinations remain attached to their prepared feed IDs and do not need to be
+recreated.
+
+## Acceptance contract before egress-ladder work
+
+The implementation is not ready for egress scaling work until these pass:
+
+1. A supervisor launches an allowlisted executor and rejects shell injection.
+2. A killed ffmpeg child is detected, its process group is reaped, and the
+   stage restarts with bounded backoff and a new epoch.
+3. A malformed/oversized executor message is rejected without allocation
+   growth or worker-loop blockage.
+4. Two equal transform requests share one physical stage; differing
+   result-affecting keys do not.
+5. Track selection does not create a transform or copy unrelated tracks.
+6. A source failover changes source mapping and epoch but preserves prepared
+   feed/destination identity.
+7. Package capability validation rejects impossible multi-track requests before
+   destination activation.
+8. CPU executor output and hardware executor output use the same logical
+   prepared-feed contract.
+9. Executor loss leaves unrelated sources, destinations and program health
+   bounded and observable.
