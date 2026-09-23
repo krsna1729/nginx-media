@@ -868,6 +868,20 @@ ngx_media_ts_emit(ngx_media_ts_demux_t *demux, ngx_media_ts_track_t *track,
         return NGX_OK;
     }
 
+    /*
+     * The length is reassembled from the transport stream, so it is attacker
+     * controlled: a PES header declares a length and a run of packets can
+     * declare more.  The assembly enforces max_au_bytes before this point, and
+     * the ceiling is enforced again at the allocation rather than relied on
+     * from there - a caller that assembles its own buffer cannot hand this
+     * function an unbounded length, and a stream that tries is a counted drop
+     * instead of an unbounded allocation.
+     */
+    if (len > demux->max_au_bytes) {
+        demux->stats.au_overflows++;
+        return NGX_ERROR;
+    }
+
     buf = ngx_media_buf_alloc(len);
     if (buf == NULL) {
         return NGX_ERROR;

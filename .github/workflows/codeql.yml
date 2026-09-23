@@ -67,6 +67,18 @@ jobs:
           # queries too, which is a different argument to have and one worth
           # having separately.
           queries: security-extended
+          # The analysis covers this repository's own sources.  The build step
+          # below fetches nginx and compiles the module against it, so the
+          # vendored tree is in the database whether or not it is analyzed -
+          # and analyzing it reports findings in code this project does not
+          # own, cannot act on, and would have to triage on every run
+          # (`ngx_time.c` localtime() and an `ngx_log.c` path argument were the
+          # two).  Those reports are noise that hides findings in `src/`, which
+          # is the code the module ships.
+          config: |
+            paths:
+              - src
+              - tests
 
       - name: Install the build dependencies
         run: |
