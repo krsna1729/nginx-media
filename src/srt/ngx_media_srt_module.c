@@ -53,6 +53,7 @@
 #include "ngx_media_route.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_destination.h"
+#include "ngx_media_egress_manager.h"
 #include "ngx_media_srt_output.h"
 
 /*
@@ -249,6 +250,7 @@ static ngx_media_srt_slot_t  ngx_media_srt_slots[
 /* SRT destinations fed from the shared program preparation */
 static ngx_media_srt_outputs_t  *ngx_media_srt_outputs;
 static ngx_connection_t         *ngx_media_srt_output_connection;
+static ngx_event_t              ngx_media_srt_egress_adapt_ev;
 
 static ngx_media_feed_conf_t    ngx_media_srt_feed_conf = {
     2048, 32 * 1024 * 1024, 10000
@@ -1058,11 +1060,11 @@ ngx_media_srt_destination_add(ngx_media_stream_t *stream,
     }
 
     ngx_memzero(&conf, sizeof(conf));
-
     conf.application = stream->application;
     conf.stream = stream->name;
     conf.incarnation = stream->incarnation;
     conf.program_identity = (uintptr_t) stream;
+    conf.egress_token = destination->egress_token;
     conf.host = destination->host;
     conf.port = destination->port;
     conf.streamid = destination->streamid;
@@ -1173,6 +1175,20 @@ ngx_media_srt_output_handler(ngx_event_t *ev)
                               events[i].dropped);
             }
         }
+    }
+}
+
+static void
+ngx_media_srt_egress_adapt_handler(ngx_event_t *ev)
+{
+    ngx_media_srt_outputs_t  *outs = ev->data;
+
+    if (outs != NULL) {
+        ngx_media_srt_outputs_adapt(outs);
+    }
+
+    if (outs != NULL && !ngx_exiting && !ngx_terminate && !ngx_quit) {
+        ngx_add_timer(ev, 1000);
     }
 }
 
@@ -1684,6 +1700,49 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
                                      == &mcf->crypto_params
                                  ? "global" : "stream"));
         }
+        for (i = 0; i < mcf->noutputs; i++) {
+            ngx_media_egress_descriptor_t  descriptor;
+            ngx_str_t                      destination;
+            u_char                        *end;
+            ngx_media_srt_output_conf_t   *conf;
+
+            conf = &mcf->outputs[i];
+            destination.len = conf->host.len + NGX_INT_T_LEN + 1;
+            destination.data = ngx_pnalloc(cycle->pool, destination.len);
+            if (destination.data == NULL) {
+                while (i != 0) {
+                    conf = &mcf->outputs[--i];
+                    ngx_media_egress_manager_release(conf->egress_token);
+                    conf->egress_token = 0;
+                }
+                return NGX_ERROR;
+            }
+
+            end = ngx_snprintf(destination.data, destination.len,
+                               "%V:%ui", &conf->host, conf->port);
+            destination.len = end - destination.data;
+            ngx_memzero(&descriptor, sizeof(descriptor));
+            descriptor.application = conf->application;
+            descriptor.stream = conf->stream;
+            descriptor.destination = destination;
+            descriptor.representation_epoch = 1;
+            descriptor.protocol = NGX_MEDIA_DEST_SRT;
+            descriptor.engine = NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD;
+            descriptor.placement = i % NGX_MEDIA_SRT_EGRESS_SHARDS;
+
+            if (ngx_media_egress_manager_admit(&descriptor,
+                                               &conf->egress_token,
+                                               cycle->log) != NGX_OK)
+            {
+                while (i != 0) {
+                    conf = &mcf->outputs[--i];
+                    ngx_media_egress_manager_release(conf->egress_token);
+                    conf->egress_token = 0;
+                }
+                return NGX_ERROR;
+            }
+        }
+
 
         {
             static ngx_media_destination_ops_t  srt_destination_ops = {
@@ -1701,6 +1760,13 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
         {
             ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
                           "media: could not start the SRT outputs");
+            for (i = 0; i < mcf->noutputs; i++) {
+                if (mcf->outputs[i].egress_token != 0) {
+                    ngx_media_egress_manager_release(
+                        mcf->outputs[i].egress_token);
+                    mcf->outputs[i].egress_token = 0;
+                }
+            }
             return NGX_ERROR;
         }
 
@@ -1723,6 +1789,13 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
         }
 
         ngx_media_runtime_set_sink(ngx_media_srt_output_sink, outs);
+
+        ngx_memzero(&ngx_media_srt_egress_adapt_ev, sizeof(ngx_event_t));
+        ngx_media_srt_egress_adapt_ev.handler =
+            ngx_media_srt_egress_adapt_handler;
+        ngx_media_srt_egress_adapt_ev.data = outs;
+        ngx_media_srt_egress_adapt_ev.log = cycle->log;
+        ngx_add_timer(&ngx_media_srt_egress_adapt_ev, 1000);
 
         ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
                       "media: %ui SRT destination(s) started", mcf->noutputs);
@@ -2143,6 +2216,10 @@ ngx_media_srt_exit_process(ngx_cycle_t *cycle)
 
     if (ngx_media_srt_shutdown_ev.timer_set) {
         ngx_del_timer(&ngx_media_srt_shutdown_ev);
+    }
+
+    if (ngx_media_srt_egress_adapt_ev.timer_set) {
+        ngx_del_timer(&ngx_media_srt_egress_adapt_ev);
     }
 
     /* the ingest side, up only when a listener was configured */

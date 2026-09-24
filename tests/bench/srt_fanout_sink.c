@@ -543,6 +543,16 @@ main(int argc, char **argv)
         goto done;
     }
     initialized = 1;
+    /*
+     * Per-packet receive loss, empty accepts, and redundant epoll-removal
+     * warnings flood the measured path. Receiver byte, TS, and transport
+     * counters preserve the quality evidence without those log categories.
+     */
+    srt_dellogfa(SRT_LOGFA_BUF_RECV);
+    srt_dellogfa(SRT_LOGFA_QUE_RECV);
+    srt_dellogfa(SRT_LOGFA_TSBPD);
+    srt_dellogfa(SRT_LOGFA_CONN);
+    srt_dellogfa(SRT_LOGFA_EPOLL_UPD);
 
     listener = srt_create_socket();
     if (listener == SRT_INVALID_SOCK) {
@@ -615,13 +625,17 @@ main(int argc, char **argv)
             if (event_mask & SRT_EPOLL_ERR) {
                 size_t peer_index;
 
-                if (quality_mode && sock != listener) {
+                if (sock != listener) {
                     for (peer_index = 0; peer_index < connected; peer_index++) {
                         if (peers[peer_index].sock == sock) {
                             break;
                         }
                     }
-                    if (peer_index < connected) {
+                    if (peer_index == connected) {
+                        /* A replaced session can still have a queued event. */
+                        continue;
+                    }
+                    if (quality_mode) {
                         mark_transport_error(epoll_id, &peers[peer_index],
                                              "SRT_EPOLL_ERR");
                         continue;
@@ -640,9 +654,11 @@ main(int argc, char **argv)
                 for (;;) {
                     SRTSOCKET accepted = srt_accept(listener, NULL, NULL);
                     char streamid[STREAMID_CAP];
+                    char destination[DESTINATION_CAP];
                     int streamid_len = sizeof(streamid) - 1;
                     int nonblocking = 0;
-                    int j;
+                    int is_new;
+                    size_t peer_index;
 
                     if (accepted == SRT_INVALID_SOCK) {
                         int system_error;
@@ -655,17 +671,11 @@ main(int argc, char **argv)
                         failure = 1;
                         break;
                     }
-                    if (connected == expected) {
-                        fprintf(stderr, "received more than %zu expected peers\n",
-                                expected);
-                        (void) srt_close(accepted);
-                        failure = 1;
-                        break;
-                    }
                     memset(streamid, 0, sizeof(streamid));
                     if (srt_getsockopt(accepted, 0, SRTO_STREAMID, streamid,
                                        &streamid_len) == SRT_ERROR
-                        || streamid_len < 0 || streamid_len >= (int) sizeof(streamid))
+                        || streamid_len < 0
+                        || streamid_len >= (int) sizeof(streamid))
                     {
                         fprintf(stderr, "cannot read peer stream ID: %s\n",
                                 srt_getlasterror_str());
@@ -674,31 +684,46 @@ main(int argc, char **argv)
                         break;
                     }
                     streamid[streamid_len] = '\0';
-                    if (extract_destination(streamid, peers[connected].destination,
-                                            sizeof(peers[connected].destination)) != 0)
+                    if (extract_destination(streamid, destination,
+                                            sizeof(destination)) != 0)
                     {
-                        fprintf(stderr, "peer stream ID has no valid s= destination: %s\n",
+                        fprintf(stderr,
+                                "peer stream ID has no valid s= destination: %s\n",
                                 streamid);
                         (void) srt_close(accepted);
                         failure = 1;
                         break;
                     }
-                    peers[connected].stalled =
-                        stall_id != NULL
-                        && strcmp(peers[connected].destination, stall_id) == 0;
-                    for (j = 0; j < (int) connected; j++) {
-                        if (strcmp(peers[j].destination,
-                                   peers[connected].destination) == 0)
-                        {
-                            fprintf(stderr, "duplicate destination ID: %s\n",
-                                    peers[connected].destination);
-                            (void) srt_close(accepted);
-                            failure = 1;
+                    for (peer_index = 0; peer_index < connected; peer_index++) {
+                        if (strcmp(peers[peer_index].destination, destination) == 0) {
                             break;
                         }
                     }
-                    if (failure) {
+                    is_new = peer_index == connected;
+                    if (is_new && connected == expected) {
+                        fprintf(stderr,
+                                "received unexpected peer %s after %zu peers\n",
+                                destination, expected);
+                        (void) srt_close(accepted);
+                        failure = 1;
                         break;
+                    }
+                    if (is_new) {
+                        (void) memcpy(peers[peer_index].destination, destination,
+                                      strlen(destination) + 1);
+                        peers[peer_index].stalled =
+                            stall_id != NULL
+                            && strcmp(destination, stall_id) == 0;
+                    } else {
+                        if (peers[peer_index].sock != SRT_INVALID_SOCK) {
+                            if (!peers[peer_index].stalled) {
+                                (void) srt_epoll_remove_usock(
+                                    epoll_id, peers[peer_index].sock);
+                            }
+                            (void) srt_close(peers[peer_index].sock);
+                            peers[peer_index].sock = SRT_INVALID_SOCK;
+                        }
+                        peers[peer_index].transport_error = 1;
                     }
                     if (srt_setsockopt(accepted, 0, SRTO_RCVSYN, &nonblocking,
                                        sizeof(nonblocking)) == SRT_ERROR)
@@ -709,39 +734,42 @@ main(int argc, char **argv)
                         failure = 1;
                         break;
                     }
-                    if (!peers[connected].stalled) {
+                    if (quality_mode
+                        && (peers[peer_index].ts_last_cc == NULL
+                            || peers[peer_index].ts_seen == NULL))
+                    {
+                        peers[peer_index].ts_last_cc = malloc(TS_PID_COUNT);
+                        peers[peer_index].ts_seen = calloc(TS_SEEN_BYTES, 1);
+                        if (peers[peer_index].ts_last_cc == NULL
+                            || peers[peer_index].ts_seen == NULL)
+                        {
+                            fprintf(stderr, "cannot allocate TS counters for %s\n",
+                                    peers[peer_index].destination);
+                            free(peers[peer_index].ts_last_cc);
+                            free(peers[peer_index].ts_seen);
+                            peers[peer_index].ts_last_cc = NULL;
+                            peers[peer_index].ts_seen = NULL;
+                            (void) srt_close(accepted);
+                            failure = 1;
+                            break;
+                        }
+                    }
+                    if (!peers[peer_index].stalled) {
                         int mask = SRT_EPOLL_IN | SRT_EPOLL_ERR;
                         if (srt_epoll_add_usock(epoll_id, accepted, &mask)
                             == SRT_ERROR)
                         {
-                            fprintf(stderr,
-                                    "cannot monitor accepted socket: %s\n",
+                            fprintf(stderr, "cannot monitor accepted socket: %s\n",
                                     srt_getlasterror_str());
                             (void) srt_close(accepted);
                             failure = 1;
                             break;
                         }
                     }
-                    if (quality_mode) {
-                        peers[connected].ts_last_cc = malloc(TS_PID_COUNT);
-                        peers[connected].ts_seen = calloc(TS_SEEN_BYTES, 1);
-                        if (peers[connected].ts_last_cc == NULL
-                            || peers[connected].ts_seen == NULL)
-                        {
-                            fprintf(stderr,
-                                    "cannot allocate TS counters for %s\n",
-                                    peers[connected].destination);
-                            free(peers[connected].ts_last_cc);
-                            free(peers[connected].ts_seen);
-                            peers[connected].ts_last_cc = NULL;
-                            peers[connected].ts_seen = NULL;
-                            (void) srt_close(accepted);
-                            failure = 1;
-                            break;
-                        }
+                    peers[peer_index].sock = accepted;
+                    if (is_new) {
+                        connected++;
                     }
-                    peers[connected].sock = accepted;
-                    connected++;
                     if (connected == expected && !ready) {
                         if (publish_ready(argv[3]) != 0) {
                             failure = 1;
@@ -758,9 +786,8 @@ main(int argc, char **argv)
                     }
                 }
                 if (peer_index == connected) {
-                    fprintf(stderr, "epoll returned unknown SRT socket\n");
-                    failure = 1;
-                    break;
+                    /* A replaced session can still have a queued event. */
+                    continue;
                 }
                 for (;;) {
                     int received = srt_recvmsg(sock, buffer, RECEIVE_CAP);

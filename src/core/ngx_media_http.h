@@ -3,6 +3,8 @@
 
 #include "ngx_media.h"
 
+#include <sys/types.h>
+
 /*
  * A minimal blocking HTTP/1.1 client.
  *
@@ -42,12 +44,13 @@ ngx_int_t ngx_media_http_get(const ngx_str_t *url, const ngx_str_t *ca_file,
     u_char *buf, size_t cap, size_t *len, ngx_log_t *log);
 
 /*
- * PUT the contents of a file to url.  The body is sent with sendfile, so the
- * page cache goes straight to the socket with no user-space copy; a short
- * transfer is reported rather than published.
+ * PUT an already-open snapshot of a file to url.  path supplies the remote
+ * basename; file_fd remains caller-owned so sealed files can be shared across
+ * destination queues and remain readable after unlink or rename retention.
  */
 ngx_int_t ngx_media_http_put_file(const ngx_str_t *url,
-    const ngx_str_t *ca_file, const u_char *path, off_t size, ngx_log_t *log);
+    const ngx_str_t *ca_file, const u_char *path, int file_fd, off_t size,
+    ngx_log_t *log);
 
 /* whether kTLS is engaged on this connection, for diagnostics */
 ngx_uint_t ngx_media_http_ktls_supported(void);

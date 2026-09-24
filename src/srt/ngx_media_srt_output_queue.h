@@ -22,6 +22,7 @@ typedef struct {
     ngx_media_buf_t  *burst;      /* prepared burst, one reference */
     size_t            len;        /* bytes of the burst */
     uint64_t          sequence;
+    ngx_msec_t        enqueue_msec; /* monotonic insertion time */
     unsigned          keyframe:1; /* burst starts at a sync boundary */
 } ngx_media_srt_unit_t;
 
@@ -44,7 +45,8 @@ void ngx_media_srt_queue_destroy(ngx_media_srt_queue_t *q);
 
 /* takes a reference on the burst; drops whole bursts on overrun */
 ngx_int_t ngx_media_srt_queue_push(ngx_media_srt_queue_t *q,
-    ngx_media_buf_t *burst, size_t len, ngx_uint_t keyframe);
+    ngx_media_buf_t *burst, size_t len, ngx_uint_t keyframe,
+    ngx_msec_t enqueue_msec);
 
 /*
  * The next unit for a consumer positioned at *cursor, or NULL when nothing is

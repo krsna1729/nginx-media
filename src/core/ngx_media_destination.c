@@ -1,5 +1,6 @@
 #include "ngx_media_destination.h"
 #include "ngx_media_stream.h"
+#include "ngx_media_egress_manager.h"
 
 #define NGX_MEDIA_DESTINATION_MAX_BACKENDS  4
 
@@ -165,28 +166,79 @@ ngx_media_destination_count(const ngx_media_stream_t *stream)
     return count;
 }
 
+static ngx_uint_t
+ngx_media_destination_egress_engine(ngx_uint_t type)
+{
+    switch (type) {
+    case NGX_MEDIA_DEST_SRT:
+        return NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD;
+    case NGX_MEDIA_DEST_RTMP:
+        return NGX_MEDIA_EGRESS_ENGINE_RTMP_EVENT_LOOP;
+    case NGX_MEDIA_DEST_HLS_PUSH:
+        return NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL;
+    default:
+        return NGX_MEDIA_EGRESS_ENGINE_SHARED;
+    }
+}
 ngx_int_t
 ngx_media_destination_start(ngx_media_stream_t *stream,
     ngx_media_destination_t *destination, ngx_log_t *log)
 {
     const ngx_media_destination_ops_t  *ops;
+    ngx_media_egress_descriptor_t       descriptor;
+    uint64_t                            token;
+    ngx_uint_t                          engine;
 
     if (stream == NULL || destination == NULL || !destination->enabled) {
         return NGX_ERROR;
+    }
+
+    if (destination->impl != NULL || destination->egress_token != 0) {
+        return NGX_OK;
     }
 
     ops = ngx_media_destination_backend(destination->type);
 
     /*
      * No backend means the type was accepted by the control API but nothing
-     * in this build can carry it.  The caller reports that; the model does
-     * not log, so it stays usable from hosts without nginx's logging.
+     * in this build can carry it.  The model does not log, so it stays usable
+     * from hosts without nginx's logging.
      */
     if (ops == NULL) {
         return NGX_ERROR;
     }
 
-    return ops->add(stream, destination, log);
+    engine = ngx_media_destination_egress_engine(destination->type);
+    if (engine == NGX_MEDIA_EGRESS_ENGINE_SHARED) {
+        return NGX_ERROR;
+    }
+
+    ngx_memzero(&descriptor, sizeof(descriptor));
+    descriptor.application = stream->application;
+    descriptor.stream = stream->name;
+    descriptor.destination = destination->id;
+    descriptor.stream_incarnation = stream->incarnation;
+    descriptor.representation_id = stream->incarnation;
+    descriptor.representation_epoch = stream->generation;
+    descriptor.feed_id = stream->incarnation;
+    descriptor.feed_epoch = stream->program_feed.generation;
+    descriptor.protocol = destination->type;
+    descriptor.engine = engine;
+    descriptor.deadline_msec = destination->segment_duration_ms;
+
+    if (ngx_media_egress_manager_admit(&descriptor, &token, log) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    destination->egress_token = token;
+
+    if (ops->add(stream, destination, log) != NGX_OK) {
+        ngx_media_egress_manager_release(token);
+        destination->egress_token = 0;
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
 }
 
 /*
@@ -209,6 +261,8 @@ ngx_media_destination_remove(ngx_media_stream_t *stream,
     if (ops != NULL && destination->impl != NULL) {
         ops->remove(stream, destination);
     }
+    ngx_media_egress_manager_release(destination->egress_token);
+    destination->egress_token = 0;
 
     destination->impl = NULL;
     destination->stream = NULL;

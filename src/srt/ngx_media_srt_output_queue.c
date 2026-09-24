@@ -65,7 +65,7 @@ ngx_media_srt_queue_evict(ngx_media_srt_queue_t *q)
 
 ngx_int_t
 ngx_media_srt_queue_push(ngx_media_srt_queue_t *q, ngx_media_buf_t *burst,
-    size_t len, ngx_uint_t keyframe)
+    size_t len, ngx_uint_t keyframe, ngx_msec_t enqueue_msec)
 {
     ngx_media_srt_unit_t  *unit;
     ngx_uint_t             index;
@@ -108,6 +108,7 @@ ngx_media_srt_queue_push(ngx_media_srt_queue_t *q, ngx_media_buf_t *burst,
     unit->burst = ngx_media_buf_ref(burst);
     unit->len = len;
     unit->sequence = q->head;
+    unit->enqueue_msec = enqueue_msec;
     unit->keyframe = keyframe ? 1 : 0;
 
     q->bytes += len;

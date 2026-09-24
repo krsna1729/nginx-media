@@ -50,19 +50,30 @@ back to a worker through an eventfd rather than touching worker state directly:
 | Thread | Created by | Talks to the worker through |
 |---|---|---|
 | SRT ingest | `ngx_media_srt_ingest.c` | a bounded raw-TS queue plus an eventfd |
-| SRT egress shard pool (fixed, 16 per worker) | `ngx_media_srt_output.c` | a bounded shard-feed queue and per-destination queues |
+| SRT egress shards (16 stable lanes, adaptive active senders) | `ngx_media_srt_output.c` | a bounded shard-feed queue and per-destination queues |
 | Recording writer | `ngx_media_record.c` | a work queue |
 | HLS ingest reader (one per ingest source) | `ngx_media_hls_ingest.c` | publishes frames through the stream's publish path |
 | HLS pull reader (one per pull source) | `ngx_media_hls_pull.c` | publishes frames through the stream's publish path |
-| HLS push upload pool (fixed size, shared) | `ngx_media_hls_push.c` | a bounded per-destination queue |
+| HLS push upload pool (four-thread ceiling, adaptive active count) | `ngx_media_hls_push.c` | a bounded per-destination queue |
 
 The two HTTP readers are the exception to the eventfd rule: they demux on their
 own thread and publish through the stream's own publish path — the same gate a
 publisher's frames enter — because the alternative would be to hand raw
 segments back and demux them twice.  The push pool is the mirror image of
 the SRT senders: one shared pool serves every destination, and each destination
-has its own bounded queue so a stalled remote cannot consume another
-destination's share.
+has its own bounded queue.  Active sender concurrency changes under the worker's
+shared CPU budget; a stalled remote can occupy a pool thread until its deadline,
+but cannot block the program or overflow another destination's queue.
+
+Each output registers with the worker-local egress manager.  Its destination
+record carries the application and stream incarnation, protocol, engine,
+placement, representation ID and epoch, and feed ID and epoch alongside
+per-destination delivery, drop, error, and queue telemetry.  The manager samples
+worker CPU capacity and event-loop lag, then adapts SRT and HLS sender
+concurrency under one budget that reserves one CPU for the event loop; SRT
+retransmissions alone are not growth pressure.  The manager never migrates a
+destination between workers, and RTMP sockets remain on their owning event
+loop.
 
 RTMP, the file source and the HTTP control API run entirely inside worker event
 loops: a file source advances from the runtime tick, never from a thread of its
@@ -376,11 +387,13 @@ publishing side of the source gate or the consuming side of the fanout:
   AAC audio; a container with none of those yields no tracks and no frames, and
   the reader reports that once instead of producing a source that never goes on
   air for no stated reason.
-- An `hls_push` destination watches one program's HLS output directory and
-  uploads segments to its endpoint on a bounded pool, each destination with its
-  own bounded queue.  With `media_hls <root>`, that directory is
-  `<root>/<application>/<name>`: programs do not share a playlist or a segment
-  name space.
+- An `hls_push` destination receives notifications from the segmenter after a
+  program's HLS segment or playlist has been atomically renamed.  It opens the
+  sealed inode and queues that snapshot for upload; it does not scan the output
+  directory.  With `media_hls <root>`, notifications match
+  `<root>/<application>/<name>`, so programs do not share a playlist or segment
+  namespace.  The HLS origin remains the local output directory and is separate
+  from this push path.
 
 Because all of these publish through the source gate or consume from the
 fanout, selection, health and compatibility need to know nothing about where
@@ -396,9 +409,10 @@ downstream of selection.
   file stops producing and fails the same way, so a one-shot slate hands over
   like a publisher that went away.
 - A destination that cannot keep up loses units from its own queue and counts
-  them; the program is unaffected.  An `hls_push` destination whose remote has
-  stalled loses its oldest queued segment and counts it, and a delete stops it
-  and unlinks it first so nothing it queued outlives it.
+  them; the program is unaffected.  An HLS queue overflow drops the oldest
+  queued file.  An opened inode remains readable after HLS retention unlinks or
+  replaces its path.  Deleting a destination discards queued files; any upload
+  already in flight retains its references until it finishes or times out.
 - Recording I/O never runs on the event loop, and reload closes the current
   recording part cleanly instead of transferring a live descriptor.
 - Nothing in the media path allocates per packet or blocks a worker.
@@ -542,21 +556,25 @@ The source-level path is intentionally visible:
   extraction and the ingest thread.  A full session table refuses a new
   session rather than growing the scheduler.
 - `src/srt/ngx_media_srt_output.c` and `ngx_media_srt_output_queue.*` own
-  bounded per-destination queues and a fixed pool of 16 egress shard threads
-  per worker.  Destination slots are assigned by slot index modulo 16; each
-  shard services its slots and calls only `connect`, `send`, `stats`,
+  bounded per-destination queues and 16 stable logical egress shards.  A
+  destination's slot maps to its logical shard modulo 16; the adaptive physical
+  sender pool maps those logical lanes across its current active worker count,
+  so scaling does not move a destination to a different shard.  Each lane
+  services its slots and calls only `connect`, `send`, `stats`,
   `session_shutdown` and `session_close`.
 - `src/srt/ngx_media_srt_udp.c` is a plain-UDP conformance double.  It is not a
   third SRT runtime and must not be used to infer reliability, encryption,
   pacing, group or library-thread behavior.
 
 The runtime counts above exclude module-owned threads.  Each worker's SRT
-destinations share the fixed 16-thread egress pool and a 1000-slot output
-table; adding runtime destinations does not create threads.  A destination
-queue is bounded at 256 units / 8 MiB, and each shard's feed queue at 64 units /
-8 MiB.  The ingest thread, bounded session table and IPC/event-loop work are
-also nginx-media resources.  Robotweax bounds the library transport cost, not
-the complete worker's thread or queue budget.
+destinations share 16 logical lanes and a 16-thread physical ceiling; active
+sender concurrency adapts under the worker-local egress manager and shares the
+available sender budget with HLS push after reserving one CPU for the event
+loop.  Adding runtime destinations does not create threads.  A destination
+queue is bounded at 256 units / 8 MiB, and each logical shard's feed queue at
+64 units / 8 MiB.  The ingest thread, bounded session table and IPC/event-loop
+work are also nginx-media resources.  Robotweax bounds the library transport
+cost, not the complete worker's thread or queue budget.
 
 `listen_shared` is an adapter capability, not an automatic property of every
 SRT library.  The module creates the native UDP socket, sets `SO_REUSEPORT`,

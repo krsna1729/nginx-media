@@ -47,6 +47,7 @@ typedef struct ngx_media_destination_s {
     uint64_t                revision;   /* bumped by every mutation */
     unsigned                enabled:1;  /* desired state */
 
+    uint64_t                egress_token; /* worker-local manager handle */
     void                   *impl;       /* backend handle, opaque here */
     ngx_queue_t             queue;
 } ngx_media_destination_t;

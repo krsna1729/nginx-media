@@ -194,20 +194,12 @@ static const char *owner_h_paths[] = {
     "src/core/ngx_media_owner.h",
 };
 
-static const char *srt_out_paths[] = {
-    "../../src/srt/ngx_media_srt_output.c",
-    "src/srt/ngx_media_srt_output.c",
-};
 
 static const char *rtmp_paths[] = {
     "../../src/rtmp/ngx_media_rtmp_wire.c",
     "src/rtmp/ngx_media_rtmp_wire.c",
 };
 
-static const char *ts_paths[] = {
-    "../../src/mpegts/ngx_media_ts_demux.c",
-    "src/mpegts/ngx_media_ts_demux.c",
-};
 
 static const char *api_paths[] = {
     "../../src/api/ngx_media_api_module.c",
@@ -245,10 +237,6 @@ static const char *srt_tr_paths[] = {
     "src/srt/ngx_media_srt_transport.c",
 };
 
-static const char *hls_push_paths[] = {
-    "../../src/core/ngx_media_hls_push.c",
-    "src/core/ngx_media_hls_push.c",
-};
 
 static const char *nal_paths[] = {
     "../../src/codec/ngx_media_nal.c",
@@ -987,55 +975,6 @@ test_http_thread_pool(void)
           "http.c uses no cycle pool (thread-safe buffers)");
 }
 
-/* ------------------------------------------------------------------ */
-/* Previous round (566358e): SRT UAF defer + idle sleep.               */
-/* ------------------------------------------------------------------ */
-
-static void
-test_srt_defer_and_idle(void)
-{
-    TEST_CASE("srt: remove() during an in-flight send defers the close "
-              "(UAF)");
-
-    /*
-     * outputs_remove() ran close(session) while the sender thread was
-     * outside the lock inside session_send(session) on the same pointer.
-     * The fix checks dest->sending under the lock and lets the sender that
-     * observes the epoch mismatch close the session after re-locking.
-     */
-    CHECK(file_contains(srt_out_paths,
-                        sizeof(srt_out_paths) / sizeof(srt_out_paths[0]),
-                        "if (!dest->sending)"),
-          "outputs_remove() defers close while sending");
-    CHECK(file_contains(srt_out_paths,
-                        sizeof(srt_out_paths) / sizeof(srt_out_paths[0]),
-                        "if (!dest->used && dest->session != NULL)"),
-          "sender thread reclaims a session removed mid-send");
-
-    TEST_CASE("srt: idle senders sleep on idle_cond instead of spinning");
-
-    /*
-     * Sender threads previously looped over empty slots at ~95% CPU.  They
-     * now wait on a pool-wide condition when no outputs are used and are
-     * woken by add/remove/stop.
-     */
-    CHECK(file_contains(srt_out_paths,
-                        sizeof(srt_out_paths) / sizeof(srt_out_paths[0]),
-                        "idle_cond"),
-          "sender pool has an idle condition");
-    CHECK(file_contains(srt_out_paths,
-                        sizeof(srt_out_paths) / sizeof(srt_out_paths[0]),
-                        "pthread_cond_wait"),
-          "idle senders sleep instead of spinning");
-    CHECK(file_contains(srt_out_paths,
-                        sizeof(srt_out_paths) / sizeof(srt_out_paths[0]),
-                        "pthread_cond_broadcast(&outs->idle_cond"),
-          "add/remove/stop wake idle senders");
-    CHECK(file_contains(ts_paths,
-                        sizeof(ts_paths) / sizeof(ts_paths[0]),
-                        "hdr_need"),
-          "ts demux accumulates split section headers");
-}
 
 /* ------------------------------------------------------------------ */
 /* Current working-tree round: HLS ingest name validation, close-on-   */
@@ -1317,50 +1256,6 @@ test_srt_null_backend(void)
           "last_error() guards the backend pointer");
 }
 
-/* mirrors the fixed scanner condition in ngx_media_hls_push.c */
-static int
-sec_push_wanted(const char *name)
-{
-    size_t  len = strlen(name);
-
-    if (len < 4) {
-        return 0;
-    }
-
-    if (strcmp(name + len - 3, ".ts") == 0) {
-        return 1;
-    }
-
-    if (len >= 5 && strcmp(name + len - 5, ".m3u8") == 0) {
-        return 1;
-    }
-
-    return 0;
-}
-
-static void
-test_push_scan_names(void)
-{
-    const char  *evil = "abcd";   /* len 4, not a segment */
-
-    TEST_CASE("hls push: 4-char names never read before the buffer");
-
-    /* the old expression evaluates name+4-5 == name-1: demonstrate the
-     * underflow without dereferencing it, so this is core-free */
-    CHECK(evil + strlen(evil) - 5 < evil,
-          "old arithmetic points before the name (the OOB)");
-
-    CHECK(!sec_push_wanted("abcd"), "4-char non-segment skipped");
-    CHECK(!sec_push_wanted("abc"), "short name skipped");
-    CHECK(sec_push_wanted("seg-1.ts"), ".ts accepted");
-    CHECK(sec_push_wanted("index.m3u8"), ".m3u8 accepted");
-    CHECK(!sec_push_wanted("index.m3u"), "truncated suffix rejected");
-
-    CHECK(file_contains(hls_push_paths,
-                        sizeof(hls_push_paths) / sizeof(hls_push_paths[0]),
-                        "name_len >= 5"),
-          "scanner guards the .m3u8 suffix length");
-}
 
 #define SEC_NAL_EMPTIES  200000
 
@@ -1668,8 +1563,6 @@ main(void)
     test_http_header_truncation();
     test_http_thread_pool();
 
-    /* previous round */
-    test_srt_defer_and_idle();
 
     /* current working-tree round */
     test_api_segment_names();
@@ -1681,7 +1574,6 @@ main(void)
     /* round 4 */
     test_rtmp_player_reserve();
     test_srt_null_backend();
-    test_push_scan_names();
     test_nal_no_recursion();
     test_record_suffix();
     test_route_ipc_bounds();

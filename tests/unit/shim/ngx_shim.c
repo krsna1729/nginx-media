@@ -1,3 +1,5 @@
+#include "ngx_media_http.h"
+
 #include "ngx_shim.h"
 
 #include <stdlib.h>
@@ -166,4 +168,22 @@ ngx_log_error(ngx_uint_t level, ngx_log_t *log, int err, const char *fmt, ...)
     (void) log;
     (void) err;
     (void) fmt;
+}
+
+/*
+ * Unit suites do not perform network I/O.  HLS push integration exercises the
+ * real HTTP client; the linked worker-pool code still uses its real notifier.
+ */
+ngx_int_t
+ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
+    const u_char *path, int file_fd, off_t size, ngx_log_t *log)
+{
+    (void) url;
+    (void) ca_file;
+    (void) path;
+    (void) file_fd;
+    (void) size;
+    (void) log;
+
+    return NGX_ERROR;
 }

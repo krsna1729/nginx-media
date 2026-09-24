@@ -122,6 +122,7 @@ ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/core/ngx_media_timeline.c \
                  $ngx_addon_dir/src/core/ngx_media_source.c \
                  $ngx_addon_dir/src/core/ngx_media_destination.c \
+                 $ngx_addon_dir/src/core/ngx_media_egress_manager.c \
                  $ngx_addon_dir/src/core/ngx_media_file.c \
                  $ngx_addon_dir/src/core/ngx_media_hls_push.c \
                  $ngx_addon_dir/src/core/ngx_media_http.c \

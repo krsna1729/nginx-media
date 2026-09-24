@@ -2055,12 +2055,13 @@ ngx_media_rtmp_init_process(ngx_cycle_t *cycle)
      * answer destination_start_failed forever, which is exactly the bug this
      * ordering fixes (goal doc 16).
      *
-     * Outbound push destinations stay with worker 0, which is where they have
-     * always been materialised and is not what the ingest socket moving
-     * changes: what is shared below is where publishers are *accepted*, not
-     * which worker opens a destination's socket.
+     * Outbound push destinations are registered independently in every
+     * worker, because the worker that owns a stream also owns its RTMP
+     * destination sockets and event-loop state.  This does not change
+     * listener placement: the independent guard below still keeps a
+     * non-reuseport listener on worker 0.
      */
-    if (ngx_worker == 0) {
+    {
         static ngx_media_destination_ops_t  rtmp_destination_ops = {
             NGX_MEDIA_DEST_RTMP,
             ngx_media_rtmp_destination_add,

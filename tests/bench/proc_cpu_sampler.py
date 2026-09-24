@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Take two low-overhead NGINX worker thread CPU snapshots."""
+"""Take low-overhead benchmark process thread CPU snapshots."""
 
 import argparse
 import os

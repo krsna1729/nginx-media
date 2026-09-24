@@ -1,4 +1,5 @@
 #include "ngx_media_hls_segmenter.h"
+#include "ngx_media_hls_push.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -576,6 +577,7 @@ ngx_media_hls_write_file(ngx_media_hls_t *hls, const ngx_str_t *name)
     }
 
     rc = NGX_OK;
+    ngx_media_hls_push_sealed(&hls->conf.path, &path, hls->log);
 
 done:
 
@@ -699,6 +701,7 @@ ngx_media_hls_write_playlist(ngx_media_hls_t *hls)
     }
 
     rc = NGX_OK;
+    ngx_media_hls_push_sealed(&hls->conf.path, &path, hls->log);
 
 done:
 

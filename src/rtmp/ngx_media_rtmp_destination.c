@@ -29,6 +29,7 @@
 #include "ngx_media_rtmp_adapter.h"
 #include "ngx_media_rtmp_destination.h"
 #include "ngx_media_rtmp_wire.h"
+#include "ngx_media_egress_manager.h"
 
 #define NGX_MEDIA_RTMP_DEST_MAX          1000
 #define NGX_MEDIA_RTMP_DEST_CHUNK        4096
@@ -77,6 +78,7 @@ struct ngx_media_rtmp_dest_s {
     ngx_uint_t                   port;
 
     ngx_media_stream_t          *stream;
+    unsigned                     resource_sampled:1;
     ngx_media_rtmp_prepare_t    *prepare;
     uint64_t                     cursor;
     unsigned                     announced:1;
@@ -97,6 +99,16 @@ struct ngx_media_rtmp_dest_s {
     ngx_uint_t                   stream_id;
     ngx_msec_t                   deadline;
     uint64_t                     reconnects;
+    uint64_t                     reported_reconnects;
+    uint64_t                     egress_token;
+    uint64_t                     delivered_bytes;
+    uint64_t                     transport_errors;
+    uint64_t                     backpressure_events;
+    uint64_t                     deadline_misses;
+    ngx_msec_t                   last_report;
+    ngx_msec_t                   last_resource_sample;
+    ngx_uint_t                   max_batch;
+    ngx_msec_t                   queue_since;
 
     ngx_chain_t                 *out;
     ngx_chain_t                 *out_last;
@@ -369,6 +381,10 @@ ngx_media_rtmp_dest_queue_message(ngx_media_rtmp_dest_t *d, ngx_uint_t csid,
     d->out_last = pending_last;
     d->out_queue += pending_queue;
     d->out_bytes += wire_bytes;
+    if (d->queue_since == 0) {
+        d->queue_since = ngx_current_msec;
+    }
+
 
     for (i = 0; i < packet.nparts; i++) {
         if (packet.parts[i].data < packet.head
@@ -394,19 +410,30 @@ ngx_media_rtmp_dest_flush(ngx_media_rtmp_dest_t *d)
 {
     ngx_connection_t  *c = d->connection;
     ngx_chain_t       *sent_tail, *cl, *next;
-    size_t             remaining_bytes;
+    size_t              remaining_bytes, before, after;
 
     if (c == NULL || d->out == NULL) {
         return;
     }
 
-    /* send_chain() returns the part of the chain that is still unsent */
+    before = 0;
+    for (cl = d->out; cl != NULL; cl = cl->next) {
+        before += (size_t) (cl->buf->last - cl->buf->pos);
+    }
+
     sent_tail = c->send_chain(c, d->out, 0);
 
     if (sent_tail == NGX_CHAIN_ERROR) {
+        d->transport_errors++;
         ngx_media_rtmp_dest_release(d);
         return;
     }
+
+    after = 0;
+    for (cl = sent_tail; cl != NULL; cl = cl->next) {
+        after += (size_t) (cl->buf->last - cl->buf->pos);
+    }
+    d->delivered_bytes += before - after;
 
     for (cl = d->out; cl != NULL && cl != sent_tail; cl = next) {
         next = cl->next;
@@ -429,9 +456,12 @@ ngx_media_rtmp_dest_flush(ngx_media_rtmp_dest_t *d)
     }
 
     d->out_bytes = remaining_bytes;
-
     d->out = sent_tail;
     d->out_last = sent_tail;
+
+    if (sent_tail == NULL) {
+        d->queue_since = 0;
+    }
 
     if (d->out_last != NULL) {
         while (d->out_last->next != NULL) {
@@ -869,6 +899,7 @@ ngx_media_rtmp_dest_on_command(ngx_media_rtmp_dest_t *d, ngx_media_buf_t *payloa
                       "media: rtmp destination %V publish rejected: %V",
                       &d->id, code);
 
+        d->transport_errors++;
         ngx_media_rtmp_dest_release(d);
     }
 }
@@ -913,7 +944,7 @@ static void
 ngx_media_rtmp_dest_pump(ngx_media_rtmp_dest_t *d)
 {
     const ngx_media_rtmp_media_t  *unit;
-    ngx_uint_t                     sent = 0;
+    ngx_uint_t                     sent = 0, blocked = 0;
     ngx_int_t                      rc;
 
     if (d->prepare == NULL || d->stream == NULL
@@ -951,7 +982,20 @@ ngx_media_rtmp_dest_pump(ngx_media_rtmp_dest_t *d)
         d->metadata_sent = 1;
     }
 
-    while (sent < NGX_MEDIA_RTMP_DEST_MAX_BATCH
+    if (!d->resource_sampled
+        || ngx_current_msec - d->last_resource_sample >= 1000)
+    {
+        ngx_media_egress_resources_t  resources;
+
+        ngx_media_egress_manager_resources_get(&resources);
+        d->resource_sampled = 1;
+        d->last_resource_sample = ngx_current_msec;
+        d->max_batch = (resources.worker_cpu_permille >= 800
+                        || resources.event_loop_lag_msec >= 250)
+                       ? 8 : NGX_MEDIA_RTMP_DEST_MAX_BATCH;
+    }
+
+    while (sent < d->max_batch
            && d->out_queue < NGX_MEDIA_RTMP_DEST_MAX_QUEUE)
     {
         unit = ngx_media_rtmp_fanout_next(&d->prepare->fan, d->cursor);
@@ -969,16 +1013,25 @@ ngx_media_rtmp_dest_pump(ngx_media_rtmp_dest_t *d)
             ngx_media_buf_size(unit->payload));
 
         if (rc == NGX_AGAIN) {
+            blocked = 1;
             break;
         }
 
         if (rc != NGX_OK) {
+            d->transport_errors++;
             ngx_media_rtmp_dest_release(d);
             return;
         }
 
         d->cursor = unit->sequence + 1;
         sent++;
+    }
+
+    if (blocked || d->out_queue >= NGX_MEDIA_RTMP_DEST_MAX_QUEUE) {
+        unit = ngx_media_rtmp_fanout_next(&d->prepare->fan, d->cursor);
+        if (unit != NULL) {
+            d->backpressure_events++;
+        }
     }
 
     if (sent > 0) {
@@ -1060,6 +1113,7 @@ ngx_media_rtmp_dest_handshake_done(ngx_media_rtmp_dest_t *d)
     if (ngx_media_rtmp_dest_queue_raw(d, d->handshake.c1,
                                       NGX_MEDIA_RTMP_HANDSHAKE_SIZE) != NGX_OK)
     {
+        d->transport_errors++;
         ngx_media_rtmp_dest_release(d);
         return;
     }
@@ -1086,6 +1140,7 @@ ngx_media_rtmp_dest_connected(ngx_media_rtmp_dest_t *d)
     d->deadline = ngx_current_msec;
 
     if (ngx_media_rtmp_dest_handshake_start(d) != NGX_OK) {
+        d->transport_errors++;
         ngx_media_rtmp_dest_release(d);
         return;
     }
@@ -1229,6 +1284,7 @@ ngx_media_rtmp_dest_write_handler(ngx_event_t *ev)
                           "media: rtmp destination %V could not connect to "
                           "%V:%ui", &d->id, &d->host, d->port);
 
+            d->transport_errors++;
             ngx_media_rtmp_dest_release(d);
             return;
         }
@@ -1259,6 +1315,7 @@ ngx_media_rtmp_dest_read_handler(ngx_event_t *ev)
             ngx_log_error(NGX_LOG_WARN, d->log, 0,
                           "media: rtmp destination %V: message header exceeds "
                           "the read buffer", &d->id);
+            d->transport_errors++;
             ngx_media_rtmp_dest_release(d);
             return;
         }
@@ -1271,6 +1328,7 @@ ngx_media_rtmp_dest_read_handler(ngx_event_t *ev)
 
         if (n == 0 || n == NGX_ERROR) {
             ngx_media_rtmp_dest_release(d);
+            d->transport_errors++;
             return;
         }
 
@@ -1294,6 +1352,7 @@ ngx_media_rtmp_dest_read_handler(ngx_event_t *ev)
                               "media: rtmp destination %V: handshake failed",
                               &d->id);
                 ngx_media_rtmp_dest_release(d);
+                d->transport_errors++;
                 return;
             }
 
@@ -1327,6 +1386,7 @@ ngx_media_rtmp_dest_read_handler(ngx_event_t *ev)
                                            ngx_media_rtmp_dest_on_message, d)
                 != NGX_OK)
             {
+                d->transport_errors++;
                 ngx_media_rtmp_dest_release(d);
                 return;
             }
@@ -1356,6 +1416,8 @@ ngx_media_rtmp_dest_read_handler(ngx_event_t *ev)
 
 /* --- timer --------------------------------------------------------------- */
 
+#define NGX_MEDIA_RTMP_DEST_REPORT  1000
+
 static void
 ngx_media_rtmp_dest_timer(ngx_event_t *ev)
 {
@@ -1374,6 +1436,8 @@ ngx_media_rtmp_dest_timer(ngx_event_t *ev)
                       "media: rtmp destination %V timed out in state %ui",
                       &d->id, d->state);
 
+        d->deadline_misses++;
+        d->transport_errors++;
         ngx_media_rtmp_dest_release(d);
     }
 
@@ -1381,11 +1445,36 @@ ngx_media_rtmp_dest_timer(ngx_event_t *ev)
 
         if (ngx_media_rtmp_dest_connect(d) != NGX_OK) {
             d->reconnects++;
+            d->transport_errors++;
             interval = NGX_MEDIA_RTMP_DEST_RETRY;
         }
 
     } else if (d->state == NGX_MEDIA_RTMP_DEST_PUBLISHING) {
         ngx_media_rtmp_dest_pump(d);
+    }
+    if (ngx_current_msec - d->last_report
+        >= NGX_MEDIA_RTMP_DEST_REPORT)
+    {
+        ngx_media_egress_report_t  report;
+
+        ngx_memzero(&report, sizeof(report));
+        report.delivered_bytes = d->delivered_bytes;
+        report.transport_errors = d->transport_errors;
+        report.backpressure_events = d->backpressure_events;
+        report.reconnects = d->reconnects - d->reported_reconnects;
+        report.deadline_misses = d->deadline_misses;
+        report.queue_bytes = d->out_bytes;
+        report.queue_lag_msec = (d->queue_since != 0)
+                                    ? ngx_current_msec - d->queue_since : 0;
+        report.placement = (ngx_uint_t) ngx_worker;
+        ngx_media_egress_manager_report(d->egress_token, &report);
+
+        d->delivered_bytes = 0;
+        d->transport_errors = 0;
+        d->backpressure_events = 0;
+        d->reported_reconnects = d->reconnects;
+        d->deadline_misses = 0;
+        d->last_report = ngx_current_msec;
     }
 
     if (d->used) {
@@ -1426,12 +1515,14 @@ ngx_media_rtmp_destination_add(ngx_media_stream_t *stream,
     }
 
     d->id = destination->id;
+    d->egress_token = destination->egress_token;
     d->application = stream->application;
     d->host = destination->host;
     d->port = destination->port;
     d->stream = stream;
     d->stream_name = destination->streamid.len ? destination->streamid
                                                : stream->name;
+    d->last_report = ngx_current_msec;
 
     /*
      * The same shared FLV preparation the players read: the program is

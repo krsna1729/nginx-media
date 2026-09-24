@@ -353,16 +353,20 @@ SRT backend (`src/srt/ngx_media_srt_module.c`), the RTMP backend
    accepted by the API and then `ngx_media_destination_start()` fails and the
    create answers `500 destination_start_failed`, which is honest about what the
    build can do.
-6. Take media from a shared preparation, never from the feed yourself.  The
-   three existing backends show the three available sources: the SRT backend
-   registers the runtime's prepared transport bursts (`ngx_media_runtime_set_sink`)
-   and fans them out to its per-destination queues, so a destination costs one
-   reference per burst; the RTMP backend reads the stream's shared FLV
-   preparation that the players read; the HLS push backend watches the HLS
-   output directory on the runtime tick.  The burst sink is a single global
-   slot, so a second backend that wants the prepared bursts either shares that
-   registration or the seam has to be widened — it cannot simply register over
-   the top.
+6. Take media from a shared preparation, never from the feed yourself.  The SRT
+   backend registers the runtime's prepared transport bursts
+   (`ngx_media_runtime_set_sink`) and fans them out to per-destination queues;
+   the RTMP backend reads the stream's shared FLV preparation on the owning
+   worker event loop.  The HLS push backend receives segmenter notifications
+   after segment and playlist atomic rename, opens each sealed inode once, and
+   queues its descriptor and metadata; it never scans the output directory.
+   Sender-thread state and queue entries must be heap-owned.  Background
+   threads must not touch `ngx_connection_t`, NGINX pools, timers, or handlers.
+   Register with the worker-local egress manager to report queue/transport
+   state and adapt SRT/HLS sender concurrency under the shared CPU budget; keep
+   RTMP on its owning event loop.  The burst sink is a single global slot, so a
+   second backend that wants prepared bursts either shares that registration or
+   the seam has to be widened — it cannot simply register over the top.
 
 The teardown order is not optional: `ngx_media_destination_remove()` stops the
 transport before it unlinks the object, so a sender is never left writing into

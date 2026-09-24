@@ -76,7 +76,9 @@ This document records the security boundaries, threat models, verified vulnerabi
 ### 12. HLS Push Scanner Out-of-Bounds Read on 4-Character Filenames
 - **Vulnerability**: In `src/core/ngx_media_hls_push.c`, the directory scan tested `strcmp(name + len - 5, ".m3u8")` for any name with `len >= 4`. A 4-character non-segment name made the pointer `name - 1`, reading one byte before the dirent buffer on every runtime tick.
 - **Root Cause**: `size_t` pointer arithmetic underflow in a suffix check.
-- **Fix**: Restructured to check `.ts` first, then require `len >= 5` before the `.m3u8` comparison.
+- **Current mitigation**: The directory scanner has been removed.  The
+  segmenter notifies push after sealed-file rename; the notifier opens that
+  final path instead of inspecting arbitrary dirent names.
 
 ### 13. NAL Iterator Unbounded Recursion on Empty Units
 - **Vulnerability**: In `src/codec/ngx_media_nal.c`, `ngx_media_nal_iter_next()` recursed once per empty NAL unit (adjacent start codes). A 200k-empty-unit access unit (~600 KiB of `00 00 01`) recursed 200k frames deep and smashed the 8 MB worker stack; any RTMP/SRT publisher controls this input.

@@ -548,22 +548,20 @@ ngx_media_http_get(const ngx_str_t *url, const ngx_str_t *ca_file,
 }
 
 /*
- * One blocking PUT of a whole file.  The body goes out with sendfile: the
- * page cache hands its pages straight to the socket, with no user-space
- * bounce, so an upload costs one kernel-side copy per destination instead of
- * two.  sendfile is not a server-side privilege - it works on any socket,
- * including this client connection.
+ * One blocking PUT of an already-open file snapshot.  The descriptor is
+ * caller-owned and may be shared across destinations: sendfile uses an
+ * explicit offset, and userspace TLS uses pread so neither path mutates its
+ * shared file position.
  */
 ngx_int_t
 ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
-    const u_char *path, off_t size, ngx_log_t *log)
+    const u_char *path, int file_fd, off_t size, ngx_log_t *log)
 {
     ngx_str_t   host, target;
     ngx_int_t   port = 80;
     ngx_int_t   fd, rc;
     ngx_uint_t  tls = 0;
     void       *ssl = NULL;
-    ngx_int_t   file_fd;
     off_t       sent = 0, offset = 0;
     ssize_t     n;
     u_char      header[1024];
@@ -571,6 +569,10 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
     u_char      response[512];
     ssize_t     rn;
     u_char      full[NGX_MEDIA_HTTP_PATH_MAX];
+
+    if (path == NULL || file_fd < 0 || size < 0) {
+        return NGX_ERROR;
+    }
 
     rc = ngx_media_http_split(url, &host, &port, &target, &tls, log);
 
@@ -621,11 +623,6 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
         }
     }
 
-    file_fd = open((char *) path, O_RDONLY);
-    if (file_fd < 0) {
-        (void) close(fd);
-        return NGX_ERROR;
-    }
 
     header_len = snprintf((char *) header, sizeof(header),
                           "PUT %.*s HTTP/1.1\r\n"
@@ -638,7 +635,6 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
                           (long long) size);
 
     if (header_len < 0 || (size_t) header_len >= sizeof(header)) {
-        (void) close(file_fd);
         if (ssl != NULL) {
             SSL_free((SSL *) ssl);
         }
@@ -649,7 +645,6 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
     if (ngx_media_http_write(fd, ssl, header, (size_t) header_len)
         != header_len)
     {
-        (void) close(file_fd);
 
         if (ssl != NULL) {
             SSL_free((SSL *) ssl);
@@ -704,20 +699,30 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
 
     } else {
         u_char  buf[16384];
-        size_t  got;
+        size_t  want;
 
         NGX_MEDIA_HTTP_LOG(NGX_LOG_INFO, log,
                       "media: upload to %V is userspace TLS, so the body "
                       "goes through user space; kTLS would remove that copy",
                       url);
 
-        while ((got = (size_t) read(file_fd, buf, sizeof(buf))) > 0) {
-
-            if (ngx_media_http_write(fd, ssl, buf, got) != (ssize_t) got) {
-                break;
+        while (sent < size) {
+            want = (size - sent > (off_t) sizeof(buf))
+                       ? sizeof(buf) : (size_t) (size - sent);
+            n = pread(file_fd, buf, want, offset);
+            if (n > 0) {
+                if (ngx_media_http_write(fd, ssl, buf, (size_t) n) != n) {
+                    break;
+                }
+                sent += n;
+                offset += n;
+                continue;
             }
 
-            sent += (off_t) got;
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            break;
         }
     }
 
@@ -726,7 +731,6 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
         NGX_MEDIA_HTTP_LOG(NGX_LOG_WARN, log,
                       "media: hls push sent %O of %O bytes from %s",
                       sent, size, path);
-        (void) close(file_fd);
 
         if (ssl != NULL) {
             SSL_free((SSL *) ssl);
@@ -736,7 +740,6 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
         return NGX_ERROR;
     }
 
-    (void) close(file_fd);
 
     rn = ngx_media_http_read(fd, ssl, response, sizeof(response) - 1);
 

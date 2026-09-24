@@ -3,88 +3,72 @@
 #include "ngx_media_http.h"
 #include "ngx_media_destination.h"
 #include "ngx_media_stream.h"
+#include "ngx_media_egress_manager.h"
 
 #include <arpa/inet.h>
-#include <dirent.h>
 #include <pthread.h>
-#include <stdio.h>
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <unistd.h>
+
+#include <sys/stat.h>
+
+#include <stdlib.h>
+#include <stdint.h>
+#include <time.h>
 
 #define NGX_MEDIA_HLS_PUSH_QUEUE     64
 #define NGX_MEDIA_HLS_PUSH_POOL      4
-#define NGX_MEDIA_HLS_PUSH_PATH_MAX  512
-#define NGX_MEDIA_HLS_PUSH_SCAN_MAX  256
-
-/* a segment name can be at most NAME_MAX (255) bytes, plus slack */
-#define NGX_MEDIA_HLS_PUSH_NAME_MAX  256
 
 typedef struct {
-    u_char    path[NGX_MEDIA_HLS_PUSH_PATH_MAX];
-    size_t    len;
-    off_t     size;
+    ngx_atomic_t  refs;
+    int           fd;
+    off_t         size;
+    u_char        path[];
+} ngx_media_hls_push_file_t;
+
+typedef struct {
+    ngx_media_hls_push_file_t  *file;
+    struct timespec             enqueued;
 } ngx_media_hls_push_item_t;
 
-/*
- * The last thing offered for one name.  A segment is immutable, so its name
- * is its identity; the playlist is rewritten in place under a constant name,
- * so its identity is the version - mtime and size - and a rewrite has to be
- * offered again.  Version comparison is also what keeps the table honest: a
- * version equal to the one already uploaded is never offered twice, while a
- * rewritten index differs in mtime at nanosecond resolution even when the
- * byte count happens to be the same.
- */
-typedef struct {
-    u_char           name[NGX_MEDIA_HLS_PUSH_NAME_MAX];
-    size_t           len;
-    struct timespec  mtime;
-    off_t            size;
-} ngx_media_hls_push_seen_t;
 
 struct ngx_media_hls_push_t {
     /*
-     * The object outlives the stream that created it.  An upload runs on a
-     * pool thread with the destination list lock released, so the stream's
-     * pool cannot carry this: deleting the stream would free a destination an
-     * uploader is still reading its endpoint and its watched directory out of.
-     * It has its own pool instead, and a reference for every holder - the list
-     * plus one per upload in flight - so the last one out frees it.
+     * The object outlives its stream.  It and all strings used by uploader
+     * threads are raw heap-owned, never tied to an NGINX pool.
      */
-    ngx_pool_t              *pool;
     ngx_atomic_t             refs;
 
-    ngx_str_t                directory;    /* watched output directory */
+
+    ngx_str_t                directory;    /* output directory */
     ngx_str_t                url;          /* remote endpoint, with trailing / */
     ngx_str_t                ca_file;      /* TLS trust anchor, empty for the
                                             * system store */
 
+    uint64_t                 egress_token;
+    ngx_uint_t               placement;
     ngx_media_hls_push_item_t  queue[NGX_MEDIA_HLS_PUSH_QUEUE];
     ngx_uint_t               head, tail, count;
+    ngx_media_hls_push_item_t  inflight_item;
+    ngx_uint_t                 inflight;
 
     pthread_mutex_t          mutex;
-    pthread_cond_t           cond;
+    pthread_mutex_t          report_mutex;
     ngx_uint_t               stopping;
 
-    /*
-     * Names already offered, so a scan does not enqueue the same file twice.
-     * The bounded table covers the recent window; the lexical high-water mark
-     * keeps immutable segment names older than it out after the table wraps.
-     * The playlist is rewritten in place, so it is tracked by version instead.
-     */
-    ngx_media_hls_push_seen_t  seen[NGX_MEDIA_HLS_PUSH_SCAN_MAX];
-    ngx_uint_t                 nseen;
-    ngx_uint_t                 seen_next;
-    u_char                     last_segment[NGX_MEDIA_HLS_PUSH_NAME_MAX];
-    ngx_uint_t                 last_segment_set;
 
     uint64_t                 uploaded;
+    uint64_t                 uploaded_bytes;
     uint64_t                 dropped;
     uint64_t                 failed;
+    uint64_t                 reported_uploaded_bytes;
+    uint64_t                 reported_dropped;
+    uint64_t                 reported_failed;
+    struct timespec          last_report;
 
     ngx_media_hls_push_t    *next;
 };
@@ -93,15 +77,69 @@ static ngx_media_hls_push_t   *ngx_media_hls_push_all;
 static pthread_mutex_t         ngx_media_hls_push_all_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_t               ngx_media_hls_push_pool[NGX_MEDIA_HLS_PUSH_POOL];
 static ngx_uint_t              ngx_media_hls_push_pool_size;
-static ngx_uint_t              ngx_media_hls_push_stopping;
+static ngx_atomic_t           ngx_media_hls_push_stopping;
+static ngx_atomic_t          ngx_media_hls_push_active_workers;
+static ngx_uint_t             ngx_media_hls_push_pool_ids[
+    NGX_MEDIA_HLS_PUSH_POOL];
+static uint64_t               ngx_media_hls_push_last_adapt_ns;
+static uint64_t               ngx_media_hls_push_last_cpu_ns[
+    NGX_MEDIA_HLS_PUSH_POOL];
+static ngx_uint_t             ngx_media_hls_push_cpu_sampled;
 static ngx_log_t              *ngx_media_hls_push_log;
+
+static ngx_uint_t
+ngx_media_hls_push_active(void)
+{
+    return (ngx_uint_t)
+        ngx_atomic_fetch_add(&ngx_media_hls_push_active_workers, 0);
+}
+
+static ngx_uint_t
+ngx_media_hls_push_is_stopping(void)
+{
+    return ngx_atomic_fetch_add(&ngx_media_hls_push_stopping, 0) != 0;
+}
+
+static ngx_int_t
+ngx_media_hls_push_set_active(ngx_uint_t active)
+{
+    ngx_uint_t  current;
+
+    if (active == 0 || active > NGX_MEDIA_HLS_PUSH_POOL
+        || ngx_media_hls_push_is_stopping())
+    {
+        return NGX_ERROR;
+    }
+
+    for ( ;; ) {
+        current = ngx_media_hls_push_active();
+        if (current == active
+            || ngx_atomic_cmp_set(&ngx_media_hls_push_active_workers, current,
+                                  active))
+        {
+            return NGX_OK;
+        }
+    }
+}
+
+static uint64_t
+ngx_media_hls_push_now_ns(void)
+{
+    struct timespec  ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+
+    return (uint64_t) ts.tv_sec * UINT64_C(1000000000)
+           + (uint64_t) ts.tv_nsec;
+}
 
 /* --- queue --------------------------------------------------------------- */
 
 /*
  * One reference on the object.  The list holds one, every upload in flight
- * holds one, and the last release destroys the pool - which is what makes a
- * delete safe while an uploader is still inside the destination.
+ * holds one, and the last release frees only raw heap storage.
  */
 static void
 ngx_media_hls_push_release(ngx_media_hls_push_t *push)
@@ -110,16 +148,27 @@ ngx_media_hls_push_release(ngx_media_hls_push_t *push)
         return;
     }
 
-    (void) pthread_cond_destroy(&push->cond);
+    (void) pthread_mutex_destroy(&push->report_mutex);
     (void) pthread_mutex_destroy(&push->mutex);
 
-    ngx_destroy_pool(push->pool);
+    free(push->directory.data);
+    free(push->url.data);
+    free(push->ca_file.data);
+    free(push);
 }
 
-/* a pool copy of one field, because the stream's pool is not ours to hold */
+static void
+ngx_media_hls_push_file_release(ngx_media_hls_push_file_t *file)
+{
+    if (file != NULL && ngx_atomic_fetch_add(&file->refs, -1) == 1) {
+        (void) close(file->fd);
+        free(file);
+    }
+}
+
+/* a heap copy, independent of the stream's pool */
 static ngx_int_t
-ngx_media_hls_push_strdup(ngx_pool_t *pool, const ngx_str_t *src,
-    ngx_str_t *dst)
+ngx_media_hls_push_strdup(const ngx_str_t *src, ngx_str_t *dst)
 {
     dst->len = src->len;
 
@@ -128,7 +177,7 @@ ngx_media_hls_push_strdup(ngx_pool_t *pool, const ngx_str_t *src,
         return NGX_OK;
     }
 
-    dst->data = ngx_pnalloc(pool, src->len + 1);
+    dst->data = malloc(src->len + 1);
 
     if (dst->data == NULL) {
         return NGX_ERROR;
@@ -140,127 +189,230 @@ ngx_media_hls_push_strdup(ngx_pool_t *pool, const ngx_str_t *src,
     return NGX_OK;
 }
 
-static ngx_int_t
-ngx_media_hls_push_enqueue(ngx_media_hls_push_t *push, const u_char *path,
-    size_t len, off_t size)
+#define NGX_MEDIA_HLS_PUSH_REPORT_INTERVAL_MS  1000
+
+static ngx_msec_t
+ngx_media_hls_push_elapsed_msec(const struct timespec *then,
+    const struct timespec *now)
 {
+    int64_t  sec, nsec;
+
+    sec = (int64_t) now->tv_sec - (int64_t) then->tv_sec;
+    nsec = (int64_t) now->tv_nsec - (int64_t) then->tv_nsec;
+
+    return (ngx_msec_t) (sec * 1000 + nsec / 1000000);
+}
+
+/*
+ * Snapshot under the push mutex, then report without holding it.  The token
+ * is copied at add time; no NGINX state is consulted by uploader threads.
+ */
+static void
+ngx_media_hls_push_report(ngx_media_hls_push_t *push, ngx_uint_t force)
+{
+    ngx_media_egress_report_t  report;
+    ngx_media_hls_push_item_t *item;
+    struct timespec            now;
+    ngx_uint_t                 i, index;
+    size_t                     queue_bytes;
+    ngx_msec_t                 lag;
+
+    if (push->egress_token == 0) {
+        return;
+    }
+
+    (void) pthread_mutex_lock(&push->report_mutex);
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        (void) pthread_mutex_unlock(&push->report_mutex);
+        return;
+    }
+
     (void) pthread_mutex_lock(&push->mutex);
 
-    if (push->count == NGX_MEDIA_HLS_PUSH_QUEUE) {
+    if (!force && push->last_report.tv_sec != 0
+        && ngx_media_hls_push_elapsed_msec(&push->last_report, &now)
+           < NGX_MEDIA_HLS_PUSH_REPORT_INTERVAL_MS)
+    {
+        (void) pthread_mutex_unlock(&push->mutex);
+        (void) pthread_mutex_unlock(&push->report_mutex);
+        return;
+    }
 
-        /*
-         * The remote is not keeping up.  Drop the oldest and count it: the
-         * program and every other destination carry on, which is the
-         * behaviour the acceptance contract asks for.
-         */
+    ngx_memzero(&report, sizeof(report));
+    report.delivered_bytes = push->uploaded_bytes
+                             - push->reported_uploaded_bytes;
+    report.dropped_units = push->dropped - push->reported_dropped;
+    report.transport_errors = push->failed - push->reported_failed;
+    report.backpressure_events = report.dropped_units;
+    report.placement = push->placement;
+
+    push->reported_uploaded_bytes = push->uploaded_bytes;
+    push->reported_dropped = push->dropped;
+    push->reported_failed = push->failed;
+    push->last_report = now;
+
+    queue_bytes = (push->inflight && push->inflight_item.file != NULL)
+                      ? (size_t) push->inflight_item.file->size : 0;
+    lag = push->inflight
+              ? ngx_media_hls_push_elapsed_msec(
+                    &push->inflight_item.enqueued, &now)
+              : 0;
+
+    for (i = 0, index = push->head; i < push->count;
+         i++, index = (index + 1) % NGX_MEDIA_HLS_PUSH_QUEUE)
+    {
+        item = &push->queue[index];
+        if (item->file->size > 0) {
+            queue_bytes += (size_t) item->file->size;
+        }
+        if (!push->inflight && i == 0) {
+            lag = ngx_media_hls_push_elapsed_msec(&item->enqueued, &now);
+        }
+    }
+    report.queue_bytes = queue_bytes;
+    report.queue_lag_msec = lag;
+
+    (void) pthread_mutex_unlock(&push->mutex);
+
+    ngx_media_egress_manager_report(push->egress_token, &report);
+    (void) pthread_mutex_unlock(&push->report_mutex);
+}
+
+static ngx_int_t
+ngx_media_hls_push_enqueue(ngx_media_hls_push_t *push,
+    ngx_media_hls_push_file_t *file)
+{
+    struct timespec  now;
+
+    if (push == NULL || file == NULL) {
+        return NGX_ERROR;
+    }
+
+    (void) pthread_mutex_lock(&push->mutex);
+
+    if (push->stopping) {
+        (void) pthread_mutex_unlock(&push->mutex);
+        return NGX_ERROR;
+    }
+
+    if (push->count == NGX_MEDIA_HLS_PUSH_QUEUE) {
+        ngx_media_hls_push_file_release(push->queue[push->head].file);
+        ngx_memzero(&push->queue[push->head],
+                    sizeof(push->queue[push->head]));
         push->head = (push->head + 1) % NGX_MEDIA_HLS_PUSH_QUEUE;
         push->count--;
         push->dropped++;
     }
 
-    if (len >= NGX_MEDIA_HLS_PUSH_PATH_MAX) {
-        (void) pthread_mutex_unlock(&push->mutex);
-        return NGX_ERROR;
-    }
-
-    ngx_memcpy(push->queue[push->tail].path, path, len);
-    push->queue[push->tail].path[len] = '\0';
-    push->queue[push->tail].len = len;
-    push->queue[push->tail].size = size;
+    push->queue[push->tail].file = file;
+    (void) clock_gettime(CLOCK_MONOTONIC, &now);
+    push->queue[push->tail].enqueued = now;
 
     push->tail = (push->tail + 1) % NGX_MEDIA_HLS_PUSH_QUEUE;
     push->count++;
 
-    (void) pthread_cond_signal(&push->cond);
     (void) pthread_mutex_unlock(&push->mutex);
 
+    ngx_media_hls_push_report(push, 0);
     return NGX_OK;
 }
 
 /*
- * One uploader: dequeues under the locks, then uploads with none held.
- *
- * The separation is load-bearing.  An upload can block for as long as the
- * remote takes - that is the whole point of the bounded queue - so doing it
- * while holding the destination list would block the runtime tick's scan,
- * which takes the same lock, and the worker would stop serving.  That is
- * exactly what happened when the first version uploaded inside the loop.
+ * One uploader dequeues under the locks and uploads without them.  Holding
+ * the destination list while a remote blocks would stall the event-loop
+ * sealed-file notifier and unrelated destinations.
  */
 static void *
 ngx_media_hls_push_thread(void *data)
 {
-    ngx_media_hls_push_t      *push;
-    ngx_media_hls_push_t      *work_push[NGX_MEDIA_HLS_PUSH_POOL * 2];
-    ngx_media_hls_push_item_t  work_item[NGX_MEDIA_HLS_PUSH_POOL * 2];
-    ngx_uint_t                 nwork, i, got;
-
-    (void) data;
+    ngx_media_hls_push_t       *push;
+    ngx_media_hls_push_t       *work_push[NGX_MEDIA_HLS_PUSH_POOL * 2];
+    ngx_media_hls_push_item_t   work_item[NGX_MEDIA_HLS_PUSH_POOL * 2];
+    ngx_media_hls_push_file_t  *file;
+    ngx_uint_t                  worker_id = *(ngx_uint_t *) data;
+    ngx_uint_t                  nwork, i, got, active;
+    ngx_int_t                   rc;
 
     for ( ;; ) {
+        active = ngx_media_hls_push_active();
+        if (worker_id >= active) {
+            if (ngx_media_hls_push_is_stopping()) {
+                return NULL;
+            }
+            usleep(20000);
+            continue;
+        }
 
         nwork = 0;
-
         (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
 
         for (push = ngx_media_hls_push_all; push != NULL; push = push->next) {
-
             if (nwork >= NGX_MEDIA_HLS_PUSH_POOL * 2) {
                 break;
             }
 
             (void) pthread_mutex_lock(&push->mutex);
-
-            if (push->count == 0 || push->stopping) {
+            if (push->count == 0 || push->stopping || push->inflight) {
                 (void) pthread_mutex_unlock(&push->mutex);
                 continue;
             }
 
             work_item[nwork] = push->queue[push->head];
+            ngx_memzero(&push->queue[push->head],
+                        sizeof(push->queue[push->head]));
             work_push[nwork] = push;
+            push->inflight = 1;
+            push->inflight_item = work_item[nwork];
             nwork++;
 
             /*
-             * Taken under the destination list lock, which the delete also
-             * holds while it unlinks: a destination this loop can still see is
-             * one the delete has not released yet, and from here the upload
-             * keeps it alive on its own.
+             * The list lock protects this destination reference against
+             * removal; the queued file reference transfers to the upload.
              */
             (void) ngx_atomic_fetch_add(&push->refs, 1);
-
             push->head = (push->head + 1) % NGX_MEDIA_HLS_PUSH_QUEUE;
             push->count--;
 
             (void) pthread_mutex_unlock(&push->mutex);
+            ngx_media_hls_push_report(push, 0);
         }
 
         (void) pthread_mutex_unlock(&ngx_media_hls_push_all_mutex);
-
         got = nwork;
 
         for (i = 0; i < nwork; i++) {
+            file = work_item[i].file;
+            rc = ngx_media_http_put_file(&work_push[i]->url,
+                                         &work_push[i]->ca_file,
+                                         file->path, file->fd, file->size,
+                                         ngx_media_hls_push_log);
 
-            if (ngx_media_http_put_file(&work_push[i]->url,
-                                        &work_push[i]->ca_file,
-                                        work_item[i].path, work_item[i].size,
-                                        ngx_media_hls_push_log) == NGX_OK)
-            {
+            (void) pthread_mutex_lock(&work_push[i]->mutex);
+            work_push[i]->inflight = 0;
+            ngx_memzero(&work_push[i]->inflight_item,
+                        sizeof(work_push[i]->inflight_item));
+
+            if (rc == NGX_OK) {
                 work_push[i]->uploaded++;
+                work_push[i]->uploaded_bytes += (uint64_t) file->size;
 
             } else {
                 work_push[i]->failed++;
             }
+
+            (void) pthread_mutex_unlock(&work_push[i]->mutex);
+            ngx_media_hls_push_file_release(file);
+            ngx_media_hls_push_report(work_push[i], 0);
 
             /* last holder out frees the destination, uploads included */
             ngx_media_hls_push_release(work_push[i]);
         }
 
         if (got == 0) {
-
-            if (ngx_media_hls_push_stopping) {
+            if (ngx_media_hls_push_is_stopping()) {
                 return NULL;
             }
-
-            /* nothing to do: wait briefly rather than spin */
             usleep(20000);
         }
     }
@@ -273,41 +425,55 @@ ngx_media_hls_push_add(ngx_media_stream_t *stream,
     ngx_media_destination_t *destination, ngx_log_t *log)
 {
     ngx_media_hls_push_t  *push;
-    ngx_pool_t            *pool;
 
     if (destination->path.len == 0 || destination->host.len == 0) {
         ngx_log_error(NGX_LOG_WARN, log, 0,
                       "media: hls push destination %V needs a path (the "
-                      "watched directory) and a host (the endpoint)",
+                      "output directory) and a host (the endpoint)",
                       &destination->id);
         return NGX_ERROR;
     }
 
-    pool = ngx_create_pool(4096, log);
-
-    if (pool == NULL) {
-        return NGX_ERROR;
-    }
-
-    push = ngx_pcalloc(pool, sizeof(ngx_media_hls_push_t));
+    push = calloc(1, sizeof(ngx_media_hls_push_t));
 
     if (push == NULL
-        || ngx_media_hls_push_strdup(pool, &destination->path,
+        || ngx_media_hls_push_strdup(&destination->path,
                                      &push->directory) != NGX_OK
-        || ngx_media_hls_push_strdup(pool, &destination->host,
+        || ngx_media_hls_push_strdup(&destination->host,
                                      &push->url) != NGX_OK
-        || ngx_media_hls_push_strdup(pool, &destination->ca_file,
+        || ngx_media_hls_push_strdup(&destination->ca_file,
                                      &push->ca_file) != NGX_OK)
     {
-        ngx_destroy_pool(pool);
+        if (push != NULL) {
+            free(push->directory.data);
+            free(push->url.data);
+            free(push->ca_file.data);
+            free(push);
+        }
         return NGX_ERROR;
     }
 
-    push->pool = pool;
+    push->egress_token = destination->egress_token;
+    push->placement = 0;
     push->refs = 1;                    /* the destination list's reference */
 
-    (void) pthread_mutex_init(&push->mutex, NULL);
-    (void) pthread_cond_init(&push->cond, NULL);
+    if (pthread_mutex_init(&push->mutex, NULL) != 0) {
+        free(push->directory.data);
+        free(push->url.data);
+        free(push->ca_file.data);
+        free(push);
+        return NGX_ERROR;
+    }
+
+    if (pthread_mutex_init(&push->report_mutex, NULL) != 0) {
+        (void) pthread_mutex_destroy(&push->mutex);
+        free(push->directory.data);
+        free(push->url.data);
+        free(push->ca_file.data);
+        free(push);
+        return NGX_ERROR;
+    }
+
 
     (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
     push->next = ngx_media_hls_push_all;
@@ -351,11 +517,9 @@ ngx_media_hls_push_remove(ngx_media_stream_t *stream,
     }
 
     /*
-     * Unlink first, then stop: the pool holds the list mutex while it
-     * dequeues, so after this returns no uploader can take a new reference to
-     * this destination.  One already in flight holds its own and keeps the
-     * object alive until it finishes, which is why the release below is the
-     * list's reference and not the last word on the object.
+     * Unlink first, then stop: the list mutex protects dequeues, so after
+     * this returns no uploader can take a new reference.  An in-flight upload
+     * holds its own reference until it finishes.
      */
     (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
 
@@ -372,8 +536,17 @@ ngx_media_hls_push_remove(ngx_media_stream_t *stream,
 
     (void) pthread_mutex_lock(&push->mutex);
     push->stopping = 1;
-    push->count = 0;
+    while (push->count > 0) {
+        ngx_media_hls_push_file_release(push->queue[push->head].file);
+        ngx_memzero(&push->queue[push->head],
+                    sizeof(push->queue[push->head]));
+        push->head = (push->head + 1) % NGX_MEDIA_HLS_PUSH_QUEUE;
+        push->count--;
+        push->dropped++;
+    }
+    push->tail = push->head;
     (void) pthread_mutex_unlock(&push->mutex);
+    ngx_media_hls_push_report(push, 1);
 
     destination->impl = NULL;
 
@@ -392,23 +565,31 @@ ngx_media_hls_push_register(ngx_log_t *log)
     ngx_uint_t  i;
 
     ngx_media_hls_push_log = log;
-
-    if (ngx_media_destination_register(&ngx_media_hls_push_ops) != NGX_OK) {
+    ngx_media_hls_push_stopping = 0;
+    ngx_media_hls_push_last_adapt_ns = 0;
+    ngx_media_hls_push_cpu_sampled = 0;
+    ngx_memzero(ngx_media_hls_push_last_cpu_ns,
+                sizeof(ngx_media_hls_push_last_cpu_ns));
+    if (ngx_media_hls_push_set_active(1) != NGX_OK
+        || ngx_media_destination_register(&ngx_media_hls_push_ops) != NGX_OK)
+    {
         return NGX_ERROR;
     }
 
     for (i = 0; i < NGX_MEDIA_HLS_PUSH_POOL; i++) {
-
+        ngx_media_hls_push_pool_ids[i] = i;
         if (pthread_create(&ngx_media_hls_push_pool[i], NULL,
-                           ngx_media_hls_push_thread, NULL) != 0)
+                           ngx_media_hls_push_thread,
+                           &ngx_media_hls_push_pool_ids[i]) != 0)
         {
-            ngx_media_hls_push_stopping = 1;
+            (void) ngx_atomic_cmp_set(&ngx_media_hls_push_stopping, 0, 1);
             return NGX_ERROR;
         }
-
         ngx_media_hls_push_pool_size++;
     }
 
+    ngx_media_egress_manager_engine_load(
+        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 0, 1);
     return NGX_OK;
 }
 
@@ -417,189 +598,199 @@ ngx_media_hls_push_stop(void)
 {
     ngx_uint_t  i;
 
-    ngx_media_hls_push_stopping = 1;
-
+    (void) ngx_atomic_cmp_set(&ngx_media_hls_push_stopping, 0, 1);
     for (i = 0; i < ngx_media_hls_push_pool_size; i++) {
         (void) pthread_join(ngx_media_hls_push_pool[i], NULL);
     }
 
     ngx_media_hls_push_pool_size = 0;
+    ngx_media_egress_manager_engine_load(
+        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 0, 0);
 }
 
-/* --- scanning ------------------------------------------------------------ */
 
-/*
- * Has this name already been offered in this version?
- *
- * A segment is immutable, so a name offered once is never offered again.  The
- * playlist is not: the segmenter rewrites it in place under a constant name,
- * so it is compared by version and re-offered whenever either half of that
- * version changes.  A miss takes the oldest slot when the ring is full - the
- * segmenter deletes segments from the front of its window long before 256
- * newer names have been offered, and an immutable segment re-offered after a
- * wrap carries the same bytes to the same remote name, so the repeat is
- * harmless where a forgotten live name would not be.
- */
-static ngx_uint_t
-ngx_media_hls_push_seen(ngx_media_hls_push_t *push, const u_char *name,
-    size_t len, const struct stat *st)
+void
+ngx_media_hls_push_adapt(void)
 {
-    ngx_media_hls_push_seen_t  *entry;
-    ngx_uint_t                  i, playlist;
+    struct timespec  cpu_time;
+    clockid_t        cpu_clock;
+    pthread_t        *thread;
+    uint64_t          wall_ns, wall_delta, cpu_ns, cpu_delta, busy;
+    ngx_uint_t        active, peak_busy, i, desired;
 
-    playlist = (len > 5
-                && ngx_memcmp(name + len - 5, (u_char *) ".m3u8", 5) == 0);
-
-    if (!playlist && push->last_segment_set
-        && strcmp((char *) name, (char *) push->last_segment) <= 0)
+    if (ngx_media_hls_push_pool_size == 0
+        || ngx_media_hls_push_is_stopping())
     {
-        return 1;
+        return;
     }
 
-    for (i = 0; i < push->nseen; i++) {
+    wall_ns = ngx_media_hls_push_now_ns();
+    if (wall_ns == 0
+        || (ngx_media_hls_push_last_adapt_ns != 0
+            && wall_ns - ngx_media_hls_push_last_adapt_ns
+               < UINT64_C(1000000000)))
+    {
+        return;
+    }
 
-        entry = &push->seen[i];
+    wall_delta = (ngx_media_hls_push_last_adapt_ns != 0)
+                     ? wall_ns - ngx_media_hls_push_last_adapt_ns : 0;
+    active = ngx_media_hls_push_active();
+    peak_busy = 0;
 
-        if (entry->len != len || ngx_memcmp(entry->name, name, len) != 0) {
+    for (i = 0; i < ngx_media_hls_push_pool_size; i++) {
+        thread = &ngx_media_hls_push_pool[i];
+        if (pthread_getcpuclockid(*thread, &cpu_clock) != 0
+            || clock_gettime(cpu_clock, &cpu_time) != 0)
+        {
+            ngx_media_hls_push_last_cpu_ns[i] = 0;
             continue;
         }
 
-        if (!playlist) {
-            return 1;
-        }
-
-        if (entry->mtime.tv_sec == st->st_mtim.tv_sec
-            && entry->mtime.tv_nsec == st->st_mtim.tv_nsec
-            && entry->size == st->st_size)
+        cpu_ns = (uint64_t) cpu_time.tv_sec * UINT64_C(1000000000)
+                 + (uint64_t) cpu_time.tv_nsec;
+        if (i < active && ngx_media_hls_push_cpu_sampled
+            && ngx_media_hls_push_last_cpu_ns[i] != 0
+            && cpu_ns >= ngx_media_hls_push_last_cpu_ns[i]
+            && wall_delta != 0)
         {
-            /* the version already uploaded: there is nothing new to publish */
-            return 1;
+            cpu_delta = cpu_ns - ngx_media_hls_push_last_cpu_ns[i];
+            busy = cpu_delta * 1000 / wall_delta;
+            if (busy > peak_busy) {
+                peak_busy = (busy > 1000) ? 1000 : (ngx_uint_t) busy;
+            }
         }
-
-        /* a rewritten index: offer it, and remember this version instead */
-        entry->mtime = st->st_mtim;
-        entry->size = st->st_size;
-
-        return 0;
+        ngx_media_hls_push_last_cpu_ns[i] = cpu_ns;
     }
 
-    if (push->nseen < NGX_MEDIA_HLS_PUSH_SCAN_MAX) {
-        entry = &push->seen[push->nseen++];
-
-    } else {
-        entry = &push->seen[push->seen_next];
-        push->seen_next = (push->seen_next + 1) % NGX_MEDIA_HLS_PUSH_SCAN_MAX;
+    ngx_media_hls_push_last_adapt_ns = wall_ns;
+    if (!ngx_media_hls_push_cpu_sampled) {
+        ngx_media_hls_push_cpu_sampled = 1;
+        return;
     }
 
-    if (!playlist
-        && (!push->last_segment_set
-            || strcmp((char *) name, (char *) push->last_segment) > 0))
+    ngx_media_egress_manager_engine_load(
+        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, peak_busy, active);
+    desired = ngx_media_egress_manager_recommend_workers(
+        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, active, 1,
+        NGX_MEDIA_HLS_PUSH_POOL);
+    if (desired != active
+        && ngx_media_hls_push_set_active(desired) == NGX_OK)
     {
-        ngx_memcpy(push->last_segment, name, len + 1);
-        push->last_segment_set = 1;
+        ngx_media_egress_manager_engine_load(
+            NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, peak_busy, desired);
     }
-
-    ngx_memcpy(entry->name, name, len);
-    entry->len = len;
-    entry->mtime = st->st_mtim;
-    entry->size = st->st_size;
-
-    return 0;
 }
 
-/*
- * Called from the runtime tick.  It stats the directory and offers every file
- * it has not offered in this version before; the upload itself happens on the
- * pool, so this never blocks the worker.
- */
 void
-ngx_media_hls_push_scan(const ngx_str_t *directory, ngx_log_t *log)
+ngx_media_hls_push_sealed(const ngx_str_t *directory, const ngx_str_t *path,
+    ngx_log_t *log)
 {
-    ngx_media_hls_push_t  *push;
-    u_char                 dir[NGX_MEDIA_HLS_PUSH_PATH_MAX];
-    u_char                 full[NGX_MEDIA_HLS_PUSH_PATH_MAX];
-    DIR                   *d;
-    struct dirent         *de;
-    struct stat            st;
-    ngx_uint_t             scanned = 0;
+    ngx_media_hls_push_t       *push;
+    ngx_media_hls_push_file_t  *file;
+    ngx_uint_t                  matched;
+    struct stat                 st;
+    int                         fd;
+    ngx_int_t                   rc;
+    int                         err;
+    size_t                      bytes;
 
-    if (directory == NULL || directory->len == 0
+    if (directory == NULL || directory->data == NULL || directory->len == 0
+        || path == NULL || path->data == NULL || path->len == 0
         || ngx_media_hls_push_all == NULL)
     {
         return;
     }
 
-    if (directory->len >= sizeof(dir)) {
-        return;
+    (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
+    matched = 0;
+    for (push = ngx_media_hls_push_all; push != NULL; push = push->next) {
+        if (push->directory.len == directory->len
+            && ngx_memcmp(push->directory.data, directory->data,
+                          directory->len) == 0)
+        {
+            matched = 1;
+            break;
+        }
     }
 
-    ngx_memcpy(dir, directory->data, directory->len);
-    dir[directory->len] = '\0';
-
-    d = opendir((char *) dir);
-    if (d == NULL) {
-        return;
-    }
-
-    while ((de = readdir(d)) != NULL && scanned < NGX_MEDIA_HLS_PUSH_SCAN_MAX) {
-
-        size_t  name_len = strlen(de->d_name);
-
-        if (name_len < 4) {
-            continue;
-        }
-
-        if (strcmp(de->d_name + name_len - 3, ".ts") == 0) {
-            /* segment file */
-        } else if (name_len >= 5
-                   && strcmp(de->d_name + name_len - 5, ".m3u8") == 0)
-        {
-            /* playlist file */
-        } else {
-            continue;
-        }
-
-        scanned++;
-
-        if (snprintf((char *) full, sizeof(full), "%s/%s", dir,
-                     de->d_name) >= (int) sizeof(full))
-        {
-            continue;
-        }
-
-        if (stat((char *) full, &st) != 0 || !S_ISREG(st.st_mode)
-            || st.st_size == 0)
-        {
-            continue;
-        }
-
-        (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
-
-        for (push = ngx_media_hls_push_all; push != NULL; push = push->next) {
-
-            if (push->directory.len != directory->len
-                || ngx_memcmp(push->directory.data, directory->data,
-                              directory->len) != 0)
-            {
-                continue;
-            }
-
-            if (ngx_media_hls_push_seen(push, (u_char *) de->d_name,
-                                        name_len, &st))
-            {
-                continue;
-            }
-
-            (void) ngx_media_hls_push_enqueue(push, full, strlen((char *) full),
-                                              st.st_size);
-        }
-
+    if (!matched) {
         (void) pthread_mutex_unlock(&ngx_media_hls_push_all_mutex);
+        return;
     }
 
-    closedir(d);
+    file = NULL;
+    err = (path->len > SIZE_MAX - sizeof(*file) - 1)
+              ? ENAMETOOLONG : 0;
+    if (err == 0) {
+        bytes = sizeof(*file) + path->len + 1;
+        file = calloc(1, bytes);
+        if (file == NULL) {
+            err = ENOMEM;
+        }
+    }
 
-    (void) log;
+    if (err == 0) {
+        ngx_memcpy(file->path, path->data, path->len);
+        file->path[path->len] = '\0';
+        fd = open((char *) file->path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            err = ngx_errno;
+            free(file);
+            file = NULL;
+
+        } else if (fstat(fd, &st) != 0) {
+            err = ngx_errno;
+            (void) close(fd);
+            free(file);
+            file = NULL;
+
+        } else if (!S_ISREG(st.st_mode) || st.st_size < 0) {
+            err = EINVAL;
+            (void) close(fd);
+            free(file);
+            file = NULL;
+        } else {
+            file->fd = fd;
+            file->size = st.st_size;
+            file->refs = 1;             /* notifier's reference */
+        }
+    }
+
+    for (push = ngx_media_hls_push_all; push != NULL; push = push->next) {
+        if (push->directory.len != directory->len
+            || ngx_memcmp(push->directory.data, directory->data,
+                          directory->len) != 0)
+        {
+            continue;
+        }
+
+        if (file == NULL) {
+            (void) pthread_mutex_lock(&push->mutex);
+            if (err == ENOENT) {
+                push->dropped++;
+            } else {
+                push->failed++;
+            }
+            (void) pthread_mutex_unlock(&push->mutex);
+            ngx_media_hls_push_report(push, 1);
+            continue;
+        }
+
+        (void) ngx_atomic_fetch_add(&file->refs, 1);
+        rc = ngx_media_hls_push_enqueue(push, file);
+        if (rc != NGX_OK) {
+            ngx_media_hls_push_file_release(file);
+            if (log != NULL) {
+                ngx_log_error(NGX_LOG_WARN, log, 0,
+                              "media: hls push could not queue sealed file %V",
+                              path);
+            }
+        }
+    }
+    (void) pthread_mutex_unlock(&ngx_media_hls_push_all_mutex);
+
+    ngx_media_hls_push_file_release(file);
 }
 
 ngx_uint_t
@@ -624,13 +815,13 @@ ngx_media_hls_push_uploaded_total(void)
 {
     ngx_media_hls_push_t  *push;
     uint64_t               total = 0;
-
     (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
 
     for (push = ngx_media_hls_push_all; push != NULL; push = push->next) {
+        (void) pthread_mutex_lock(&push->mutex);
         total += push->uploaded;
+        (void) pthread_mutex_unlock(&push->mutex);
     }
-
     (void) pthread_mutex_unlock(&ngx_media_hls_push_all_mutex);
 
     return total;
@@ -641,13 +832,13 @@ ngx_media_hls_push_dropped_total(void)
 {
     ngx_media_hls_push_t  *push;
     uint64_t               total = 0;
-
     (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
 
     for (push = ngx_media_hls_push_all; push != NULL; push = push->next) {
+        (void) pthread_mutex_lock(&push->mutex);
         total += push->dropped;
+        (void) pthread_mutex_unlock(&push->mutex);
     }
-
     (void) pthread_mutex_unlock(&ngx_media_hls_push_all_mutex);
 
     return total;
@@ -658,13 +849,13 @@ ngx_media_hls_push_failed_total(void)
 {
     ngx_media_hls_push_t  *push;
     uint64_t               total = 0;
-
     (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
 
     for (push = ngx_media_hls_push_all; push != NULL; push = push->next) {
+        (void) pthread_mutex_lock(&push->mutex);
         total += push->failed;
+        (void) pthread_mutex_unlock(&push->mutex);
     }
-
     (void) pthread_mutex_unlock(&ngx_media_hls_push_all_mutex);
 
     return total;

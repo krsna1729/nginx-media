@@ -35,9 +35,9 @@ other's media.  The two components come from the program's identity, with
 anything outside `[A-Za-z0-9_-]` replaced by `_`, so a name cannot choose a
 directory outside the root.  The segmenter starts on a keyframe; no directive
 configures segment duration yet.  A segment's file is written under a temporary
-name and renamed into place, the way the playlist is, so a reader that watches
-the directory - an `hls_push` destination, or a viewer that fetched the name
-from the playlist - never sees a name with a partial segment behind it.
+name and renamed into place, the way the playlist is, so a viewer fetching a
+listed segment or the segmenter notifying a destination never sees a partial
+file.
 
 ### `media_transform_ffmpeg <path>;`
 
@@ -240,13 +240,14 @@ operator configuration on purpose — an encoder cannot promote itself.
 
 ### `media_srt_output <application/stream> <host:port> [streamid];`
 
-Pushes that program to an SRT destination as a caller.  Each worker shares a
-fixed pool of 16 egress shard threads across static and runtime destinations;
-the output table holds up to 1000 destinations per worker.  Each destination
-has a bounded queue of 256 units / 8 MiB, while each shard's feed queue is
-bounded at 64 units / 8 MiB.  Queue overrun drops bursts and resynchronizes at
-the next keyframe; a slow destination does not stall the program.  The optional
-stream id is announced to the destination.
+Pushes that program to an SRT destination as a caller.  Each worker keeps 16
+stable logical egress shards and adaptively changes active sender concurrency
+within a shared CPU budget with HLS push; the output table holds up to 1000
+destinations per worker.  Each destination has a bounded queue of 256 units /
+8 MiB, while each logical shard's feed queue is bounded at 64 units / 8 MiB.
+Queue overrun drops bursts and resynchronizes at the next keyframe; a slow
+destination does not stall the program.  The optional stream id is announced
+to the destination.
 
 ### `media_srt_crypto <passphrase> [ctr|gcm] [0|16|24|32] [on|off];`
 
@@ -367,7 +368,8 @@ location /ingest/ {
 The endpoint deliberately does not know what reads the directory — the two
 halves stay separate, so an upload arriving by any other means works just as
 well.  The usual reader is a source of type `hls_push` created through the
-control API, which watches this directory.
+control API, which reads this directory.  This inbound `hls_push` source is
+separate from the outbound `hls_push` destination described below.
 
 The body is written to a file by nginx's own machinery rather than read into
 memory, and the handler then renames it into place, so a reader either sees a
@@ -413,19 +415,20 @@ waits for the origin rather than spinning.
  "path":"https://origin.example/live/news/index.m3u8"}
 ```
 
-A **`hls_push` destination** watches a directory and uploads the segments and
-playlists that appear in it to an HTTP or HTTPS endpoint.  Every upload is
-bounded: five seconds to connect and ten without progress on the wire, so a
-remote that accepts and then stops reading costs one failed upload rather than
-an uploader thread.  The directory has to
-be the one the program's output is written to — with `media_hls <root>`, that is
-`<root>/<application>/<name>` — because the runtime tick scans that directory
-once per tick and offers anything new to the destinations watching it, so a
-destination pointed somewhere else simply receives nothing.  Uploads
-run on a bounded pool and each destination has its own bounded queue, so a
-stalled remote drops its oldest queued segment and counts it rather than
-stalling the program or its neighbours.  An endpoint that carries a credential
-is redacted before it reaches a log or an API read.
+A **`hls_push` destination** uploads segmenter notifications for sealed HLS
+segments and playlists; it does not scan the output directory.  Its `path` must
+match the program's output directory exactly — with `media_hls <root>`, that is
+`<root>/<application>/<name>` — or no files match the destination.  The
+segmenter opens each file after atomic rename and queues that inode snapshot,
+which remains readable if HLS retention unlinks or replaces its path.
+
+Each destination has one upload in flight and a 64-file queue; overflow drops
+the oldest queued file and is counted.  A shared four-thread-ceiling pool starts
+with one active sender and adapts concurrency under the worker's shared CPU
+budget.  Uploads are bounded: five seconds to connect and ten without progress
+on the wire.  The local HLS origin remains available independently of this
+push path.  An endpoint that carries a credential is redacted before it reaches
+a log or an API read.
 
 ```json
 {"id":"cdn","type":"hls_push",

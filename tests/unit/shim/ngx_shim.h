@@ -23,6 +23,15 @@
 #include <stdint.h>
 #include <errno.h>
 #include <string.h>
+#include <strings.h>
+
+#define ngx_strlen(s)  strlen((const char *) (s))
+#define ngx_strncmp(s1, s2, n) \
+    strncmp((const char *) (s1), (const char *) (s2), (n))
+#define ngx_strncasecmp(s1, s2, n) \
+    strncasecmp((const char *) (s1), (const char *) (s2), (n))
+#define ngx_strlchr(s, last, c) \
+    ((u_char *) memchr((s), (c), (size_t) ((last) - (s))))
 
 typedef intptr_t                    ngx_int_t;
 typedef uintptr_t                   ngx_uint_t;

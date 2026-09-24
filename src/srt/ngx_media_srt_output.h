@@ -45,6 +45,7 @@ typedef struct {
      * order the directives appear in.
      */
     const ngx_media_srt_params_t  *params;
+    uint64_t    egress_token;      /* worker-local manager record */
 } ngx_media_srt_output_conf_t;
 
 typedef struct {
@@ -69,6 +70,7 @@ typedef struct {
     uint64_t    sent_bursts;
     uint64_t    blocked_sends;
     uint64_t    retransmitted_packets;
+
 } ngx_media_srt_egress_stats_t;
 
 typedef struct ngx_media_srt_outputs_s ngx_media_srt_outputs_t;
@@ -77,6 +79,13 @@ ngx_int_t ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
     const ngx_media_srt_output_conf_t *confs, ngx_uint_t count,
     ngx_uint_t max_events, ngx_log_t *log);
 void ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs);
+
+/* Reschedules stable logical shards over the bounded physical sender pool. */
+ngx_int_t ngx_media_srt_outputs_set_concurrency(
+    ngx_media_srt_outputs_t *outs, ngx_uint_t active_senders);
+ngx_uint_t ngx_media_srt_outputs_concurrency(
+    ngx_media_srt_outputs_t *outs);
+void ngx_media_srt_outputs_adapt(ngx_media_srt_outputs_t *outs);
 
 /*
  * Runtime destinations share the fixed egress shards.  add() takes a free

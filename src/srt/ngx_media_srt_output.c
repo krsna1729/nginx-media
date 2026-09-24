@@ -1,4 +1,5 @@
 #include "ngx_media_srt_output.h"
+#include "ngx_media_egress_manager.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -66,15 +67,23 @@ typedef struct {
     uint64_t                     blocked_sends;
     uint64_t                     retransmitted_packets;
     uint64_t                     reconnects;
+    uint64_t                     transport_errors;
+    uint64_t                     reported_bytes;
+    uint64_t                     reported_dropped;
+    uint64_t                     reported_errors;
+    uint64_t                     reported_blocked;
+    uint64_t                     reported_reconnects;
     ngx_msec_t                   retry_at;
     ngx_msec_t                   stats_at;
+    ngx_msec_t                   egress_at;
 } ngx_media_srt_output_t;
-
 typedef struct {
     ngx_media_srt_outputs_t     *outs;
     ngx_media_srt_feed_queue_t   feed;
     pthread_t                    thread;
     ngx_uint_t                   id;
+    uint64_t                     last_cpu_ns;
+    pthread_mutex_t              lane_mutex;
     pthread_mutex_t              wake_mutex;
     pthread_cond_t               wake_cond;
     uint64_t                     wake_generation;
@@ -90,6 +99,9 @@ struct ngx_media_srt_outputs_s {
     pthread_rwlock_t                destinations_lock;
     ngx_media_srt_sender_t          shards[NGX_MEDIA_SRT_EGRESS_SHARDS];
     ngx_uint_t                      nthreads;
+    ngx_atomic_t                  active_senders;
+    uint64_t                        last_adapt_ns;
+    ngx_uint_t                      cpu_sampled;
 
     ngx_media_srt_out_event_t      *events;
     ngx_uint_t                      events_capacity;
@@ -101,6 +113,8 @@ struct ngx_media_srt_outputs_s {
     int                             notify_fd;
     ngx_log_t                      *log;
 };
+
+static uint64_t ngx_media_srt_now_ns(void);
 
 static void
 ngx_media_srt_out_notify(ngx_media_srt_outputs_t *outs)
@@ -429,6 +443,26 @@ ngx_media_srt_sender_wake(ngx_media_srt_sender_t *sender)
     (void) pthread_mutex_unlock(&sender->wake_mutex);
 }
 
+static ngx_uint_t
+ngx_media_srt_outputs_active_senders(ngx_media_srt_outputs_t *outs)
+{
+    return (outs != NULL)
+           ? (ngx_uint_t) ngx_atomic_fetch_add(&outs->active_senders, 0) : 0;
+}
+
+static void
+ngx_media_srt_out_wake_lane(ngx_media_srt_outputs_t *outs, ngx_uint_t lane)
+{
+    ngx_uint_t  active;
+
+    active = ngx_media_srt_outputs_active_senders(outs);
+    if (active == 0) {
+        active = 1;
+    }
+
+    ngx_media_srt_sender_wake(&outs->shards[lane % active]);
+}
+
 static ngx_msec_t
 ngx_media_srt_now(void)
 {
@@ -437,6 +471,62 @@ ngx_media_srt_now(void)
     (void) clock_gettime(CLOCK_MONOTONIC, &ts);
 
     return (ngx_msec_t) ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void
+ngx_media_srt_out_egress_report(ngx_media_srt_output_t *dest,
+    ngx_msec_t now)
+{
+    ngx_media_egress_report_t   report;
+    const ngx_media_srt_unit_t *unit;
+    uint64_t                    cursor, sequence;
+
+    if (dest->conf.egress_token == 0 || now - dest->egress_at < 1000) {
+        return;
+    }
+    ngx_memzero(&report, sizeof(report));
+    report.delivered_bytes = dest->sent_bytes - dest->reported_bytes;
+    report.dropped_units = dest->queue.dropped - dest->reported_dropped;
+    report.transport_errors = dest->transport_errors - dest->reported_errors;
+    report.backpressure_events =
+        dest->blocked_sends - dest->reported_blocked;
+    report.reconnects = dest->reconnects - dest->reported_reconnects;
+    report.placement = dest->shard;
+    cursor = dest->cursor;
+    unit = ngx_media_srt_queue_next(&dest->queue, &cursor);
+    if (unit != NULL) {
+        if (now >= unit->enqueue_msec) {
+            report.queue_lag_msec = now - unit->enqueue_msec;
+        }
+
+        for (sequence = unit->sequence; sequence < dest->queue.head;
+             sequence++)
+        {
+            unit = &dest->queue.units[
+                       sequence % dest->queue.capacity];
+            if (unit->burst == NULL || unit->sequence != sequence) {
+                continue;
+            }
+
+            if (dest->inflight_burst != NULL
+                && sequence == dest->inflight_sequence)
+            {
+                report.queue_bytes +=
+                    (unit->len > dest->inflight_offset)
+                        ? unit->len - dest->inflight_offset : 0;
+            } else {
+                report.queue_bytes += unit->len;
+            }
+        }
+    }
+
+    dest->reported_bytes = dest->sent_bytes;
+    dest->reported_dropped = dest->queue.dropped;
+    dest->reported_errors = dest->transport_errors;
+    dest->reported_blocked = dest->blocked_sends;
+    dest->reported_reconnects = dest->reconnects;
+    dest->egress_at = now;
+    ngx_media_egress_manager_report(dest->conf.egress_token, &report);
 }
 
 static ngx_uint_t
@@ -471,6 +561,9 @@ ngx_media_srt_out_service(ngx_media_srt_outputs_t *outs,
         return 0;
     }
 
+    ngx_media_srt_out_egress_report(dest, now);
+
+
     if (dest->session == NULL) {
         if (dest->retry_at > now) {
             (void) pthread_mutex_unlock(&dest->mutex);
@@ -503,6 +596,7 @@ ngx_media_srt_out_service(ngx_media_srt_outputs_t *outs,
 
         if (session == NULL) {
             dest->reconnects++;
+            dest->transport_errors++;
             dest->retry_at = now + NGX_MEDIA_SRT_DEST_RETRY;
             (void) pthread_mutex_unlock(&dest->mutex);
             ngx_media_srt_out_report(outs, index,
@@ -585,12 +679,11 @@ ngx_media_srt_out_service(ngx_media_srt_outputs_t *outs,
     }
 
     if (rc < 0 || (size_t) rc > take) {
+        dest->transport_errors++;
         if (dest->session != NULL) {
             ngx_media_srt_session_close(dest->session);
             dest->session = NULL;
         }
-        dest->reconnects++;
-        dest->retry_at = 0;
         ngx_media_srt_queue_resync(&dest->queue);
         if (dest->inflight_burst != NULL) {
             ngx_media_buf_unref(dest->inflight_burst);
@@ -638,7 +731,8 @@ ngx_media_srt_out_dispatch(ngx_media_srt_sender_t *sender,
 
         if (dest->used && dest->running && dest->route == unit->route) {
             (void) ngx_media_srt_queue_push(&dest->queue, unit->burst,
-                                             unit->len, unit->keyframe);
+                                             unit->len, unit->keyframe,
+                                             ngx_media_srt_now());
         }
 
         (void) pthread_mutex_unlock(&dest->mutex);
@@ -652,11 +746,12 @@ ngx_media_srt_out_thread(void *data)
 {
     ngx_media_srt_sender_t      *sender = data;
     ngx_media_srt_outputs_t     *outs = sender->outs;
+    ngx_media_srt_sender_t      *lane_sender;
     ngx_media_srt_feed_unit_t    unit;
     ngx_media_srt_output_t      *dest;
     ngx_msec_t                   now;
     uint64_t                     observed;
-    ngx_uint_t                   i, worked;
+    ngx_uint_t                   active, lane, i, worked;
     char                         name[16];
 
     (void) snprintf(name, sizeof(name), "srt-egress-%02lu",
@@ -673,21 +768,42 @@ ngx_media_srt_out_thread(void *data)
         }
 
         worked = 0;
+        active = ngx_media_srt_outputs_active_senders(outs);
 
-        while (ngx_media_srt_feed_pop(sender, &unit)) {
-            ngx_media_srt_out_dispatch(sender, &unit);
-            ngx_media_buf_unref(unit.burst);
-            worked = 1;
-        }
+        if (sender->id < active) {
+            for (lane = sender->id; lane < NGX_MEDIA_SRT_EGRESS_SHARDS;
+                 lane += active)
+            {
+                lane_sender = &outs->shards[lane];
 
-        now = ngx_media_srt_now();
+                if (pthread_mutex_trylock(&lane_sender->lane_mutex) != 0) {
+                    continue;
+                }
 
-        for (i = sender->id; i < NGX_MEDIA_SRT_MAX_OUTPUTS;
-             i += NGX_MEDIA_SRT_EGRESS_SHARDS)
-        {
-            dest = &outs->destinations[i];
-            if (ngx_media_srt_out_service(outs, dest, i, now)) {
-                worked = 1;
+                active = ngx_media_srt_outputs_active_senders(outs);
+                if (active == 0 || lane % active != sender->id) {
+                    (void) pthread_mutex_unlock(&lane_sender->lane_mutex);
+                    continue;
+                }
+
+                while (ngx_media_srt_feed_pop(lane_sender, &unit)) {
+                    ngx_media_srt_out_dispatch(lane_sender, &unit);
+                    ngx_media_buf_unref(unit.burst);
+                    worked = 1;
+                }
+
+                now = ngx_media_srt_now();
+
+                for (i = lane; i < NGX_MEDIA_SRT_MAX_OUTPUTS;
+                     i += NGX_MEDIA_SRT_EGRESS_SHARDS)
+                {
+                    dest = &outs->destinations[i];
+                    if (ngx_media_srt_out_service(outs, dest, i, now)) {
+                        worked = 1;
+                    }
+                }
+
+                (void) pthread_mutex_unlock(&lane_sender->lane_mutex);
             }
         }
 
@@ -772,6 +888,7 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
 
     (void) pthread_mutex_init(&outs->events_mutex, NULL);
     (void) pthread_rwlock_init(&outs->destinations_lock, NULL);
+    outs->active_senders = 1;
 
     for (i = 0; i < NGX_MEDIA_SRT_EGRESS_SHARDS; i++) {
         sender = &outs->shards[i];
@@ -779,6 +896,7 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
         sender->id = i;
         (void) pthread_mutex_init(&sender->feed.mutex, NULL);
         (void) pthread_mutex_init(&sender->wake_mutex, NULL);
+        (void) pthread_mutex_init(&sender->lane_mutex, NULL);
         (void) pthread_cond_init(&sender->wake_cond, NULL);
     }
 
@@ -813,6 +931,8 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
         }
         outs->nthreads++;
     }
+    ngx_media_egress_manager_engine_load(
+        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 0, 1);
 
     *out = outs;
     return NGX_OK;
@@ -820,6 +940,127 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
 failed:
     ngx_media_srt_outputs_stop(outs);
     return NGX_ERROR;
+}
+
+ngx_int_t
+ngx_media_srt_outputs_set_concurrency(ngx_media_srt_outputs_t *outs,
+    ngx_uint_t active_senders)
+{
+    ngx_uint_t  current, i;
+
+    if (outs == NULL || active_senders == 0
+        || active_senders > NGX_MEDIA_SRT_EGRESS_SHARDS
+        || ngx_atomic_fetch_add(&outs->stopping, 0) != 0)
+    {
+        return NGX_ERROR;
+    }
+
+    for ( ;; ) {
+        current = ngx_media_srt_outputs_active_senders(outs);
+        if (current == active_senders
+            || ngx_atomic_cmp_set(&outs->active_senders, current,
+                                  active_senders))
+        {
+            break;
+        }
+    }
+
+    for (i = 0; i < NGX_MEDIA_SRT_EGRESS_SHARDS; i++) {
+        ngx_media_srt_sender_wake(&outs->shards[i]);
+    }
+
+    return NGX_OK;
+}
+
+ngx_uint_t
+ngx_media_srt_outputs_concurrency(ngx_media_srt_outputs_t *outs)
+{
+    return ngx_media_srt_outputs_active_senders(outs);
+}
+
+void
+ngx_media_srt_outputs_adapt(ngx_media_srt_outputs_t *outs)
+{
+    ngx_media_srt_sender_t  *sender;
+    struct timespec          cpu_time;
+    clockid_t                cpu_clock;
+    uint64_t                 wall_ns, wall_delta, cpu_ns, cpu_delta, busy;
+    ngx_uint_t               active, peak_busy, i, desired;
+
+    if (outs == NULL || ngx_atomic_fetch_add(&outs->stopping, 0) != 0) {
+        return;
+    }
+
+    wall_ns = ngx_media_srt_now_ns();
+    if (wall_ns == 0
+        || (outs->last_adapt_ns != 0
+            && wall_ns - outs->last_adapt_ns < UINT64_C(1000000000)))
+    {
+        return;
+    }
+
+    wall_delta = (outs->last_adapt_ns != 0)
+                     ? wall_ns - outs->last_adapt_ns : 0;
+    active = ngx_media_srt_outputs_active_senders(outs);
+    peak_busy = 0;
+
+    for (i = 0; i < NGX_MEDIA_SRT_EGRESS_SHARDS; i++) {
+        sender = &outs->shards[i];
+
+        if (pthread_getcpuclockid(sender->thread, &cpu_clock) != 0
+            || clock_gettime(cpu_clock, &cpu_time) != 0)
+        {
+            sender->last_cpu_ns = 0;
+            continue;
+        }
+
+        cpu_ns = (uint64_t) cpu_time.tv_sec * UINT64_C(1000000000)
+                 + (uint64_t) cpu_time.tv_nsec;
+
+        if (i < active && outs->cpu_sampled && sender->last_cpu_ns != 0
+            && cpu_ns >= sender->last_cpu_ns && wall_delta != 0)
+        {
+            cpu_delta = cpu_ns - sender->last_cpu_ns;
+            busy = cpu_delta * 1000 / wall_delta;
+            if (busy > peak_busy) {
+                peak_busy = (busy > 1000) ? 1000 : (ngx_uint_t) busy;
+            }
+        }
+
+        sender->last_cpu_ns = cpu_ns;
+    }
+
+    outs->last_adapt_ns = wall_ns;
+    if (!outs->cpu_sampled) {
+        outs->cpu_sampled = 1;
+        return;
+    }
+
+    ngx_media_egress_manager_engine_load(
+        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, peak_busy, active);
+    desired = ngx_media_egress_manager_recommend_workers(
+        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, active, 1,
+        NGX_MEDIA_SRT_EGRESS_SHARDS);
+
+    if (desired != active
+        && ngx_media_srt_outputs_set_concurrency(outs, desired) == NGX_OK)
+    {
+        ngx_media_egress_manager_engine_load(
+            NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, peak_busy, desired);
+    }
+}
+
+static uint64_t
+ngx_media_srt_now_ns(void)
+{
+    struct timespec  ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+
+    return (uint64_t) ts.tv_sec * UINT64_C(1000000000)
+           + (uint64_t) ts.tv_nsec;
 }
 ngx_int_t
 ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
@@ -896,6 +1137,13 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
     dest->blocked_sends = 0;
     dest->retransmitted_packets = 0;
     dest->reconnects = 0;
+    dest->transport_errors = 0;
+    dest->reported_bytes = 0;
+    dest->reported_dropped = 0;
+    dest->reported_errors = 0;
+    dest->reported_blocked = 0;
+    dest->reported_reconnects = 0;
+    dest->egress_at = 0;
     dest->retry_at = 0;
     dest->stats_at = 0;
     dest->connecting = 0;
@@ -911,7 +1159,7 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
     outs->count++;
     (void) pthread_rwlock_unlock(&outs->destinations_lock);
 
-    ngx_media_srt_sender_wake(&outs->shards[dest->shard]);
+    ngx_media_srt_out_wake_lane(outs, dest->shard);
 
     if (index != NULL) {
         *index = i;
@@ -973,7 +1221,7 @@ ngx_media_srt_outputs_remove(ngx_media_srt_outputs_t *outs, ngx_uint_t index)
     (void) pthread_mutex_unlock(&dest->mutex);
     (void) pthread_rwlock_unlock(&outs->destinations_lock);
 
-    ngx_media_srt_sender_wake(&outs->shards[dest->shard]);
+    ngx_media_srt_out_wake_lane(outs, dest->shard);
 }
 void
 ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
@@ -1012,6 +1260,18 @@ ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
         (void) pthread_join(outs->shards[i].thread, NULL);
     }
     outs->nthreads = 0;
+    ngx_media_egress_manager_engine_load(
+        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 0, 0);
+    for (i = 0; i < NGX_MEDIA_SRT_MAX_OUTPUTS; i++) {
+        dest = &outs->destinations[i];
+        if (dest->conf.program_identity == 0
+            && dest->conf.egress_token != 0)
+        {
+            ngx_media_egress_manager_release(dest->conf.egress_token);
+            dest->conf.egress_token = 0;
+        }
+    }
+
 
     for (i = 0; i < NGX_MEDIA_SRT_MAX_OUTPUTS; i++) {
         dest = &outs->destinations[i];
@@ -1031,6 +1291,7 @@ ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
         ngx_media_srt_feed_destroy(&outs->shards[i].feed);
         (void) pthread_cond_destroy(&outs->shards[i].wake_cond);
         (void) pthread_mutex_destroy(&outs->shards[i].wake_mutex);
+        (void) pthread_mutex_destroy(&outs->shards[i].lane_mutex);
     }
 
     (void) pthread_rwlock_destroy(&outs->destinations_lock);
@@ -1060,7 +1321,7 @@ ngx_media_srt_route_publish(ngx_media_srt_outputs_t *outs,
 
         (void) ngx_media_srt_feed_push(&outs->shards[i], route->token, burst,
                                         len, keyframe);
-        ngx_media_srt_sender_wake(&outs->shards[i]);
+        ngx_media_srt_out_wake_lane(outs, i);
         matched++;
     }
 

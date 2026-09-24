@@ -211,10 +211,12 @@ bench-ingest-egress-fanout:
 bench-capacity-curve:
 	PHASES=capacity tests/bench/ingest_egress_fanout.sh
 
-# Calibrated 8M SRT delivery-quality ladder with interval rates, TS continuity,
-# application-drop checks, and sampled sender-queue pressure.
+# Five calibrated 8M delivery-quality ladders: pure SRT, RTMP, HLS, and both
+# 95/5 RTMP/SRT and HLS-push/SRT mixes. Reports the first failed rung per mix.
+# Set CAPACITY_QUALITY_MIXES to a space-separated subset for targeted reruns;
+# the default `all` runs every mix.
 bench-capacity-quality:
-	PHASES=capacity-srt-quality tests/bench/ingest_egress_fanout.sh
+	PHASES=capacity-quality-ladder tests/bench/ingest_egress_fanout.sh
 
 srt-qualify:
 	MEDIA_SRT_BACKEND=both $(MAKE) nginx

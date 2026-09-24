@@ -23,6 +23,7 @@
 #include "ngx_media_platform.h"
 #include "ngx_media_registry.h"
 #include "ngx_media_destination.h"
+#include "ngx_media_egress_manager.h"
 #include "ngx_media_file.h"
 #include "ngx_media_graph.h"
 #include "ngx_media_compat.h"
@@ -893,6 +894,190 @@ ngx_media_api_parse(u_char *uri, size_t len, ngx_str_t *application,
     return NGX_OK;
 }
 
+typedef struct {
+    u_char  **last;
+    u_char   *end;
+} ngx_media_api_egress_render_t;
+
+typedef struct {
+    size_t  capacity;
+} ngx_media_api_egress_capacity_t;
+
+static const char *
+ngx_media_api_egress_protocol(ngx_uint_t protocol)
+{
+    switch (protocol) {
+    case NGX_MEDIA_DEST_SRT:
+        return "srt";
+    case NGX_MEDIA_DEST_RTMP:
+        return "rtmp";
+    case NGX_MEDIA_DEST_HLS_PUSH:
+        return "hls_push";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *
+ngx_media_api_egress_engine(ngx_uint_t engine)
+{
+    switch (engine) {
+    case NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD:
+        return "srt_shard";
+    case NGX_MEDIA_EGRESS_ENGINE_RTMP_EVENT_LOOP:
+        return "rtmp_event_loop";
+    case NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL:
+        return "hls_upload_pool";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *
+ngx_media_api_resource_engine(ngx_uint_t engine)
+{
+    switch (engine) {
+    case NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD:
+        return "srt_shard";
+    case NGX_MEDIA_EGRESS_ENGINE_RTMP_EVENT_LOOP:
+        return "rtmp_event_loop";
+    case NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL:
+        return "hls_upload_pool";
+    default:
+        return NULL;
+    }
+}
+
+static ngx_int_t
+ngx_media_api_egress_prefix(u_char **last, u_char *end, const char *metric,
+    const ngx_media_egress_stats_t *stats)
+{
+    *last = ngx_snprintf(*last, end - *last,
+                         "%s{worker=\"%i\",application=\"", metric,
+                         ngx_worker);
+
+    if (*last >= end
+        || ngx_media_api_prom_string(last, end, &stats->application) != NGX_OK
+        || ngx_media_api_put_bytes(last, end, (u_char *) "\",name=\"",
+                                   sizeof("\",name=\"") - 1) != NGX_OK
+        || ngx_media_api_prom_string(last, end, &stats->stream) != NGX_OK
+        || ngx_media_api_put_bytes(last, end, (u_char *) "\",destination=\"",
+                                   sizeof("\",destination=\"") - 1) != NGX_OK
+        || ngx_media_api_prom_string(last, end, &stats->destination) != NGX_OK
+        || ngx_media_api_put_bytes(last, end, (u_char *) "\",protocol=\"",
+                                   sizeof("\",protocol=\"") - 1) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last, "%s\",engine=\"%s\"",
+                         ngx_media_api_egress_protocol(stats->protocol),
+                         ngx_media_api_egress_engine(stats->engine));
+
+    if (*last >= end) {
+        return NGX_ERROR;
+    }
+
+    *last = ngx_snprintf(
+        *last, end - *last,
+        ",placement=\"%ui\",incarnation=\"%uL\",representation=\"%uL\","
+        "representation_epoch=\"%uL\",feed=\"%uL\",feed_epoch=\"%uL\"} ",
+        stats->placement, stats->stream_incarnation, stats->representation_id,
+        stats->representation_epoch, stats->feed_id, stats->feed_epoch);
+
+    return (*last < end) ? NGX_OK : NGX_ERROR;
+}
+
+static ngx_int_t
+ngx_media_api_egress_metric_u64(ngx_media_api_egress_render_t *render,
+    const ngx_media_egress_stats_t *stats, const char *metric, uint64_t value)
+{
+    if (ngx_media_api_egress_prefix(render->last, render->end, metric, stats)
+        != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    *render->last = ngx_snprintf(*render->last, render->end - *render->last,
+                                 "%uL\n", value);
+
+    return (*render->last < render->end) ? NGX_OK : NGX_ERROR;
+}
+
+static ngx_int_t
+ngx_media_api_egress_render(const ngx_media_egress_stats_t *stats, void *ctx)
+{
+    ngx_media_api_egress_render_t  *render = ctx;
+
+    if (ngx_media_api_egress_metric_u64(
+            render, stats, "nginx_media_egress_delivered_bytes_total",
+            stats->delivered_bytes) != NGX_OK
+        || ngx_media_api_egress_metric_u64(
+            render, stats, "nginx_media_egress_dropped_units_total",
+            stats->dropped_units) != NGX_OK
+        || ngx_media_api_egress_metric_u64(
+            render, stats, "nginx_media_egress_transport_errors_total",
+            stats->transport_errors) != NGX_OK
+        || ngx_media_api_egress_metric_u64(
+            render, stats, "nginx_media_egress_backpressure_events_total",
+            stats->backpressure_events) != NGX_OK
+        || ngx_media_api_egress_metric_u64(
+            render, stats, "nginx_media_egress_reconnects_total",
+            stats->reconnects) != NGX_OK
+        || ngx_media_api_egress_metric_u64(
+            render, stats, "nginx_media_egress_deadline_misses_total",
+            stats->deadline_misses) != NGX_OK
+        || ngx_media_api_egress_metric_u64(
+            render, stats, "nginx_media_egress_queue_bytes",
+            (uint64_t) stats->queue_bytes) != NGX_OK
+        || ngx_media_api_egress_metric_u64(
+            render, stats, "nginx_media_egress_queue_lag_ms",
+            (uint64_t) stats->queue_lag_msec) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_media_api_egress_capacity(const ngx_media_egress_stats_t *stats, void *ctx)
+{
+    ngx_media_api_egress_capacity_t  *capacity = ctx;
+    size_t                             label_bytes;
+
+    if (stats->application.len > NGX_MEDIA_API_BUF_MAX_SIZE
+        || stats->stream.len > NGX_MEDIA_API_BUF_MAX_SIZE
+                                  - stats->application.len)
+    {
+        capacity->capacity = NGX_MEDIA_API_BUF_MAX_SIZE;
+        return NGX_ERROR;
+    }
+
+    label_bytes = stats->application.len + stats->stream.len;
+
+    if (stats->destination.len > NGX_MEDIA_API_BUF_MAX_SIZE - label_bytes
+        || capacity->capacity > NGX_MEDIA_API_BUF_MAX_SIZE - 4096)
+    {
+        capacity->capacity = NGX_MEDIA_API_BUF_MAX_SIZE;
+        return NGX_ERROR;
+    }
+
+    label_bytes += stats->destination.len;
+    capacity->capacity += 4096;
+
+    if (label_bytes
+        > (NGX_MEDIA_API_BUF_MAX_SIZE - capacity->capacity) / 40)
+    {
+        capacity->capacity = NGX_MEDIA_API_BUF_MAX_SIZE;
+        return NGX_ERROR;
+    }
+
+    capacity->capacity += label_bytes * 40;
+
+    return NGX_OK;
+}
+
 /*
  * GET /media/api/v1/metrics
  *
@@ -910,8 +1095,11 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
     ngx_media_source_t             *source;
     ngx_media_runtime_stats_t       stats;
     ngx_media_runtime_progress_t    progress;
+    ngx_media_egress_resources_t    resources;
     ngx_media_srt_egress_stats_t    srt_stats[NGX_MEDIA_SRT_EGRESS_SHARDS];
+    ngx_media_api_egress_render_t   egress;
     ngx_uint_t                      n_srt_stats, i;
+    ngx_media_egress_manager_resources_get(&resources);
     ngx_media_runtime_stats_get(&stats);
     n_srt_stats = ngx_media_srt_module_stats_get(
         srt_stats, NGX_MEDIA_SRT_EGRESS_SHARDS);
@@ -1116,6 +1304,79 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "nginx_media_worker_info{worker=\"%i\",pid=\"%P\"} "
                          "1\n",
                          ngx_worker, ngx_pid);
+    *last = ngx_snprintf(
+        *last, end - *last,
+        "# HELP nginx_media_egress_available_cpu_milli "
+        "available CPU capacity in milli-CPU\n"
+        "# TYPE nginx_media_egress_available_cpu_milli gauge\n"
+        "# HELP nginx_media_egress_worker_cpu_permille "
+        "worker CPU usage as permille of available CPU capacity\n"
+        "# TYPE nginx_media_egress_worker_cpu_permille gauge\n"
+        "# HELP nginx_media_egress_event_loop_lag_msec "
+        "worker event-loop lag in milliseconds\n"
+        "# TYPE nginx_media_egress_event_loop_lag_msec gauge\n"
+        "# HELP nginx_media_egress_active_workers "
+        "active workers assigned to an egress engine\n"
+        "# TYPE nginx_media_egress_active_workers gauge\n"
+        "# HELP nginx_media_egress_engine_cpu_permille "
+        "CPU utilization attributed to sender-thread pools in permille\n"
+        "# TYPE nginx_media_egress_engine_cpu_permille gauge\n");
+
+    if (*last >= end) {
+        return NGX_ERROR;
+    }
+
+    if (resources.sample_valid) {
+        *last = ngx_snprintf(
+            *last, end - *last,
+            "nginx_media_egress_available_cpu_milli{worker=\"%i\"} %ui\n"
+            "nginx_media_egress_worker_cpu_permille{worker=\"%i\"} %ui\n"
+            "nginx_media_egress_event_loop_lag_msec{worker=\"%i\"} %M\n",
+            ngx_worker, resources.available_cpu_milli,
+            ngx_worker, resources.worker_cpu_permille,
+            ngx_worker, resources.event_loop_lag_msec);
+
+        if (*last >= end) {
+            return NGX_ERROR;
+        }
+
+        for (i = NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD;
+             i <= NGX_MEDIA_EGRESS_ENGINE_MAX; i++)
+        {
+            const char  *engine;
+
+            engine = ngx_media_api_resource_engine(i);
+            if (engine == NULL) {
+                continue;
+            }
+
+            *last = ngx_snprintf(
+                *last, end - *last,
+                "nginx_media_egress_active_workers{worker=\"%i\","
+                "engine=\"%s\"} %ui\n",
+                ngx_worker, engine, resources.active_workers[i]);
+
+            if (*last >= end) {
+                return NGX_ERROR;
+            }
+
+            if (i != NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD
+                && i != NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL)
+            {
+                continue;
+            }
+
+            *last = ngx_snprintf(
+                *last, end - *last,
+                "nginx_media_egress_engine_cpu_permille{worker=\"%i\","
+                "engine=\"%s\"} %ui\n",
+                ngx_worker, engine, resources.engine_cpu_permille[i]);
+
+            if (*last >= end) {
+                return NGX_ERROR;
+            }
+        }
+    }
     *last = ngx_snprintf(*last, end - *last,
                          "# HELP nginx_media_source_payload_bytes_in_total "
                          "source media payload bytes accepted by the parser\n"
@@ -1165,6 +1426,38 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "SRT transport packets retransmitted by the sender\n"
                          "# TYPE nginx_media_srt_egress_shard_retransmitted_packets_total "
                          "counter\n");
+    *last = ngx_snprintf(*last, end - *last,
+                         "# HELP nginx_media_egress_delivered_bytes_total "
+                         "bytes accepted by the destination transport\n"
+                         "# TYPE nginx_media_egress_delivered_bytes_total "
+                         "counter\n"
+                         "# HELP nginx_media_egress_dropped_units_total "
+                         "media units dropped for this destination\n"
+                         "# TYPE nginx_media_egress_dropped_units_total "
+                         "counter\n"
+                         "# HELP nginx_media_egress_transport_errors_total "
+                         "destination transport errors\n"
+                         "# TYPE nginx_media_egress_transport_errors_total "
+                         "counter\n"
+                         "# HELP nginx_media_egress_backpressure_events_total "
+                         "destination backpressure observations\n"
+                         "# TYPE nginx_media_egress_backpressure_events_total "
+                         "counter\n"
+                         "# HELP nginx_media_egress_reconnects_total "
+                         "destination transport reconnects\n"
+                         "# TYPE nginx_media_egress_reconnects_total "
+                         "counter\n"
+                         "# HELP nginx_media_egress_deadline_misses_total "
+                         "destination deadlines missed\n"
+                         "# TYPE nginx_media_egress_deadline_misses_total "
+                         "counter\n"
+                         "# HELP nginx_media_egress_queue_bytes "
+                         "bytes currently queued for this destination\n"
+                         "# TYPE nginx_media_egress_queue_bytes gauge\n"
+                         "# HELP nginx_media_egress_queue_lag_ms "
+                         "oldest pending media age for this destination\n"
+                         "# TYPE nginx_media_egress_queue_lag_ms gauge\n");
+
 
     if (*last >= end) {
         return NGX_ERROR;
@@ -1199,6 +1492,14 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
         if (*last >= end) {
             return NGX_ERROR;
         }
+    }
+    egress.last = last;
+    egress.end = end;
+
+    if (ngx_media_egress_manager_visit(ngx_media_api_egress_render, &egress)
+        != NGX_OK)
+    {
+        return NGX_ERROR;
     }
 
     for (q = ngx_queue_head(&registry->entries);
@@ -4261,8 +4562,11 @@ ngx_media_api_response_capacity(ngx_http_request_t *r,
     ngx_media_destination_t    *destination;
     ngx_str_t                   application, name, action;
     ngx_uint_t                  all_streams, include_destinations;
+    ngx_uint_t                  include_egress;
+    ngx_media_api_egress_capacity_t egress_capacity;
 
     capacity = NGX_MEDIA_API_BUF_SIZE;
+    include_egress = 0;
 
     if (r->method != NGX_HTTP_GET || registry == NULL) {
         return capacity;
@@ -4276,6 +4580,7 @@ ngx_media_api_response_capacity(ngx_http_request_t *r,
     {
         all_streams = 1;
         include_destinations = 0;
+        include_egress = 1;
 
     } else if (r->uri.len == streams_uri_len
                && ngx_memcmp(r->uri.data, "/media/api/v1/streams",
@@ -4370,6 +4675,17 @@ ngx_media_api_response_capacity(ngx_http_request_t *r,
                 capacity += destination->id.len * 6;
             }
         }
+    }
+    if (include_egress) {
+        egress_capacity.capacity = capacity;
+
+        if (ngx_media_egress_manager_visit(ngx_media_api_egress_capacity,
+                                           &egress_capacity) != NGX_OK)
+        {
+            return NGX_MEDIA_API_BUF_MAX_SIZE;
+        }
+
+        capacity = egress_capacity.capacity;
     }
 
     return capacity;

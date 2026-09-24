@@ -6,6 +6,7 @@
 #include "ngx_media_hls_ingest.h"
 #include "ngx_media_hls_pull.h"
 #include "ngx_media_hls_push.h"
+#include "ngx_media_egress_manager.h"
 
 #include <ngx_event.h>
 #include <ngx_event_posted.h>
@@ -24,7 +25,8 @@
  * ISO tap muxes a named source before the selector and the RAW tap records
  * transport bytes before normalization (goal doc 20).
  */
-typedef struct {
+typedef struct ngx_media_runtime_outputs_s ngx_media_runtime_outputs_t;
+struct ngx_media_runtime_outputs_s {
     ngx_uint_t             used;
     ngx_media_stream_t    *stream;
     ngx_media_cursor_t     cursor;
@@ -63,7 +65,21 @@ typedef struct {
     uint64_t               generation;
     uint64_t               frames;
     uint64_t               bursts;
-} ngx_media_runtime_outputs_t;
+    ngx_media_runtime_outputs_t *next;
+};
+typedef struct ngx_media_runtime_prepare_s ngx_media_runtime_prepare_t;
+struct ngx_media_runtime_prepare_s {
+    ngx_uint_t                 used;
+    ngx_media_stream_t        *stream;
+    ngx_media_cursor_t         cursor;
+    ngx_media_rtmp_prepare_t   prepare;
+    ngx_media_trackset_t      *tracks;
+    ngx_media_runtime_prepare_t *next;
+};
+
+static ngx_media_runtime_outputs_t  *ngx_media_runtime_outputs;
+static ngx_media_runtime_prepare_t  *ngx_media_runtime_prepares;
+static ngx_uint_t                    ngx_media_runtime_outputs_count;
 
 typedef struct {
     ngx_uint_t  frames;
@@ -125,19 +141,6 @@ ngx_media_runtime_budget_account(ngx_media_runtime_budget_t *budget,
     }
 }
 
-/* Per-stream player preparation: one conversion shared by every RTMP player. */
-typedef struct {
-    ngx_uint_t                 used;
-    ngx_media_stream_t        *stream;
-    ngx_media_cursor_t         cursor;
-    ngx_media_rtmp_prepare_t   prepare;
-    ngx_media_trackset_t      *tracks;
-} ngx_media_runtime_prepare_t;
-
-static ngx_media_runtime_outputs_t
-    ngx_media_runtime_outputs[NGX_MEDIA_RUNTIME_MAX_OUTPUTS];
-static ngx_media_runtime_prepare_t
-    ngx_media_runtime_prepares[NGX_MEDIA_RUNTIME_MAX_PREPARE];
 
 static ngx_media_record_t   ngx_media_runtime_raw;
 static ngx_uint_t           ngx_media_runtime_raw_started;
@@ -867,36 +870,24 @@ static ngx_media_runtime_outputs_t *
 ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
 {
     ngx_media_policy_t              *policy = ngx_media_runtime_policy();
-    ngx_media_runtime_outputs_t     *out = NULL;
+    ngx_media_runtime_outputs_t     *out;
     ngx_media_hls_conf_t             hls_conf;
     ngx_media_record_conf_t          rec_conf;
-    ngx_uint_t                       i;
 
     if (stream == NULL) {
         return NULL;
     }
 
-    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_OUTPUTS; i++) {
-
-        if (ngx_media_runtime_outputs[i].used
-            && ngx_media_runtime_outputs[i].stream == stream)
-        {
-            return &ngx_media_runtime_outputs[i];
+    for (out = ngx_media_runtime_outputs; out != NULL; out = out->next) {
+        if (out->used && out->stream == stream) {
+            return out;
         }
     }
 
-    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_OUTPUTS; i++) {
-
-        if (!ngx_media_runtime_outputs[i].used) {
-            out = &ngx_media_runtime_outputs[i];
-            break;
-        }
-    }
-
+    out = ngx_alloc(sizeof(ngx_media_runtime_outputs_t), log);
     if (out == NULL) {
         return NULL;
     }
-
     ngx_memzero(out, sizeof(ngx_media_runtime_outputs_t));
 
     out->used = 1;
@@ -906,12 +897,12 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
     ngx_media_feed_cursor_init(&stream->program_feed, &out->cursor);
 
     if (ngx_media_ts_mux_init(&out->mux, NULL, log) != NGX_OK) {
-        out->used = 0;
+        ngx_free(out);
         return NULL;
     }
 
     if (policy == NULL) {
-        return out;
+        goto active;
     }
 
     if (policy->hls_path.len > 0) {
@@ -920,6 +911,7 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
 
         if (dir == NULL) {
             ngx_media_runtime_outputs_stop(out);
+            ngx_free(out);
             return NULL;
         }
 
@@ -932,6 +924,7 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
 
         if (ngx_media_hls_init(&out->hls, &hls_conf, log) != NGX_OK) {
             ngx_media_runtime_outputs_stop(out);
+            ngx_free(out);
             return NULL;
         }
 
@@ -950,6 +943,7 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
 
         if (ngx_media_record_init(&out->program, &rec_conf, log) != NGX_OK) {
             ngx_media_runtime_outputs_stop(out);
+            ngx_free(out);
             return NULL;
         }
 
@@ -970,6 +964,7 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
             || ngx_media_record_init(&out->iso, &rec_conf, log) != NGX_OK)
         {
             ngx_media_runtime_outputs_stop(out);
+            ngx_free(out);
             return NULL;
         }
 
@@ -989,9 +984,14 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
            != NGX_OK)
     {
         ngx_media_runtime_outputs_stop(out);
+        ngx_free(out);
         return NULL;
     }
 
+active:
+    out->next = ngx_media_runtime_outputs;
+    ngx_media_runtime_outputs = out;
+    ngx_media_runtime_outputs_count++;
     return out;
 }
 
@@ -1924,34 +1924,22 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
 ngx_media_rtmp_prepare_t *
 ngx_media_runtime_prepare(ngx_media_stream_t *stream, ngx_log_t *log)
 {
-    ngx_media_runtime_prepare_t  *slot = NULL;
-    ngx_uint_t                    i;
+    ngx_media_runtime_prepare_t  *slot;
 
     if (stream == NULL) {
         return NULL;
     }
 
-    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_PREPARE; i++) {
-
-        if (ngx_media_runtime_prepares[i].used
-            && ngx_media_runtime_prepares[i].stream == stream)
-        {
-            return &ngx_media_runtime_prepares[i].prepare;
+    for (slot = ngx_media_runtime_prepares; slot != NULL; slot = slot->next) {
+        if (slot->used && slot->stream == stream) {
+            return &slot->prepare;
         }
     }
 
-    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_PREPARE; i++) {
-
-        if (!ngx_media_runtime_prepares[i].used) {
-            slot = &ngx_media_runtime_prepares[i];
-            break;
-        }
-    }
-
+    slot = ngx_alloc(sizeof(ngx_media_runtime_prepare_t), log);
     if (slot == NULL) {
         return NULL;
     }
-
     ngx_memzero(slot, sizeof(ngx_media_runtime_prepare_t));
 
     slot->used = 1;
@@ -1960,7 +1948,8 @@ ngx_media_runtime_prepare(ngx_media_stream_t *stream, ngx_log_t *log)
     ngx_media_feed_cursor_init(&stream->program_feed, &slot->cursor);
     ngx_media_rtmp_prepare_init(&slot->prepare, 2048, 32 * 1024 * 1024);
 
-    (void) log;
+    slot->next = ngx_media_runtime_prepares;
+    ngx_media_runtime_prepares = slot;
 
     return &slot->prepare;
 }
@@ -1974,12 +1963,8 @@ ngx_media_runtime_prepare_drain(ngx_media_stream_t *stream, ngx_log_t *log,
     ngx_uint_t                    count, i, status, max_units;
     size_t                        max_bytes;
 
-    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_PREPARE; i++) {
-
-        if (ngx_media_runtime_prepares[i].used
-            && ngx_media_runtime_prepares[i].stream == stream)
-        {
-            slot = &ngx_media_runtime_prepares[i];
+    for (slot = ngx_media_runtime_prepares; slot != NULL; slot = slot->next) {
+        if (slot->used && slot->stream == stream) {
             goto found;
         }
     }
@@ -2353,15 +2338,6 @@ ngx_media_runtime_visit(ngx_log_t *log)
 
             if (out != NULL) {
 
-                /*
-                 * A push destination watches a directory, and a program's
-                 * HLS output is a directory of its own.  Directory discovery
-                 * is periodic maintenance; output feed progress below is
-                 * allowed on a posted media visit.
-                 */
-                if (ngx_media_runtime_timer_visit && out->hls_ready) {
-                    ngx_media_hls_push_scan(&out->hls.conf.path, log);
-                }
 
                 ngx_media_runtime_outputs_drain(out, log, &budget);
             }
@@ -2433,6 +2409,9 @@ ngx_media_runtime_periodic_visit(ngx_log_t *log)
     ngx_media_runtime_timer_visit = 1;
     more = ngx_media_runtime_visit(log);
     ngx_media_runtime_timer_visit = 0;
+    ngx_media_egress_manager_worker_sample(
+        ngx_media_runtime_stats.last_gap);
+    ngx_media_hls_push_adapt();
 
     if (more) {
         ngx_media_runtime_stats.budget_reposts++;
@@ -2616,64 +2595,61 @@ ngx_media_runtime_stop(void)
     }
 }
 
-/* how many runtime output slots are in use: a leak shows up here */
+/* number of live per-stream runtime output objects */
 ngx_uint_t
 ngx_media_runtime_outputs_active(void)
 {
-    ngx_uint_t  i, active = 0;
-
-    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_OUTPUTS; i++) {
-        active += ngx_media_runtime_outputs[i].used ? 1 : 0;
-    }
-
-    return active;
+    return ngx_media_runtime_outputs_count;
 }
 
 /*
- * Releases the runtime state of one stream: flush what is buffered, finalize
- * the playlist and any recording part, and free the output slot; drop the
- * player preparation and the routed slots.  Called from ordered teardown,
- * before the stream's feed goes away, because the flush reads from it.
- * Without this a create/delete cycle leaks an output slot every time.
- *
- * The stream's player preparation goes with it.  It reads the same feed and
- * holds the FLV conversion of the program, so it has to be dropped at this
- * same point in ordered teardown; releasing it only at worker exit would leak
- * a prepare slot, and the program payload pinned behind its ring, on every
- * create/delete cycle -- after NGX_MEDIA_RUNTIME_MAX_PREPARE cycles the next
- * stream's prepare() returns NULL and its RTMP players and destinations
- * silently receive nothing.
+ * Releases one stream's runtime objects before its feed is destroyed.  Output
+ * state is flushed and freed; the shared RTMP preparation and routed slots
+ * are also released here so neither readers nor queued buffers outlive stream
+ * teardown.
  */
 void
 ngx_media_runtime_stream_release(ngx_media_stream_t *stream)
 {
-    ngx_uint_t  i;
+    ngx_media_runtime_outputs_t  **output_link, *output;
+    ngx_media_runtime_prepare_t  **prepare_link, *prepare;
+    ngx_uint_t                      i;
 
     if (stream == NULL) {
         return;
     }
 
-    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_OUTPUTS; i++) {
-
-        if (ngx_media_runtime_outputs[i].used
-            && ngx_media_runtime_outputs[i].stream == stream)
-        {
-            ngx_media_runtime_outputs_stop(&ngx_media_runtime_outputs[i]);
-            break;
+    for (output_link = &ngx_media_runtime_outputs;
+         *output_link != NULL; output_link = &(*output_link)->next)
+    {
+        if ((*output_link)->stream != stream) {
+            continue;
         }
+
+        output = *output_link;
+        *output_link = output->next;
+        if (ngx_media_runtime_outputs_count > 0) {
+            ngx_media_runtime_outputs_count--;
+        }
+        ngx_media_runtime_outputs_stop(output);
+        ngx_free(output);
+        break;
     }
 
-    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_PREPARE; i++) {
-
-        if (ngx_media_runtime_prepares[i].used
-            && ngx_media_runtime_prepares[i].stream == stream)
-        {
-            ngx_media_rtmp_prepare_destroy(
-                &ngx_media_runtime_prepares[i].prepare);
-            ngx_memzero(&ngx_media_runtime_prepares[i],
-                        sizeof(ngx_media_runtime_prepare_t));
-            break;
+    for (prepare_link = &ngx_media_runtime_prepares;
+         *prepare_link != NULL; prepare_link = &(*prepare_link)->next)
+    {
+        if ((*prepare_link)->stream != stream) {
+            continue;
         }
+
+        prepare = *prepare_link;
+        *prepare_link = prepare->next;
+        if (prepare->used) {
+            ngx_media_rtmp_prepare_destroy(&prepare->prepare);
+        }
+        ngx_free(prepare);
+        break;
     }
 
     /*
@@ -2702,29 +2678,31 @@ ngx_media_runtime_stream_release(ngx_media_stream_t *stream)
 void
 ngx_media_runtime_shutdown(ngx_log_t *log)
 {
-    ngx_media_hls_push_stop();
+    ngx_media_runtime_outputs_t  *output;
+    ngx_media_runtime_prepare_t  *prepare;
+
     ngx_media_hls_pull_stop_all();
     ngx_media_hls_ingest_stop_all();
-
-    ngx_uint_t  i;
-
-    (void) log;
 
     ngx_media_runtime_stop();
     ngx_media_route_worker_shutdown(log);
 
-    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_OUTPUTS; i++) {
-        ngx_media_runtime_outputs_stop(&ngx_media_runtime_outputs[i]);
-    }
-
-    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_PREPARE; i++) {
-
-        if (ngx_media_runtime_prepares[i].used) {
-            ngx_media_rtmp_prepare_destroy(
-                &ngx_media_runtime_prepares[i].prepare);
-            ngx_memzero(&ngx_media_runtime_prepares[i],
-                        sizeof(ngx_media_runtime_prepare_t));
+    while ((output = ngx_media_runtime_outputs) != NULL) {
+        ngx_media_runtime_outputs = output->next;
+        if (ngx_media_runtime_outputs_count > 0) {
+            ngx_media_runtime_outputs_count--;
         }
+        ngx_media_runtime_outputs_stop(output);
+        ngx_free(output);
+    }
+    ngx_media_hls_push_stop();
+
+    while ((prepare = ngx_media_runtime_prepares) != NULL) {
+        ngx_media_runtime_prepares = prepare->next;
+        if (prepare->used) {
+            ngx_media_rtmp_prepare_destroy(&prepare->prepare);
+        }
+        ngx_free(prepare);
     }
 
     if (ngx_media_runtime_raw_started) {

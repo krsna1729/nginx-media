@@ -78,9 +78,11 @@ exceeded 150 ms (the interval plus half).  `nginx_media_worker_service_ms` and
 this worker spent serving every program it owns.
 
 Everything periodic happens on that tick — file sources advance by one chunk,
-the HLS push scan offers new segments, each stream drains its output slots (HLS
-segmenting, recording) and prepares its transport bursts — so this is the
-leading indicator for all of it.  A `service_ms` of 80 ms is not "80% of a
+each stream drains its output slots (HLS segmenting, recording), prepares its
+transport bursts, and samples worker resources for egress adaptation.  HLS push
+is not scanned here: the segmenter notifies destinations after atomically
+renaming a sealed segment or playlist.  This is the leading indicator for the
+worker-owned periodic work.  A `service_ms` of 80 ms is not "80% of a
 budget": it makes the effective cadence 180 ms, and the program feed backlog
 grows at the difference.  A `delay_ms` that stays above the interval, or
 `late_ticks_total` incrementing at all on an otherwise idle machine, is the
@@ -253,64 +255,72 @@ matters.
 
 ### A stalled HLS remote
 
-An `hls_push` destination uploads on a shared pool of four threads, and each
-destination has its own 64-entry queue
-(`NGX_MEDIA_HLS_PUSH_QUEUE`/`_POOL`, `src/core/ngx_media_hls_push.c`).  When a
-remote stalls, the queue fills and the oldest queued segment is dropped and
-counted, rather than anything waiting on it; the program is unaffected, which
-`tests/integration/hls_push_nginx.sh` asserts directly by stalling the sink and
-checking that `program_frames` keeps advancing.
+An `hls_push` destination uploads sealed-file notifications on a shared pool
+with a four-thread ceiling and a 64-file queue per destination
+(`NGX_MEDIA_HLS_PUSH_QUEUE`/`_POOL`, `src/core/ngx_media_hls_push.c`).  There is
+one upload in flight per destination; active sender concurrency starts at one
+and adapts within the worker's shared CPU budget.  Queue overflow drops and
+counts the oldest queued file instead of blocking the producer or another
+destination.  `tests/integration/hls_push_nginx.sh` asserts that
+`program_frames` keeps advancing while its sink is stalled.
 
-From outside there is very little to see, and that is the honest state of it: the
-remote's directory stops growing, and nothing else changes.  The destination
-keeps reporting `enabled`, the program's own metrics are healthy, and there is
-no log line for a failed or dropped upload and no metric for it either — the
-counters exist in the process (`ngx_media_hls_push_uploaded_total` and its
-`dropped`/`failed` siblings) and are not published by the API or the metrics
-endpoint.  The practical monitor is the remote: compare what it has received
-against the HLS directory's playlist, and treat a stalled remote as a
-destination to delete and recreate rather than something the server will report.
+The destination can remain `enabled` when its remote is unavailable, so inspect
+the worker-local metrics at `/media/api/v1/metrics`.  Per-destination
+`nginx_media_egress_delivered_bytes_total`,
+`nginx_media_egress_dropped_units_total`,
+`nginx_media_egress_transport_errors_total`,
+`nginx_media_egress_backpressure_events_total`,
+`nginx_media_egress_reconnects_total`, and
+`nginx_media_egress_deadline_misses_total` are counters;
+`nginx_media_egress_queue_bytes` and `nginx_media_egress_queue_lag_ms` are
+gauges.  The worker resource series
+`nginx_media_egress_available_cpu_milli`,
+`nginx_media_egress_worker_cpu_permille`,
+`nginx_media_egress_event_loop_lag_msec`,
+`nginx_media_egress_active_workers`, and
+`nginx_media_egress_engine_cpu_permille` show capacity and sender concurrency.
+Engine CPU is measured for SRT/HLS sender pools; RTMP stays on its owning event
+loop.  Scrapes are process-local, so monitor every NGINX worker.
 
 Every outbound HTTP operation has a deadline: five seconds to connect to one
 address, ten seconds without progress on a read or a write.  A remote that
-accepts the connection and then says nothing therefore costs a reader thread or
-an uploader that long rather than the kernel's own timeout, and on the push side
-that matters most: the upload pool is four threads, so four silent remotes used
-to take every destination's uploads with them.  A stalled upload is then a
-failed upload (`failed` in the destination's counters, not `dropped`) and the
-segment is not published truncated.
+accepts the connection and then says nothing occupies an upload thread until
+that deadline; the pool ceiling bounds this cost.  Queue pressure can grow the
+active pool only while there is CPU headroom and space under the shared SRT/HLS
+sender budget.  Transport errors or SRT retransmissions alone do not trigger
+growth.  A stalled upload fails with a transport error rather than publishing a
+truncated file.
 
-A destination pointed at a directory no program writes to simply receives
-nothing: the scan offers the program's own HLS directory
-(`<media_hls>/<application>/<name>`), so a destination has to be pointed at the
-program it is meant to carry (`configuration.md`).
-
-The per-destination scan table is bounded at 256 names
-(`NGX_MEDIA_HLS_PUSH_SCAN_MAX`), but it is not the correctness boundary:
-immutable segment names also advance a lexical high-water mark.  Once a segment
-has been offered, a later scan never re-offers that name after the table wraps.
-The constant-name playlist is the exception; its mtime and size are tracked so
-rewrites are offered again.  A full upload queue can still drop a segment by
-policy, and that is reported by the destination's drop counter; the scan table
-does not turn a bounded queue into an unbounded one.
+A destination pointed at a directory no program writes to receives no files:
+notifications match only the program's exact HLS output directory
+(`<media_hls>/<application>/<name>`); there is no fallback directory scan
+(`configuration.md`).  Each notification opens the sealed inode, so later
+playlist rewrites or HLS retention unlinks do not change an already queued
+snapshot.  Deleting a destination drops its queued files; an upload in flight
+retains its references until it completes or reaches its deadline.
 
 ### A slow SRT or RTMP receiver
 
-SRT destinations share a fixed pool of 16 egress shard threads per worker; an
-output does not create a module sender thread.  Static and runtime outputs
-share 1000 destination slots per worker.  Each destination has a bounded queue
-of 256 units / 8 MiB, and each shard has a 64-unit / 8 MiB feed queue.  Queue
-overrun drops bursts and resynchronizes at the next keyframe, so a slow remote
-does not stall its program.  Queue occupancy and drops are available in the
-SRT shard metrics.  Connection state is also reported through the worker
-eventfd: `WARN` when an output is disconnected and `NOTICE` when it connects.
-The logged `<n>` is a destination-table slot, not the destination ID; correlate
-it with `media: srt destination <id> started ...`.  RTMP connect failures are
-logged as `media: rtmp destination <id> could not connect ...`.
+SRT destinations share 16 stable logical egress shards per worker; the manager
+adapts active sender concurrency within the shared SRT/HLS worker CPU budget.
+An output does not create a sender thread.  Static and runtime outputs share
+1000 destination slots per worker.  Each destination has a bounded queue of
+256 units / 8 MiB, and each logical shard has a 64-unit / 8 MiB feed queue.
+Queue overrun drops bursts and resynchronizes at the next keyframe, so a slow
+remote does not stall its program.  Queue occupancy and drops are available in
+the shard and destination metrics.  SRT transport retransmissions are measured
+but do not independently cause sender growth.  Connection state is reported
+through the worker eventfd: `WARN` when an output is disconnected and `NOTICE`
+when it connects.  The logged `<n>` is a destination-table slot, not the
+destination ID; correlate it with `media: srt destination <id> started ...`.
+RTMP connect failures are logged as
+`media: rtmp destination <id> could not connect ...`.
 
 RTMP destinations have a 128-message / 512 KiB per-destination queue and a
-one-second reconnect backoff.  Their destination table holds up to 1000 active
-outputs per worker.
+one-second reconnect backoff.  RTMP remains on the owning event loop; its pump
+uses smaller batches under worker CPU or event-loop pressure rather than
+moving a live connection to a background thread.  Its destination table holds
+up to 1000 active outputs per worker.
 
 Both destination tables reject creates at capacity: SRT returns
 `500 {"error":"destination_start_failed"}` and leaves no object behind; the
@@ -562,8 +572,9 @@ With no publisher, destination or media, the old sender loop repeatedly took
 the eight destination slots' mutexes and spun.  The idle-wait fix made sender
 threads wait on a condition variable when no work is available; a post-fix
 `PHASES=floor` smoke run measured 0% idle sender CPU at one, two and four
-workers.  Current egress uses a fixed 16-shard pool per worker, independent of
-the number of destinations.
+workers.  Current egress keeps 16 stable logical shards and a 16-thread sender
+pool ceiling per worker; active concurrency adapts under the shared SRT/HLS CPU
+budget, independently of destination count.
 
 **Ingest: one endpoint is one receive thread, and it is not the first thing to
 give.**  Sixteen publishers is the per-worker session ceiling, so the only
@@ -1057,10 +1068,11 @@ pools and their fixed thread cost.  The pool size is not an nginx option or a
 public Robotweax scaling API.
 
 The seven-thread figure is the Robotweax library only.  The worker also pays
-for nginx-media's ingest thread and its fixed 16-thread SRT egress-shard pool.
-`ngx_media_srt_output.c` reuses those shards for runtime destinations; the
-1000-slot output table, queue bounds, session-table and IPC limits are
-independent of the Robotweax scheduler limit.
+for nginx-media's ingest thread and its fixed 16-thread SRT egress pool, whose
+active sender count adapts under the shared worker CPU budget with HLS push.
+`ngx_media_srt_output.c` reuses its stable logical shards for runtime
+destinations; the 1000-slot output table, queue bounds, session table and IPC
+limits are independent of the Robotweax scheduler limit.
 
 That is a different ceiling, not automatically a higher one:
 
@@ -1153,7 +1165,7 @@ approached is a reading, not a directive.
 | Streams draining after a delete | unbounded, one per deleted stream whose reader thread is still stopping | `nginx_media_streams_draining`; it returns to zero within a tick or two, and a value that stays up is a reader that will not leave.  Each such stream holds its pool (its feed included) until then |
 | Standby GOP cache | 512 units / 4 MiB per source | `preroll_units`, `preroll_bytes`; `preroll_overflows` rising means the cache is being cleared instead of kept, so a switch has no cached GOP to land on |
 | SRT output destinations | 1000 slots per worker, shared by static and runtime outputs | API create fails with `500 destination_start_failed` |
-| SRT egress shard pool | 16 threads per worker, independent of destination count | `srt-egress-00` through `srt-egress-15` in `/proc/<pid>/task/*/comm` |
+| SRT egress shard pool | 16 stable logical shards; adaptive 1-16 active senders per worker | `/proc/<pid>/task/*/comm`; `nginx_media_egress_active_workers` |
 | SRT shard feed queue | 64 units / 8 MiB per shard | `nginx_media_srt_egress_shard_feed_queue_*` gauges and drop counter |
 | SRT destination queue | 256 units / 8 MiB per destination | `nginx_media_srt_egress_shard_output_queue_*` gauges and drop counter |
 | SRT ingest sessions | 16 per worker | `media: no free ingest session slot` |
@@ -1162,11 +1174,11 @@ approached is a reading, not a directive.
 | SRT receive queue (Haivision library) | one `RcvQ` thread per listening endpoint, shared by every session on it | no metric, only the log; Robotweax uses its fixed library pool instead |
 | SRT UDP receive buffer (kernel) | `net.core.rmem_max` per listening endpoint, shared by every session | `ss -ulmpn` shows `rb` for the port; overflow is silent and appears as loss and retransmission |
 | SRT flow window (library) | 25,600 packets in flight per session | caps one session's throughput at `FC × payload / RTT` on a lossy path |
-| Haivision SRT library threads | 1 GC + 2 per bound port + 1 per live session + 2 per destination | excludes nginx-media's 1 ingest thread and 16 egress shards; inspect with `ps -L -o comm -p <worker-pid>` |
+| Haivision SRT library threads | 1 GC + 2 per bound port + 1 per live session + 2 per destination | excludes nginx-media's 1 ingest thread and 16 egress lane threads; inspect with `ps -L -o comm -p <worker-pid>` |
 | RTMP sessions | 1024 per worker, so 1024 × workers in the instance | `media: rtmp: no free session slot` |
 | RTMP destinations | 1000 slots per worker | the destination allocator rejects creates when full |
 | RTMP destination queue | 128 messages / 512 KiB per destination | drops to the next sync boundary |
-| HLS push queue | 64 entries per destination, pool of 4 | internal counters only; nothing published |
+| HLS push queue and pool | 64 queued files per destination; four-thread ceiling, adaptive 1-4 active senders | oldest queued file drops on overflow; `nginx_media_egress_queue_bytes`, `nginx_media_egress_queue_lag_ms`, `nginx_media_egress_dropped_units_total` |
 | HLS output window | 6 segments, 8 MiB per segment, 64 MiB retained | evicted segments are deleted from disk, so the directory does not grow |
 | Recording queue | 1024 jobs / 32 MiB pending, parts roll at 512 MiB | drops counted internally; the part-rolled file is the visible artefact |
 | Inter-worker routing | 256 queued messages, 4 MiB frame, 32 routed sources per worker | a routed publisher that cannot be forwarded is dropped to a sync boundary |
@@ -1208,9 +1220,10 @@ responsibility.
   recorded on the destination and do not drive segmentation, which is fixed at a
   6 s target with a 6-segment window; the profile guarantees that the
   destination is one the platform would accept, nothing more.
-- It does not publish a metric for destination-level drops.  SRT reports them in
-  the log, HLS push reports them nowhere, and the emergency switch count is only
-  in the detail JSON — all three named above where they are.
+- It does not aggregate destination metrics across NGINX workers.  Egress byte,
+  drop, transport-error, backpressure, reconnect, deadline and queue metrics
+  are worker-local; the emergency switch count is only in the detail JSON —
+  both limits are described above.
 - It does not carry a `record` destination.  The type is accepted by the API and
   fails to start, because no backend is registered for it in this build;
   recording is the static taps (`media_record`, `media_record_raw`,

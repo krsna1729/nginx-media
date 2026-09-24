@@ -16,8 +16,7 @@
  */
 
 #define NGX_MEDIA_RUNTIME_INTERVAL        100
-#define NGX_MEDIA_RUNTIME_MAX_OUTPUTS     16
-#define NGX_MEDIA_RUNTIME_MAX_PREPARE     16
+/* Output and RTMP preparation state is allocated on demand per active stream. */
 #define NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK 64
 
 /*

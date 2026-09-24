@@ -334,7 +334,7 @@ For a socket destination (`srt`, `rtmp`):
 ```
 
 For an HLS push destination, `host` is the endpoint URL and `path` is the
-output directory it watches; there is no port:
+program's HLS output directory; there is no port:
 
 ```json
 {"id":"cdn","type":"hls_push",
@@ -342,12 +342,10 @@ output directory it watches; there is no port:
  "path":"/var/lib/nginx/media/hls/live/news"}
 ```
 
-That directory is not free-form: it has to be the program's own HLS output
-directory, `<media_hls>/<application>/<name>`, because the runtime tick scans
-that directory and offers what appears in it to the destinations watching it.
-A destination pointed anywhere else starts, is listed, and receives nothing —
-the string it was given is compared against the directory the program writes,
-so a typo is a silent no-op rather than an error.
+The path must exactly match `<media_hls>/<application>/<name>`.  The
+segmenter notifies matching destinations after each segment or playlist is
+atomically renamed; there is no directory scan.  A destination pointed at a
+different directory starts but receives no files.
 
 A destination is answered as `{"id","type","host","port","enabled","revision"}`
 with the type numbers `srt` 1, `rtmp` 2, `hls_push` 3, `record` 4, and
@@ -360,10 +358,14 @@ program as `streamid` (or the stream name when none is given) and carries the
 same FLV messages the RTMP players get, so an H.265 program keeps the
 enhanced-RTMP signalling it arrived with.
 
-Uploads run on a bounded pool, and each destination has a bounded queue: a
-stalled remote drops its oldest queued segment and counts it rather than
-stalling the program or its neighbours.  Deleting one stops it and unlinks it
-first, so nothing it queued outlives it.
+Uploads run on a four-thread-ceiling pool; active concurrency starts at one
+and adapts within the worker's shared CPU budget.  Each destination has one
+upload in flight and a 64-file queue.  Queue overflow drops and counts the
+oldest queued file.  The notifier opens each sealed inode once, so HLS
+retention can unlink or replace its path without changing the queued snapshot.
+Deletion removes the destination from scheduling and drops queued files;
+an upload already in flight keeps its file and destination references until it
+finishes or times out.
 
 ### Endpoint credentials are not reported
 
@@ -537,11 +539,12 @@ Capacity and health metrics include:
   Both are gauges with a ceiling, so a value pinned at the ceiling is the
   symptom to alert on, not a number to graph for trend.
 - **SRT egress shards.** `nginx_media_srt_egress_shard_*` series are labeled by
-  `worker` and one of the 16 fixed `shard` IDs.  `destinations` is the active
-  destination-count gauge.  `feed_queue_units`/`feed_queue_bytes` and
-  `output_queue_units`/`output_queue_bytes` are queue gauges; output values
-  aggregate the destinations assigned to that shard.
-  `nginx_media_srt_egress_shard_feed_queue_dropped_total` and
+  `worker` and one of 16 stable logical `shard` IDs.  Destination placement
+  stays on its logical shard while physical sender concurrency adapts.
+  `destinations` is the active destination-count gauge.
+  `feed_queue_units`/`feed_queue_bytes` and `output_queue_units`/`output_queue_bytes`
+  are queue gauges; output values aggregate the destinations assigned to that
+  shard.  `nginx_media_srt_egress_shard_feed_queue_dropped_total` and
   `nginx_media_srt_egress_shard_output_dropped_total` count bursts refused by
   the bounded shard-feed and per-destination queues.  The feed queue is capped
   at 64 units / 8 MiB per shard; each destination queue at 256 units / 8 MiB.
@@ -551,6 +554,30 @@ Capacity and health metrics include:
   `retransmitted_packets_total` expose completed bursts, send backpressure,
   and transport retransmissions.  Receiver-delivered bytes require
   receiver-side accounting, as used by `bench-capacity-curve`.
+
+- **Worker egress budget.** `nginx_media_egress_available_cpu_milli` reports
+  affinity/cgroup capacity.  `nginx_media_egress_worker_cpu_permille` is the
+  worker's process CPU share of that capacity, and
+  `nginx_media_egress_event_loop_lag_msec` is the runtime-tick gap.  The
+  worker-local manager reserves one CPU for the owning event loop and shares
+  remaining sender concurrency between SRT and HLS push.  Sustained independent
+  queue pressure plus CPU headroom can grow the pool; SRT retransmissions
+  alone do not.
+- **Destination egress.** `nginx_media_egress_delivered_bytes_total` counts
+  bytes accepted by the destination transport, not receiver-acknowledged bytes.
+  `nginx_media_egress_dropped_units_total`,
+  `nginx_media_egress_transport_errors_total`,
+  `nginx_media_egress_backpressure_events_total`,
+  `nginx_media_egress_reconnects_total`, and
+  `nginx_media_egress_deadline_misses_total` are per-destination counters;
+  `nginx_media_egress_queue_bytes` and
+  `nginx_media_egress_queue_lag_ms` are gauges.  Labels include worker,
+  application, stream name, destination, protocol, engine, placement,
+  incarnation, representation ID and epoch, and feed ID and epoch.
+  `nginx_media_egress_active_workers` reports SRT sender concurrency, the
+  owning RTMP event loop, and HLS upload concurrency.
+  `nginx_media_egress_engine_cpu_permille` is emitted for measured SRT and HLS
+  sender-thread pools; RTMP CPU remains part of the owning event loop.
 - **Worker event loop.**  `nginx_media_worker_event_loop_delay_ms` is the gap
   between the last two runtime ticks, which the timer asks to be 100 ms, so
   anything above it is time the worker could not get back to its timer.

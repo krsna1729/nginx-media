@@ -2,9 +2,8 @@
 #
 # HLS push/PUT destination (normative revision, acceptance cases 8-10).
 #
-# The segmenter writes files; the destination watches that directory and
-# uploads what appears to a remote endpoint.  This test uses a small local
-# HTTP sink that accepts PUT, so nothing external is needed.
+# The segmenter notifies the bounded push queue after atomic rename.  This test
+# uses a small local HTTP sink that accepts PUT, so nothing external is needed.
 #
 #   8. add an HLS PUT destination while live and see the segments arrive
 #   9. stall the remote and prove the backlog stays bounded and the program
@@ -142,6 +141,10 @@ http {
         location /media/api/ {
             media_api;
         }
+
+        location /hls/ {
+            alias $RUN/hls/;
+        }
     }
 }
 EOF
@@ -195,6 +198,42 @@ echo "   the sink received $RECEIVED files"
 
 ls "$RUN/received" | head -3
 
+echo "== serving the HLS origin while push is active"
+curl -fsS "http://127.0.0.1:$HTTP_PORT/hls/live/push/index.m3u8" \
+    -o "$RUN/origin.m3u8"
+grep -q '^#EXTM3U' "$RUN/origin.m3u8" \
+    || { echo "HLS origin did not serve a playlist" >&2; exit 1; }
+ORIGIN_SEGMENT="$(grep -E '\.ts$' "$RUN/origin.m3u8" | tail -1)"
+[ -n "$ORIGIN_SEGMENT" ] \
+    || { echo "HLS origin playlist references no segment" >&2; exit 1; }
+curl -fsS "http://127.0.0.1:$HTTP_PORT/hls/live/push/$ORIGIN_SEGMENT" \
+    -o "$RUN/origin-segment.ts"
+cmp -s "$RUN/hls/live/push/$ORIGIN_SEGMENT" "$RUN/origin-segment.ts" \
+    || { echo "HLS origin segment differs from the sealed output" >&2; exit 1; }
+
+echo "== scraping worker and destination egress telemetry"
+for _ in $(seq 1 30); do
+    METRICS="$(curl -fsS "$API/metrics")"
+    grep -q '^nginx_media_egress_worker_cpu_permille' <<< "$METRICS" && break
+    sleep 0.1
+done
+for metric in \
+    nginx_media_egress_available_cpu_milli \
+    nginx_media_egress_worker_cpu_permille \
+    nginx_media_egress_event_loop_lag_msec \
+    nginx_media_egress_active_workers \
+    nginx_media_egress_engine_cpu_permille \
+    nginx_media_egress_delivered_bytes_total \
+    nginx_media_egress_queue_lag_ms
+do
+    grep -q "^$metric" <<< "$METRICS" \
+        || { echo "missing egress metric: $metric" >&2
+             printf '%s\n' "$METRICS" >&2
+             exit 1; }
+done
+grep -Fq 'engine="hls_upload_pool"} 1' <<< "$METRICS" \
+    || { echo "HLS upload-pool concurrency was not reported" >&2; exit 1; }
+
 echo "== a stalled remote must not stall the program"
 echo stall > "$RUN/mode"
 
@@ -210,6 +249,7 @@ echo "   program frames: $BEFORE -> $AFTER while the remote is stalled"
 
 [ "${AFTER:-0}" -gt "${BEFORE:-0}" ] \
     || { echo "the program stalled with the remote" >&2; exit 1; }
+rm -f "$RUN/mode"
 
 echo "== the same destination over tls"
 # the capability has to hold in both directions, not only when fetching
