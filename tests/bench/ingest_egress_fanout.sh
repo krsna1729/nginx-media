@@ -53,16 +53,16 @@
 # placed by choosing the endpoint it connects to.
 #
 # Thread identification: the fixed SRT egress shards name themselves
-# `srt-egress-00` through `srt-egress-15`, and the benchmark reads those names
-# from /proc/<tid>/comm.  libsrt names its own threads - `SRT:RcvQ:wN`,
-# `SRT:SndQ:wN`, `SRT:TsbPd`, `SRT:GC` - there too.  The worker's own
-# threads are labelled once per instance from a stack backtrace, because a
-# detached thread is otherwise indistinguishable from the worker's event
-# loop; if that is unavailable the labels fall back to comm and the
-# conditions say so.
+# `srt-egress-00` through `srt-egress-15`; libsrt names its threads
+# `SRT:RcvQ:wN`, `SRT:SndQ:wN`, `SRT:TsbPd`, and `SRT:GC`.  The sampler reads
+# the comm field from each TID's `stat` record in the same pass as CPU ticks.
+# The worker's own threads are labelled once per instance from a stack
+# backtrace, because a detached thread is otherwise indistinguishable from
+# the worker's event loop; if that is unavailable the labels fall back to
+# comm and the conditions say so.
 #
-# CPU is per thread from /proc/<pid>/task/<tid>/stat, and the window is the
-# wall time the two samples were taken over, not the sleep between them.
+# CPU is per thread from /proc/<pid>/task/<tid>/stat.  One sampler takes both
+# snapshots; CPU percentages use the wall time between their sample midpoints.
 #
 # Conditions are printed with the numbers.  One host, no netem, nothing else
 # running.
@@ -164,6 +164,8 @@ LABELLED=1
 W_BEFORE=""
 W_AFTER=""
 W_DUR=0
+W_CPU_BEFORE_MS=0
+W_CPU_AFTER_MS=0
 
 cleanup() {
     local p
@@ -301,63 +303,36 @@ label_all() {
     done
 }
 
-role_of() {   # <pid> <tid> ; stable egress shard comm names take precedence
-    local pid="$1" tid="$2" comm
+write_cpu_roles() {
+    local tid
 
-    comm="$(cat "/proc/$pid/task/$tid/comm" 2>/dev/null || echo unknown)"
-    case "$comm" in
-        srt-egress-*) printf '%s' "$comm"; return 0 ;;
-    esac
-
-    if [ -n "${ROLE[$tid]:-}" ]; then
-        printf '%s' "${ROLE[$tid]}"
-        return 0
-    fi
-
-    case "$comm" in
-        SRT:RcvQ*) printf 'SRT:RcvQ' ;;
-        SRT:SndQ*) printf 'SRT:SndQ' ;;
-        SRT:TsbPd) printf 'SRT:TsbPd' ;;
-        SRT:GC)    printf 'SRT:GC' ;;
-        nginx)     printf 'nginx-thread' ;;
-        *)         printf '%s' "$comm" ;;
-    esac
-}
-
-# --- CPU sampling -----------------------------------------------------------
-#
-# /proc/<pid>/task/<tid>/stat, utime+stime.  The comm field is parenthesised
-# and may contain spaces ("nginx: worker process"), so the fields are counted
-# from after the last ')': utime is the twelfth of what is left, stime the
-# thirteenth.
-
-sample_cpu() {
-    local p t tid
-
-    for p in $(worker_pids); do
-        for t in /proc/"$p"/task/*; do
-            [ -r "$t/stat" ] || continue
-            tid="$(basename "$t")"
-            printf '%s %s %s %s\n' "$p" "$tid" "$(role_of "$p" "$tid")" \
-                "$(awk '{ sub(/^[^)]*\) /, ""); print $12 + $13 }' "$t/stat")"
-        done
+    : > "$RUN/roles" || return 1
+    for tid in "${!ROLE[@]}"; do
+        printf '%s\t%s\n' "$tid" "${ROLE[$tid]}" >> "$RUN/roles" \
+            || return 1
     done
 }
 
-# the samples bracket the sleep, so the window is measured, not assumed
+# One Python process takes both snapshots; it enumerates each worker's task
+# directory once per sample and reads comm plus CPU ticks from stat.
 cpu_window() {   # <seconds>
-    local t0 t1
+    local result
+    local -a pids=()
 
     W_BEFORE="$RUN/before"
     W_AFTER="$RUN/after"
+    write_cpu_roles || return 1
+    mapfile -t pids < <(worker_pids)
+    [ "${#pids[@]}" -gt 0 ] \
+        || { echo "no NGINX workers available for CPU sampling" >&2; return 1; }
 
-    t0="$(date +%s.%N)"
-    sample_cpu > "$W_BEFORE"
-    sleep "$1"
-    sample_cpu > "$W_AFTER"
-    t1="$(date +%s.%N)"
-
-    W_DUR="$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", b - a }')"
+    result="$(python3 "$ROOT/tests/bench/proc_cpu_sampler.py" \
+        --sleep "$1" --roles "$RUN/roles" \
+        --before "$W_BEFORE" --after "$W_AFTER" "${pids[@]}")" \
+        || return 1
+    read -r W_DUR W_CPU_BEFORE_MS W_CPU_AFTER_MS <<< "$result"
+    [ -n "$W_DUR" ] && [ -n "$W_CPU_BEFORE_MS" ] \
+        && [ -n "$W_CPU_AFTER_MS" ]
 }
 
 # per (worker, role) percent of one core between two samples
@@ -2067,6 +2042,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     local feed_overruns_after source_frames source_frames_before
     local source_frames_after
     local worker_pid worker_slot worker_before worker_after cpu_pct
+    local worker_cpu_total
     local budget_before budget_after visits_before visits_after
     local late_before late_after max_service event_delay
     local socket_before socket_after sock_tcp_before sock_tcp_after
@@ -2339,7 +2315,10 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     capacity_socket_snapshot "$case_dir/after" || return 1
     capacity_memory_snapshot "$case_dir/memory.after" || return 1
 
-    echo "   measurement_s=$measure_seconds cpu_window_s=$W_DUR"
+    echo "   measurement_s=$measure_seconds requested_window_s=$seconds" \
+         "media_measurement_window_s=$measure_seconds cpu_window_s=$W_DUR" \
+         "cpu_sampling_before_ms=$W_CPU_BEFORE_MS" \
+         "cpu_sampling_after_ms=$W_CPU_AFTER_MS"
 
     for (( index = 0; index < programs; index++ )); do
         name="${names[$index]}"
@@ -2514,21 +2493,49 @@ PY
         report_cpu "$W_BEFORE" "$W_AFTER" "$W_DUR" \
             | awk '$2 ~ /^srt-egress-/ {
                        printf "      worker=%s thread=%s cpu=%.1f%%\n", $1, $2, $3
-                       found = 1
+                       worker[$1] += $3
+                       total += $3
+                       count++
                    }
-                   END { if (!found) print "      no srt-egress-* thread rows" }'
+                   END {
+                       if (!count) print "      no srt-egress-* thread rows"
+                       for (slot in worker) {
+                           printf "      worker=%s aggregate_egress_shard_cpu=%.1f%%\n",
+                                  slot, worker[slot]
+                       }
+                       printf "      aggregate_egress_shard_cpu=%.1f%%\n", total
+                   }'
+        echo "   libsrt SRT:SndQ CPU:"
+        report_cpu "$W_BEFORE" "$W_AFTER" "$W_DUR" \
+            | awk '$2 == "SRT:SndQ" {
+                       printf "      worker=%s cpu=%.1f%%\n", $1, $3
+                       worker[$1] += $3
+                       total += $3
+                       count++
+                   }
+                   END {
+                       if (!count) print "      no SRT:SndQ thread rows"
+                       for (slot in worker) {
+                           printf "      worker=%s aggregate_libsrt_sndq_cpu=%.1f%%\n",
+                                  slot, worker[slot]
+                       }
+                       printf "      aggregate_libsrt_sndq_cpu=%.1f%%\n", total
+                   }'
     fi
     echo "   worker process RSS/PSS from smaps_rollup:"
     capacity_memory_report "$case_dir/memory.before" "$case_dir/memory.after"
 
 
     echo "   worker visit and scheduling metrics:"
+    worker_cpu_total=0
     for worker_pid in $(worker_pids); do
         worker_slot="$(slot_name "$worker_pid")"
         worker_before="$case_dir/workers.before.$worker_pid"
         worker_after="$case_dir/workers.after.$worker_pid"
         cpu_pct="$(capacity_worker_cpu "$W_BEFORE" "$W_AFTER" "$W_DUR" \
             "$worker_slot")"
+        worker_cpu_total="$(awk -v a="$worker_cpu_total" -v b="$cpu_pct" \
+            'BEGIN { printf "%.1f", a + b }')"
         budget_before="$(capacity_metric "$worker_before" \
             nginx_media_worker_budget_reposts_total)"
         budget_after="$(capacity_metric "$worker_after" \
@@ -2551,6 +2558,7 @@ PY
         echo "         budget_reposts_delta=$(( ${budget_after:-0} - ${budget_before:-0} ))"
         echo "         late_ticks_delta=$(( ${late_after:-0} - ${late_before:-0} ))"
     done
+    echo "      aggregate_worker_cpu=${worker_cpu_total}% of one core"
 
     echo "   NGINX socket skmem (ss -m):"
     for worker_pid in $(worker_pids); do
