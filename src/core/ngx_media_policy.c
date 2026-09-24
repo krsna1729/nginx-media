@@ -18,6 +18,8 @@ ngx_media_policy_init(ngx_media_policy_t *policy)
     policy->failure_timeout = NGX_MEDIA_POLICY_FAILURE_TIMEOUT_DEFAULT;
     policy->recovery_timeout = NGX_MEDIA_POLICY_RECOVERY_TIMEOUT_DEFAULT;
     policy->switchback = NGX_MEDIA_SWITCHBACK_AUTO;
+    policy->srt_egress_workers = NGX_MEDIA_EGRESS_WORKERS_UNSET;
+    policy->hls_push_egress_workers = NGX_MEDIA_EGRESS_WORKERS_UNSET;
     ngx_media_executor_conf_default(&policy->transform_executor);
 
     /*

@@ -18,6 +18,7 @@
 #include "ngx_media_owner_dir.h"
 #include "ngx_media_route.h"
 #include "ngx_media_policy.h"
+#include "ngx_media_egress_manager.h"
 
 static void *ngx_media_core_create_conf(ngx_cycle_t *cycle);
 static ngx_int_t ngx_media_core_init_module(ngx_cycle_t *cycle);
@@ -39,6 +40,8 @@ static char *ngx_media_transform_profile_cmd(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static ngx_int_t ngx_media_parse_msec(const ngx_str_t *value,
     ngx_msec_t *out);
+static char *ngx_media_egress_workers_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 
 /*
  * Failover timeouts are sub-second quantities, so unlike nginx's own time
@@ -165,6 +168,13 @@ static ngx_command_t ngx_media_core_commands[] = {
       0,
       NULL },
 
+
+    { ngx_string("media_egress_workers"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2,
+      ngx_media_egress_workers_cmd,
+      0,
+      0,
+      NULL },
       ngx_null_command
 };
 
@@ -382,9 +392,74 @@ ngx_media_transform_profile_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     return NGX_CONF_OK;
 }
 
+static char *
+ngx_media_egress_workers_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_media_policy_t  *policy = conf;
+    ngx_str_t           *value = cf->args->elts;
+    ngx_uint_t          *slot, maximum;
+    ngx_int_t            workers;
+
+    (void) cmd;
+
+    if (value[1].len == sizeof("srt") - 1
+        && ngx_memcmp(value[1].data, "srt", sizeof("srt") - 1) == 0)
+    {
+        slot = &policy->srt_egress_workers;
+        maximum = 16;
+
+    } else if (value[1].len == sizeof("hls_push") - 1
+               && ngx_memcmp(value[1].data, "hls_push",
+                             sizeof("hls_push") - 1) == 0)
+    {
+        slot = &policy->hls_push_egress_workers;
+        maximum = 4;
+
+    } else {
+        return "engine must be srt or hls_push";
+    }
+
+    if (*slot != NGX_MEDIA_EGRESS_WORKERS_UNSET) {
+        return "is duplicate";
+    }
+
+    if (value[2].len == sizeof("adaptive") - 1
+        && ngx_memcmp(value[2].data, "adaptive",
+                      sizeof("adaptive") - 1) == 0)
+    {
+        *slot = 0;
+        return NGX_CONF_OK;
+    }
+
+    workers = ngx_atoi(value[2].data, value[2].len);
+    if (workers < 1 || workers > (ngx_int_t) maximum) {
+        return "worker count must be within the engine's fixed pool";
+    }
+
+    *slot = (ngx_uint_t) workers;
+
+    return NGX_CONF_OK;
+}
+
 static ngx_int_t
 ngx_media_core_init_module(ngx_cycle_t *cycle)
 {
+    ngx_media_policy_t  *policy;
+
+    policy = ngx_media_policy_get(cycle);
+    if (policy == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_media_egress_manager_fixed_workers_set(
+        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD,
+        policy->srt_egress_workers == NGX_MEDIA_EGRESS_WORKERS_UNSET
+            ? 0 : policy->srt_egress_workers);
+    ngx_media_egress_manager_fixed_workers_set(
+        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL,
+        policy->hls_push_egress_workers == NGX_MEDIA_EGRESS_WORKERS_UNSET
+            ? 0 : policy->hls_push_egress_workers);
+
     /*
      * The shared owner directory is allocated in the master before workers are
      * forked, so every worker inherits the same pages (goal doc 22).  It holds

@@ -37,6 +37,8 @@ static ngx_media_egress_resources_t      ngx_media_egress_resources;
 static ngx_media_egress_engine_state_t   ngx_media_egress_engines[
     NGX_MEDIA_EGRESS_ENGINE_MAX + 1];
 static uint64_t                          ngx_media_egress_last_wall_ns;
+static ngx_uint_t                    ngx_media_egress_fixed_workers[
+    NGX_MEDIA_EGRESS_ENGINE_MAX + 1];
 static uint64_t                          ngx_media_egress_last_cpu_ns;
 static pthread_mutex_t                   ngx_media_egress_capacity_mutex =
     PTHREAD_MUTEX_INITIALIZER;
@@ -564,6 +566,39 @@ ngx_media_egress_manager_engine_load(ngx_uint_t engine,
         (cpu_permille > 1000) ? 1000 : cpu_permille;
     ngx_media_egress_resources.active_workers[engine] = active_workers;
     (void) pthread_mutex_unlock(&ngx_media_egress_mutex);
+}
+void
+ngx_media_egress_manager_fixed_workers_set(ngx_uint_t engine,
+    ngx_uint_t workers)
+{
+    if (engine != NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD
+        && engine != NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL)
+    {
+        return;
+    }
+
+    (void) pthread_mutex_lock(&ngx_media_egress_mutex);
+    ngx_media_egress_fixed_workers[engine] = workers;
+    (void) pthread_mutex_unlock(&ngx_media_egress_mutex);
+}
+
+
+ngx_uint_t
+ngx_media_egress_manager_fixed_workers(ngx_uint_t engine)
+{
+    ngx_uint_t  workers;
+
+    if (engine != NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD
+        && engine != NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL)
+    {
+        return 0;
+    }
+
+    (void) pthread_mutex_lock(&ngx_media_egress_mutex);
+    workers = ngx_media_egress_fixed_workers[engine];
+    (void) pthread_mutex_unlock(&ngx_media_egress_mutex);
+
+    return workers;
 }
 
 ngx_uint_t

@@ -10,6 +10,7 @@ import re
 import sys
 
 METRIC = "nginx_media_source_payload_bytes_in_total"
+QUEUE_METRIC = "nginx_media_egress_queue_bytes"
 SAMPLE_RE = re.compile(
     r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*?)\})?\s+"
     r"([-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)"
@@ -67,6 +68,61 @@ def read_snapshot(prefix):
                     identifier = labels["name"]
                     totals[identifier] = totals.get(identifier, 0) + int(value)
     return totals
+
+
+def read_queue_snapshot(prefix):
+    paths = sorted(glob.glob(prefix + ".*"))
+    if not paths:
+        raise ValueError(f"no worker metrics files match {prefix}.*")
+    values = {}
+    for path in paths:
+        with open(path, encoding="utf-8") as source:
+            for line_number, line in enumerate(source, 1):
+                match = SAMPLE_RE.match(line.strip())
+                if match is None:
+                    continue
+                name, raw_labels, raw_value = match.groups()
+                if name != QUEUE_METRIC:
+                    continue
+                labels = dict(LABEL_RE.findall(raw_labels or ""))
+                if labels.get("protocol") != "rtmp":
+                    continue
+                identifier = labels.get("destination")
+                if not identifier:
+                    raise ValueError(
+                        f"RTMP queue metric has no destination in {path}:{line_number}"
+                    )
+                try:
+                    value = float(raw_value)
+                except ValueError as error:
+                    raise ValueError(
+                        f"invalid RTMP queue metric in {path}:{line_number}"
+                    ) from error
+                if not math.isfinite(value) or value < 0 or not value.is_integer():
+                    raise ValueError(
+                        f"invalid RTMP queue byte gauge in {path}:{line_number}"
+                    )
+                values[identifier] = max(values.get(identifier, 0), int(value))
+    return values
+
+
+def percentile(values, fraction):
+    ordered = sorted(values)
+    return ordered[int((len(ordered) - 1) * fraction)] if ordered else 0
+
+
+def report_queue_snapshot(prefix, label, expected):
+    values = read_queue_snapshot(prefix)
+    observed = [values[identifier] for identifier in expected
+                if identifier in values]
+    missing = [identifier for identifier in expected if identifier not in values]
+    print(f"rtmp_queue_bytes_{label}_destinations={len(observed)}/{len(expected)}")
+    print(f"rtmp_queue_bytes_{label}_total={sum(observed)}")
+    print(f"rtmp_queue_bytes_{label}_p50={percentile(observed, 0.50)}")
+    print(f"rtmp_queue_bytes_{label}_p95={percentile(observed, 0.95)}")
+    print(f"rtmp_queue_bytes_{label}_max={max(observed, default=0)}")
+    if missing:
+        print(f"rtmp_queue_bytes_{label}_missing_ids={','.join(missing)}")
 
 
 def expected_ids(programs, destinations, offset):
@@ -138,6 +194,12 @@ def quality_report(args):
     if len(ratios) != len(expected):
         min_ratio = 0.0
     aggregate_bps = total_bytes * 8.0 / args.measurement_s
+    if args.queue_before_prefix or args.queue_after_prefix:
+        if not args.queue_before_prefix or not args.queue_after_prefix:
+            raise ValueError("both queue snapshot prefixes are required")
+        report_queue_snapshot(args.queue_before_prefix, "start", expected)
+        report_queue_snapshot(args.queue_after_prefix, "end", expected)
+
     unique_failures = list(dict.fromkeys(failures))
     print(f"quality_pass={'no' if unique_failures else 'yes'}")
     print(f"quality_reference_payload_bps={reference:.2f}")
@@ -183,6 +245,8 @@ def main():
     parser.add_argument("--reference-bps", type=float, required=True)
     parser.add_argument("--min-delivery-ratio", type=float, default=0.95)
     parser.add_argument("--report", required=True)
+    parser.add_argument("--queue-before-prefix")
+    parser.add_argument("--queue-after-prefix")
     args = parser.parse_args()
     if not math.isfinite(args.reference_bps) or args.reference_bps < 0:
         parser.error("--reference-bps must be finite and nonnegative")

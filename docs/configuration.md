@@ -109,6 +109,19 @@ Default `auto`.  Whether a recovered higher-priority source takes the program
 back (`auto`), waits for an operator (`manual`, see the control API), or never
 returns (`never`).
 
+## Egress scheduling
+
+### `media_egress_workers srt|hls_push adaptive|<count>;`
+
+Both sender pools default to adaptive concurrency.  This directive pins one
+pool to a fixed active-thread count for repeatable workloads: SRT accepts 1–16
+senders; `hls_push` accepts 1–4 uploaders.  `adaptive` restores the default
+resource-aware scheduler.  The directive may be set once per engine in the
+main context; RTMP egress remains on its owning event loop.
+
+Fixed counts bypass adaptive scaling; set them only when the workload and
+available CPU budget are understood.
+
 ## SRT
 
 ### `media_srt_listen <host:port>;`

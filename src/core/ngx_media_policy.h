@@ -24,6 +24,8 @@ typedef struct {
     ngx_msec_t   recovery_timeout;
     ngx_flag_t   switch_keyframe;
     ngx_uint_t   switchback;
+    ngx_uint_t   srt_egress_workers;
+    ngx_uint_t   hls_push_egress_workers;
 
     /* static outputs applied to every stream (per-stream configuration
      * arrives with the stream database) */
@@ -38,6 +40,7 @@ typedef struct {
 #define NGX_MEDIA_POLICY_FAILURE_TIMEOUT_DEFAULT 1500
 #define NGX_MEDIA_POLICY_RECOVERY_TIMEOUT_DEFAULT 10000
 
+#define NGX_MEDIA_EGRESS_WORKERS_UNSET ((ngx_uint_t) -1)
 /* configured core policy, with a default fallback for unit/runtime callers */
 ngx_media_policy_t *ngx_media_policy_get(ngx_cycle_t *cycle);
 ngx_media_policy_t *ngx_media_policy_init(ngx_media_policy_t *policy);

@@ -143,6 +143,8 @@ CAPACITY_SATURATED_SECONDS="${CAPACITY_SATURATED_SECONDS:-15}"
 CAPACITY_QUALITY_RATE="${CAPACITY_QUALITY_RATE:-8M}"
 CAPACITY_QUALITY_SECONDS="${CAPACITY_QUALITY_SECONDS:-120}"
 CAPACITY_QUALITY_STEPS="${CAPACITY_QUALITY_STEPS:-1 2 4 8 16 32 64 128 256 512 1000}"
+CAPACITY_FIXED_SRT_WORKERS="${CAPACITY_FIXED_SRT_WORKERS:-adaptive}"
+CAPACITY_FIXED_HLS_PUSH_WORKERS="${CAPACITY_FIXED_HLS_PUSH_WORKERS:-adaptive}"
 CAPACITY_QUALITY_REFERENCE_RTMP_BPS="${CAPACITY_QUALITY_REFERENCE_RTMP_BPS:-0}"
 CAPACITY_QUALITY_REFERENCE_HLS_BPS="${CAPACITY_QUALITY_REFERENCE_HLS_BPS:-0}"
 CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS="${CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS:-0}"
@@ -573,6 +575,10 @@ write_config() {   # <workers> <hls yes|no> <rtmp yes|no>
         echo "daemon on;"
         echo "error_log logs/error.log info;"
         echo "pid logs/nginx.pid;"
+        [ "$CAPACITY_FIXED_SRT_WORKERS" = adaptive ] \
+            || echo "media_egress_workers srt $CAPACITY_FIXED_SRT_WORKERS;"
+        [ "$CAPACITY_FIXED_HLS_PUSH_WORKERS" = adaptive ] \
+            || echo "media_egress_workers hls_push $CAPACITY_FIXED_HLS_PUSH_WORKERS;"
         echo
         echo "events { worker_connections 8192; }"
         echo
@@ -2000,6 +2006,30 @@ def read_snapshot(prefix):
                             match.group(1))] = value
     return values
 
+
+def active_workers(prefix):
+    values = []
+    for path in glob.glob(prefix + ".*"):
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as source:
+            for line in source:
+                if not line.startswith("nginx_media_egress_active_workers{"):
+                    continue
+                labels_text, _, value_text = line.partition("}")
+                labels = dict(re.findall(
+                    r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"])*)"',
+                    labels_text,
+                ))
+                if labels.get("engine") == "srt_shard":
+                    values.append(int(float(value_text.strip())))
+    return max(values) if values else "unavailable"
+
+
+before_active = active_workers(sys.argv[1])
+after_active = active_workers(sys.argv[2])
+print(f"srt_active_senders_before={before_active}")
+print(f"srt_active_senders_after={after_active}")
 before = read_snapshot(sys.argv[1])
 after = read_snapshot(sys.argv[2])
 all_keys = {(worker, shard) for worker, shard, _ in set(before) | set(after)}
@@ -2103,6 +2133,8 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     local sink_snapshot_before sink_snapshot_after stall_seen rtmp_ready
     local sink_pid="" publisher_pid="" receiver_pid hls_pid="" hls_ready hls_log hls_playlist
     local hls_push_sink_pid="" hls_push_sink_port hls_push_ready ready_status
+    local hls_push_progress_file hls_push_progress_received
+    local hls_push_progress_remaining hls_push_progress_elapsed
     local before_frames after_frames before_dispatched after_dispatched
     local fanout_max p50 p95 p99 p999 frame_rate frame_delta fairness
     local measure_start measure_end measure_seconds
@@ -2248,6 +2280,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     echo "   video_rate=$rate offered_ingress=${offered_in}Mbit/s"
     echo "   destinations_per_program=$destinations total_destinations=$total_dest"
     echo "   per_program_outputs: SRT=$srt_destinations RTMP=$rtmp_destinations HLS_readers=$hls_readers HLS_push=$hls_push_destinations"
+    echo "   egress_workers: SRT=$CAPACITY_FIXED_SRT_WORKERS HLS_push=$CAPACITY_FIXED_HLS_PUSH_WORKERS"
     echo "   offered_egress=${offered_out}Mbit/s window=${seconds}s"
 
     # SRT uses one shared mux and one multi-peer listener; RTMP receives on
@@ -2371,6 +2404,11 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
                  >&2; return 1; }
     # Start media while nonblocking SRT handshakes settle; send errors trigger the
     # output's normal retry path for a connection that did not establish.
+    if [ "$hls_push_destinations" -gt 0 ]; then
+        curl -fsS "http://127.0.0.1:$hls_push_sink_port/__mark" \
+            >"$case_dir/hls-push.mark.json" \
+            || { echo "could not mark HLS push first-segment timing" >&2; return 1; }
+    fi
     for (( index = 0; index < programs; index++ )); do
         publish "${SRT_PORTS[${owners[$index]}]}" "${names[$index]}" "$source"
         PUBS+=( "$!" )
@@ -2467,10 +2505,45 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     fi
     if [ "$hls_push_destinations" -gt 0 ]; then
         hls_push_ready=0
+        hls_push_progress_file="$case_dir/hls-push-readiness.json"
+        : > "$case_dir/hls-push-readiness.csv"
+        echo "elapsed_s,received,expected,remaining" \
+            > "$case_dir/hls-push-readiness.csv"
         for attempt in $(seq 1 "$connect_attempts"); do
             ready_status="$(curl -sS -o /dev/null -w '%{http_code}' \
-                "http://127.0.0.1:$hls_push_sink_port/__ready?destinations=$hls_push_destinations" \
+                "http://127.0.0.1:$hls_push_sink_port/__ready?destinations=$hls_push_destinations&offset=$srt_destinations" \
                 2>/dev/null || true)"
+            if [ $(( attempt % 10 )) -eq 0 ] || [ "$ready_status" = 200 ]; then
+                curl -fsS \
+                    "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$srt_destinations" \
+                    > "$hls_push_progress_file" \
+                    || { echo "could not query HLS push readiness progress" \
+                             >&2; return 1; }
+                read -r hls_push_progress_elapsed hls_push_progress_received \
+                    hls_push_progress_remaining < <(python3 - \
+                        "$hls_push_progress_file" "$hls_push_destinations" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    progress = json.load(source)
+print(
+    f"{progress['elapsed_s'] or 0:.3f}",
+    progress["received"],
+    len(progress["missing_ids"]),
+)
+PY
+                )
+                printf '%s,%s,%s,%s\n' "$hls_push_progress_elapsed" \
+                    "$hls_push_progress_received" "$hls_push_destinations" \
+                    "$hls_push_progress_remaining" \
+                    >> "$case_dir/hls-push-readiness.csv"
+                if [ "$hls_push_progress_received" != \
+                     "${hls_push_last_progress_received:-}" ]; then
+                    echo "   HLS push first-segment readiness: elapsed=${hls_push_progress_elapsed}s received=$hls_push_progress_received/$hls_push_destinations remaining=$hls_push_progress_remaining"
+                    hls_push_last_progress_received="$hls_push_progress_received"
+                fi
+            fi
             if [ "$ready_status" = 200 ]; then
                 hls_push_ready=1
                 break
@@ -2481,10 +2554,72 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
                          >&2; return 1; }
             sleep 0.1
         done
-        [ "$hls_push_ready" -eq 1 ] \
-            || { echo "HLS push sink did not receive a TS segment from all" \
-                    "$hls_push_destinations destinations before timeout" \
-                    "(HTTP $ready_status)" >&2; return 1; }
+        if [ "$hls_push_ready" -ne 1 ]; then
+            curl -fsS \
+                "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$srt_destinations" \
+                > "$hls_push_progress_file" || true
+            python3 - "$hls_push_progress_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    progress = json.load(source)
+print(
+    "HLS push readiness timed out: "
+    f"received={progress['received']}/{progress['expected']} "
+    "remaining_ids=" + ",".join(progress["missing_ids"])
+)
+PY
+            if cpu_window 3 "$hls_push_sink_pid"; then
+                capacity_worker_metrics "$case_dir/workers.readiness" || true
+                curl -fsS \
+                    "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$srt_destinations" \
+                    > "$hls_push_progress_file" || true
+                curl -fsS "http://127.0.0.1:$hls_push_sink_port/__snapshot" \
+                    > "$case_dir/hls-push.readiness.json" || true
+                python3 "$ROOT/tests/bench/hls_push_capacity.py" \
+                    readiness-report \
+                    --metrics-prefix "$case_dir/workers.readiness" \
+                    --stream "${names[0]}" \
+                    --destinations "$hls_push_destinations" \
+                    --destination-offset "$srt_destinations" \
+                    --sink-snapshot "$case_dir/hls-push.readiness.json" \
+                    --progress "$hls_push_progress_file" \
+                    > "$case_dir/hls-push-readiness-report.txt" || true
+                cat "$case_dir/hls-push-readiness-report.txt"
+                echo "   HLS push sink CPU during timeout diagnostics:"
+                report_cpu "$W_BEFORE" "$W_AFTER" "$W_DUR" \
+                    | awk -v pid="pid$hls_push_sink_pid" '
+                        $1 == pid {
+                            printf "      thread=%s cpu=%.1f%%\n", $2, $3
+                            total += $3
+                            count++
+                        }
+                        END {
+                            if (!count) print "      no HLS push sink CPU rows"
+                            else printf "      aggregate_hls_push_sink_cpu=%.1f%%\n", total
+                        }'
+            else
+                echo "could not collect timeout CPU diagnostics" >&2
+            fi
+            echo "HLS push sink did not receive a TS segment from all" \
+                 "$hls_push_destinations destinations before timeout" \
+                 "(HTTP $ready_status)" >&2
+            echo "readiness_progress=$case_dir/hls-push-readiness.csv" >&2
+            return 1
+        fi
+        python3 - "$hls_push_progress_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    progress = json.load(source)
+print(
+    f"   HLS push all-destination first-segment latency="
+    f"{progress['elapsed_s']:.3f}s ({progress['received']}/{progress['expected']})"
+)
+PY
+        echo "   HLS push readiness progress=$case_dir/hls-push-readiness.csv"
     fi
 
     for name in "${names[@]}"; do
@@ -2775,6 +2910,8 @@ PY
             python3 "$ROOT/tests/bench/rtmp_capacity_quality.py" \
                 --before-prefix "$case_dir/workers.before" \
                 --after-prefix "$case_dir/workers.after" \
+                --queue-before-prefix "$case_dir/workers.before" \
+                --queue-after-prefix "$case_dir/workers.after" \
                 --programs "$programs" \
                 --destinations "$rtmp_destinations" \
                 --destination-offset "$srt_destinations" \
@@ -3191,6 +3328,7 @@ phase_capacity_quality_ladder() {
         pure-srt:srt:0
         pure-rtmp:rtmp:0
         pure-hls:hls:0
+        pure-hls-push:hls-push:0
         rtmp-95-srt-5:rtmp:5
         hls-push-95-srt-5:hls-push:5
     )
@@ -3204,7 +3342,7 @@ phase_capacity_quality_ladder() {
             || { echo "CAPACITY_QUALITY_MIXES must not be empty" >&2; return 1; }
         for requested in "${requested_mixes[@]}"; do
             case "$requested" in
-                pure-srt|pure-rtmp|pure-hls|rtmp-95-srt-5|hls-push-95-srt-5)
+                pure-srt|pure-rtmp|pure-hls|pure-hls-push|rtmp-95-srt-5|hls-push-95-srt-5)
                     ;;
                 *)
                     echo "unknown capacity quality mix: $requested" >&2
@@ -3227,9 +3365,9 @@ phase_capacity_quality_ladder() {
 
     if [ "$CAPACITY_QUALITY_MIXES" = all ]; then
         echo
-        echo "== five 8 Mbit/s delivery-quality ladders"
+        echo "== six 8 Mbit/s delivery-quality ladders"
         echo "   each rung uses one program; per-protocol one-destination baselines calibrate before scaling."
-        echo "   mix order: pure SRT, pure RTMP, pure HLS readers, 95% RTMP/5% SRT, 95% HLS push/5% SRT."
+        echo "   mix order: pure SRT, pure RTMP, pure HLS readers, pure HLS push, 95% RTMP/5% SRT, 95% HLS push/5% SRT."
     else
         echo
         echo "== selected 8 Mbit/s delivery-quality ladders"

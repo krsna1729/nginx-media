@@ -888,7 +888,11 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
 
     (void) pthread_mutex_init(&outs->events_mutex, NULL);
     (void) pthread_rwlock_init(&outs->destinations_lock, NULL);
-    outs->active_senders = 1;
+    outs->active_senders = ngx_media_egress_manager_fixed_workers(
+                               NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD);
+    if (outs->active_senders == 0) {
+        outs->active_senders = 1;
+    }
 
     for (i = 0; i < NGX_MEDIA_SRT_EGRESS_SHARDS; i++) {
         sender = &outs->shards[i];
@@ -932,7 +936,8 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
         outs->nthreads++;
     }
     ngx_media_egress_manager_engine_load(
-        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 0, 1);
+        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 0,
+        ngx_media_srt_outputs_active_senders(outs));
 
     *out = outs;
     return NGX_OK;
@@ -985,7 +990,7 @@ ngx_media_srt_outputs_adapt(ngx_media_srt_outputs_t *outs)
     struct timespec          cpu_time;
     clockid_t                cpu_clock;
     uint64_t                 wall_ns, wall_delta, cpu_ns, cpu_delta, busy;
-    ngx_uint_t               active, peak_busy, i, desired;
+    ngx_uint_t               active, peak_busy, i, desired, fixed;
 
     if (outs == NULL || ngx_atomic_fetch_add(&outs->stopping, 0) != 0) {
         return;
@@ -1038,9 +1043,13 @@ ngx_media_srt_outputs_adapt(ngx_media_srt_outputs_t *outs)
 
     ngx_media_egress_manager_engine_load(
         NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, peak_busy, active);
-    desired = ngx_media_egress_manager_recommend_workers(
-        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, active, 1,
-        NGX_MEDIA_SRT_EGRESS_SHARDS);
+    fixed = ngx_media_egress_manager_fixed_workers(
+                NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD);
+    desired = (fixed != 0)
+                  ? fixed
+                  : ngx_media_egress_manager_recommend_workers(
+                        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, active, 1,
+                        NGX_MEDIA_SRT_EGRESS_SHARDS);
 
     if (desired != active
         && ngx_media_srt_outputs_set_concurrency(outs, desired) == NGX_OK)

@@ -562,7 +562,7 @@ static ngx_media_destination_ops_t  ngx_media_hls_push_ops = {
 ngx_int_t
 ngx_media_hls_push_register(ngx_log_t *log)
 {
-    ngx_uint_t  i;
+    ngx_uint_t  i, active;
 
     ngx_media_hls_push_log = log;
     ngx_media_hls_push_stopping = 0;
@@ -570,7 +570,12 @@ ngx_media_hls_push_register(ngx_log_t *log)
     ngx_media_hls_push_cpu_sampled = 0;
     ngx_memzero(ngx_media_hls_push_last_cpu_ns,
                 sizeof(ngx_media_hls_push_last_cpu_ns));
-    if (ngx_media_hls_push_set_active(1) != NGX_OK
+    active = ngx_media_egress_manager_fixed_workers(
+                 NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL);
+    if (active == 0) {
+        active = 1;
+    }
+    if (ngx_media_hls_push_set_active(active) != NGX_OK
         || ngx_media_destination_register(&ngx_media_hls_push_ops) != NGX_OK)
     {
         return NGX_ERROR;
@@ -589,7 +594,8 @@ ngx_media_hls_push_register(ngx_log_t *log)
     }
 
     ngx_media_egress_manager_engine_load(
-        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 0, 1);
+        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 0,
+        ngx_media_hls_push_active());
     return NGX_OK;
 }
 
@@ -616,7 +622,7 @@ ngx_media_hls_push_adapt(void)
     clockid_t        cpu_clock;
     pthread_t        *thread;
     uint64_t          wall_ns, wall_delta, cpu_ns, cpu_delta, busy;
-    ngx_uint_t        active, peak_busy, i, desired;
+    ngx_uint_t        active, peak_busy, i, desired, fixed;
 
     if (ngx_media_hls_push_pool_size == 0
         || ngx_media_hls_push_is_stopping())
@@ -671,9 +677,13 @@ ngx_media_hls_push_adapt(void)
 
     ngx_media_egress_manager_engine_load(
         NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, peak_busy, active);
-    desired = ngx_media_egress_manager_recommend_workers(
-        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, active, 1,
-        NGX_MEDIA_HLS_PUSH_POOL);
+    fixed = ngx_media_egress_manager_fixed_workers(
+                NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL);
+    desired = (fixed != 0)
+                  ? fixed
+                  : ngx_media_egress_manager_recommend_workers(
+                        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, active, 1,
+                        NGX_MEDIA_HLS_PUSH_POOL);
     if (desired != active
         && ngx_media_hls_push_set_active(desired) == NGX_OK)
     {

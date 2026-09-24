@@ -107,6 +107,9 @@ void ngx_media_egress_manager_worker_resources(ngx_uint_t available_cpu_milli,
     ngx_uint_t worker_cpu_permille, ngx_msec_t event_loop_lag_msec);
 void ngx_media_egress_manager_engine_load(ngx_uint_t engine,
     ngx_uint_t cpu_permille, ngx_uint_t active_workers);
+void ngx_media_egress_manager_fixed_workers_set(ngx_uint_t engine,
+    ngx_uint_t workers);
+ngx_uint_t ngx_media_egress_manager_fixed_workers(ngx_uint_t engine);
 ngx_uint_t ngx_media_egress_manager_recommend_workers(ngx_uint_t engine,
     ngx_uint_t current, ngx_uint_t minimum, ngx_uint_t maximum);
 void ngx_media_egress_manager_resources_get(

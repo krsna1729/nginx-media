@@ -211,10 +211,11 @@ bench-ingest-egress-fanout:
 bench-capacity-curve:
 	PHASES=capacity tests/bench/ingest_egress_fanout.sh
 
-# Five calibrated 8M delivery-quality ladders: pure SRT, RTMP, HLS, and both
-# 95/5 RTMP/SRT and HLS-push/SRT mixes. Reports the first failed rung per mix.
-# Set CAPACITY_QUALITY_MIXES to a space-separated subset for targeted reruns;
-# the default `all` runs every mix.
+# Set CAPACITY_FIXED_SRT_WORKERS and CAPACITY_FIXED_HLS_PUSH_WORKERS to pin
+# either pool (1-16 SRT senders, 1-4 HLS uploaders); default is adaptive.
+# Six calibrated 8M delivery-quality ladders: pure SRT, RTMP, HLS readers,
+# pure HLS push, and both 95/5 RTMP/SRT and HLS-push/SRT mixes.
+# Set CAPACITY_QUALITY_MIXES to a subset; default `all` runs every mix.
 bench-capacity-quality:
 	PHASES=capacity-quality-ladder tests/bench/ingest_egress_fanout.sh
 
