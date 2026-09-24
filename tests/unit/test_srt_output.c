@@ -95,6 +95,44 @@ test_ordering(void)
 }
 
 static void
+test_consumed_units_are_reclaimed(void)
+{
+    ngx_media_srt_queue_t  q;
+    ngx_media_buf_t       *b;
+    const ngx_media_srt_unit_t  *unit;
+    uint64_t               cursor = 0;
+    ngx_uint_t             i;
+
+    TEST_CASE("consumed queue units release their capacity");
+
+    ngx_media_srt_queue_init(&q, 4, 400);
+
+    for (i = 0; i < 16; i++) {
+        b = burst(100);
+        CHECK(b != NULL, "burst %lu allocated", i);
+        if (b == NULL) {
+            break;
+        }
+
+        CHECK(ngx_media_srt_queue_push(&q, b, 100, i == 0) == NGX_OK,
+              "burst %lu queued", i);
+        ngx_media_buf_unref(b);
+
+        unit = ngx_media_srt_queue_next(&q, &cursor);
+        CHECK(unit != NULL && unit->sequence == i,
+              "consumer receives burst %lu", i);
+        if (unit != NULL) {
+            ngx_media_srt_queue_advance(&q, &cursor, unit->sequence);
+        }
+
+        CHECK(q.dropped == 0, "no consumed burst evicted: %lu", q.dropped);
+        CHECK(q.bytes == 0, "consumed burst releases bytes: %lu", q.bytes);
+    }
+
+    ngx_media_srt_queue_destroy(&q);
+}
+
+static void
 test_unit_ceiling(void)
 {
     ngx_media_srt_queue_t  q;
@@ -406,6 +444,7 @@ main(void)
     printf("== srt output queue\n");
 
     test_ordering();
+    test_consumed_units_are_reclaimed();
     test_unit_ceiling();
     test_byte_ceiling();
     test_keyframe_resync();

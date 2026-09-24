@@ -301,7 +301,8 @@ def quality_report(args):
     with open(args.receiver_results, newline="", encoding="utf-8") as source:
         reader = csv.DictReader(source)
         required = {"destination_id", "ts_packets", "ts_sync_errors",
-                    "ts_continuity_errors", "ts_tei_errors", "stalled"}
+                    "ts_continuity_errors", "ts_tei_errors", "stalled",
+                    "transport_error"}
         if reader.fieldnames is None or not required.issubset(reader.fieldnames):
             raise ValueError("receiver results CSV lacks quality counters")
         for row in reader:
@@ -311,7 +312,8 @@ def quality_report(args):
             try:
                 receiver_results[destination] = {
                     key: int(row[key]) for key in
-                    ("ts_packets", "ts_sync_errors", "ts_continuity_errors", "ts_tei_errors")
+                    ("ts_packets", "ts_sync_errors", "ts_continuity_errors",
+                     "ts_tei_errors", "transport_error")
                 } | {"stalled": row["stalled"].lower() in {"1", "true", "yes"}}
             except (TypeError, ValueError):
                 raise ValueError(f"invalid TS counters for {destination}")
@@ -417,6 +419,8 @@ def quality_report(args):
         ts = receiver_results[destination]
         if ts["stalled"]:
             failures.append(f"{destination}: receiver marked stalled")
+        if ts["transport_error"]:
+            failures.append(f"{destination}: SRT transport error")
         if ts["ts_packets"] <= 0:
             failures.append(f"{destination}: no MPEG-TS packets parsed")
         if any(ts[key] != 0 for key in ("ts_sync_errors", "ts_continuity_errors", "ts_tei_errors")):
@@ -441,15 +445,21 @@ def quality_report(args):
     if any(queue_drops.values()):
         failures.append("sender feed/output application drop counters increased")
 
-    for metric in ("nginx_media_stream_feed_overruns_total",
-                   "nginx_media_stream_feed_evictions_total"):
-        old = read_stream_metric(args.stream_before, metric)
-        new = read_stream_metric(args.stream_after, metric)
-        if new < old:
-            failures.append(f"{metric} counter regressed")
-        elif new > old:
-            failures.append(f"{metric} increased by {new - old:g}")
+    metric = "nginx_media_stream_feed_overruns_total"
+    old = read_stream_metric(args.stream_before, metric)
+    new = read_stream_metric(args.stream_after, metric)
+    if new < old:
+        failures.append(f"{metric} counter regressed")
+    elif new > old:
+        failures.append(f"{metric} increased by {new - old:g}")
+    stream_overruns = max(0.0, new - old)
 
+    metric = "nginx_media_stream_feed_evictions_total"
+    old = read_stream_metric(args.stream_before, metric)
+    new = read_stream_metric(args.stream_after, metric)
+    if new < old:
+        failures.append(f"{metric} counter regressed")
+    stream_evictions = max(0.0, new - old)
     queue_rows = defaultdict(dict)
     with open(args.queues, newline="", encoding="utf-8") as source:
         reader = csv.DictReader(source)
@@ -535,11 +545,12 @@ def quality_report(args):
         writer.writerow(("destination_id", "delivered_bytes", "average_bps",
                          "average_delivery_ratio", "minimum_interval_ratio",
                          "largest_interval_s", "ts_packets", "ts_sync_errors",
-                         "ts_continuity_errors", "ts_tei_errors"))
+                         "ts_continuity_errors", "ts_tei_errors", "transport_error"))
         for destination, received, rate, ratio, low_ratio, max_interval, ts in rows:
             writer.writerow((destination, received, f"{rate:.2f}", f"{ratio:.5f}",
                              f"{low_ratio:.5f}", f"{max_interval:.3f}", ts["ts_packets"],
-                             ts["ts_sync_errors"], ts["ts_continuity_errors"], ts["ts_tei_errors"]))
+                             ts["ts_sync_errors"], ts["ts_continuity_errors"],
+                             ts["ts_tei_errors"], ts["transport_error"]))
 
     print(f"quality_pass={'no' if failures else 'yes'}")
     print(f"quality_reference_payload_bps={reference_bps:.2f}")
@@ -553,6 +564,8 @@ def quality_report(args):
     print(f"quality_destination_fairness_jain={jain(all_rates):.5f} (supplementary)")
     print(f"quality_sender_feed_drops={queue_drops['nginx_media_srt_egress_shard_feed_queue_dropped_total']:g}")
     print(f"quality_sender_output_drops={queue_drops['nginx_media_srt_egress_shard_output_dropped_total']:g}")
+    print(f"quality_stream_feed_overruns={stream_overruns:g}")
+    print(f"quality_stream_feed_retention_evictions={stream_evictions:g}")
     print(f"quality_peak_feed_queue_utilization={peak_feed:.4f}")
     print(f"quality_peak_output_queue_utilization={peak_output:.4f}")
     print(f"quality_complete_queue_samples={len(rounds)}")

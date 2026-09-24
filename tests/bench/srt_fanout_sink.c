@@ -36,6 +36,7 @@ typedef struct {
     int ts_sync_locked;
     int has_first_byte;
     int stalled;
+    int transport_error;
 } peer_t;
 
 static volatile sig_atomic_t stop_requested;
@@ -188,8 +189,8 @@ write_results(const char *path, const peer_t *peers, size_t count)
         return -1;
     }
     if (fprintf(file,
-                "destination_id,bytes_received,first_ms,stalled,ts_packets,"
-                "ts_sync_errors,ts_continuity_errors,ts_tei_errors\n") < 0)
+                "destination_id,bytes_received,first_ms,stalled,transport_error,"
+                "ts_packets,ts_sync_errors,ts_continuity_errors,ts_tei_errors\n") < 0)
     {
         fprintf(stderr, "cannot write result CSV %s\n", path);
         (void) fclose(file);
@@ -213,14 +214,14 @@ write_results(const char *path, const peer_t *peers, size_t count)
                 return -1;
             }
         }
-        if (fprintf(file, ",%d,%llu,%llu,%llu,%llu\n",
-                    peers[i].stalled,
+        if (fprintf(file, ",%d,%d,%llu,%llu,%llu,%llu\n",
+                    peers[i].stalled, peers[i].transport_error,
                     (unsigned long long) peers[i].ts_packets,
                     (unsigned long long) peers[i].ts_sync_errors,
                     (unsigned long long) peers[i].ts_continuity_errors,
                     (unsigned long long) peers[i].ts_tei_errors) < 0)
         {
-            fprintf(file, "cannot write result CSV %s\n", path);
+            fprintf(stderr, "cannot write result CSV %s\n", path);
             (void) fclose(file);
             return -1;
         }
@@ -303,6 +304,19 @@ failed:
             strerror(saved_errno));
     free(temporary);
     return -1;
+}
+
+static void
+mark_transport_error(int epoll_id, peer_t *peer, const char *reason)
+{
+    fprintf(stderr, "SRT transport error for %s: %s\n", peer->destination,
+            reason);
+    peer->transport_error = 1;
+    if (peer->sock != SRT_INVALID_SOCK) {
+        (void) srt_epoll_remove_usock(epoll_id, peer->sock);
+        (void) srt_close(peer->sock);
+        peer->sock = SRT_INVALID_SOCK;
+    }
 }
 
 static void
@@ -599,6 +613,20 @@ main(int argc, char **argv)
             int event_mask = events[i].events;
 
             if (event_mask & SRT_EPOLL_ERR) {
+                size_t peer_index;
+
+                if (quality_mode && sock != listener) {
+                    for (peer_index = 0; peer_index < connected; peer_index++) {
+                        if (peers[peer_index].sock == sock) {
+                            break;
+                        }
+                    }
+                    if (peer_index < connected) {
+                        mark_transport_error(epoll_id, &peers[peer_index],
+                                             "SRT_EPOLL_ERR");
+                        continue;
+                    }
+                }
                 fprintf(stderr, "SRT transport error on socket %lld\n",
                         (long long) sock);
                 failure = 1;
@@ -742,15 +770,28 @@ main(int argc, char **argv)
                         if (error == SRT_EASYNCRCV) {
                             break;
                         }
-                        fprintf(stderr, "SRT receive failed for %s: %s\n",
-                                peers[peer_index].destination, srt_getlasterror_str());
-                        failure = 1;
+                        if (quality_mode) {
+                            mark_transport_error(
+                                epoll_id, &peers[peer_index],
+                                srt_getlasterror_str());
+                        } else {
+                            fprintf(stderr, "SRT receive failed for %s: %s\n",
+                                    peers[peer_index].destination,
+                                    srt_getlasterror_str());
+                            failure = 1;
+                        }
                         break;
                     }
                     if (received == 0) {
-                        fprintf(stderr, "SRT peer %s closed its receive stream\n",
-                                peers[peer_index].destination);
-                        failure = 1;
+                        if (quality_mode) {
+                            mark_transport_error(epoll_id, &peers[peer_index],
+                                                 "peer closed receive stream");
+                        } else {
+                            fprintf(stderr,
+                                    "SRT peer %s closed its receive stream\n",
+                                    peers[peer_index].destination);
+                            failure = 1;
+                        }
                         break;
                     }
                     if (UINT64_MAX - peers[peer_index].bytes_received

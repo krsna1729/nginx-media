@@ -167,15 +167,37 @@ void
 ngx_media_srt_queue_advance(ngx_media_srt_queue_t *q, uint64_t *cursor,
     uint64_t sequence)
 {
+    ngx_media_srt_unit_t  *unit;
+    ngx_uint_t             index;
+    uint64_t               next;
+
     if (q == NULL || cursor == NULL) {
         return;
     }
 
-    *cursor = sequence + 1;
+    next = sequence + 1;
 
-    /* the resync was satisfied by the unit we just delivered */
+    /* A resync can skip retained units before the next keyframe. */
     if (q->resync && sequence >= q->tail) {
+        q->dropped += sequence - q->tail;
         q->resync = 0;
+    }
+
+    *cursor = next;
+
+    /* Retire every unit already accepted by the transport. */
+    while (q->tail < next && q->tail < q->head) {
+        index = (ngx_uint_t) (q->tail % q->capacity);
+        unit = &q->units[index];
+
+        if (unit->burst != NULL) {
+            q->bytes -= unit->len;
+            ngx_media_buf_unref(unit->burst);
+            unit->burst = NULL;
+        }
+
+        unit->len = 0;
+        q->tail++;
     }
 }
 
