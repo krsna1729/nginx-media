@@ -367,6 +367,10 @@ Output: the program is prepared once (TS multiplex for SRT/record taps, FLV for
 RTMP, fragmented MPEG-TS for HLS) and each destination consumes its own bounded
 queue.  A slow destination is dropped from, never allowed to stall the program.
 
+RTMP connections remain on the NGINX worker event loop. A worker-local
+run queue visits runnable publishers under destination, media-unit, byte, and
+service-time budgets; a socket-blocked output returns on write readiness.
+
 ### Where the other inputs and outputs sit
 
 Everything that reads or writes a file sits at the edge of the program, on the

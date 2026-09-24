@@ -2410,10 +2410,10 @@ ngx_media_rtmp_exit_process(ngx_cycle_t *cycle)
     }
 
     /*
-     * Ordered teardown.  Destinations go first: each one owns a socket, a
-     * timer and a pointer into the shared FLV preparation, and leaving any of
-     * them live past the runtime's own shutdown is how a callback ends up
-     * reading a slot that no longer exists.
+     * Ordered teardown.  Each destination owns a socket and a pointer into the
+     * shared FLV preparation; the worker-local scheduler and maintenance heap
+     * also index these slots.  Leaving any live past the runtime's shutdown
+     * is how a callback ends up reading a slot that no longer exists.
      */
     if (ngx_media_rtmp_destinations_started) {
         ngx_media_rtmp_destinations_started = 0;

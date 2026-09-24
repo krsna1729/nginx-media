@@ -560,9 +560,11 @@ Capacity and health metrics include:
   worker's process CPU share of that capacity, and
   `nginx_media_egress_event_loop_lag_msec` is the runtime-tick gap.  The
   worker-local manager reserves one CPU for the owning event loop and shares
-  remaining sender concurrency between SRT and HLS push.  Sustained independent
-  queue pressure plus CPU headroom can grow the pool; SRT retransmissions
-  alone do not.
+  remaining sender concurrency between SRT and HLS push. SRT scaling counts
+  independently pressured shards. HLS push queue pressure requires queue lag
+  or bytes to rise across samples; a draining startup backlog alone does not
+  expand the pool. New drops or backpressure remain pressure signals, while
+  SRT retransmissions alone do not.
 - **Destination egress.** `nginx_media_egress_delivered_bytes_total` counts
   bytes accepted by the destination transport, not receiver-acknowledged bytes.
   `nginx_media_egress_dropped_units_total`,
@@ -578,6 +580,20 @@ Capacity and health metrics include:
   owning RTMP event loop, and HLS upload concurrency.
   `nginx_media_egress_engine_cpu_permille` is emitted for measured SRT and HLS
   sender-thread pools; RTMP CPU remains part of the owning event loop.
+- **RTMP media scheduler.** `nginx_media_rtmp_runnable_destinations` and
+  `nginx_media_rtmp_write_blocked_destinations` are worker-local gauges for
+  queued work and sockets awaiting write readiness.
+  `nginx_media_rtmp_oldest_runnable_age_ms` reports scheduler queue age.
+  `nginx_media_rtmp_scheduler_visit_destinations`,
+  `nginx_media_rtmp_scheduler_visit_bytes_queued`,
+  `nginx_media_rtmp_scheduler_visit_units_pumped`, and
+  `nginx_media_rtmp_scheduler_visit_service_us` describe the last bounded
+  visit. `nginx_media_rtmp_scheduler_destinations_visited_total`,
+  `nginx_media_rtmp_scheduler_bytes_queued_total`,
+  `nginx_media_rtmp_scheduler_units_pumped_total`,
+  `nginx_media_rtmp_scheduler_service_us_total`, and
+  `nginx_media_rtmp_scheduler_reposts_total` are cumulative counters.
+
 - **Worker event loop.**  `nginx_media_worker_event_loop_delay_ms` is the gap
   between the last two runtime ticks, which the timer asks to be 100 ms, so
   anything above it is time the worker could not get back to its timer.

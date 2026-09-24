@@ -19,6 +19,9 @@ struct ngx_media_egress_record_s {
     ngx_media_egress_stats_t    stats;
     uint64_t                    sampled_dropped_units;
     uint64_t                    sampled_backpressure_events;
+    size_t                      sampled_queue_bytes;
+    ngx_msec_t                  sampled_queue_lag_msec;
+    ngx_uint_t                  sampled_queue_valid;
     u_char                      labels[];
 };
 
@@ -610,7 +613,7 @@ ngx_media_egress_manager_recommend_workers(ngx_uint_t engine,
     ngx_msec_t                        now;
     uint64_t                          placement_mask, bit;
     ngx_uint_t                        pressure_units, cpu_limit, other_workers,
-                                      next;
+                                      next, record_pressure;
 
     if (engine == 0 || engine > NGX_MEDIA_EGRESS_ENGINE_MAX
         || minimum == 0 || maximum < minimum)
@@ -637,12 +640,28 @@ ngx_media_egress_manager_recommend_workers(ngx_uint_t engine,
             continue;
         }
 
-        if (record->stats.queue_lag_msec >= 100
-            || record->stats.queue_bytes >= 1024 * 1024
-            || record->stats.backpressure_events
-               > record->sampled_backpressure_events
-            || record->stats.dropped_units > record->sampled_dropped_units)
+        record_pressure =
+            record->stats.backpressure_events
+                > record->sampled_backpressure_events
+            || record->stats.dropped_units > record->sampled_dropped_units;
+
+        if (engine == NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL) {
+            if (record->sampled_queue_valid
+                && (record->stats.queue_lag_msec
+                        > record->sampled_queue_lag_msec
+                    || record->stats.queue_bytes
+                           > record->sampled_queue_bytes))
+            {
+                record_pressure = 1;
+            }
+
+        } else if (record->stats.queue_lag_msec >= 100
+                   || record->stats.queue_bytes >= 1024 * 1024)
         {
+            record_pressure = 1;
+        }
+
+        if (record_pressure) {
             /*
              * SRT lanes are stable logical placements.  One saturated shard
              * cannot be helped by adding physical senders; other engines use
@@ -665,6 +684,9 @@ ngx_media_egress_manager_recommend_workers(ngx_uint_t engine,
         record->sampled_backpressure_events =
             record->stats.backpressure_events;
         record->sampled_dropped_units = record->stats.dropped_units;
+        record->sampled_queue_bytes = record->stats.queue_bytes;
+        record->sampled_queue_lag_msec = record->stats.queue_lag_msec;
+        record->sampled_queue_valid = 1;
     }
 
     cpu_limit = ngx_media_egress_resources.available_cpu_milli / 1000;
@@ -761,5 +783,18 @@ ngx_media_egress_manager_resources_get(
 
     (void) pthread_mutex_lock(&ngx_media_egress_mutex);
     *resources = ngx_media_egress_resources;
+    (void) pthread_mutex_unlock(&ngx_media_egress_mutex);
+}
+
+void
+ngx_media_egress_manager_rtmp_scheduler_report(
+    const ngx_media_rtmp_scheduler_stats_t *stats)
+{
+    if (stats == NULL) {
+        return;
+    }
+
+    (void) pthread_mutex_lock(&ngx_media_egress_mutex);
+    ngx_media_egress_resources.rtmp_scheduler = *stats;
     (void) pthread_mutex_unlock(&ngx_media_egress_mutex);
 }

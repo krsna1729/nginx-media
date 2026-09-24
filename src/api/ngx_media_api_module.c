@@ -1320,6 +1320,42 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
         "# TYPE nginx_media_egress_active_workers gauge\n"
         "# HELP nginx_media_egress_engine_cpu_permille "
         "CPU utilization attributed to sender-thread pools in permille\n"
+        "# HELP nginx_media_rtmp_runnable_destinations "
+        "RTMP destinations waiting for a bounded scheduler visit\n"
+        "# TYPE nginx_media_rtmp_runnable_destinations gauge\n"
+        "# HELP nginx_media_rtmp_write_blocked_destinations "
+        "RTMP destinations waiting for socket write readiness\n"
+        "# TYPE nginx_media_rtmp_write_blocked_destinations gauge\n"
+        "# HELP nginx_media_rtmp_scheduler_visit_destinations "
+        "destinations visited by the last RTMP scheduler invocation\n"
+        "# TYPE nginx_media_rtmp_scheduler_visit_destinations gauge\n"
+        "# HELP nginx_media_rtmp_scheduler_visit_bytes_queued "
+        "wire bytes queued by the last RTMP scheduler invocation\n"
+        "# TYPE nginx_media_rtmp_scheduler_visit_bytes_queued gauge\n"
+        "# HELP nginx_media_rtmp_scheduler_visit_units_pumped "
+        "media units pumped by the last RTMP scheduler invocation\n"
+        "# TYPE nginx_media_rtmp_scheduler_visit_units_pumped gauge\n"
+        "# HELP nginx_media_rtmp_scheduler_visit_service_us "
+        "microseconds spent in the last RTMP scheduler invocation\n"
+        "# TYPE nginx_media_rtmp_scheduler_visit_service_us gauge\n"
+        "# HELP nginx_media_rtmp_scheduler_reposts_total "
+        "RTMP scheduler continuations posted after exhausting visit budgets\n"
+        "# TYPE nginx_media_rtmp_scheduler_reposts_total counter\n"
+        "# HELP nginx_media_rtmp_oldest_runnable_age_ms "
+        "age of the oldest queued RTMP scheduler destination\n"
+        "# TYPE nginx_media_rtmp_oldest_runnable_age_ms gauge\n"
+        "# HELP nginx_media_rtmp_scheduler_destinations_visited_total "
+        "destinations visited by the RTMP scheduler\n"
+        "# TYPE nginx_media_rtmp_scheduler_destinations_visited_total counter\n"
+        "# HELP nginx_media_rtmp_scheduler_bytes_queued_total "
+        "RTMP media wire bytes queued by the scheduler\n"
+        "# TYPE nginx_media_rtmp_scheduler_bytes_queued_total counter\n"
+        "# HELP nginx_media_rtmp_scheduler_units_pumped_total "
+        "RTMP media units queued by the scheduler\n"
+        "# TYPE nginx_media_rtmp_scheduler_units_pumped_total counter\n"
+        "# HELP nginx_media_rtmp_scheduler_service_us_total "
+        "microseconds spent executing the RTMP scheduler\n"
+        "# TYPE nginx_media_rtmp_scheduler_service_us_total counter\n"
         "# TYPE nginx_media_egress_engine_cpu_permille gauge\n");
 
     if (*last >= end) {
@@ -1376,6 +1412,36 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                 return NGX_ERROR;
             }
         }
+    }
+    *last = ngx_snprintf(
+        *last, end - *last,
+        "nginx_media_rtmp_runnable_destinations{worker=\"%i\"} %ui\n"
+        "nginx_media_rtmp_write_blocked_destinations{worker=\"%i\"} %ui\n"
+        "nginx_media_rtmp_scheduler_visit_destinations{worker=\"%i\"} %uL\n"
+        "nginx_media_rtmp_scheduler_visit_bytes_queued{worker=\"%i\"} %uL\n"
+        "nginx_media_rtmp_scheduler_visit_units_pumped{worker=\"%i\"} %uL\n"
+        "nginx_media_rtmp_scheduler_visit_service_us{worker=\"%i\"} %uL\n"
+        "nginx_media_rtmp_scheduler_reposts_total{worker=\"%i\"} %uL\n"
+        "nginx_media_rtmp_oldest_runnable_age_ms{worker=\"%i\"} %M\n"
+        "nginx_media_rtmp_scheduler_destinations_visited_total{worker=\"%i\"} %uL\n"
+        "nginx_media_rtmp_scheduler_bytes_queued_total{worker=\"%i\"} %uL\n"
+        "nginx_media_rtmp_scheduler_units_pumped_total{worker=\"%i\"} %uL\n"
+        "nginx_media_rtmp_scheduler_service_us_total{worker=\"%i\"} %uL\n",
+        ngx_worker, resources.rtmp_scheduler.runnable_destinations,
+        ngx_worker, resources.rtmp_scheduler.write_blocked_destinations,
+        ngx_worker, resources.rtmp_scheduler.visit_destinations,
+        ngx_worker, resources.rtmp_scheduler.visit_bytes_queued,
+        ngx_worker, resources.rtmp_scheduler.visit_units_pumped,
+        ngx_worker, resources.rtmp_scheduler.visit_service_usec,
+        ngx_worker, resources.rtmp_scheduler.reposts_total,
+        ngx_worker, resources.rtmp_scheduler.oldest_runnable_age_msec,
+        ngx_worker, resources.rtmp_scheduler.destinations_visited_total,
+        ngx_worker, resources.rtmp_scheduler.bytes_queued_total,
+        ngx_worker, resources.rtmp_scheduler.units_pumped_total,
+        ngx_worker, resources.rtmp_scheduler.service_usec_total);
+
+    if (*last >= end) {
+        return NGX_ERROR;
     }
     *last = ngx_snprintf(*last, end - *last,
                          "# HELP nginx_media_source_payload_bytes_in_total "

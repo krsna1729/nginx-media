@@ -82,12 +82,15 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NGINX="$ROOT/.build/nginx-install/sbin/nginx"
 RUN="$ROOT/.build/ingest-egress-fanout"
 
-# ports from the pid, so two runs on one host cannot collide.  Each instance
-# owns a 256-wide block: endpoints 0-3, http and rtmp at +0/+1; the shared
-# capacity receiver listens on +20.
-BASE=$(( 30000 + ($$ % 80) * 256 ))
+# Each run owns a 256-wide port block: HTTP +0, RTMP sink +1, SRT endpoints
+# +2..+17, SRT receiver +20, HLS push receiver +30, and RTMP sink API +40.
+# CAPACITY_BASE may select another block when the PID-derived block is occupied.
+BASE="${CAPACITY_BASE:-$(( 30000 + ($$ % 80) * 256 ))}"
 HTTP_PORT="$BASE"
 RTMP_PORT="$(( BASE + 1 ))"
+RTMP_SINK_RUN="$RUN/rtmp-sink"
+RTMP_SINK_HTTP_PORT="$(( BASE + 40 ))"
+RTMP_SINK_WORKER_PID=""
 
 PHASES="${PHASES:-floor ingest egress misplace}"
 WINDOW="${WINDOW:-6}"
@@ -202,6 +205,7 @@ cleanup() {
     [ "$STORM" != "0" ] && kill -KILL "$STORM" 2>/dev/null
 
     stop_instance
+    stop_rtmp_sink_instance
 
     return 0
 }
@@ -279,6 +283,88 @@ stop_instance() {
     rm -f "$RUN/logs/nginx.pid"
 
     return 0
+}
+
+stop_rtmp_sink_instance() {
+    local m p
+
+    m="$(cat "$RTMP_SINK_RUN/logs/nginx.pid" 2>/dev/null || true)"
+    [ -n "$m" ] || {
+        RTMP_SINK_WORKER_PID=""
+        return 0
+    }
+
+    for p in $(pgrep -P "$m" 2>/dev/null); do
+        kill -KILL "$p" 2>/dev/null
+    done
+
+    kill -QUIT "$m" 2>/dev/null
+    sleep 1
+    kill -KILL "$m" 2>/dev/null
+    rm -f "$RTMP_SINK_RUN/logs/nginx.pid"
+    unset "ROLE[$RTMP_SINK_WORKER_PID]" "SLOT[$RTMP_SINK_WORKER_PID]"
+    RTMP_SINK_WORKER_PID=""
+}
+
+start_rtmp_sink_instance() {
+    local i m
+
+    stop_rtmp_sink_instance
+    rm -rf "$RTMP_SINK_RUN/logs"
+    mkdir -p "$RTMP_SINK_RUN/conf" "$RTMP_SINK_RUN/logs"
+
+    cat > "$RTMP_SINK_RUN/conf/nginx.conf" <<EOF
+worker_processes 1;
+daemon on;
+error_log logs/error.log info;
+pid logs/nginx.pid;
+
+events { worker_connections 8192; }
+
+media_rtmp_listen 127.0.0.1:$RTMP_PORT;
+
+http {
+    server {
+        listen 127.0.0.1:$RTMP_SINK_HTTP_PORT;
+        location /media/api/ { media_api; }
+    }
+}
+EOF
+
+    "$NGINX" -p "$RTMP_SINK_RUN" -c conf/nginx.conf -t \
+        >"$RTMP_SINK_RUN/conf.log" 2>&1 \
+        || {
+            cat "$RTMP_SINK_RUN/conf.log" >&2
+            echo "RTMP sink configuration rejected" >&2
+            return 1
+        }
+
+    "$NGINX" -p "$RTMP_SINK_RUN" -c conf/nginx.conf \
+        || { echo "could not start RTMP sink" >&2; return 1; }
+
+    for i in $(seq 1 200); do
+        if curl -fsS "$(rtmp_sink_api)/metrics" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.05
+    done
+
+    if ! curl -fsS "$(rtmp_sink_api)/metrics" >/dev/null 2>&1; then
+        echo "RTMP sink did not become ready" >&2
+        stop_rtmp_sink_instance
+        return 1
+    fi
+
+    m="$(cat "$RTMP_SINK_RUN/logs/nginx.pid" 2>/dev/null || true)"
+    RTMP_SINK_WORKER_PID="$(pgrep -P "$m" 2>/dev/null | sed -n '1p')"
+    if [ -z "$RTMP_SINK_WORKER_PID" ]; then
+        echo "RTMP sink worker did not start" >&2
+        stop_rtmp_sink_instance
+        return 1
+    fi
+
+    ROLE["$RTMP_SINK_WORKER_PID"]="worker"
+    SLOT["$RTMP_SINK_WORKER_PID"]="rtmp-sink"
 }
 
 # --- thread labelling -------------------------------------------------------
@@ -405,6 +491,10 @@ cpu_total() {   # <before> <after> <seconds>
 # the worker that will answer the metrics is the owner.
 
 api() { printf 'http://127.0.0.1:%s/media/api/v1' "$HTTP_PORT"; }
+
+rtmp_sink_api() {
+    printf 'http://127.0.0.1:%s/media/api/v1' "$RTMP_SINK_HTTP_PORT"
+}
 
 stream_field() {   # <name> <field>
     curl -fsS "$(api)/streams/live/$1" 2>/dev/null \
@@ -1643,6 +1733,15 @@ capacity_worker_metrics() {   # <file prefix>; one response from every worker
     fi
 }
 
+capacity_rtmp_sink_metrics() {   # <file prefix>
+    local prefix="$1"
+
+    [ -n "$RTMP_SINK_WORKER_PID" ] || return 0
+    curl -fsS "$(rtmp_sink_api)/metrics" \
+        > "$prefix.$RTMP_SINK_WORKER_PID" \
+        || { echo "could not scrape RTMP sink worker metrics" >&2; return 1; }
+}
+
 capacity_socket_snapshot() {   # <file prefix>
     local prefix="$1" pids
 
@@ -2081,9 +2180,14 @@ PY
 
 capacity_memory_snapshot() {   # <file>
     local output="$1" pid
+    local -a pids=()
 
     : > "$output" || return 1
-    for pid in $(worker_pids); do
+    mapfile -t pids < <(worker_pids)
+    [ -n "$RTMP_SINK_WORKER_PID" ] \
+        && pids+=( "$RTMP_SINK_WORKER_PID" )
+
+    for pid in "${pids[@]}"; do
         awk -v pid="$pid" '
             $1 == "Rss:" { rss = $2 }
             $1 == "Pss:" { pss = $2 }
@@ -2115,10 +2219,11 @@ capacity_worker_cpu() {   # <before> <after> <seconds> <slot>
             END { printf "%.1f", total }'
 }
 
-capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt|rtmp|hls|hls-push] [stall destination ID] [yes|no quality] [SRT share percent]
+capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt|rtmp|hls|hls-push|rtmp-hls-push] [stall destination ID] [yes|no quality] [SRT share percent] [HLS push share percent]
     local label="$1" programs="$2" rate="$3" destinations="$4" seconds="$5"
     local protocol="${6:-srt}" stall_id="${7:-}" quality_mode="${8:-no}"
     local srt_share="${9:-0}"
+    local hls_push_share="${10:-0}"
     local quality_failed=0 quality_status quality_report_file
     local hls_push_quality_report hls_push_reference_bps
     local quality_reference_bps rtmp_reference_bps hls_reference_bps
@@ -2126,7 +2231,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     local receiver_sampler_pid queue_sampler_pid
     local workers="$CAPACITY_WORKERS" case_id source rate_bps offered_in offered_out
     local primary_destinations=0 srt_destinations=0 rtmp_destinations=0
-    local hls_readers=0 hls_push_destinations=0
+    local hls_readers=0 hls_push_destinations=0 hls_enabled=yes
     local total_dest total_srt_dest total_rtmp_dest total_hls_push_dest
     local started_srt started_rtmp started_hls_push sink_id output_id owner name slot index depth owner_streams
     local connect_wait connect_attempts sink_port sink_ready sink_csv
@@ -2159,7 +2264,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
        && "$seconds" =~ ^[1-9][0-9]*$ ]] \
         || { echo "invalid capacity case: $label" >&2; return 1; }
     case "$protocol" in
-        srt|rtmp|hls|hls-push) ;;
+        srt|rtmp|hls|hls-push|rtmp-hls-push) ;;
         *) echo "invalid capacity protocol: $protocol" >&2; return 1 ;;
     esac
     case "$quality_mode" in
@@ -2169,6 +2274,19 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     [[ "$srt_share" =~ ^(0|[1-9][0-9]*)$ ]] \
         && [ "$srt_share" -le 100 ] \
         || { echo "SRT share must be an integer from 0 to 100" >&2; return 1; }
+    [[ "$hls_push_share" =~ ^(0|[1-9][0-9]*)$ ]] \
+        && [ "$hls_push_share" -le 100 ] \
+        || { echo "HLS push share must be an integer from 0 to 100" \
+                 >&2; return 1; }
+    if [ "$protocol" = rtmp-hls-push ]; then
+        [ "$srt_share" -gt 0 ] && [ "$hls_push_share" -gt 0 ] \
+            && [ "$(( srt_share + hls_push_share ))" -lt 100 ] \
+            || { echo "three-way mixes need positive SRT, HLS push, and RTMP shares" \
+                     >&2; return 1; }
+    elif [ "$hls_push_share" -ne 0 ]; then
+        echo "HLS push share is valid only for three-way mixes" >&2
+        return 1
+    fi
     if [ "$protocol" = srt ]; then
         [ "$srt_share" -eq 0 ] \
             || { echo "pure SRT cases do not take a secondary SRT share" >&2; return 1; }
@@ -2181,6 +2299,10 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
         rtmp) rtmp_destinations="$primary_destinations" ;;
         hls) hls_readers="$primary_destinations" ;;
         hls-push) hls_push_destinations="$primary_destinations" ;;
+        rtmp-hls-push)
+            hls_push_destinations=$(( (destinations * hls_push_share + 50) / 100 ))
+            rtmp_destinations=$(( primary_destinations - hls_push_destinations ))
+            ;;
     esac
     if [ "$protocol" != srt ] && [ "$primary_destinations" -eq 0 ]; then
         echo "mixed cases require at least one $protocol destination" >&2
@@ -2203,6 +2325,8 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
         [ -z "$stall_id" ] \
             || { echo "RTMP capacity cases do not support a stalled SRT peer" \
                      >&2; return 1; }
+        # Receiver metrics are worker-local, so keep this complete RTMP
+        # quality sample on one worker.
         workers=1
     fi
     if [ -n "$stall_id" ] && [ "$protocol" != srt ]; then
@@ -2283,9 +2407,18 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     echo "   egress_workers: SRT=$CAPACITY_FIXED_SRT_WORKERS HLS_push=$CAPACITY_FIXED_HLS_PUSH_WORKERS"
     echo "   offered_egress=${offered_out}Mbit/s window=${seconds}s"
 
-    # SRT uses one shared mux and one multi-peer listener; RTMP receives on
-    # the instance's single local listener.  HLS keeps the shared TS mux active.
-    start_instance "$workers" yes "$([ "$rtmp_destinations" -gt 0 ] && echo yes || echo no)"
+    # RTMP-only receivers need to accept and drain the stream.  SRT cases
+    # keep HLS enabled for their shared transport-stream output.
+    if [ "$rtmp_destinations" -gt 0 ] \
+        && [ "$srt_destinations" -eq 0 ] \
+        && [ "$hls_readers" -eq 0 ] \
+        && [ "$hls_push_destinations" -eq 0 ]; then
+        hls_enabled=no
+    fi
+    start_instance "$workers" "$hls_enabled" no
+    if [ "$rtmp_destinations" -gt 0 ]; then
+        start_rtmp_sink_instance || return 1
+    fi
     PUBS=()
     SINKS=()
     sink_port=$(( BASE + 20 ))
@@ -2360,7 +2493,9 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
             [ "$sink_id" = "$stall_id" ] && stall_seen=1
         done
         if [ "$rtmp_destinations" -gt 0 ]; then
-            for (( attempt = srt_destinations; attempt < destinations; attempt++ )); do
+            for (( attempt = srt_destinations;
+                  attempt < srt_destinations + rtmp_destinations;
+                  attempt++ )); do
                 output_id="$(capacity_destination_id "$index" "$attempt" "$programs")"
                 post_owner "/streams/live/$name/destinations" \
                     "{\"id\":\"$output_id\",\"type\":\"rtmp\",\"host\":\"127.0.0.1\",\"port\":$RTMP_PORT,\"streamid\":\"$output_id\"}" \
@@ -2368,7 +2503,9 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
             done
         fi
         if [ "$hls_push_destinations" -gt 0 ]; then
-            for (( attempt = srt_destinations; attempt < destinations; attempt++ )); do
+            for (( attempt = srt_destinations + rtmp_destinations;
+                  attempt < srt_destinations + rtmp_destinations + hls_push_destinations;
+                  attempt++ )); do
                 output_id="$(capacity_destination_id "$index" "$attempt" "$programs")"
                 post_owner "/streams/live/$name/destinations" \
                     "{\"id\":\"$output_id\",\"type\":\"hls_push\",\"host\":\"http://127.0.0.1:$hls_push_sink_port/$output_id/\",\"path\":\"$RUN/hls/live/$name\"}" \
@@ -2458,7 +2595,8 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     if [ "$rtmp_destinations" -gt 0 ]; then
         rtmp_ready=0
         for attempt in $(seq 1 "$connect_attempts"); do
-            curl -fsS "$(api)/metrics" > "$case_dir/rtmp-warmup.metrics" \
+            curl -fsS "$(rtmp_sink_api)/metrics" \
+                > "$case_dir/rtmp-warmup.metrics" \
                 || { echo "could not scrape RTMP receiver metrics" >&2; return 1; }
             if capacity_rtmp_receiver_ready "$case_dir/rtmp-warmup.metrics" \
                 "$programs" "$rtmp_destinations" "$srt_destinations"
@@ -2511,11 +2649,11 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
             > "$case_dir/hls-push-readiness.csv"
         for attempt in $(seq 1 "$connect_attempts"); do
             ready_status="$(curl -sS -o /dev/null -w '%{http_code}' \
-                "http://127.0.0.1:$hls_push_sink_port/__ready?destinations=$hls_push_destinations&offset=$srt_destinations" \
+                "http://127.0.0.1:$hls_push_sink_port/__ready?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                 2>/dev/null || true)"
             if [ $(( attempt % 10 )) -eq 0 ] || [ "$ready_status" = 200 ]; then
                 curl -fsS \
-                    "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$srt_destinations" \
+                    "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                     > "$hls_push_progress_file" \
                     || { echo "could not query HLS push readiness progress" \
                              >&2; return 1; }
@@ -2556,7 +2694,7 @@ PY
         done
         if [ "$hls_push_ready" -ne 1 ]; then
             curl -fsS \
-                "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$srt_destinations" \
+                "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                 > "$hls_push_progress_file" || true
             python3 - "$hls_push_progress_file" <<'PY'
 import json
@@ -2573,7 +2711,7 @@ PY
             if cpu_window 3 "$hls_push_sink_pid"; then
                 capacity_worker_metrics "$case_dir/workers.readiness" || true
                 curl -fsS \
-                    "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$srt_destinations" \
+                    "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                     > "$hls_push_progress_file" || true
                 curl -fsS "http://127.0.0.1:$hls_push_sink_port/__snapshot" \
                     > "$case_dir/hls-push.readiness.json" || true
@@ -2582,7 +2720,7 @@ PY
                     --metrics-prefix "$case_dir/workers.readiness" \
                     --stream "${names[0]}" \
                     --destinations "$hls_push_destinations" \
-                    --destination-offset "$srt_destinations" \
+                    --destination-offset "$((srt_destinations + rtmp_destinations))" \
                     --sink-snapshot "$case_dir/hls-push.readiness.json" \
                     --progress "$hls_push_progress_file" \
                     > "$case_dir/hls-push-readiness-report.txt" || true
@@ -2629,6 +2767,7 @@ PY
     capacity_socket_snapshot "$case_dir/before" || return 1
     capacity_memory_snapshot "$case_dir/memory.before" || return 1
     capacity_worker_metrics "$case_dir/workers.before" || return 1
+    capacity_rtmp_sink_metrics "$case_dir/rtmp-receiver.before" || return 1
     if [ "$srt_destinations" -gt 0 ]; then
         if [ "$quality_mode" = yes ]; then
             capacity_srt_measurement_snapshot "$sink_pid" "$sink_csv.snapshot" \
@@ -2662,7 +2801,8 @@ PY
         kill -USR1 "$hls_pid" \
             || { echo "could not start HLS reader measurement" >&2; return 1; }
     fi
-    cpu_window "$seconds" "$sink_pid" "$hls_pid" "$hls_push_sink_pid"
+    cpu_window "$seconds" "$sink_pid" "$hls_pid" "$hls_push_sink_pid" \
+        "$RTMP_SINK_WORKER_PID"
     if [ "$hls_push_destinations" -gt 0 ]; then
         curl -fsS "http://127.0.0.1:$hls_push_sink_port/__snapshot" \
             >"$case_dir/hls-push.after.json" \
@@ -2704,6 +2844,7 @@ PY
     measure_seconds="$(awk -v a="$measure_start" -v b="$measure_end" \
         'BEGIN { printf "%.2f", b - a }')"
     capacity_worker_metrics "$case_dir/workers.after" || return 1
+    capacity_rtmp_sink_metrics "$case_dir/rtmp-receiver.after" || return 1
     capacity_socket_snapshot "$case_dir/after" || return 1
     capacity_memory_snapshot "$case_dir/memory.after" || return 1
 
@@ -2908,8 +3049,8 @@ PY
             rtmp_reference_bps="${CAPACITY_QUALITY_REFERENCE_RTMP_BPS:-0}"
             rtmp_report_file="$case_dir/rtmp-quality.txt"
             python3 "$ROOT/tests/bench/rtmp_capacity_quality.py" \
-                --before-prefix "$case_dir/workers.before" \
-                --after-prefix "$case_dir/workers.after" \
+                --before-prefix "$case_dir/rtmp-receiver.before" \
+                --after-prefix "$case_dir/rtmp-receiver.after" \
                 --queue-before-prefix "$case_dir/workers.before" \
                 --queue-after-prefix "$case_dir/workers.after" \
                 --programs "$programs" \
@@ -2939,8 +3080,8 @@ PY
             fi
             [ "$quality_status" = yes ] || quality_failed=1
         else
-            capacity_rtmp_payload_report "$case_dir/workers.before" \
-                "$case_dir/workers.after" "$programs" "$rtmp_destinations" \
+            capacity_rtmp_payload_report "$case_dir/rtmp-receiver.before" \
+                "$case_dir/rtmp-receiver.after" "$programs" "$rtmp_destinations" \
                 "$srt_destinations" > "$case_dir/rtmp-receiver-report.txt" \
                 || return 1
             echo "   receiver-delivered RTMP payload bytes (per destination):"
@@ -2978,7 +3119,7 @@ PY
             --before-prefix "$case_dir/workers.before" \
             --after-prefix "$case_dir/workers.after" \
             --stream "${names[0]}" \
-            --destination-offset "$srt_destinations" \
+            --destination-offset "$((srt_destinations + rtmp_destinations))" \
             --destinations "$hls_push_destinations" \
             --sink-before "$case_dir/hls-push.before.json" \
             --sink-after "$case_dir/hls-push.after.json" \
@@ -3141,6 +3282,10 @@ PY
         echo "         late_ticks_delta=$(( ${late_after:-0} - ${late_before:-0} ))"
     done
     echo "      aggregate_worker_cpu=${worker_cpu_total}% of one core"
+    if [ -n "$RTMP_SINK_WORKER_PID" ]; then
+        echo "      RTMP sink CPU=$(capacity_worker_cpu "$W_BEFORE" "$W_AFTER" \
+            "$W_DUR" wrtmp-sink)% of one core (separate receiver worker)"
+    fi
 
     echo "   NGINX socket skmem (ss -m):"
     for worker_pid in $(worker_pids); do
@@ -3174,6 +3319,7 @@ PY
     for receiver_pid in "${SINKS[@]}"; do kill_one "$receiver_pid"; done
     SINKS=()
     stop_instance
+    stop_rtmp_sink_instance
     if [ "$quality_mode" = yes ] && [ "$quality_failed" -ne 0 ]; then
         return 2
     fi
@@ -3186,7 +3332,7 @@ phase_capacity() {
     echo "== offered-load capacity curve (fixed worker count)"
     echo "   program and bitrate cases use one shared SRT receiver per case."
     echo "   The destination ladder runs every exact rung over SRT and RTMP;"
-    echo "   RTMP cases use one worker and both protocols count receiver bytes."
+    echo "   RTMP source uses one worker and a separate no-HLS receiver."
     echo "   Publishers and outputs warm up before the timed baseline."
 
     for programs in $CAPACITY_PROGRAM_STEPS; do
@@ -3248,10 +3394,11 @@ phase_capacity_srt_ladder() {
     done
 }
 
-capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share percent>
-    local mix="$1" protocol="$2" srt_share="$3"
+capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push share]
+    local mix="$1" protocol="$2" srt_share="$3" hls_push_share="${4:-0}"
     local destinations previous=0 status failures=0 first_failure="" failed_rungs=""
-    local srt_count primary_count rtmp_count hls_count hls_push_count actual_srt_share
+    local srt_count primary_count rtmp_count hls_count hls_push_count
+    local actual_srt_share actual_rtmp_share actual_hls_push_share
 
     echo
     echo "== $mix ${CAPACITY_QUALITY_RATE} receiver-quality ladder"
@@ -3288,13 +3435,22 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share percent>
             rtmp) rtmp_count="$primary_count" ;;
             hls) hls_count="$primary_count" ;;
             hls-push) hls_push_count="$primary_count" ;;
+            rtmp-hls-push)
+                hls_push_count=$(( (destinations * hls_push_share + 50) / 100 ))
+                rtmp_count=$(( primary_count - hls_push_count ))
+                ;;
         esac
         actual_srt_share="$(awk -v s="$srt_count" -v d="$destinations" \
             'BEGIN { printf "%.2f", 100 * s / d }')"
-        echo "quality_rung_start mix=$mix destinations=$destinations srt=$srt_count rtmp=$rtmp_count hls=$hls_count hls_push=$hls_push_count actual_srt_share=${actual_srt_share}%"
+        actual_rtmp_share="$(awk -v s="$rtmp_count" -v d="$destinations" \
+            'BEGIN { printf "%.2f", 100 * s / d }')"
+        actual_hls_push_share="$(awk -v s="$hls_push_count" -v d="$destinations" \
+            'BEGIN { printf "%.2f", 100 * s / d }')"
+        echo "quality_rung_start mix=$mix destinations=$destinations srt=$srt_count rtmp=$rtmp_count hls=$hls_count hls_push=$hls_push_count actual_shares_srt=${actual_srt_share}%_rtmp=${actual_rtmp_share}%_hls_push=${actual_hls_push_share}%"
         if capacity_case "quality-$mix-$destinations" 1 \
             "$CAPACITY_QUALITY_RATE" "$destinations" \
-            "$CAPACITY_QUALITY_SECONDS" "$protocol" "" yes "$srt_share"
+            "$CAPACITY_QUALITY_SECONDS" "$protocol" "" yes \
+            "$srt_share" "$hls_push_share"
         then
             echo "quality_rung_result mix=$mix destinations=$destinations srt=$srt_count rtmp=$rtmp_count hls=$hls_count hls_push=$hls_push_count result=pass"
         else
@@ -3322,7 +3478,7 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share percent>
 }
 
 phase_capacity_quality_ladder() {
-    local entry mix protocol srt_share status failures=0 failed_mixes=""
+    local entry mix protocol srt_share hls_push_share status failures=0 failed_mixes=""
     local requested found
     local -a mix_specs=(
         pure-srt:srt:0
@@ -3331,6 +3487,7 @@ phase_capacity_quality_ladder() {
         pure-hls-push:hls-push:0
         rtmp-95-srt-5:rtmp:5
         hls-push-95-srt-5:hls-push:5
+        rtmp-50-hls-push-45-srt-5:rtmp-hls-push:5:45
     )
     local -a requested_mixes=() selected_mix_specs=()
 
@@ -3342,7 +3499,7 @@ phase_capacity_quality_ladder() {
             || { echo "CAPACITY_QUALITY_MIXES must not be empty" >&2; return 1; }
         for requested in "${requested_mixes[@]}"; do
             case "$requested" in
-                pure-srt|pure-rtmp|pure-hls|pure-hls-push|rtmp-95-srt-5|hls-push-95-srt-5)
+                pure-srt|pure-rtmp|pure-hls|pure-hls-push|rtmp-95-srt-5|hls-push-95-srt-5|rtmp-50-hls-push-45-srt-5)
                     ;;
                 *)
                     echo "unknown capacity quality mix: $requested" >&2
@@ -3365,9 +3522,9 @@ phase_capacity_quality_ladder() {
 
     if [ "$CAPACITY_QUALITY_MIXES" = all ]; then
         echo
-        echo "== six 8 Mbit/s delivery-quality ladders"
+        echo "== seven 8 Mbit/s delivery-quality ladders"
         echo "   each rung uses one program; per-protocol one-destination baselines calibrate before scaling."
-        echo "   mix order: pure SRT, pure RTMP, pure HLS readers, pure HLS push, 95% RTMP/5% SRT, 95% HLS push/5% SRT."
+        echo "   mix order: pure SRT, pure RTMP, pure HLS readers, pure HLS push, 95% RTMP/5% SRT, 95% HLS push/5% SRT, and RTMP/HLS push/SRT."
     else
         echo
         echo "== selected 8 Mbit/s delivery-quality ladders"
@@ -3375,8 +3532,8 @@ phase_capacity_quality_ladder() {
         echo "   each rung uses one program; per-protocol one-destination baselines calibrate before scaling."
     fi
     for entry in "${mix_specs[@]}"; do
-        IFS=: read -r mix protocol srt_share <<< "$entry"
-        if capacity_quality_ladder "$mix" "$protocol" "$srt_share"; then
+        IFS=: read -r mix protocol srt_share hls_push_share <<< "$entry"
+        if capacity_quality_ladder "$mix" "$protocol" "$srt_share" "$hls_push_share"; then
             :
         else
             status="$?"
@@ -3465,8 +3622,8 @@ if [[ " $PHASES " == *" capacity "* \
    || " $PHASES " == *" capacity-saturated "* \
    || " $PHASES " == *" capacity-slow-reader "* \
    || " $PHASES " == *" capacity-sustained "* ]]; then
-    echo "   receivers:  shared SRT sink, RTMP payload metrics, HLS readers and HLS PUT sink"
-    echo "   receiver CPU: sampled for external SRT/HLS processes with workers"
+    echo "   receivers:  separate SRT/RTMP sinks, HLS readers and HLS PUT sink"
+    echo "   receiver CPU: sampled for external SRT, RTMP and HLS sink workers"
 fi
 echo "   labels:     SRT:* from comm; this module's threads from a stack" \
      "backtrace ($([ "$LABELLED" = 1 ] && echo 'attached and labelled' \

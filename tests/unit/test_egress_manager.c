@@ -248,7 +248,7 @@ test_worker_budget_requires_local_pressure_and_cpu_headroom(void)
 }
 
 static void
-test_hls_budget_requires_multiple_pressured_destinations(void)
+test_hls_backlog_trend_requires_multiple_destinations(void)
 {
     static const u_char  app_data[] = "studio";
     static const u_char  stream_data[] = "program";
@@ -259,7 +259,7 @@ test_hls_budget_requires_multiple_pressured_destinations(void)
     uint64_t                       id_a = 0, id_b = 0;
     ngx_uint_t                     i;
 
-    TEST_CASE("HLS pool scales only for multiple pressured destinations");
+    TEST_CASE("HLS startup backlog drains before pool expansion");
 
     ngx_memzero(&descriptor, sizeof(descriptor));
     descriptor.application.data = (u_char *) app_data;
@@ -278,9 +278,20 @@ test_hls_budget_requires_multiple_pressured_destinations(void)
         NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 100, 1);
 
     ngx_memzero(&report, sizeof(report));
+    ngx_media_egress_manager_report(id_a, &report);
+    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
+                           NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 1, 1, 4),
+                       1);
+
     report.queue_bytes = 2 * 1024 * 1024;
     report.queue_lag_msec = 200;
-    report.backpressure_events = 1;
+    ngx_media_egress_manager_report(id_a, &report);
+    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
+                           NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 1, 1, 4),
+                       1);
+
+    report.queue_bytes = 1536 * 1024;
+    report.queue_lag_msec = 150;
     ngx_media_egress_manager_report(id_a, &report);
     TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
                            NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 1, 1, 4),
@@ -294,20 +305,37 @@ test_hls_budget_requires_multiple_pressured_destinations(void)
     TEST_ASSERT_EQ_INT(ngx_media_egress_manager_admit(&descriptor, &id_b, NULL),
                        NGX_OK);
     ngx_media_egress_manager_report(id_b, &report);
-    ngx_media_egress_manager_worker_resources(3000, 100, 100);
-    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
-                           NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 1, 1, 4),
-                       1);
     TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
                            NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 1, 1, 4),
                        1);
 
-    ngx_media_egress_manager_worker_resources(4000, 100, 100);
+    report.queue_bytes = 1600 * 1024;
+    report.queue_lag_msec = 160;
+    ngx_media_egress_manager_report(id_a, &report);
+    report.queue_bytes = 2100 * 1024;
+    report.queue_lag_msec = 210;
+    ngx_media_egress_manager_report(id_b, &report);
+    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
+                           NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 1, 1, 4),
+                       1);
+
+    report.queue_bytes = 1700 * 1024;
+    report.queue_lag_msec = 170;
+    ngx_media_egress_manager_report(id_a, &report);
+    report.queue_bytes = 2200 * 1024;
+    report.queue_lag_msec = 220;
+    ngx_media_egress_manager_report(id_b, &report);
     TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
                            NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 1, 1, 4),
                        2);
 
     for (i = 0; i < 10; i++) {
+        report.queue_bytes = (1700 + (i + 1) * 100) * 1024;
+        report.queue_lag_msec = 170 + (i + 1) * 10;
+        ngx_media_egress_manager_report(id_a, &report);
+        report.queue_bytes = (2200 + (i + 1) * 100) * 1024;
+        report.queue_lag_msec = 220 + (i + 1) * 10;
+        ngx_media_egress_manager_report(id_b, &report);
         TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
                                NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL,
                                2, 1, 4), 2);
@@ -330,7 +358,7 @@ main(void)
     test_manager_rejects_incomplete_identity();
     test_rtmp_event_loop_activity_tracks_admission();
     test_worker_budget_requires_local_pressure_and_cpu_headroom();
-    test_hls_budget_requires_multiple_pressured_destinations();
+    test_hls_backlog_trend_requires_multiple_destinations();
     TEST_LEAKS();
     TEST_MAIN_END();
 }

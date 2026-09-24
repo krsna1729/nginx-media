@@ -7,6 +7,7 @@
 #include "ngx_media_hls_pull.h"
 #include "ngx_media_hls_push.h"
 #include "ngx_media_egress_manager.h"
+#include "ngx_media_rtmp_destination.h"
 
 #include <ngx_event.h>
 #include <ngx_event_posted.h>
@@ -1960,7 +1961,7 @@ ngx_media_runtime_prepare_drain(ngx_media_stream_t *stream, ngx_log_t *log,
 {
     ngx_media_runtime_prepare_t  *slot;
     ngx_media_frame_t             frames[NGX_MEDIA_RUNTIME_MAX_FRAMES_TICK];
-    ngx_uint_t                    count, i, status, max_units;
+    ngx_uint_t                    count, i, status, max_units, prepared;
     size_t                        max_bytes;
 
     for (slot = ngx_media_runtime_prepares; slot != NULL; slot = slot->next) {
@@ -1972,6 +1973,7 @@ ngx_media_runtime_prepare_drain(ngx_media_stream_t *stream, ngx_log_t *log,
     return;
 
 found:
+    prepared = 0;
 
     for ( ;; ) {
         if (!ngx_media_runtime_budget_ready(budget)) {
@@ -2034,6 +2036,7 @@ found:
             }
 
             slot->tracks = stream->active->tracks;
+            prepared = 1;
         }
 
         /* bounded per visit (goal doc 34 item 13) */
@@ -2048,10 +2051,14 @@ found:
             {
                 break;
             }
+            prepared = 1;
         }
 
         ngx_media_feed_release(frames, count);
 }
+    if (prepared) {
+        ngx_media_rtmp_destination_media_ready(stream);
+    }
 }
 
 /* --- timer --------------------------------------------------------------- */

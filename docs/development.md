@@ -190,6 +190,7 @@ make bench-hls-fanout     # many concurrent readers over a sliding window
 make bench-push-fanout    # the uploader's copy path, 8 destinations
 make bench-burst-sizing   # sweep TS backing capacity against real media
 make bench-capacity-curve     # fixed-worker offered-load sweep and fairness
+make bench-capacity-quality  # per-destination delivery checks across egress mixes
 ```
 
 These measure rather than assert, and their numbers are what the HLS and push
@@ -231,6 +232,14 @@ The focused `PHASES=capacity-srt-ladder` run executes only the single-program
 SRT destination ladder. `capacity-slow-reader`, `capacity-saturated`, and
 `capacity-sustained` each run one scenario without repeating the ladder.
 This is an offered-load curve, not a worker-count sweep.
+
+`bench-capacity-quality` runs seven calibrated delivery-quality ladders,
+including the pairwise RTMP/SRT and HLS-push/SRT mixes and a three-way
+50% RTMP / 45% HLS-push / 5% SRT mix.  The three-way case places all outputs
+on the same program owner and validates each protocol against its calibrated
+single-destination reference. `CAPACITY_QUALITY_MIXES` selects a subset;
+`CAPACITY_QUALITY_STEPS` chooses the strictly increasing destination counts
+(starting at one), and `CAPACITY_QUALITY_SECONDS` sets each measurement window.
 
 `bench-burst-sizing` runs the in-process demux/mux/remux fixture at each
 capacity in `CAPACITIES` (bytes).  It reports burst count, observed byte range,

@@ -77,12 +77,29 @@ typedef struct {
 } ngx_media_egress_stats_t;
 
 typedef struct {
+    ngx_uint_t  runnable_destinations;
+    ngx_uint_t  write_blocked_destinations;
+    uint64_t    visit_destinations;
+    uint64_t    visit_bytes_queued;
+    uint64_t    visit_units_pumped;
+    uint64_t    visit_service_usec;
+    uint64_t    destinations_visited_total;
+    uint64_t    bytes_queued_total;
+    uint64_t    units_pumped_total;
+    uint64_t    service_usec_total;
+    uint64_t    reposts_total;
+    ngx_msec_t  oldest_runnable_age_msec;
+} ngx_media_rtmp_scheduler_stats_t;
+
+
+typedef struct {
     ngx_uint_t  available_cpu_milli;
     ngx_uint_t  worker_cpu_permille;
     ngx_msec_t  event_loop_lag_msec;
     ngx_uint_t  sample_valid;
     ngx_uint_t  active_workers[NGX_MEDIA_EGRESS_ENGINE_MAX + 1];
     ngx_uint_t  engine_cpu_permille[NGX_MEDIA_EGRESS_ENGINE_MAX + 1];
+    ngx_media_rtmp_scheduler_stats_t rtmp_scheduler;
 } ngx_media_egress_resources_t;
 
 typedef ngx_int_t (*ngx_media_egress_visit_pt)(
@@ -114,5 +131,7 @@ ngx_uint_t ngx_media_egress_manager_recommend_workers(ngx_uint_t engine,
     ngx_uint_t current, ngx_uint_t minimum, ngx_uint_t maximum);
 void ngx_media_egress_manager_resources_get(
     ngx_media_egress_resources_t *resources);
+void ngx_media_egress_manager_rtmp_scheduler_report(
+    const ngx_media_rtmp_scheduler_stats_t *stats);
 
 #endif /* NGX_MEDIA_EGRESS_MANAGER_H */

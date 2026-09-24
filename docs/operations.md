@@ -285,11 +285,13 @@ loop.  Scrapes are process-local, so monitor every NGINX worker.
 Every outbound HTTP operation has a deadline: five seconds to connect to one
 address, ten seconds without progress on a read or a write.  A remote that
 accepts the connection and then says nothing occupies an upload thread until
-that deadline; the pool ceiling bounds this cost.  Queue pressure can grow the
+that deadline; the pool ceiling bounds this cost. Queue pressure can grow the
 active pool only while there is CPU headroom and space under the shared SRT/HLS
-sender budget.  Transport errors or SRT retransmissions alone do not trigger
-growth.  A stalled upload fails with a transport error rather than publishing a
-truncated file.
+sender budget. HLS queue lag or bytes must rise across samples; a startup
+backlog that is draining does not trigger expansion. New drop and backpressure
+events remain pressure signals. Transport errors or SRT retransmissions alone
+do not trigger growth. A stalled upload fails with a transport error rather
+than publishing a truncated file.
 
 A destination pointed at a directory no program writes to receives no files:
 notifications match only the program's exact HLS output directory
@@ -317,10 +319,16 @@ RTMP connect failures are logged as
 `media: rtmp destination <id> could not connect ...`.
 
 RTMP destinations have a 128-message / 512 KiB per-destination queue and a
-one-second reconnect backoff.  RTMP remains on the owning event loop; its pump
-uses smaller batches under worker CPU or event-loop pressure rather than
-moving a live connection to a background thread.  Its destination table holds
-up to 1000 active outputs per worker.
+one-second reconnect backoff. Media is driven by one worker-local ready queue,
+not a 40 ms timer per destination. New shared-FLV media wakes publishing
+destinations; a bounded scheduler visit rotates among runnable outputs, and a
+socket blocked on write is re-enqueued by its write-readiness event. Each visit
+stops at 64 destinations, 512 media units, 8 MiB of media wire bytes, or 2 ms,
+whichever limit comes first; per-destination batches shrink under worker CPU or
+event-loop pressure. A shared maintenance heap handles protocol deadlines,
+retries, and reports.
+RTMP remains on its owning event loop; its destination table holds up to 1000
+active outputs per worker.
 
 Both destination tables reject creates at capacity: SRT returns
 `500 {"error":"destination_start_failed"}` and leaves no object behind; the

@@ -18,10 +18,13 @@ ngx_int_t ngx_media_rtmp_destination_add(ngx_media_stream_t *stream,
 void ngx_media_rtmp_destination_remove(ngx_media_stream_t *stream,
     ngx_media_destination_t *destination);
 
+/* Wake publishing destinations after the shared FLV feed gains media. */
+void ngx_media_rtmp_destination_media_ready(ngx_media_stream_t *stream);
+
 /*
  * Stops every live destination.  Called from exit_process before the program
- * runtime shuts the shared FLV preparation down, so no timer is left holding
- * a pointer into a prepare slot that is about to be released.
+ * runtime shuts the shared FLV preparation down, so the scheduler queue and
+ * maintenance heap cannot revisit a destination whose prepare slot is freed.
  */
 void ngx_media_rtmp_destination_stop_all(void);
 
