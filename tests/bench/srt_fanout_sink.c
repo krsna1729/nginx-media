@@ -16,24 +16,39 @@
 #define STREAMID_CAP 512
 #define DESTINATION_CAP 256
 #define RECEIVE_CAP 65536
+#define TS_PACKET_SIZE 188
+#define TS_PID_COUNT 8192
+#define TS_SEEN_BYTES (TS_PID_COUNT / 8)
 
 typedef struct {
     SRTSOCKET sock;
     char destination[DESTINATION_CAP];
     uint64_t bytes_received;
     struct timespec first_byte_at;
+    uint64_t ts_packets;
+    uint64_t ts_sync_errors;
+    uint64_t ts_continuity_errors;
+    uint64_t ts_tei_errors;
+    uint8_t *ts_last_cc;
+    uint8_t *ts_seen;
+    unsigned char ts_partial[TS_PACKET_SIZE];
+    size_t ts_partial_len;
+    int ts_sync_locked;
     int has_first_byte;
     int stalled;
 } peer_t;
 
 static volatile sig_atomic_t stop_requested;
 static volatile sig_atomic_t snapshot_requested;
+static volatile sig_atomic_t measurement_toggle_requested;
 
 static void
 handle_signal(int signo)
 {
     if (signo == SIGUSR1) {
         snapshot_requested = 1;
+    } else if (signo == SIGUSR2) {
+        measurement_toggle_requested = 1;
     } else {
         stop_requested = 1;
     }
@@ -44,7 +59,7 @@ usage(const char *program)
 {
     fprintf(stderr,
             "usage: %s PORT EXPECTED_PEERS READY_FILE RESULT_CSV "
-            "[STALL_DEST_ID]\n",
+            "[STALL_DEST_ID] [quality]\n",
             program);
 }
 
@@ -173,7 +188,8 @@ write_results(const char *path, const peer_t *peers, size_t count)
         return -1;
     }
     if (fprintf(file,
-                "destination_id,bytes_received,first_ms,stalled\n") < 0)
+                "destination_id,bytes_received,first_ms,stalled,ts_packets,"
+                "ts_sync_errors,ts_continuity_errors,ts_tei_errors\n") < 0)
     {
         fprintf(stderr, "cannot write result CSV %s\n", path);
         (void) fclose(file);
@@ -197,8 +213,14 @@ write_results(const char *path, const peer_t *peers, size_t count)
                 return -1;
             }
         }
-        if (fprintf(file, ",%d\n", peers[i].stalled) < 0) {
-            fprintf(stderr, "cannot write result CSV %s\n", path);
+        if (fprintf(file, ",%d,%llu,%llu,%llu,%llu\n",
+                    peers[i].stalled,
+                    (unsigned long long) peers[i].ts_packets,
+                    (unsigned long long) peers[i].ts_sync_errors,
+                    (unsigned long long) peers[i].ts_continuity_errors,
+                    (unsigned long long) peers[i].ts_tei_errors) < 0)
+        {
+            fprintf(file, "cannot write result CSV %s\n", path);
             (void) fclose(file);
             return -1;
         }
@@ -213,13 +235,17 @@ write_results(const char *path, const peer_t *peers, size_t count)
 }
 
 static int
-write_snapshot(const char *path, const peer_t *peers, size_t count)
+write_snapshot(const char *path, const peer_t *peers, size_t count,
+    const struct timespec *snapshot_time)
 {
     char *temporary;
     size_t length = strlen(path) + sizeof(".tmp.XXXXXX");
     size_t i;
     int fd, saved_errno;
     FILE *file;
+    uint64_t snapshot_ns;
+    snapshot_ns = (uint64_t) snapshot_time->tv_sec * 1000000000ULL
+                  + (uint64_t) snapshot_time->tv_nsec;
 
     temporary = malloc(length);
     if (temporary == NULL) {
@@ -244,12 +270,13 @@ write_snapshot(const char *path, const peer_t *peers, size_t count)
         free(temporary);
         return -1;
     }
-    if (fprintf(file, "destination_id,bytes_received\n") < 0) {
+    if (fprintf(file, "destination_id,bytes_received,snapshot_ns\n") < 0) {
         goto failed;
     }
     for (i = 0; i < count; i++) {
-        if (fprintf(file, "%s,%llu\n", peers[i].destination,
-                    (unsigned long long) peers[i].bytes_received) < 0)
+        if (fprintf(file, "%s,%llu,%llu\n", peers[i].destination,
+                    (unsigned long long) peers[i].bytes_received,
+                    (unsigned long long) snapshot_ns) < 0)
         {
             goto failed;
         }
@@ -278,6 +305,138 @@ failed:
     return -1;
 }
 
+static void
+ts_inspect_packet(peer_t *peer, const unsigned char *packet)
+{
+    unsigned int pid, cc, afc, adaptation_length, seen_index;
+    unsigned char seen_mask;
+    int payload, discontinuity = 0;
+
+    if (packet[0] != 0x47) {
+        peer->ts_sync_errors++;
+        return;
+    }
+
+    pid = ((unsigned int) (packet[1] & 0x1f) << 8) | packet[2];
+    afc = (packet[3] >> 4) & 0x03;
+    cc = packet[3] & 0x0f;
+    if (afc == 0) {
+        peer->ts_sync_errors++;
+        return;
+    }
+
+    if (packet[1] & 0x80) {
+        peer->ts_tei_errors++;
+    }
+    if (afc & 0x02) {
+        adaptation_length = packet[4];
+        if (adaptation_length > 183) {
+            peer->ts_sync_errors++;
+            return;
+        }
+        if (adaptation_length > 0 && (packet[5] & 0x80)) {
+            discontinuity = 1;
+        }
+    }
+
+    peer->ts_packets++;
+    payload = (afc & 0x01) != 0;
+    seen_index = pid >> 3;
+    seen_mask = (unsigned char) (1U << (pid & 7));
+
+    if (discontinuity) {
+        peer->ts_seen[seen_index] &= (uint8_t) ~seen_mask;
+    }
+    if (payload) {
+        if ((peer->ts_seen[seen_index] & seen_mask)
+            && cc != ((peer->ts_last_cc[pid] + 1) & 0x0f))
+        {
+            peer->ts_continuity_errors++;
+        }
+        peer->ts_last_cc[pid] = (uint8_t) cc;
+        peer->ts_seen[seen_index] |= seen_mask;
+    } else if ((peer->ts_seen[seen_index] & seen_mask)
+               && cc != peer->ts_last_cc[pid])
+    {
+        peer->ts_continuity_errors++;
+    }
+}
+
+static size_t
+ts_find_sync(const unsigned char *data, size_t length, size_t offset)
+{
+    size_t i;
+
+    for (i = offset; i < length; i++) {
+        if (data[i] == 0x47 && length - i >= TS_PACKET_SIZE
+            && (length - i < TS_PACKET_SIZE * 2
+                || data[i + TS_PACKET_SIZE] == 0x47))
+        {
+            return i;
+        }
+    }
+
+    return length;
+}
+
+static void
+ts_inspect(peer_t *peer, const unsigned char *data, size_t length)
+{
+    size_t offset = 0, copied, remaining, sync;
+
+    if (!peer->ts_sync_locked) {
+        sync = ts_find_sync(data, length, 0);
+        if (sync == length) {
+            return;
+        }
+        offset = sync;
+        peer->ts_sync_locked = 1;
+    }
+
+    if (peer->ts_partial_len != 0) {
+        copied = TS_PACKET_SIZE - peer->ts_partial_len;
+        if (copied > length) {
+            copied = length;
+        }
+        memcpy(peer->ts_partial + peer->ts_partial_len, data, copied);
+        peer->ts_partial_len += copied;
+        offset += copied;
+        if (peer->ts_partial_len == TS_PACKET_SIZE) {
+            if (peer->ts_partial[0] == 0x47) {
+                ts_inspect_packet(peer, peer->ts_partial);
+            } else {
+                peer->ts_sync_errors++;
+                peer->ts_sync_locked = 0;
+            }
+            peer->ts_partial_len = 0;
+        } else {
+            return;
+        }
+    }
+
+    while (length - offset >= TS_PACKET_SIZE) {
+        if (data[offset] != 0x47) {
+            peer->ts_sync_errors++;
+            peer->ts_sync_locked = 0;
+            sync = ts_find_sync(data, length, offset + 1);
+            if (sync == length) {
+                return;
+            }
+            offset = sync;
+            peer->ts_sync_locked = 1;
+            continue;
+        }
+        ts_inspect_packet(peer, data + offset);
+        offset += TS_PACKET_SIZE;
+    }
+
+    remaining = length - offset;
+    if (remaining != 0) {
+        memcpy(peer->ts_partial, data + offset, remaining);
+        peer->ts_partial_len = remaining;
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -288,13 +447,15 @@ main(int argc, char **argv)
     int epoll_id = SRT_ERROR;
     struct sockaddr_in address;
     struct sigaction action;
+    struct timespec snapshot_time;
     SRT_EPOLL_EVENT *events = NULL;
     char *buffer = NULL;
     const char *stall_id = NULL;
     char *snapshot_path = NULL;
     int failure = 0, ready = 0, initialized = 0, i;
+    int quality_mode = 0, measurement_active = 0;
 
-    if ((argc != 5 && argc != 6)
+    if ((argc < 5 || argc > 7)
         || parse_unsigned(argc > 1 ? argv[1] : NULL, 65535, &port_arg) != 0
         || parse_unsigned(argc > 2 ? argv[2] : NULL, INT32_MAX - 2,
                           &expected_arg) != 0)
@@ -303,12 +464,23 @@ main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    if (argc == 6) {
-        if (argv[5][0] == '\0' || strlen(argv[5]) >= DESTINATION_CAP) {
-            fprintf(stderr, "STALL_DEST_ID is empty or too long\n");
+    if (argc >= 6) {
+        if (strcmp(argv[5], "quality") == 0) {
+            quality_mode = 1;
+        } else {
+            if (argv[5][0] == '\0' || strlen(argv[5]) >= DESTINATION_CAP) {
+                fprintf(stderr, "STALL_DEST_ID is empty or too long\n");
+                return EXIT_FAILURE;
+            }
+            stall_id = argv[5];
+        }
+    }
+    if (argc == 7) {
+        if (strcmp(argv[6], "quality") != 0 || quality_mode) {
+            usage(argv[0]);
             return EXIT_FAILURE;
         }
-        stall_id = argv[5];
+        quality_mode = 1;
     }
 
     expected = (size_t) expected_arg;
@@ -343,7 +515,8 @@ main(int argc, char **argv)
     sigemptyset(&action.sa_mask);
     if (sigaction(SIGINT, &action, NULL) == -1
         || sigaction(SIGTERM, &action, NULL) == -1
-        || sigaction(SIGUSR1, &action, NULL) == -1)
+        || sigaction(SIGUSR1, &action, NULL) == -1
+        || (quality_mode && sigaction(SIGUSR2, &action, NULL) == -1))
     {
         fprintf(stderr, "cannot install signal handlers: %s\n", strerror(errno));
         failure = 1;
@@ -521,6 +694,24 @@ main(int argc, char **argv)
                             break;
                         }
                     }
+                    if (quality_mode) {
+                        peers[connected].ts_last_cc = malloc(TS_PID_COUNT);
+                        peers[connected].ts_seen = calloc(TS_SEEN_BYTES, 1);
+                        if (peers[connected].ts_last_cc == NULL
+                            || peers[connected].ts_seen == NULL)
+                        {
+                            fprintf(stderr,
+                                    "cannot allocate TS counters for %s\n",
+                                    peers[connected].destination);
+                            free(peers[connected].ts_last_cc);
+                            free(peers[connected].ts_seen);
+                            peers[connected].ts_last_cc = NULL;
+                            peers[connected].ts_seen = NULL;
+                            (void) srt_close(accepted);
+                            failure = 1;
+                            break;
+                        }
+                    }
                     peers[connected].sock = accepted;
                     connected++;
                     if (connected == expected && !ready) {
@@ -571,6 +762,11 @@ main(int argc, char **argv)
                         break;
                     }
                     peers[peer_index].bytes_received += (uint64_t) received;
+                    if (measurement_active) {
+                        ts_inspect(&peers[peer_index],
+                                   (const unsigned char *) buffer,
+                                   (size_t) received);
+                    }
                     if (!peers[peer_index].has_first_byte) {
                         if (clock_gettime(CLOCK_MONOTONIC,
                                           &peers[peer_index].first_byte_at)
@@ -588,15 +784,45 @@ main(int argc, char **argv)
                 }
             }
         }
-        if (snapshot_requested) {
-            snapshot_requested = 0;
-            if (write_snapshot(snapshot_path, peers, connected) != 0) {
+        if (measurement_toggle_requested) {
+            size_t peer_index;
+            int start_measurement = !measurement_active;
+
+            measurement_toggle_requested = 0;
+            if (start_measurement) {
+                for (peer_index = 0; peer_index < connected; peer_index++) {
+                    peers[peer_index].ts_packets = 0;
+                    peers[peer_index].ts_sync_errors = 0;
+                    peers[peer_index].ts_continuity_errors = 0;
+                    peers[peer_index].ts_tei_errors = 0;
+                    peers[peer_index].ts_sync_locked = 0;
+                    peers[peer_index].ts_partial_len = 0;
+                    memset(peers[peer_index].ts_seen, 0, TS_SEEN_BYTES);
+                }
+                measurement_active = 1;
+            } else {
+                measurement_active = 0;
+            }
+            if (clock_gettime(CLOCK_MONOTONIC, &snapshot_time) == -1
+                || write_snapshot(snapshot_path, peers, connected,
+                                  &snapshot_time) != 0)
+            {
                 failure = 1;
                 break;
             }
         }
-    }
+        if (snapshot_requested) {
+            snapshot_requested = 0;
+            if (clock_gettime(CLOCK_MONOTONIC, &snapshot_time) == -1
+                || write_snapshot(snapshot_path, peers, connected,
+                                  &snapshot_time) != 0)
+            {
+                failure = 1;
+                break;
+            }
+        }
 
+    }
     if (!failure && connected != expected) {
         fprintf(stderr, "stopped with %zu of %zu expected peers connected\n",
                 connected, expected);
@@ -622,6 +848,12 @@ done:
     }
     if (buffer != NULL) {
         free(buffer);
+    }
+    if (peers != NULL) {
+        for (i = 0; i < (int) expected; i++) {
+            free(peers[i].ts_last_cc);
+            free(peers[i].ts_seen);
+        }
     }
     free(events);
     free(snapshot_path);

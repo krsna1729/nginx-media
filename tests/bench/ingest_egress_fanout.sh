@@ -140,6 +140,15 @@ CAPACITY_SUSTAINED_PROGRAMS="${CAPACITY_SUSTAINED_PROGRAMS:-4}"
 CAPACITY_SUSTAINED_RATE="${CAPACITY_SUSTAINED_RATE:-6M}"
 CAPACITY_SUSTAINED_DESTS="${CAPACITY_SUSTAINED_DESTS:-4}"
 CAPACITY_SATURATED_SECONDS="${CAPACITY_SATURATED_SECONDS:-15}"
+CAPACITY_QUALITY_RATE="${CAPACITY_QUALITY_RATE:-8M}"
+CAPACITY_QUALITY_SECONDS="${CAPACITY_QUALITY_SECONDS:-120}"
+CAPACITY_QUALITY_STEPS="${CAPACITY_QUALITY_STEPS:-1 8 32 64 128 256 512 1000}"
+CAPACITY_QUALITY_MIN_DELIVERY_RATIO="${CAPACITY_QUALITY_MIN_DELIVERY_RATIO:-0.95}"
+CAPACITY_QUALITY_INTERVAL_FLOOR="${CAPACITY_QUALITY_INTERVAL_FLOOR:-0.80}"
+CAPACITY_QUALITY_MAX_LOW_SECONDS="${CAPACITY_QUALITY_MAX_LOW_SECONDS:-2}"
+CAPACITY_QUALITY_QUEUE_PRESSURE="${CAPACITY_QUALITY_QUEUE_PRESSURE:-0.90}"
+CAPACITY_QUALITY_PRESSURE_SAMPLES="${CAPACITY_QUALITY_PRESSURE_SAMPLES:-3}"
+CAPACITY_QUALITY_BLOCKED_SAMPLES="${CAPACITY_QUALITY_BLOCKED_SAMPLES:-3}"
 # -muxrate makes the offered rate a parameter, so the placed and routed runs
 # carry the same media and the CPU comparison is per unit carried
 MP_RATE="${MP_RATE:-20M}"
@@ -153,6 +162,7 @@ LIVE_RATE="${LIVE_RATE:-}"
 
 PUBS=()
 SINKS=()
+QUALITY_MONITORS=()
 STORM=0
 
 SRT_PORTS=()
@@ -169,6 +179,14 @@ W_CPU_AFTER_MS=0
 
 cleanup() {
     local p
+    for p in ${QUALITY_MONITORS[@]+"${QUALITY_MONITORS[@]}"}; do
+        kill -TERM "$p" 2>/dev/null
+    done
+    for p in ${QUALITY_MONITORS[@]+"${QUALITY_MONITORS[@]}"}; do
+        wait "$p" 2>/dev/null || true
+    done
+    QUALITY_MONITORS=()
+
 
     for p in ${PUBS[@]+"${PUBS[@]}"} ${SINKS[@]+"${SINKS[@]}"}; do
         kill -KILL "$p" 2>/dev/null
@@ -1862,6 +1880,36 @@ capacity_srt_receiver_snapshot() {   # <receiver PID> <snapshot path> <copy path
     cp "$snapshot" "$output"
 }
 
+capacity_srt_measurement_snapshot() {   # <receiver PID> <snapshot> <copy> <start|stop>
+    local pid="$1" snapshot="$2" output="$3" action="$4" attempt
+
+    rm -f "$snapshot" "$output" || return 1
+    kill -USR2 "$pid" 2>/dev/null \
+        || { echo "could not toggle SRT receiver measurement $action" >&2; return 1; }
+    for attempt in $(seq 1 1000); do
+        [ -s "$snapshot" ] && break
+        kill -0 "$pid" 2>/dev/null \
+            || { echo "SRT receiver exited before $action snapshot" >&2; return 1; }
+        sleep 0.01
+    done
+    [ -s "$snapshot" ] \
+        || { echo "SRT receiver $action snapshot was not written" >&2; return 1; }
+    cp "$snapshot" "$output"
+}
+
+capacity_quality_stop_monitors() {
+    local pid status=0
+
+    for pid in ${QUALITY_MONITORS[@]+"${QUALITY_MONITORS[@]}"}; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+    for pid in ${QUALITY_MONITORS[@]+"${QUALITY_MONITORS[@]}"}; do
+        wait "$pid" 2>/dev/null || status=1
+    done
+    QUALITY_MONITORS=()
+    return "$status"
+}
+
 capacity_srt_incomplete_report() {   # <receiver snapshot> <programs> <destinations>
     python3 - "$1" "$2" "$3" <<'PY'
 import csv
@@ -2024,9 +2072,12 @@ capacity_worker_cpu() {   # <before> <after> <seconds> <slot>
             END { printf "%.1f", total }'
 }
 
-capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt|rtmp] [stall destination ID]
+capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt|rtmp] [stall destination ID] [yes|no quality]
     local label="$1" programs="$2" rate="$3" destinations="$4" seconds="$5"
     local protocol="${6:-srt}" stall_id="${7:-}"
+    local quality_mode="${8:-no}" quality_failed=0 quality_status
+    local quality_report_file quality_reference_bps
+    local receiver_sampler_pid queue_sampler_pid
     local workers="$CAPACITY_WORKERS" case_id source rate_bps offered_in
     local offered_out owner name slot index depth total_dest total_started
     local owner_streams connect_wait sink_port
@@ -2048,13 +2099,12 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     local socket_before socket_after sock_tcp_before sock_tcp_after
     local sock_udp_before sock_udp_after tcp_inuse_before tcp_inuse_after
     local udp_inuse_before udp_inuse_after socket_row
-    local slow_drops
+    local slow_drops monitor_status
     local -a owner_pool=() one_owner=() names=() owners=()
     local -a counts_before=() counts_after=() bounds=()
-    local -a progress_frames=()
+    local -a progress_frames=() quality_worker_pids=()
     local bucket_total=0 dispatched_delta=0 bin_label bins_text=""
     local low high value
-
     [[ "$programs" =~ ^[1-9][0-9]*$ \
        && "$destinations" =~ ^[1-9][0-9]*$ \
        && "$workers" =~ ^[1-9][0-9]*$ \
@@ -2064,6 +2114,15 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
         srt|rtmp) ;;
         *) echo "invalid capacity protocol: $protocol" >&2; return 1 ;;
     esac
+    case "$quality_mode" in
+        yes|no) ;;
+        *) echo "invalid quality mode: $quality_mode" >&2; return 1 ;;
+    esac
+    if [ "$quality_mode" = yes ]; then
+        [ "$protocol" = srt ] && [ "$programs" -eq 1 ] && [ -z "$stall_id" ] \
+            || { echo "SRT quality cases require one un-stalled SRT program" \
+                     >&2; return 1; }
+    fi
     if [ "$protocol" = rtmp ]; then
         [ -z "$stall_id" ] \
             || { echo "RTMP capacity cases do not support a stalled SRT peer" \
@@ -2152,7 +2211,11 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
         sink_snapshot_after="$case_dir/srt.after.csv"
         rm -f "$sink_ready" "$sink_csv" "$sink_csv.snapshot" \
             "$sink_snapshot_before" "$sink_snapshot_after"
-        if [ -n "$stall_id" ]; then
+        if [ "$quality_mode" = yes ]; then
+            "$RUN/srt_fanout_sink" "$sink_port" "$total_dest" \
+                "$sink_ready" "$sink_csv" quality \
+                >"$case_dir/srt-receiver.log" 2>&1 &
+        elif [ -n "$stall_id" ]; then
             "$RUN/srt_fanout_sink" "$sink_port" "$total_dest" \
                 "$sink_ready" "$sink_csv" "$stall_id" \
                 >"$case_dir/srt-receiver.log" 2>&1 &
@@ -2284,19 +2347,54 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
         owner_metrics "$name" > "$case_dir/stream.$name.before" \
             || { echo "could not capture baseline for $name" >&2; return 1; }
     done
-    capacity_worker_metrics "$case_dir/workers.before" || return 1
     capacity_socket_snapshot "$case_dir/before" || return 1
     capacity_memory_snapshot "$case_dir/memory.before" || return 1
+    capacity_worker_metrics "$case_dir/workers.before" || return 1
     if [ "$protocol" = srt ]; then
-        capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
-            "$sink_snapshot_before" || return 1
+        if [ "$quality_mode" = yes ]; then
+            capacity_srt_measurement_snapshot "$sink_pid" "$sink_csv.snapshot" \
+                "$sink_snapshot_before" start || return 1
+            python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
+                sample-receivers "$sink_pid" "$sink_csv.snapshot" \
+                "$sink_snapshot_before" "$case_dir/receiver-intervals.csv" \
+                --interval 1 \
+                >"$case_dir/receiver-sampler.log" 2>&1 &
+            receiver_sampler_pid="$!"
+            QUALITY_MONITORS+=( "$receiver_sampler_pid" )
+            mapfile -t quality_worker_pids < <(worker_pids)
+            python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
+                sample-queues "$HTTP_PORT" "$case_dir/queue-samples.csv" \
+                "${quality_worker_pids[@]}" --interval 1 \
+                >"$case_dir/queue-sampler.log" 2>&1 &
+            queue_sampler_pid="$!"
+            QUALITY_MONITORS+=( "$queue_sampler_pid" )
+        else
+            capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
+                "$sink_snapshot_before" || return 1
+        fi
     fi
     measure_start="$(date +%s.%N)"
 
     cpu_window "$seconds"
+    if [ "$quality_mode" = yes ]; then
+        for publisher_pid in "${PUBS[@]}"; do
+            kill -0 "$publisher_pid" 2>/dev/null \
+                || { echo "a capacity publisher exited during the window" \
+                     >&2; return 1; }
+        done
+        kill_pubs
+    fi
     if [ "$protocol" = srt ]; then
-        capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
-            "$sink_snapshot_after" || return 1
+        if [ "$quality_mode" = yes ]; then
+            capacity_quality_stop_monitors \
+                || { echo "a quality sampler failed during the measurement" \
+                     >&2; return 1; }
+            capacity_srt_measurement_snapshot "$sink_pid" "$sink_csv.snapshot" \
+                "$sink_snapshot_after" stop || return 1
+        else
+            capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
+                "$sink_snapshot_after" || return 1
+        fi
     fi
 
     for publisher_pid in "${PUBS[@]}"; do
@@ -2453,11 +2551,62 @@ PY
         SINKS=()
         [ -s "$sink_csv" ] \
             || { echo "shared SRT receiver produced no result CSV" >&2; return 1; }
-        capacity_srt_csv_report "$sink_csv" "$programs" "$destinations" \
-            "$stall_id" "$sink_snapshot_before" "$sink_snapshot_after" \
-            > "$case_dir/receiver-report.txt" || return 1
-        echo "   receiver-delivered SRT payload bytes in measured window, per destination:"
-        cat "$case_dir/receiver-report.txt"
+        if [ "$quality_mode" = yes ]; then
+            echo "   per-destination rates, MPEG-TS counters, and queue quality:"
+        else
+            capacity_srt_csv_report "$sink_csv" "$programs" "$destinations" \
+                "$stall_id" "$sink_snapshot_before" "$sink_snapshot_after" \
+                > "$case_dir/receiver-report.txt" || return 1
+            echo "   receiver-delivered SRT payload bytes in measured window, per destination:"
+            cat "$case_dir/receiver-report.txt"
+        fi
+        if [ "$quality_mode" = yes ]; then
+            quality_report_file="$case_dir/quality-report.txt"
+            quality_reference_bps="${CAPACITY_QUALITY_REFERENCE_BPS:-0}"
+            python3 "$ROOT/tests/bench/srt_capacity_quality.py" report \
+                --baseline "$sink_snapshot_before" \
+                --final "$sink_snapshot_after" \
+                --intervals "$case_dir/receiver-intervals.csv" \
+                --queues "$case_dir/queue-samples.csv" \
+                --receiver-results "$sink_csv" \
+                --metrics-before "$case_dir/workers.before" \
+                --metrics-after "$case_dir/workers.after" \
+                --stream-before "$case_dir/stream.$name.before" \
+                --stream-after "$case_dir/stream.$name.after" \
+                --destination-report "$case_dir/destination-quality.csv" \
+                --interval-report "$case_dir/interval-throughput.csv" \
+                --destinations "$destinations" \
+                --prepared-source "$source" \
+                --source-duration-s 30 \
+                --reference-bps "$quality_reference_bps" \
+                --min-delivery-ratio "$CAPACITY_QUALITY_MIN_DELIVERY_RATIO" \
+                --interval-floor "$CAPACITY_QUALITY_INTERVAL_FLOOR" \
+                --max-low-s "$CAPACITY_QUALITY_MAX_LOW_SECONDS" \
+                --max-interval-s 2 \
+                --queue-pressure "$CAPACITY_QUALITY_QUEUE_PRESSURE" \
+                --pressure-samples "$CAPACITY_QUALITY_PRESSURE_SAMPLES" \
+                --blocked-samples "$CAPACITY_QUALITY_BLOCKED_SAMPLES" \
+                > "$quality_report_file" || return 1
+            cat "$quality_report_file"
+            echo "   destination_quality_csv=$case_dir/destination-quality.csv"
+            echo "   interval_throughput_csv=$case_dir/interval-throughput.csv"
+            quality_status="$(awk -F= '$1 == "quality_pass" { print $2; exit }' \
+                "$quality_report_file")"
+            case "$quality_status" in
+                yes|no) ;;
+                *) echo "quality analyzer returned no status" >&2; return 1 ;;
+            esac
+            if [ "$quality_reference_bps" = 0 ]; then
+                CAPACITY_QUALITY_REFERENCE_BPS="$(awk -F= \
+                    '$1 == "quality_reference_payload_bps" { print $2; exit }' \
+                    "$quality_report_file")"
+                [[ "$CAPACITY_QUALITY_REFERENCE_BPS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+                    || { echo "quality analyzer returned an invalid reference rate" \
+                         >&2; return 1; }
+                echo "   calibrated_quality_reference_bps=$CAPACITY_QUALITY_REFERENCE_BPS"
+            fi
+            [ "$quality_status" = yes ] || quality_failed=1
+        fi
     else
         capacity_rtmp_payload_report "$case_dir/workers.before" \
             "$case_dir/workers.after" "$programs" "$destinations" \
@@ -2592,6 +2741,9 @@ PY
     for receiver_pid in "${SINKS[@]}"; do kill_one "$receiver_pid"; done
     SINKS=()
     stop_instance
+    if [ "$quality_mode" = yes ] && [ "$quality_failed" -ne 0 ]; then
+        return 2
+    fi
 }
 
 phase_capacity() {
@@ -2663,6 +2815,58 @@ phase_capacity_srt_ladder() {
     done
 }
 
+phase_capacity_srt_quality() {
+    local destinations previous=0 status failures=0 first_failure="" failed_rungs=""
+
+    CAPACITY_QUALITY_REFERENCE_BPS=0
+    [ -n "$CAPACITY_QUALITY_STEPS" ] \
+        || { echo "CAPACITY_QUALITY_STEPS must not be empty" >&2; return 1; }
+    echo
+    echo "== SRT ${CAPACITY_QUALITY_RATE} receiver-quality ladder"
+    echo "   duration=${CAPACITY_QUALITY_SECONDS}s per rung; reference=one receiver"
+    echo "   pass: each receiver >=${CAPACITY_QUALITY_MIN_DELIVERY_RATIO} of the"
+    echo "   one-receiver rate; interval floor=${CAPACITY_QUALITY_INTERVAL_FLOOR},"
+    echo "   lag limit=${CAPACITY_QUALITY_MAX_LOW_SECONDS}s, queue pressure limit="
+    echo "   ${CAPACITY_QUALITY_QUEUE_PRESSURE} for ${CAPACITY_QUALITY_PRESSURE_SAMPLES} samples;"
+    echo "   zero MPEG-TS errors and application drops."
+    for destinations in $CAPACITY_QUALITY_STEPS; do
+        [[ "$destinations" =~ ^[1-9][0-9]*$ ]] \
+            && [ "$destinations" -le 1000 ] \
+            && [ "$destinations" -gt "$previous" ] \
+            || { echo "quality ladder must be strictly increasing within 1..1000" \
+                     >&2; return 1; }
+        if [ "$previous" -eq 0 ] && [ "$destinations" -ne 1 ]; then
+            echo "quality ladder must begin with one destination for calibration" >&2
+            return 1
+        fi
+        previous="$destinations"
+        if capacity_case "quality-$destinations-srt" 1 \
+            "$CAPACITY_QUALITY_RATE" "$destinations" \
+            "$CAPACITY_QUALITY_SECONDS" srt "" yes
+        then
+            :
+        else
+            status="$?"
+            if [ "$status" -ne 2 ]; then
+                echo "first_failing_destination_rung=$destinations (case/setup failure)"
+                echo "quality_ladder_aborted_at=$destinations"
+                return "$status"
+            fi
+            failures=$(( failures + 1 ))
+            [ -n "$first_failure" ] || first_failure="$destinations"
+            [ -z "$failed_rungs" ] || failed_rungs+=" "
+            failed_rungs+="$destinations"
+        fi
+    done
+    if [ "$failures" -gt 0 ]; then
+        echo "first_failing_destination_rung=$first_failure"
+        echo "quality_failed_rungs=$failed_rungs"
+        return 1
+    fi
+    echo "first_failing_destination_rung=none"
+    echo "quality_failed_rungs=none"
+}
+
 # --- run --------------------------------------------------------------------
 
 rm -rf "$RUN"
@@ -2680,7 +2884,16 @@ echo "   net.core.rmem_max $(sysctl -n net.core.rmem_max 2>/dev/null || echo '?'
 echo "   nginx $(basename "$NGINX") built $(stat -c %y "$NGINX" | cut -d. -f1)"
 echo
 
-make_source "$RUN/media/lo.ts" "$LO_BITRATE"
+needs_lo_source=0
+for phase in $PHASES; do
+    case "$phase" in
+        capacity-srt-quality) ;;
+        *) needs_lo_source=1; break ;;
+    esac
+done
+if [ "$needs_lo_source" -eq 1 ]; then
+    make_source "$RUN/media/lo.ts" "$LO_BITRATE"
+fi
 
 for phase in $PHASES; do
     case "$phase" in
@@ -2699,6 +2912,7 @@ for phase in $PHASES; do
         topology) phase_topology ;;
         capacity) phase_capacity || exit 1 ;;
         capacity-srt-ladder) phase_capacity_srt_ladder || exit 1 ;;
+        capacity-srt-quality) phase_capacity_srt_quality || exit 1 ;;
         capacity-saturated) phase_capacity_saturated || exit 1 ;;
         capacity-slow-reader) phase_capacity_slow_reader || exit 1 ;;
         capacity-sustained) phase_capacity_sustained || exit 1 ;;

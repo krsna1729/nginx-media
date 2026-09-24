@@ -2,7 +2,7 @@ NGINX_VERSION ?= 1.30.5
 
 .PHONY: unit tsan nginx graph-conflict incarnation smoke bench-worker-scaling \
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
-    bench-capacity-curve bench-burst-sizing test-image test-in-container \
+    bench-capacity-curve bench-capacity-quality bench-burst-sizing test-image test-in-container \
     srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph \
     failover hls hls-push hls-pull hls-ingest hls-profile file-source transform \
     stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto \
@@ -210,6 +210,11 @@ bench-ingest-egress-fanout:
 # sustained multi-program fairness.
 bench-capacity-curve:
 	PHASES=capacity tests/bench/ingest_egress_fanout.sh
+
+# Calibrated 8M SRT delivery-quality ladder with interval rates, TS continuity,
+# application-drop checks, and sampled sender-queue pressure.
+bench-capacity-quality:
+	PHASES=capacity-srt-quality tests/bench/ingest_egress_fanout.sh
 
 srt-qualify:
 	MEDIA_SRT_BACKEND=both $(MAKE) nginx
