@@ -510,9 +510,20 @@ test_shared_sender_pool(void)
     ngx_media_srt_outputs_stop(outs);
     ngx_media_srt_listen_close(listener);
 
-    /* stop joins its senders before it returns: none may be left */
-    CHECK(thread_count() == base, "stopping joined every sender: %lu -> %lu",
-          (unsigned long) after_media, (unsigned long) thread_count());
+    /*
+     * stop joins its senders before it returns, but pthread_join returns
+     * when the kernel clears the thread's tid (CLONE_CHILD_CLEARTID, in
+     * mm_release) - a moment before the exiting task leaves
+     * /proc/self/task.  So the count is allowed that moment to settle; a
+     * sender stop did not end keeps running and never leaves, and still
+     * fails this.
+     */
+    {
+        ngx_uint_t  left = thread_count_settled(base);
+
+        CHECK(left == base, "stopping joined every sender: %lu -> %lu",
+              (unsigned long) after_media, (unsigned long) left);
+    }
 }
 
 /*
