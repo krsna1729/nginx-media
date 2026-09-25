@@ -109,6 +109,20 @@ jobs:
       - name: The image serves a request
         run: |
           docker run -d --name media -p 18080:8080 nginx-media:ci
+
+          # Whatever happens, say why: the container's state, its output and
+          # nginx's own error log, which the image writes to a file.  Under
+          # bash -e a failing check would otherwise exit before any of it.
+          diagnose() {
+            docker ps -a --filter name=media \
+              --format '{{.Names}} {{.Status}}' || true
+            docker logs media 2>&1 | tail -40 || true
+            docker cp media:/var/log/nginx/error.log - 2>/dev/null \
+              | tar -xO 2>/dev/null | tail -40 || true
+            docker rm -f media >/dev/null 2>&1 || true
+          }
+          trap diagnose EXIT
+
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18080/media/api/v1/streams \
                 >/dev/null 2>&1
@@ -118,8 +132,6 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:18080/media/api/v1/streams
-          docker logs media 2>&1 | tail -20
-          docker rm -f media
 
       - name: Log in to GHCR
         if: github.event_name == 'push'

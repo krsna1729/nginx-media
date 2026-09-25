@@ -502,34 +502,44 @@ curl -fsS "$API/streams" | grep -q '"streams":\[\]' \
     || { echo "the graph is not empty after deletion" >&2; exit 1; }
 
 echo "   deleted, and deleting again is a no-op"
-echo "== runtime output capacity is admitted before graph creation"
-for i in $(seq 0 15); do
+echo "== runtime outputs are allocated per stream and released on delete"
+# There is no fixed slot table: a worker takes as many programs as its memory
+# and CPU carry (the egress manager decides what it can deliver), so this
+# admits more than the old ceiling of 16 and checks that every output is
+# given back - a count that does not return is a teardown leak.
+outputs() {
+    curl -fsS "$API/metrics" | awk '$1 == "nginx_media_runtime_outputs" {print $2}'
+}
+OUTPUTS_BEFORE="$(outputs)"
+for i in $(seq 0 23); do
     cap_name="$(printf 'capacity-%02d' "$i")"
     STATUS="$(curl -sS -o "$RUN/capacity-$i.json" -w '%{http_code}' \
         -X POST -H 'Content-Type: application/json' \
         -d "{\"application\":\"live\",\"name\":\"$cap_name\"}" \
         "$API/streams")"
     [ "$STATUS" = "201" ] \
-        || { echo "capacity stream $cap_name was refused: $STATUS" >&2
-             exit 1; }
+        || { echo "stream $cap_name was refused: $STATUS" >&2
+             cat "$RUN/capacity-$i.json" >&2; exit 1; }
 done
 
-STATUS="$(curl -sS -o "$RUN/capacity-full.json" -w '%{http_code}' \
-    -X POST -H 'Content-Type: application/json' \
-    -d '{"application":"live","name":"capacity-full"}' "$API/streams")"
+OUTPUTS_FULL="$(outputs)"
+[ "${OUTPUTS_FULL:-0}" -ge $(( ${OUTPUTS_BEFORE:-0} + 24 )) ] \
+    || { echo "24 streams hold $OUTPUTS_FULL outputs (from $OUTPUTS_BEFORE)" >&2
+         exit 1; }
 
-[ "$STATUS" = "500" ] \
-    || { echo "the seventeenth output stream was admitted: $STATUS" >&2
-         cat "$RUN/capacity-full.json" >&2; exit 1; }
-grep -q '"error":"runtime_output_capacity"' "$RUN/capacity-full.json" \
-    || { echo "capacity refusal had the wrong error" >&2; exit 1; }
-
-for i in $(seq 0 15); do
+for i in $(seq 0 23); do
     cap_name="$(printf 'capacity-%02d' "$i")"
     curl -fsS -X DELETE "$API/streams/live/$cap_name" >/dev/null
 done
 
-echo "   sixteen output slots admitted, the seventeenth refused, and slots released"
+for _ in $(seq 1 50); do
+    [ "$(outputs)" = "$OUTPUTS_BEFORE" ] && break
+    sleep 0.1
+done
+[ "$(outputs)" = "$OUTPUTS_BEFORE" ] \
+    || { echo "outputs did not return to $OUTPUTS_BEFORE: $(outputs)" >&2; exit 1; }
+
+echo "   24 streams admitted ($OUTPUTS_BEFORE -> $OUTPUTS_FULL outputs), all released"
 
 
 

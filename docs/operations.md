@@ -1168,7 +1168,7 @@ approached is a reading, not a directive.
 |---|---|---|
 | Program feed backlog | 2048 units, 32 MiB, 10 s age per stream | `feed_units`, `feed_bytes`; eviction at a ceiling is a discontinuity downstream |
 | Transform input journal | 8 MPEG-TS bursts / 8 MiB per profile stream | newest burst is dropped and `transform input journal is full` is logged |
-| Runtime output slots | 16 per worker, one per stream with an output configured | `nginx_media_runtime_outputs`; a count that does not fall is a leak, and 16 is the stream ceiling per worker |
+| Runtime outputs | one per stream with an output configured, allocated on demand; no fixed ceiling - what a worker can carry is its CPU and memory, which the egress manager measures | `nginx_media_runtime_outputs`; a count that does not fall after streams are deleted is a leak |
 | Outbound HTTP wait | 5 s to connect per address, 10 s without progress per read or write | a reader or uploader thread is released; the fetch or upload fails and is retried or counted, and the log says so |
 | Streams draining after a delete | unbounded, one per deleted stream whose reader thread is still stopping | `nginx_media_streams_draining`; it returns to zero within a tick or two, and a value that stays up is a reader that will not leave.  Each such stream holds its pool (its feed included) until then |
 | Standby GOP cache | 512 units / 4 MiB per source | `preroll_units`, `preroll_bytes`; `preroll_overflows` rising means the cache is being cleared instead of kept, so a switch has no cached GOP to land on |

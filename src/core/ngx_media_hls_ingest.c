@@ -268,6 +268,7 @@ ngx_media_hls_ingest_notify_handler(ngx_event_t *ev)
     ngx_connection_t            *c;
     ngx_media_hls_ingest_source_t *ingest;
     uint64_t                     value;
+    ssize_t                      drained;
 
     c = ev->data;
     ingest = c != NULL ? c->data : NULL;
@@ -276,7 +277,12 @@ ngx_media_hls_ingest_notify_handler(ngx_event_t *ev)
         return;
     }
 
-    (void) read(ingest->notify_fd, &value, sizeof(value));
+    /*
+     * The eventfd's counter is only a wakeup; EAGAIN means another wakeup
+     * already reset it, and the queue is drained below either way.
+     */
+    drained = read(ingest->notify_fd, &value, sizeof(value));
+    (void) drained;
     ingest->notified = 0;
     if (ngx_media_hls_ingest_event_drain(ingest)) {
 #ifndef NGX_MEDIA_UNIT_TEST

@@ -186,6 +186,10 @@ RUN apt-get update \
         ffmpeg libpcre2-8-0 zlib1g libssl3t64 libsrt1.5-openssl \
         ca-certificates curl gettext-base \
     && rm -rf /var/lib/apt/lists/*
+# The installed prefix from the build stage: the binary, and the compiled-in
+# paths nginx resolves at run time.  Without it the image builds and exits on
+# start, because the link below points at nothing.
+COPY --from=build /usr/local/nginx /usr/local/nginx
 RUN ln -s /usr/local/nginx/sbin/nginx /usr/local/sbin/nginx
 
 COPY container/nginx.conf /etc/nginx/nginx.conf

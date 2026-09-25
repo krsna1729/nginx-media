@@ -178,7 +178,7 @@ jobs:
         run: make test-image TEST_IMAGE=nginx-media:test-sid DOCKER="docker" BASE=debian:sid
 
       - name: The integration suite on sid
-        run: make test-in-container TEST_IMAGE=nginx-media:test-sid
+        run: make test-in-container TEST_IMAGE=nginx-media:test-sid DOCKER="docker" BASE=debian:sid
 
       - name: Upload logs on failure
         if: failure()

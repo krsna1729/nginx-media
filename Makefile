@@ -125,6 +125,9 @@ netns:
 # runs on the host, and on the CI runner, where namespaces are ordinary.
 DOCKER ?= $(shell docker info >/dev/null 2>&1 && echo docker || echo "sudo -n docker")
 TEST_IMAGE ?= nginx-media:test
+# The Containerfile's base; an empty --build-arg would override its default
+# with nothing and fail the build, so the default lives here too.
+BASE ?= debian:trixie
 # Extra flags for the image build, empty for a local run.  CI sets
 # DOCKER_CACHE_ARGS to the BuildKit GHA cache backend (--cache-from/--cache-to
 # type=gha), which only exists where ACTIONS_RUNTIME_TOKEN does; passing those
