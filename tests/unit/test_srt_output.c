@@ -23,6 +23,7 @@
 
 #include <dirent.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 #define CHECK(cond, fmt, ...)                                                 \
@@ -294,12 +295,21 @@ test_references(void)
     ngx_media_srt_queue_destroy(&q);
 }
 
+/*
+ * The module's own sender threads, by the name each gives itself
+ * (srt-egress-NN).  Counting every task in the process instead made these
+ * checks depend on whatever else runs in it: ThreadSanitizer starts a thread
+ * of its own, and on Debian trixie a sanitizer or library thread appeared
+ * between two counts in CI ("stopping joined every sender: 17 -> 2").
+ */
 static ngx_uint_t
 thread_count(void)
 {
     DIR           *dir;
     struct dirent *ent;
     ngx_uint_t     n = 0;
+    char           path[320], comm[32];
+    FILE          *f;
 
     dir = opendir("/proc/self/task");
 
@@ -308,12 +318,45 @@ thread_count(void)
     }
 
     while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] != '.') {
+        if (ent->d_name[0] == '.') {
+            continue;
+        }
+
+        (void) snprintf(path, sizeof(path), "/proc/self/task/%s/comm",
+                        ent->d_name);
+        f = fopen(path, "r");
+        if (f == NULL) {
+            continue;
+        }
+        if (fgets(comm, sizeof(comm), f) != NULL
+            && strncmp(comm, "srt-egress-", 11) == 0)
+        {
             n++;
         }
+        (void) fclose(f);
     }
 
     closedir(dir);
+
+    return n;
+}
+
+/* a sender names itself once it runs: give new ones a moment to */
+static ngx_uint_t
+thread_count_settled(ngx_uint_t want)
+{
+    ngx_uint_t  i, n = 0;
+
+    for (i = 0; i < 200; i++) {
+        n = thread_count();
+        if (n == want) {
+            break;
+        }
+        {
+            struct timespec  ts = { 0, 5 * 1000 * 1000 };
+            (void) nanosleep(&ts, NULL);
+        }
+    }
 
     return n;
 }
@@ -343,7 +386,8 @@ test_shared_sender_pool(void)
     CHECK(listener != NULL, "listener created");
 
     base = thread_count();
-    CHECK(base > 0, "thread count readable: %lu", (unsigned long) base);
+    CHECK(base == 0, "no sender threads before the pool starts: %lu",
+          (unsigned long) base);
 
     memset(&conf, 0, sizeof(conf));
     conf.application.len = 4;
@@ -362,24 +406,11 @@ test_shared_sender_pool(void)
     CHECK(ngx_media_srt_outputs_start(&outs, &conf, 1, 16, NULL) == NGX_OK,
           "outputs started");
 
-    after_start = thread_count();
-#ifndef __SANITIZE_THREAD__
+    after_start = thread_count_settled(base + NGX_MEDIA_SRT_EGRESS_SHARDS);
     CHECK(after_start == base + NGX_MEDIA_SRT_EGRESS_SHARDS,
           "exactly %ui egress shard threads started: %lu -> %lu",
           NGX_MEDIA_SRT_EGRESS_SHARDS, (unsigned long) base,
           (unsigned long) after_start);
-#else
-    /*
-     * ThreadSanitizer starts a background thread of its own the first time
-     * the process creates one, so the count is at least the shards here;
-     * "no thread per destination" is still checked exactly below, as the
-     * difference between two counts taken after it exists.
-     */
-    CHECK(after_start >= base + NGX_MEDIA_SRT_EGRESS_SHARDS,
-          "at least %ui egress shard threads started: %lu -> %lu",
-          NGX_MEDIA_SRT_EGRESS_SHARDS, (unsigned long) base,
-          (unsigned long) after_start);
-#endif
 
     for (i = 0; i < 3; i++) {
         CHECK(ngx_media_srt_outputs_add(outs, &conf, NULL, NULL) == NGX_OK,
@@ -479,18 +510,9 @@ test_shared_sender_pool(void)
     ngx_media_srt_outputs_stop(outs);
     ngx_media_srt_listen_close(listener);
 
-    /*
-     * Under ThreadSanitizer this check is skipped rather than weakened: TSan
-     * runs threads of its own, so a kernel task count cannot say whether a
-     * sender survived.  It is not needed there either - if the join did not
-     * happen, the sender keeps walking the table after stop has freed it, and
-     * TSan reports that as a use-after-free, which is a stronger statement
-     * than this count.
-     */
-#ifndef __SANITIZE_THREAD__
+    /* stop joins its senders before it returns: none may be left */
     CHECK(thread_count() == base, "stopping joined every sender: %lu -> %lu",
           (unsigned long) after_media, (unsigned long) thread_count());
-#endif
 }
 
 /*
