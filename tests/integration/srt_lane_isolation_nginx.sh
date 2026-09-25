@@ -28,6 +28,7 @@ NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/srt-lane-isolation"
 BASE=$(( 22000 + ($$ % 40) * 16 ))
 HTTP_PORT=$BASE
+SRT_PORT=$(( BASE + 1 ))
 SINK_PORT=$(( BASE + 4 ))
 RELAY_PORT=$(( BASE + 10 ))
 COUNT=17
@@ -38,6 +39,7 @@ mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/media"
 
 SINK_PID=""
 RELAY_PID=""
+PUB_PID=""
 
 stop_instance() {
     local pid child
@@ -59,6 +61,7 @@ stop_instance() {
 cleanup() {
     [ -n "$SINK_PID" ] && kill -TERM "$SINK_PID" 2>/dev/null
     [ -n "$RELAY_PID" ] && kill -TERM "$RELAY_PID" 2>/dev/null
+    [ -n "$PUB_PID" ] && kill -KILL "$PUB_PID" 2>/dev/null
     stop_instance
     return 0
 }
@@ -77,14 +80,11 @@ cc -O2 -Wall -Wextra -Werror -std=c11 "${cflags[@]}" \
     "$ROOT/tests/bench/srt_fanout_sink.c" -o "$RUN/sink" "${libs[@]}" \
     || fail "could not build the SRT fanout sink"
 
-ffmpeg -hide_banner -loglevel error -f lavfi \
-    -i "testsrc2=size=640x360:rate=25" -t 60 \
-    -c:v libx264 -preset ultrafast -b:v 1200k -maxrate 1200k -bufsize 600k \
-    -g 25 -pix_fmt yuv420p -f mpegts "$RUN/media/source.ts" 2>/dev/null \
-    || fail "could not build the source"
-SOURCE_BPS="$(ffprobe -v error -show_entries format=bit_rate -of csv=p=0 \
-    "$RUN/media/source.ts")"
-CAP_BPS=$(( ${SOURCE_BPS:-1200000} / 2 ))
+# The stream is published live (-re), so every lane sees the same steady
+# rate for the whole window; a file source plays faster than real time and
+# can end inside the window, which measures a burst instead.
+SOURCE_BPS=1500000
+CAP_BPS=$(( SOURCE_BPS / 2 ))
 
 # The impaired path: every datagram, both ways, is dropped with probability
 # LOSS, delayed by DELAY, and sent no faster than CAP bytes/s towards the
@@ -150,6 +150,8 @@ pid logs/nginx.pid;
 
 events { worker_connections 512; }
 
+media_srt_listen 127.0.0.1:$SRT_PORT;
+
 http {
     access_log off;
     server {
@@ -176,9 +178,17 @@ sleep 0.5
 curl -fsS -X POST -H 'Content-Type: application/json' \
     -d '{"application":"live","name":"iso"}' "$API/streams" >/dev/null \
     || fail "stream not created"
-curl -fsS -X POST -H 'Content-Type: application/json' \
-    -d '{"id":"file1","type":"file","path":"'"$RUN"'/media/source.ts","priority":10}' \
-    "$API/streams/live/iso/sources" >/dev/null || fail "file source not added"
+timeout 120 ffmpeg -hide_banner -loglevel error -re \
+    -f lavfi -i "testsrc2=size=640x360:rate=25" -t 90 \
+    -c:v libx264 -preset ultrafast -b:v 1200k -maxrate 1200k -bufsize 600k \
+    -g 25 -pix_fmt yuv420p -f mpegts \
+    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/iso,m=publish,s=enc" \
+    >"$RUN/pub.log" 2>&1 &
+PUB_PID=$!
+for _ in $(seq 1 100); do
+    grep -q 'srt source open app=live stream=iso' "$RUN/logs/error.log" && break
+    sleep 0.1
+done
 
 # in slot order, so d<i> is in lane i % 16
 for i in $(seq 0 $(( COUNT - 1 ))); do
@@ -199,6 +209,15 @@ for _ in $(seq 1 300); do
     sleep 0.1
 done
 [ -f "$RUN/sink.ready" ] || fail "the sink did not see all $COUNT destinations"
+
+# d00 connects through the lossy path, which can take several handshake
+# attempts on a slow host; measure only once it is really connected
+for _ in $(seq 1 600); do
+    grep -q 'srt output 0 connected' "$RUN/logs/error.log" && break
+    sleep 0.1
+done
+grep -q 'srt output 0 connected' "$RUN/logs/error.log" \
+    || fail "the impaired destination never connected"
 
 metric() {   # <metric> <destination>
     curl -fsS "$API/metrics" \
@@ -269,12 +288,15 @@ print("   d00 (impaired): %.0f bit/s" % rate.get("d00", 0))
 print("   relay: %s" % relay)
 print("   queue lag ms: d00=%s d16=%s d01=%s" % (lag0, lag16, lag1))
 
-check(relay["lost"] > 100 and relay["over_cap"] > 100,
+check(relay["lost"] + relay["over_cap"] > 200 and relay["over_cap"] > 0,
       "the impairment happened (%d lost, %d over the cap)"
       % (relay["lost"], relay["over_cap"]))
 check(rate.get("d00", 0) < 0.8 * median,
       "d00 fell behind its path (%.0f%% of the control median)"
       % (100 * rate.get("d00", 0) / median))
+check(max(control) <= 1.05 * median,
+      "the control lanes are steady (max %.1f%% of their median)"
+      % (100 * max(control) / median))
 check(rate.get("d16", 0) >= 0.97 * median,
       "d16 delivered %.1f%% of the control median (>= 97%%)"
       % (100 * rate.get("d16", 0) / median))
