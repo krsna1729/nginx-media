@@ -30,6 +30,8 @@ RUN="$ROOT/.build/ingest-egress-fanout"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
+# absolute: the bundles are copied from inside the harness's run directory
+OUT="$(cd "$OUT" && pwd)"
 
 # BENCH_CONFIGS restricts a tier to some of its configurations, so CI can
 # run a tier's configurations as parallel jobs and merge their results.
