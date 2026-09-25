@@ -19,7 +19,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-NGINX="$ROOT/.build/nginx-install/sbin/nginx"
+NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/srt-qualify"
 BASE=$(( 19900 + ($$ % 60) * 8 ))
 PUB=0

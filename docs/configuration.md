@@ -487,7 +487,24 @@ process-scope limitations.
 ```sh
 PKG_CONFIG_PATH=/opt/robotweax/lib/pkgconfig make nginx
 SRT_DIR=/opt/robotweax make nginx          # if it ships no .pc file
+SRT_DIR=/opt/robotweax MEDIA_SRT_PKG=robotweax-srt make nginx
 ```
+
+robotweax/srt 0.2.5 installs its metadata as `robotweax-srt.pc` (and a
+static C++ archive) rather than `srt.pc`, so on a host that also has libsrt
+installed the first two forms silently link libsrt.  `MEDIA_SRT_PKG` names
+the pkg-config package to use; for `robotweax-srt` the build links its
+private dependencies and the C++ runtime as a static archive needs.  The
+selection is part of the build's configure stamp, so switching it
+reconfigures.  A binary built this way carries the library statically, so
+`ldd` does not show it; the capacity harness identifies it by the library's
+own symbols.
+
+Destinations use the library's multiplexer differently per library.  With
+libsrt, every destination of one SRT egress lane binds the lane's local
+endpoint, so a worker has at most 16 output `SndQ`/`RcvQ` thread pairs
+whatever its fanout; robotweax/srt runs a fixed scheduler pool either way.
+Measured side by side on one host in `capacity-results.md`.
 
 Startup logs which library answered, which is how a deployment knows what it
 linked: `library=libsrt 1.5.6` for the packaged Haivision build, `libsrt

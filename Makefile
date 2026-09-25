@@ -5,7 +5,8 @@ NGINX_VERSION ?= 1.30.5
     bench-capacity-curve bench-capacity-quality bench-burst-sizing test-image test-in-container \
     srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph \
     failover hls hls-push hls-pull hls-ingest hls-profile file-source transform \
-    stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-crypto \
+    stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
+    srt-lane-isolation srt-crypto \
     srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls \
     bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
@@ -96,6 +97,17 @@ rtmps:
 rtmp-workers:
 	tests/integration/rtmp_workers_nginx.sh
 
+# SRT output destinations share one library endpoint per lane: the library's
+# thread count follows the lanes, and removing every destination and adding
+# them back reconnects on fresh endpoints.
+srt-output-mux:
+	tests/integration/srt_output_mux_nginx.sh
+
+# A lane's destinations share one UDP socket and one SndQ thread: an impaired
+# destination must not degrade its healthy lane-mates.
+srt-lane-isolation:
+	tests/integration/srt_lane_isolation_nginx.sh
+
 srt-output:
 	tests/integration/srt_output_nginx.sh
 
@@ -137,7 +149,8 @@ TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
     hls-profile file-source transform stream-delete incarnation graph-conflict churn \
     rtmp \
-    rtmp-hevc rtmps rtmp-workers srt-output srt-crypto srt-worker-ports \
+    rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux srt-lane-isolation srt-crypto \
+    srt-worker-ports \
     srt-shared-port multi-worker soak fault
 
 test-image:

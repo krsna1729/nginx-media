@@ -19,6 +19,7 @@
 #define TS_PACKET_SIZE 188
 #define TS_PID_COUNT 8192
 #define TS_SEEN_BYTES (TS_PID_COUNT / 8)
+#define LISTENER_CAP 64
 
 typedef struct {
     SRTSOCKET sock;
@@ -59,8 +60,11 @@ static void
 usage(const char *program)
 {
     fprintf(stderr,
-            "usage: %s PORT EXPECTED_PEERS READY_FILE RESULT_CSV "
-            "[STALL_DEST_ID] [quality]\n",
+            "usage: %s PORT[:LISTENERS] EXPECTED_PEERS READY_FILE RESULT_CSV "
+            "[STALL_DEST_ID] [quality]\n"
+            "  PORT:N listens on PORT..PORT+N-1; each listener is its own SRT\n"
+            "  multiplexer (UDP socket and receive thread), so one socket's\n"
+            "  kernel buffer does not carry the whole fanout.\n",
             program);
 }
 
@@ -451,13 +455,96 @@ ts_inspect(peer_t *peer, const unsigned char *data, size_t length)
     }
 }
 
+/*
+ * Socket-to-peer lookup.  Every read event names a socket; a linear scan of
+ * the peer table per event is quadratic in the fanout, which made the
+ * receiver's own CPU part of what a large ladder rung measured.
+ */
+typedef struct {
+    SRTSOCKET *keys;
+    size_t *values;
+    size_t capacity;
+} peer_map_t;
+
+static int
+peer_map_init(peer_map_t *map, size_t expected)
+{
+    size_t capacity = 16, i;
+
+    while (capacity < expected * 4) {
+        capacity <<= 1;
+    }
+    map->keys = malloc(capacity * sizeof(*map->keys));
+    map->values = malloc(capacity * sizeof(*map->values));
+    if (map->keys == NULL || map->values == NULL) {
+        return -1;
+    }
+    for (i = 0; i < capacity; i++) {
+        map->keys[i] = SRT_INVALID_SOCK;
+    }
+    map->capacity = capacity;
+    return 0;
+}
+
+static size_t
+peer_map_slot(const peer_map_t *map, SRTSOCKET sock)
+{
+    size_t slot = ((uint32_t) sock * 2654435761u) & (map->capacity - 1);
+
+    while (map->keys[slot] != SRT_INVALID_SOCK && map->keys[slot] != sock) {
+        slot = (slot + 1) & (map->capacity - 1);
+    }
+    return slot;
+}
+
+/* sockets are only ever added: a replaced session's key stays mapped to the
+ * same peer, whose sock field no longer matches, which is what "stale" means */
+static void
+peer_map_put(peer_map_t *map, SRTSOCKET sock, size_t peer)
+{
+    size_t slot = peer_map_slot(map, sock);
+
+    map->keys[slot] = sock;
+    map->values[slot] = peer;
+}
+
+static int
+peer_map_get(const peer_map_t *map, const peer_t *peers, SRTSOCKET sock,
+    size_t *peer)
+{
+    size_t slot = peer_map_slot(map, sock);
+
+    if (map->keys[slot] != sock || peers[map->values[slot]].sock != sock) {
+        return -1;
+    }
+    *peer = map->values[slot];
+    return 0;
+}
+
+static int
+is_listener(const SRTSOCKET *listeners, unsigned long count, SRTSOCKET sock)
+{
+    unsigned long i;
+
+    for (i = 0; i < count; i++) {
+        if (listeners[i] == sock) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int
 main(int argc, char **argv)
 {
-    unsigned long port_arg, expected_arg;
+    unsigned long port_arg, expected_arg, listener_count = 1, l;
     size_t expected, connected = 0;
     peer_t *peers = NULL;
+    peer_map_t peer_map = { NULL, NULL, 0 };
+    SRTSOCKET listeners[LISTENER_CAP];
     SRTSOCKET listener = SRT_INVALID_SOCK;
+    char port_text[32];
+    char *colon;
     int epoll_id = SRT_ERROR;
     struct sockaddr_in address;
     struct sigaction action;
@@ -469,8 +556,25 @@ main(int argc, char **argv)
     int failure = 0, ready = 0, initialized = 0, i;
     int quality_mode = 0, measurement_active = 0;
 
+    for (l = 0; l < LISTENER_CAP; l++) {
+        listeners[l] = SRT_INVALID_SOCK;
+    }
+    if (argc > 1 && strlen(argv[1]) < sizeof(port_text)) {
+        strcpy(port_text, argv[1]);
+        colon = strchr(port_text, ':');
+        if (colon != NULL) {
+            *colon = '\0';
+            if (parse_unsigned(colon + 1, LISTENER_CAP, &listener_count) != 0) {
+                usage(argv[0]);
+                return EXIT_FAILURE;
+            }
+        }
+    } else {
+        port_text[0] = '\0';
+    }
     if ((argc < 5 || argc > 7)
-        || parse_unsigned(argc > 1 ? argv[1] : NULL, 65535, &port_arg) != 0
+        || parse_unsigned(port_text, 65535, &port_arg) != 0
+        || port_arg + listener_count - 1 > 65535
         || parse_unsigned(argc > 2 ? argv[2] : NULL, INT32_MAX - 2,
                           &expected_arg) != 0)
     {
@@ -499,7 +603,7 @@ main(int argc, char **argv)
 
     expected = (size_t) expected_arg;
     if (expected > SIZE_MAX / sizeof(*peers)
-        || expected + 1 > SIZE_MAX / sizeof(*events))
+        || expected + LISTENER_CAP > SIZE_MAX / sizeof(*events))
     {
         fprintf(stderr, "EXPECTED_PEERS is too large\n");
         return EXIT_FAILURE;
@@ -513,9 +617,11 @@ main(int argc, char **argv)
     }
     (void) sprintf(snapshot_path, "%s.snapshot", argv[4]);
     peers = calloc(expected, sizeof(*peers));
-    events = calloc(expected + 1, sizeof(*events));
+    events = calloc(expected + LISTENER_CAP, sizeof(*events));
     buffer = malloc(RECEIVE_CAP);
-    if (peers == NULL || events == NULL || buffer == NULL) {
+    if (peers == NULL || events == NULL || buffer == NULL
+        || peer_map_init(&peer_map, expected) != 0)
+    {
         fprintf(stderr, "cannot allocate receiver state for %zu peers\n", expected);
         failure = 1;
         goto done;
@@ -554,14 +660,25 @@ main(int argc, char **argv)
     srt_dellogfa(SRT_LOGFA_CONN);
     srt_dellogfa(SRT_LOGFA_EPOLL_UPD);
 
-    listener = srt_create_socket();
-    if (listener == SRT_INVALID_SOCK) {
-        fprintf(stderr, "cannot create SRT listener: %s\n", srt_getlasterror_str());
+    epoll_id = srt_epoll_create();
+    if (epoll_id == SRT_ERROR) {
+        fprintf(stderr, "cannot create SRT epoll: %s\n", srt_getlasterror_str());
         failure = 1;
         goto done;
     }
-    {
+
+    for (l = 0; l < listener_count; l++) {
         int nonblocking = 0;
+        int mask = SRT_EPOLL_IN | SRT_EPOLL_ERR;
+
+        listener = srt_create_socket();
+        if (listener == SRT_INVALID_SOCK) {
+            fprintf(stderr, "cannot create SRT listener: %s\n",
+                    srt_getlasterror_str());
+            failure = 1;
+            goto done;
+        }
+        listeners[l] = listener;
         if (srt_setsockopt(listener, 0, SRTO_RCVSYN, &nonblocking,
                            sizeof(nonblocking)) == SRT_ERROR)
         {
@@ -570,29 +687,20 @@ main(int argc, char **argv)
             failure = 1;
             goto done;
         }
-    }
 
-    memset(&address, 0, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_port = htons((uint16_t) port_arg);
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (srt_bind(listener, (struct sockaddr *) &address, sizeof(address)) == SRT_ERROR
-        || srt_listen(listener, (int) expected) == SRT_ERROR)
-    {
-        fprintf(stderr, "cannot bind/listen on 127.0.0.1:%lu: %s\n", port_arg,
-                srt_getlasterror_str());
-        failure = 1;
-        goto done;
-    }
-
-    epoll_id = srt_epoll_create();
-    if (epoll_id == SRT_ERROR) {
-        fprintf(stderr, "cannot create SRT epoll: %s\n", srt_getlasterror_str());
-        failure = 1;
-        goto done;
-    }
-    {
-        int mask = SRT_EPOLL_IN | SRT_EPOLL_ERR;
+        memset(&address, 0, sizeof(address));
+        address.sin_family = AF_INET;
+        address.sin_port = htons((uint16_t) (port_arg + l));
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (srt_bind(listener, (struct sockaddr *) &address, sizeof(address))
+                == SRT_ERROR
+            || srt_listen(listener, (int) expected) == SRT_ERROR)
+        {
+            fprintf(stderr, "cannot bind/listen on 127.0.0.1:%lu: %s\n",
+                    port_arg + l, srt_getlasterror_str());
+            failure = 1;
+            goto done;
+        }
         if (srt_epoll_add_usock(epoll_id, listener, &mask) == SRT_ERROR) {
             fprintf(stderr, "cannot monitor SRT listener: %s\n",
                     srt_getlasterror_str());
@@ -602,7 +710,8 @@ main(int argc, char **argv)
     }
 
     while (!stop_requested) {
-        int count = srt_epoll_uwait(epoll_id, events, (int) (expected + 1), 1000);
+        int count = srt_epoll_uwait(epoll_id, events,
+                                    (int) (expected + listener_count), 1000);
         if (count == SRT_ERROR) {
             int system_error;
             int error = srt_getlasterror(&system_error);
@@ -625,13 +734,8 @@ main(int argc, char **argv)
             if (event_mask & SRT_EPOLL_ERR) {
                 size_t peer_index;
 
-                if (sock != listener) {
-                    for (peer_index = 0; peer_index < connected; peer_index++) {
-                        if (peers[peer_index].sock == sock) {
-                            break;
-                        }
-                    }
-                    if (peer_index == connected) {
+                if (!is_listener(listeners, listener_count, sock)) {
+                    if (peer_map_get(&peer_map, peers, sock, &peer_index) != 0) {
                         /* A replaced session can still have a queued event. */
                         continue;
                     }
@@ -650,9 +754,9 @@ main(int argc, char **argv)
                 continue;
             }
 
-            if (sock == listener) {
+            if (is_listener(listeners, listener_count, sock)) {
                 for (;;) {
-                    SRTSOCKET accepted = srt_accept(listener, NULL, NULL);
+                    SRTSOCKET accepted = srt_accept(sock, NULL, NULL);
                     char streamid[STREAMID_CAP];
                     char destination[DESTINATION_CAP];
                     int streamid_len = sizeof(streamid) - 1;
@@ -767,6 +871,7 @@ main(int argc, char **argv)
                         }
                     }
                     peers[peer_index].sock = accepted;
+                    peer_map_put(&peer_map, accepted, peer_index);
                     if (is_new) {
                         connected++;
                     }
@@ -780,12 +885,7 @@ main(int argc, char **argv)
                 }
             } else {
                 size_t peer_index;
-                for (peer_index = 0; peer_index < connected; peer_index++) {
-                    if (peers[peer_index].sock == sock) {
-                        break;
-                    }
-                }
-                if (peer_index == connected) {
+                if (peer_map_get(&peer_map, peers, sock, &peer_index) != 0) {
                     /* A replaced session can still have a queued event. */
                     continue;
                 }
@@ -911,9 +1011,13 @@ done:
             }
         }
     }
-    if (listener != SRT_INVALID_SOCK) {
-        (void) srt_close(listener);
+    for (l = 0; l < LISTENER_CAP; l++) {
+        if (listeners[l] != SRT_INVALID_SOCK) {
+            (void) srt_close(listeners[l]);
+        }
     }
+    free(peer_map.keys);
+    free(peer_map.values);
     if (buffer != NULL) {
         free(buffer);
     }

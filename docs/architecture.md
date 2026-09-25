@@ -532,7 +532,7 @@ flowchart LR
 | `listen`, `listen_bond`, `listen_shared` | endpoint policy and retry | socket binding, listener state, group admission, or acquired-socket attachment |
 | `poll_create`, `poll_add_*`, `poll_wait` | the ingest event loop | readiness and transport progress |
 | `accept`, `accept_ready`, `streamid`, `recv` | the ingest thread and caller buffers | handshake, UDP receive, packet demultiplexing, reassembly, loss handling and receive buffering |
-| `connect`, `send`, `stats` | destination queues and the fixed egress shard pool | connect, pacing, retransmission, UDP writes and transport statistics |
+| `connect`, `connect_shared`, `send`, `stats` | destination queues, the fixed egress shard pool, and which lane (multiplexer group) a destination connects in | connect, the shared local endpoint of a group, pacing, retransmission, UDP writes and transport statistics |
 | `session_shutdown`, `session_close` | ordered thread teardown | waking blocked operations and releasing transport state |
 | `library_version`, `last_error`, `shutdown` | startup logging and lifecycle | implementation identity, diagnostics and backend-global cleanup |
 
@@ -564,8 +564,11 @@ The source-level path is intentionally visible:
   destination's slot maps to its logical shard modulo 16; the adaptive physical
   sender pool maps those logical lanes across its current active worker count,
   so scaling does not move a destination to a different shard.  Each lane
-  services its slots and calls only `connect`, `send`, `stats`,
-  `session_shutdown` and `session_close`.
+  services its slots and calls only `connect_shared`, `send`, `stats`,
+  `session_shutdown` and `session_close`.  The lane is also the destination's
+  transport multiplexer group: a lane's destinations share one library
+  endpoint, so the library's send and receive threads follow the 16 lanes
+  rather than the fanout (a backend without groups connects privately).
 - `src/srt/ngx_media_srt_udp.c` is a plain-UDP conformance double.  It is not a
   third SRT runtime and must not be used to infer reliability, encryption,
   pacing, group or library-thread behavior.
@@ -661,7 +664,7 @@ and the runtime itself has no internal reuseport-equivalent.
 | One port | one receive thread | one scheduler thread |
 | More ports in one worker | adds queue threads and receive lanes | shares the fixed pool; at most the measured scheduler parallelism |
 | More sessions | adds per-session `TsbPd` threads | shares the pool; no permanent thread per session |
-| More destinations | adds an `RcvQ`/`SndQ` pair per destination | shares the pool |
+| More destinations | share their lane's `RcvQ`/`SndQ` pair (at most 16 per worker) | shares the pool |
 | More nginx workers | independent process-local runtimes | independent process-local runtimes |
 | Bonding | build-dependent, same-process group registry | built-in groups, same-process group domain |
 | Shared port | application-owned socket plus kernel `SO_REUSEPORT` when supported | same acquired-socket requirement; no internal reuseport pool |

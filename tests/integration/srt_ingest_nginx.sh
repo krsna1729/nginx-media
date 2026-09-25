@@ -10,7 +10,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-NGINX="$ROOT/.build/nginx-install/sbin/nginx"
+NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/srt-nginx"
 PORT="${SRT_INGEST_NGINX_PORT:-19042}"
 API_PORT="${SRT_INGEST_NGINX_API_PORT:-19048}"

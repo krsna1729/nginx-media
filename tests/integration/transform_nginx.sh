@@ -7,7 +7,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-NGINX="$ROOT/.build/nginx-install/sbin/nginx"
+NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/external-transform"
 HTTP_PORT=18504
 API="http://127.0.0.1:$HTTP_PORT/media/api/v1"

@@ -1,0 +1,550 @@
+{
+ "schema": "nginx-media.bench-history/1",
+ "tier": "phase5-all-workloads",
+ "timestamp": "2026-09-25T16:49:16+00:00",
+ "sha": "944c7ce662bc85cd068e1bcd7341f94da32d07a4",
+ "ref": "claude/magical-clarke-5ijo63",
+ "run": null,
+ "host": {
+  "nproc": 4,
+  "cpu_model": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+  "kernel": "6.18.44-fc-v37",
+  "runner": null
+ },
+ "configs": {
+  "all": {
+   "harness_status": null,
+   "mixes": {
+    "hls-push-95-srt-5": {
+     "rungs": [
+      {
+       "destinations": 1,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 0.0058,
+       "sender_cpu_per_gbps": 2814.74,
+       "receiver_cpu_per_gbps": 12.14,
+       "host_cpu_busy": 0.0731,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 32,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 0.1903,
+       "sender_cpu_per_gbps": 111.87,
+       "receiver_cpu_per_gbps": 18.92,
+       "host_cpu_busy": 0.0629,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 64,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99978,
+       "delivered_gbps": 0.3782,
+       "sender_cpu_per_gbps": 65.82,
+       "receiver_cpu_per_gbps": 13.57,
+       "host_cpu_busy": 0.0934,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 96,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99883,
+       "delivered_gbps": 0.5678,
+       "sender_cpu_per_gbps": 51.28,
+       "receiver_cpu_per_gbps": 12.91,
+       "host_cpu_busy": 0.157,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 128,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 0.7552,
+       "sender_cpu_per_gbps": 39.35,
+       "receiver_cpu_per_gbps": 11.47,
+       "host_cpu_busy": 0.1846,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 192,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.9997,
+       "delivered_gbps": 1.1318,
+       "sender_cpu_per_gbps": 39.66,
+       "receiver_cpu_per_gbps": 13.04,
+       "host_cpu_busy": 0.2259,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 256,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 1.508,
+       "sender_cpu_per_gbps": 33.27,
+       "receiver_cpu_per_gbps": 12.1,
+       "host_cpu_busy": 0.2518,
+       "srt_backend": "libsrt.so.1.5"
+      }
+     ],
+     "highest_passing": 256,
+     "first_quality_failure": null,
+     "setup_limited": []
+    },
+    "pure-hls": {
+     "rungs": [
+      {
+       "destinations": 1,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.95,
+       "delivered_gbps": null,
+       "sender_cpu_per_gbps": null,
+       "receiver_cpu_per_gbps": null,
+       "host_cpu_busy": 0.0494,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 32,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.95,
+       "delivered_gbps": null,
+       "sender_cpu_per_gbps": null,
+       "receiver_cpu_per_gbps": null,
+       "host_cpu_busy": 0.0759,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 64,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.95,
+       "delivered_gbps": null,
+       "sender_cpu_per_gbps": null,
+       "receiver_cpu_per_gbps": null,
+       "host_cpu_busy": 0.0913,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 96,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.95,
+       "delivered_gbps": null,
+       "sender_cpu_per_gbps": null,
+       "receiver_cpu_per_gbps": null,
+       "host_cpu_busy": 0.1208,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 128,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.95,
+       "delivered_gbps": null,
+       "sender_cpu_per_gbps": null,
+       "receiver_cpu_per_gbps": null,
+       "host_cpu_busy": 0.1571,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 192,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.95,
+       "delivered_gbps": null,
+       "sender_cpu_per_gbps": null,
+       "receiver_cpu_per_gbps": null,
+       "host_cpu_busy": 0.1624,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 256,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.95,
+       "delivered_gbps": null,
+       "sender_cpu_per_gbps": null,
+       "receiver_cpu_per_gbps": null,
+       "host_cpu_busy": 0.2033,
+       "srt_backend": "libsrt.so.1.5"
+      }
+     ],
+     "highest_passing": 256,
+     "first_quality_failure": null,
+     "setup_limited": []
+    },
+    "pure-hls-push": {
+     "rungs": [
+      {
+       "destinations": 1,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 0.0058,
+       "sender_cpu_per_gbps": 2795.08,
+       "receiver_cpu_per_gbps": 12.16,
+       "host_cpu_busy": 0.0434,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 32,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 0.1846,
+       "sender_cpu_per_gbps": 111.93,
+       "receiver_cpu_per_gbps": 1.79,
+       "host_cpu_busy": 0.0581,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 64,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 0.3688,
+       "sender_cpu_per_gbps": 53.47,
+       "receiver_cpu_per_gbps": 1.63,
+       "host_cpu_busy": 0.0636,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 96,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 0.5532,
+       "sender_cpu_per_gbps": 36.08,
+       "receiver_cpu_per_gbps": 1.63,
+       "host_cpu_busy": 0.0695,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 128,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 0.7381,
+       "sender_cpu_per_gbps": 29.52,
+       "receiver_cpu_per_gbps": 1.63,
+       "host_cpu_busy": 0.0846,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 192,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 1.1078,
+       "sender_cpu_per_gbps": 18.25,
+       "receiver_cpu_per_gbps": 1.69,
+       "host_cpu_busy": 0.1065,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 256,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 1.4751,
+       "sender_cpu_per_gbps": 14.48,
+       "receiver_cpu_per_gbps": 1.67,
+       "host_cpu_busy": 0.1364,
+       "srt_backend": "libsrt.so.1.5"
+      }
+     ],
+     "highest_passing": 256,
+     "first_quality_failure": null,
+     "setup_limited": []
+    },
+    "pure-rtmp": {
+     "rungs": [
+      {
+       "destinations": 1,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 0.0085,
+       "sender_cpu_per_gbps": 659.93,
+       "receiver_cpu_per_gbps": 441.91,
+       "host_cpu_busy": 0.0274,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 32,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99987,
+       "delivered_gbps": 0.2732,
+       "sender_cpu_per_gbps": 26.1,
+       "receiver_cpu_per_gbps": 22.81,
+       "host_cpu_busy": 0.045,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 64,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99851,
+       "delivered_gbps": 0.5465,
+       "sender_cpu_per_gbps": 15.42,
+       "receiver_cpu_per_gbps": 15.37,
+       "host_cpu_busy": 0.0439,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 96,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99912,
+       "delivered_gbps": 0.8198,
+       "sender_cpu_per_gbps": 12.84,
+       "receiver_cpu_per_gbps": 15.37,
+       "host_cpu_busy": 0.0903,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 128,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99913,
+       "delivered_gbps": 1.0934,
+       "sender_cpu_per_gbps": 10.79,
+       "receiver_cpu_per_gbps": 18.56,
+       "host_cpu_busy": 0.085,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 192,
+       "outcome": "quality-failure",
+       "min_delivery_ratio": 0.999,
+       "delivered_gbps": 1.6413,
+       "sender_cpu_per_gbps": 11.63,
+       "receiver_cpu_per_gbps": 23.91,
+       "host_cpu_busy": 0.1705,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 256,
+       "outcome": "quality-failure",
+       "min_delivery_ratio": 0.99928,
+       "delivered_gbps": 2.1883,
+       "sender_cpu_per_gbps": 16.17,
+       "receiver_cpu_per_gbps": 33.39,
+       "host_cpu_busy": 0.3167,
+       "srt_backend": "libsrt.so.1.5"
+      }
+     ],
+     "highest_passing": 128,
+     "first_quality_failure": 192,
+     "setup_limited": []
+    },
+    "pure-srt": {
+     "rungs": [
+      {
+       "destinations": 1,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 0.0088,
+       "sender_cpu_per_gbps": 2200.61,
+       "receiver_cpu_per_gbps": 270.79,
+       "host_cpu_busy": 0.0446,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 32,
+       "outcome": "pass",
+       "min_delivery_ratio": 1.00039,
+       "delivered_gbps": 0.2811,
+       "sender_cpu_per_gbps": 202.55,
+       "receiver_cpu_per_gbps": 130.0,
+       "host_cpu_busy": 0.2291,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 64,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99999,
+       "delivered_gbps": 0.5611,
+       "sender_cpu_per_gbps": 140.69,
+       "receiver_cpu_per_gbps": 130.71,
+       "host_cpu_busy": 0.3904,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 96,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99676,
+       "delivered_gbps": 0.8378,
+       "sender_cpu_per_gbps": 148.39,
+       "receiver_cpu_per_gbps": 198.36,
+       "host_cpu_busy": 0.7621,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 128,
+       "outcome": "quality-failure",
+       "min_delivery_ratio": 0.9657,
+       "delivered_gbps": 1.0888,
+       "sender_cpu_per_gbps": 113.78,
+       "receiver_cpu_per_gbps": 188.99,
+       "host_cpu_busy": 0.8591,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 192,
+       "outcome": "quality-failure",
+       "min_delivery_ratio": 0.49038,
+       "delivered_gbps": 0.8909,
+       "sender_cpu_per_gbps": 129.09,
+       "receiver_cpu_per_gbps": 254.86,
+       "host_cpu_busy": 0.8984,
+       "srt_backend": "libsrt.so.1.5"
+      }
+     ],
+     "highest_passing": 96,
+     "first_quality_failure": 128,
+     "setup_limited": []
+    },
+    "rtmp-50-hls-push-45-srt-5": {
+     "rungs": [
+      {
+       "destinations": 1,
+       "outcome": "pass",
+       "min_delivery_ratio": 1.0009,
+       "delivered_gbps": 0.0085,
+       "sender_cpu_per_gbps": 843.37,
+       "receiver_cpu_per_gbps": 585.68,
+       "host_cpu_busy": 0.0359,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 32,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99889,
+       "delivered_gbps": 0.2349,
+       "sender_cpu_per_gbps": 58.58,
+       "receiver_cpu_per_gbps": 43.55,
+       "host_cpu_busy": 0.1064,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 64,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 0.4671,
+       "sender_cpu_per_gbps": 34.31,
+       "receiver_cpu_per_gbps": 26.61,
+       "host_cpu_busy": 0.1148,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 96,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99834,
+       "delivered_gbps": 0.7018,
+       "sender_cpu_per_gbps": 29.57,
+       "receiver_cpu_per_gbps": 23.68,
+       "host_cpu_busy": 0.0862,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 128,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99978,
+       "delivered_gbps": 0.9338,
+       "sender_cpu_per_gbps": 23.76,
+       "receiver_cpu_per_gbps": 19.23,
+       "host_cpu_busy": 0.1226,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 192,
+       "outcome": "pass",
+       "min_delivery_ratio": 1,
+       "delivered_gbps": 1.4044,
+       "sender_cpu_per_gbps": 22.77,
+       "receiver_cpu_per_gbps": 18.6,
+       "host_cpu_busy": 0.1812,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 256,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99903,
+       "delivered_gbps": 1.8692,
+       "sender_cpu_per_gbps": 21.13,
+       "receiver_cpu_per_gbps": 17.76,
+       "host_cpu_busy": 0.22,
+       "srt_backend": "libsrt.so.1.5"
+      }
+     ],
+     "highest_passing": 256,
+     "first_quality_failure": null,
+     "setup_limited": []
+    },
+    "rtmp-95-srt-5": {
+     "rungs": [
+      {
+       "destinations": 1,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99963,
+       "delivered_gbps": 0.0085,
+       "sender_cpu_per_gbps": 737.95,
+       "receiver_cpu_per_gbps": 503.68,
+       "host_cpu_busy": 0.0475,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 32,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99926,
+       "delivered_gbps": 0.2739,
+       "sender_cpu_per_gbps": 46.22,
+       "receiver_cpu_per_gbps": 34.9,
+       "host_cpu_busy": 0.114,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 64,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.9987,
+       "delivered_gbps": 0.5476,
+       "sender_cpu_per_gbps": 27.14,
+       "receiver_cpu_per_gbps": 23.32,
+       "host_cpu_busy": 0.1189,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 96,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99953,
+       "delivered_gbps": 0.8212,
+       "sender_cpu_per_gbps": 23.45,
+       "receiver_cpu_per_gbps": 20.94,
+       "host_cpu_busy": 0.1124,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 128,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.9995,
+       "delivered_gbps": 1.0984,
+       "sender_cpu_per_gbps": 20.87,
+       "receiver_cpu_per_gbps": 23.02,
+       "host_cpu_busy": 0.263,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 192,
+       "outcome": "pass",
+       "min_delivery_ratio": 0.99919,
+       "delivered_gbps": 1.6479,
+       "sender_cpu_per_gbps": 20.97,
+       "receiver_cpu_per_gbps": 25.95,
+       "host_cpu_busy": 0.2753,
+       "srt_backend": "libsrt.so.1.5"
+      },
+      {
+       "destinations": 256,
+       "outcome": "quality-failure",
+       "min_delivery_ratio": 0.99951,
+       "delivered_gbps": 2.1912,
+       "sender_cpu_per_gbps": 24.06,
+       "receiver_cpu_per_gbps": 33.43,
+       "host_cpu_busy": 0.3738,
+       "srt_backend": "libsrt.so.1.5"
+      }
+     ],
+     "highest_passing": 192,
+     "first_quality_failure": 256,
+     "setup_limited": []
+    }
+   }
+  }
+ }
+}

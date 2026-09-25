@@ -13,7 +13,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-NGINX="$ROOT/.build/nginx-install/sbin/nginx"
+NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/hls-push"
 SRT_PORT=24660
 HTTP_PORT=18490

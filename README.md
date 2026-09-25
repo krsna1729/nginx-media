@@ -63,6 +63,7 @@ Every claim below is produced by a command in this repository.
 
 ```sh
 make bench-worker-scaling      # what worker count buys
+make bench-capacity-quality   # receiver-verified ladders, seven workloads
 make bench-ingest-egress       # ingest versus egress, and the program spread
 make bench-ingest-egress-fanout # ingest and egress under fanout, and the price of routing
 make bench-capacity-curve     # offered-load capacity curve and fairness

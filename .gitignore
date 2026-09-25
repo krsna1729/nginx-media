@@ -9,3 +9,4 @@ objs/
 
 # unit test binaries
 tests/unit/build/
+__pycache__/

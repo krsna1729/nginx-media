@@ -191,6 +191,20 @@ typedef struct {
     ngx_media_srt_listener_t *(*listen_shared)(const u_char *host,
         ngx_uint_t port, const ngx_media_srt_params_t *params,
         ngx_log_t *log);
+
+    /*
+     * connect() with a multiplexer group.  Callers in the same nonzero group
+     * share one local UDP endpoint, so the library runs one send and one
+     * receive thread for the whole group instead of a pair per destination.
+     * Group 0, a backend that cannot share, or a local endpoint that can no
+     * longer be rebound all fall back to a private endpoint: sharing is an
+     * efficiency, never a condition for connecting.  NULL when the backend
+     * has no such notion; connect() is used instead.
+     */
+    ngx_media_srt_session_t *(*connect_shared)(const u_char *host,
+        ngx_uint_t port, const u_char *streamid, size_t streamid_len,
+        ngx_msec_t timeout_ms, const ngx_media_srt_params_t *params,
+        ngx_uint_t group, ngx_log_t *log);
 } ngx_media_srt_ops_t;
 
 extern ngx_media_srt_ops_t ngx_media_srt_haivision_ops;
@@ -250,6 +264,14 @@ ngx_media_srt_session_t *ngx_media_srt_connect(const u_char *host,
     ngx_uint_t port, const u_char *streamid, size_t streamid_len,
     ngx_msec_t timeout_ms, const ngx_media_srt_params_t *params,
     ngx_log_t *log);
+/*
+ * connect() in a multiplexer group (see connect_shared in the backend
+ * table); a backend without groups connects privately.
+ */
+ngx_media_srt_session_t *ngx_media_srt_connect_shared(const u_char *host,
+    ngx_uint_t port, const u_char *streamid, size_t streamid_len,
+    ngx_msec_t timeout_ms, const ngx_media_srt_params_t *params,
+    ngx_uint_t group, ngx_log_t *log);
 ngx_int_t ngx_media_srt_session_send(ngx_media_srt_session_t *session,
     const u_char *buf, size_t len, ngx_msec_t timeout_ms);
 void ngx_media_srt_session_stats(ngx_media_srt_session_t *session,
