@@ -249,12 +249,16 @@ main(void)
 
     ensure_dir(HLS_DIR);
     ensure_dir(HLS_DIR "-small");
+    ensure_dir(HLS_DIR "-exact");
 
     fixture_init(&f);
 
     TEST_CASE("configuration and init");
     ngx_media_hls_conf_default(&conf);
-    TEST_ASSERT_EQ_U64(conf.target_duration, 6000);
+    TEST_ASSERT_EQ_U64(conf.target_duration, 2000);
+    TEST_ASSERT_EQ_U64(conf.min_duration, 2000);
+    TEST_ASSERT_EQ_U64(conf.max_duration, 4000);
+    TEST_ASSERT_EQ_U64(conf.max_segments, 5);
 
     /* a fast test profile: 1s target, 0.5s minimum, 2s maximum */
     conf.path.data = (u_char *) HLS_DIR;
@@ -478,6 +482,34 @@ main(void)
         TEST_ASSERT(small.bytes_written > 0);
 
         ngx_media_hls_destroy(&small);
+    }
+
+    TEST_CASE("keyframes exactly at the minimum give segments of the minimum");
+    {
+        ngx_media_hls_t  exact;
+
+        /* 25 frames a second, a keyframe every second, 1 s asked */
+        conf.path.data = (u_char *) HLS_DIR "-exact";
+        conf.path.len = sizeof(HLS_DIR "-exact") - 1;
+        conf.target_duration = 1000;
+        conf.min_duration = 1000;
+        conf.max_duration = 2000;
+        conf.max_segment_bytes = 1024 * 1024;
+        conf.max_segments = 8;
+        TEST_ASSERT_EQ_INT(ngx_media_hls_init(&exact, &conf, NULL), NGX_OK);
+
+        TEST_ASSERT_EQ_INT(make_burst(&f, &burst, 101, 900000, 3600, 25),
+                           NGX_OK);
+        TEST_ASSERT_EQ_INT(ngx_media_hls_add_burst(&exact, &burst), NGX_OK);
+        ngx_media_ts_mux_burst_destroy(&burst);
+
+        /* cut at 1, 2, 3 and 4 s - not at 2 and 4 */
+        TEST_ASSERT_EQ_U64(ngx_media_hls_segments(&exact), 4);
+        TEST_ASSERT_EQ_U64(exact.forced_cuts, 0);
+        TEST_ASSERT_EQ_U64(exact.segments[0].duration, 1000);
+        TEST_ASSERT_EQ_U64(exact.segments[3].duration, 1000);
+
+        ngx_media_hls_destroy(&exact);
     }
 
     TEST_CASE("NULL tolerance");

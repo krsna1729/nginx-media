@@ -61,4 +61,17 @@ void ngx_media_hls_ingest_drain_all(void);
 /* stops and joins every reader; called at shutdown */
 void ngx_media_hls_ingest_stop_all(void);
 
+#ifdef NGX_MEDIA_UNIT_TEST
+/*
+ * The order a reader would take a directory's segments in, without reading
+ * them: up to max names, each copied into names[i] (cap bytes).  Returns the
+ * count.  Successive calls continue where the previous one stopped, as the
+ * reader does between scans; state is the opaque handle it returns.
+ */
+ngx_uint_t ngx_media_hls_ingest_order(void **state, const char *directory,
+    char names[][256], ngx_uint_t max);
+void ngx_media_hls_ingest_order_free(void *state);
+ngx_int_t ngx_media_hls_ingest_name_cmp(const char *a, const char *b);
+#endif
+
 #endif /* NGX_MEDIA_HLS_INGEST_H */

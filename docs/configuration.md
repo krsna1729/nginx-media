@@ -367,10 +367,17 @@ a caller who reaches it can do; `api.md` has the routes.
 
 ### `media_hls_ingest <directory>;`
 
-Location-level (`NGX_HTTP_LOC_CONF`).  Turns that location into an upload
-endpoint: someone else's encoder `PUT`s or `POST`s an HLS segment to a URL
-under it and the body is stored in `<directory>` under the name at the end of
-the request URI, so the uploader names its segments the way a reader expects.
+Location-level (`NGX_HTTP_LOC_CONF`).  Turns that location into an HLS push
+(HTTP ingest) endpoint that speaks the industry's contract - YouTube's HLS
+ingest, and the DASH-IF Live Media Ingest specification's Interface-2: an
+encoder `PUT`s or `POST`s each MPEG-TS segment and then the media playlist
+that names it, and may `DELETE` segments that have left its playlist.  The
+object is stored under `<directory>` at its path relative to the location
+(`/ingest/live/news/index7.ts` -> `<directory>/live/news/index7.ts`), so one
+endpoint serves many streams.  New objects are answered `201`, replaced ones
+`204`, deletes `200` (`404` when absent), container types this build cannot
+carry (fMP4/CMAF, DASH) `415`.  What an encoder must send, with an ffmpeg
+example, is in `hls-push-interop.md`.
 
 ```nginx
 location /ingest/ {
@@ -381,7 +388,10 @@ location /ingest/ {
 The endpoint deliberately does not know what reads the directory — the two
 halves stay separate, so an upload arriving by any other means works just as
 well.  The usual reader is a source of type `hls_push` created through the
-control API, which reads this directory.  This inbound `hls_push` source is
+control API, pointed at one stream's directory.  It reads segments in the
+order the media playlist there gives (by media sequence number) and, with no
+playlist, in the order of the number at the end of their names - as a number,
+so `index10.ts` follows `index9.ts`.  This inbound `hls_push` source is
 separate from the outbound `hls_push` destination described below.
 
 The body is written to a file by nginx's own machinery rather than read into
@@ -450,17 +460,26 @@ a log or an API read.
  "profile":"youtube_live"}
 ```
 
-### Profile
+### Profile and HLS push settings
 
 `profile` is a named set of platform rules layered on the generic HLS
 publisher, not a special path through the media core: `youtube_live` requires
 an `https` endpoint, a segment duration between 1000 and 4000 ms and at most
-five outstanding segments in the playlist, and fills the defaults when a field
-is unset.  A configuration the platform would reject is refused with
+five outstanding segments in the playlist, sends `POST`, and does not `DELETE`
+expired segments.  It fills the defaults when a field is unset.  A
+configuration the platform would reject is refused with
 `{"error":"profile_violation",...}` rather than clamped, because silently
-changing an operator's number is worse than telling them it is wrong.  The
-validated numbers are recorded on the destination; they do not yet drive the
-segmenter, which still decides its own segmentation.
+changing an operator's number is worse than telling them it is wrong.
+
+Every `hls_push` destination, with a profile or without, takes
+`segment_duration_ms`, `playlist_window`, `method` (`PUT` or `POST`) and
+`delete_expired` (`true` or `false`); without a profile the limits are
+1000–30000 ms and 1–32 segments, and a violation is `invalid_hls_push`.  The
+settings drive the output: the stream's segmenter follows its strictest HLS
+push destination, and each destination is sent a playlist rewritten to its own
+window.  The segmentation defaults - a 2 s target, cut at the first keyframe
+from 2 s and forced at 4 s, and a window of 5 - already meet YouTube's ingest
+contract.  The full contract is in `hls-push-interop.md`.
 
 ## Build-time configuration
 

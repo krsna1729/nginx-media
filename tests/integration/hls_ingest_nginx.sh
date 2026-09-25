@@ -277,6 +277,90 @@ printf '%s' "$ODD" | grep -q '"id":"odd-uploader".*"active":false' \
 
 echo "   it published no frames and never went on air"
 
+# ---------------------------------------------------------------------------
+# a standard HLS push encoder: segment, then the media playlist naming it,
+# every segment; unpadded numbered names; DELETE of expired segments.  This
+# is the ingest shape of RFC 8216 publishing as YouTube's HLS ingest and the
+# DASH-IF Live Media Ingest specification (Interface-2) describe it, and
+# ffmpeg's HLS muxer speaks it with -method PUT.
+# ---------------------------------------------------------------------------
+
+echo "== a standard HLS push encoder (ffmpeg -f hls -method PUT)"
+
+curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"application":"live","name":"std"}' "$API/streams" >/dev/null
+mkdir -p "$RUN/uploaded/std/live"
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d "{\"id\":\"encoder\",\"type\":\"hls_push\",\"path\":\"$RUN/uploaded/std/live\"}" \
+    "$API/streams/live/std/sources")"
+[ "$STATUS" = "201" ] || { echo "std source: expected 201, got $STATUS" >&2; exit 1; }
+
+# 16 two-second segments: the names cross index9 -> index10, which is where
+# ordering by name as a string goes wrong
+ffmpeg -hide_banner -loglevel warning -re -f lavfi \
+    -i "testsrc2=size=320x240:rate=25" -t 32 \
+    -c:v libx264 -preset ultrafast -g 50 -pix_fmt yuv420p \
+    -f hls -hls_time 2 -hls_list_size 5 \
+    -hls_flags delete_segments -method PUT \
+    "http://127.0.0.1:$UPLOAD_PORT/ingest/std/live/index.m3u8" \
+    >"$RUN/std-ffmpeg.log" 2>&1
+FFMPEG_STATUS=$?
+
+grep -iE 'error|failed|40[0-9] |41[0-9] |50[0-9] ' "$RUN/std-ffmpeg.log" \
+    && { echo "the encoder reported upload errors" >&2; exit 1; }
+[ "$FFMPEG_STATUS" = 0 ] \
+    || { echo "the encoder exited with $FFMPEG_STATUS" >&2
+         cat "$RUN/std-ffmpeg.log" >&2; exit 1; }
+
+STORED="$(grep -c 'hls ingest stored std/live/index[0-9]*\.ts' "$RUN/logs/error.log")"
+PLAYLISTS="$(grep -c 'hls ingest stored std/live/index\.m3u8' "$RUN/logs/error.log")"
+echo "   segments stored: $STORED, playlist uploads: $PLAYLISTS"
+[ "$STORED" -ge 15 ] && [ "$PLAYLISTS" -ge "$STORED" ] \
+    || { echo "expected a playlist upload per segment" >&2; exit 1; }
+
+LEFT="$(ls "$RUN/uploaded/std/live"/*.ts 2>/dev/null | wc -l)"
+echo "   segments left after the encoder's DELETEs: $LEFT"
+[ "$LEFT" -le 7 ] \
+    || { echo "expired segments were not deleted" >&2; exit 1; }
+
+STD="$(curl -fsS "$API/streams/live/std")"
+STD_FRAMES="$(printf '%s' "$STD" | grep -o '"program_frames":[0-9]*' | cut -d: -f2)"
+echo "   program frames: ${STD_FRAMES:-0}"
+# 32 s at 25 fps is 800 frames; allow for the start and the last segments
+[ "${STD_FRAMES:-0}" -ge 600 ] \
+    || { echo "the pushed program is short of frames" >&2; exit 1; }
+curl -fsS "$API/streams/live/std/sources" \
+    | grep -q '"id":"encoder".*"healthy":true' \
+    || { echo "the standard push source is not healthy" >&2; exit 1; }
+
+echo "== the endpoint's answers"
+put() {   # <path> -> status
+    curl -sS -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$SEG" \
+        "http://127.0.0.1:$UPLOAD_PORT/ingest/$1"
+}
+expect() {   # <what> <expected> <got>
+    echo "   $1 -> $3"
+    [ "$3" = "$2" ] || { echo "$1: expected $2, got $3" >&2; exit 1; }
+}
+expect "PUT a new segment"          201 "$(put codes/a1.ts)"
+expect "PUT it again"               204 "$(put codes/a1.ts)"
+expect "PUT a playlist"             201 "$(put codes/a.m3u8)"
+expect "PUT fMP4 (.m4s)"            415 "$(put codes/a1.m4s)"
+expect "PUT a DASH manifest"        415 "$(put codes/a.mpd)"
+expect "PUT an unknown type"        400 "$(put codes/a1.bin)"
+expect "PUT a hidden name"          400 "$(put codes/.a1.ts)"
+# nginx resolves the dots before any location matches, so a traversal never
+# reaches the endpoint at all; what matters is a 4xx and nothing written
+CODE="$(curl -sS -o /dev/null -w '%{http_code}' --path-as-is -X PUT --data-binary @"$SEG" "http://127.0.0.1:$UPLOAD_PORT/ingest/codes/../../x.ts")"
+echo "   PUT a traversal -> $CODE"
+case "$CODE" in 4??) ;; *) echo "a traversal was not refused: $CODE" >&2; exit 1 ;; esac
+expect "GET"                        405 "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$UPLOAD_PORT/ingest/codes/a1.ts")"
+expect "DELETE a segment"           200 "$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:$UPLOAD_PORT/ingest/codes/a1.ts")"
+expect "DELETE it again"            404 "$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:$UPLOAD_PORT/ingest/codes/a1.ts")"
+[ ! -e "$RUN/x.ts" ] && [ ! -e "$RUN/uploaded/x.ts" ] \
+    || { echo "a traversal wrote a file" >&2; exit 1; }
+
 trap - EXIT
 cleanup
 

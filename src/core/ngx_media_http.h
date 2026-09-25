@@ -44,12 +44,34 @@ ngx_int_t ngx_media_http_get(const ngx_str_t *url, const ngx_str_t *ca_file,
     u_char *buf, size_t cap, size_t *len, ngx_log_t *log);
 
 /*
- * PUT an already-open snapshot of a file to url.  path supplies the remote
- * basename; file_fd remains caller-owned so sealed files can be shared across
- * destination queues and remain readable after unlink or rename retention.
+ * A connection kept for one destination's requests (HTTP/1.1 keep-alive).
+ * An ingest source SHOULD use persistent connections (DASH-IF Live Media
+ * Ingest; Akamai asks for one per stream): a connection per object costs a
+ * TCP handshake and, over HTTPS, a TLS handshake per segment and playlist.
+ * Owned by one thread at a time; the caller serialises its use.
  */
-ngx_int_t ngx_media_http_put_file(const ngx_str_t *url,
-    const ngx_str_t *ca_file, const u_char *path, int file_fd, off_t size,
+typedef struct {
+    int         fd;
+    void       *ssl;
+    u_char      key[640];         /* scheme, host, port and trust anchor */
+    uint64_t    connects;
+    uint64_t    requests;
+} ngx_media_http_conn_t;
+
+void ngx_media_http_conn_init(ngx_media_http_conn_t *c);
+void ngx_media_http_conn_close(ngx_media_http_conn_t *c);
+
+/*
+ * One request for the object `name` below url, on c's connection when it is
+ * still open to the same endpoint, else on a new one; a stale kept
+ * connection is replaced once.  method is "PUT", "POST" or "DELETE".  The
+ * body is size bytes of file_fd (caller-owned, read with an explicit offset)
+ * when file_fd >= 0, else size bytes of buf, else there is none.  Returns the HTTP status (> 0), or NGX_ERROR when no
+ * status was received, NGX_DECLINED when the endpoint is not supported.
+ */
+ngx_int_t ngx_media_http_send(ngx_media_http_conn_t *c, const ngx_str_t *url,
+    const ngx_str_t *ca_file, const char *method, const u_char *name,
+    int file_fd, const u_char *buf, off_t size, const char *content_type,
     ngx_log_t *log);
 
 /* whether kTLS is engaged on this connection, for diagnostics */

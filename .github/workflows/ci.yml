@@ -106,6 +106,8 @@ jobs:
           make hls-pull
           make hls-ingest
           make hls-profile
+          make hls-push-conformance
+          make ffmpeg-interop
           make file-source
           make rtmp
           make srt-output

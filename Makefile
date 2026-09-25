@@ -4,7 +4,8 @@ NGINX_VERSION ?= 1.30.5
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
     bench-capacity-curve bench-capacity-quality bench-burst-sizing test-image test-in-container \
     srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph \
-    failover hls hls-push hls-pull hls-ingest hls-profile file-source transform \
+    failover hls hls-push hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
+    file-source transform \
     stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
     srt-lane-isolation srt-crypto \
     srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls \
@@ -57,6 +58,14 @@ hls-ingest:
 
 hls-profile:
 	tests/integration/hls_profile_nginx.sh
+
+hls-push-conformance:
+	tests/integration/hls_push_conformance.sh
+
+# ffmpeg on both sides: every way media enters, every way it leaves, with
+# H.264/HEVC and AAC combinations, checked on what ffmpeg decodes.
+ffmpeg-interop:
+	tests/integration/ffmpeg_interop.sh
 
 churn:
 	tests/integration/churn_nginx.sh
@@ -147,7 +156,8 @@ BASE ?= debian:trixie
 DOCKER_CACHE_ARGS ?=
 TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
-    hls-profile file-source transform stream-delete incarnation graph-conflict churn \
+    hls-profile hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
+    graph-conflict churn \
     rtmp \
     rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux srt-lane-isolation srt-crypto \
     srt-worker-ports \

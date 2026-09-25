@@ -181,8 +181,15 @@ wait_for_writers_drained() {
     return 1
 }
 
+# every discontinuity the stream has had: the ones that have left the
+# playlist window (EXT-X-DISCONTINUITY-SEQUENCE counts them, RFC 8216
+# 4.3.3.3) plus the ones still listed.  The listed count alone can stay flat
+# while one leaves as another arrives, which a short window makes likely.
 discontinuities() {
-    grep -c '^#EXT-X-DISCONTINUITY$' "$RUN/hls/live/news/index.m3u8" 2>/dev/null || true
+    awk -F: '/^#EXT-X-DISCONTINUITY-SEQUENCE:/ { gone = $2 }
+             /^#EXT-X-DISCONTINUITY$/ { listed++ }
+             END { print gone + listed }' \
+        "$RUN/hls/live/news/index.m3u8" 2>/dev/null || echo 0
 }
 
 # the first segment of the newest generation: the one that follows the last

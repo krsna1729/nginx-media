@@ -245,25 +245,189 @@ ngx_media_hls_ingest_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 }
 
 /*
- * PUT /segment.ts -> the body lands in the watched directory.
+ * The HLS ingest endpoint is a receiving entity in the sense of the DASH-IF
+ * Live Media Ingest specification, Interface-2, which is also the shape of
+ * YouTube's HLS ingest: an encoder sends each media segment and then the
+ * media playlist that names it, as individual HTTP PUT or POST requests
+ * (either may be used), and may DELETE segments that have left its playlist.
  *
- * The name comes from the request URI, so an uploader names its segments the
- * way the reader expects, and the file appears atomically: the temp file is
- * linked into place, so a reader either sees a whole segment or none of it.
+ *   PUT|POST <location>/<path>.ts      a segment        201 new, 204 replaced
+ *   PUT|POST <location>/<path>.m3u8    a media playlist 201 new, 204 replaced
+ *   DELETE   <location>/<path>         remove it        200, 404 when absent
+ *   other media types (.m4s, .mp4, .cmfv, .init, .mpd, .key, ...)  415
+ *   anything else, or a path that is not a plain relative path      400
+ *
+ * <path> is kept below the ingest directory, so one endpoint can take many
+ * streams ("live/news/index7.ts"); each component is [A-Za-z0-9._-], does
+ * not start with a dot, and there are at most four of them.  The source that
+ * reads a stream is pointed at its directory.
+ */
+#define NGX_MEDIA_HLS_INGEST_DEPTH_MAX  4
+
+static ngx_uint_t
+ngx_media_hls_ingest_suffix(const ngx_str_t *name, const char *suffix)
+{
+    size_t  len = ngx_strlen(suffix);
+
+    return name->len > len
+           && ngx_strncasecmp(name->data + name->len - len, (u_char *) suffix,
+                              len) == 0;
+}
+
+/*
+ * The object's path relative to the endpoint, validated.  NGX_OK, or the
+ * HTTP status to answer with.
+ */
+static ngx_int_t
+ngx_media_hls_ingest_path(ngx_http_request_t *r, ngx_str_t *rel,
+    ngx_str_t *name)
+{
+    static const char  *unsupported[] = {
+        ".m4s", ".mp4", ".m4v", ".m4a", ".cmfv", ".cmfa", ".cmft", ".cmfm",
+        ".init", ".header", ".mpd", ".key", ".vtt", ".aac", NULL
+    };
+
+    ngx_http_core_loc_conf_t  *clcf;
+    u_char                    *p, *last, *slash;
+    ngx_uint_t                 depth = 0, i;
+
+    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+
+    p = r->uri.data;
+    last = r->uri.data + r->uri.len;
+
+    /* a prefix location: what follows it is the object's path */
+    if (clcf->name.len > 0 && clcf->name.len <= r->uri.len
+        && ngx_strncmp(r->uri.data, clcf->name.data, clcf->name.len) == 0
+        && clcf->name.data[clcf->name.len - 1] == '/')
+    {
+        p += clcf->name.len;
+
+    } else {
+        slash = ngx_media_strrlchr(r->uri.data, last, '/');
+        p = (slash != NULL) ? slash + 1 : r->uri.data;
+    }
+
+    rel->data = p;
+    rel->len = (size_t) (last - p);
+
+    if (rel->len == 0 || rel->len > 255) {
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    /* every component: non-empty, no leading dot, safe characters */
+    name->data = p;
+    for ( ;; ) {
+        u_char  *start = p;
+
+        while (p < last && *p != '/') {
+            u_char c = *p;
+
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                  || (c >= '0' && c <= '9') || c == '-' || c == '_'
+                  || c == '.'))
+            {
+                return NGX_HTTP_BAD_REQUEST;
+            }
+            p++;
+        }
+
+        if (p == start || *start == '.'
+            || ++depth > NGX_MEDIA_HLS_INGEST_DEPTH_MAX)
+        {
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        name->data = start;
+        name->len = (size_t) (p - start);
+
+        if (p == last) {
+            break;
+        }
+
+        p++;    /* the slash */
+
+        if (p == last) {
+            return NGX_HTTP_BAD_REQUEST;    /* a directory, not an object */
+        }
+    }
+
+    if (r->method == NGX_HTTP_DELETE) {
+        return NGX_OK;
+    }
+
+    if (ngx_media_hls_ingest_suffix(name, ".ts")
+        || ngx_media_hls_ingest_suffix(name, ".m3u8"))
+    {
+        return NGX_OK;
+    }
+
+    for (i = 0; unsupported[i] != NULL; i++) {
+        if (ngx_media_hls_ingest_suffix(name, unsupported[i])) {
+            return NGX_HTTP_UNSUPPORTED_MEDIA_TYPE;
+        }
+    }
+
+    return NGX_HTTP_BAD_REQUEST;
+}
+
+/* the object's absolute path, NUL-terminated, from the pool */
+static u_char *
+ngx_media_hls_ingest_target(ngx_http_request_t *r, const ngx_str_t *dir,
+    const ngx_str_t *rel)
+{
+    u_char  *target;
+
+    target = ngx_pnalloc(r->pool, dir->len + 1 + rel->len + 1);
+    if (target == NULL) {
+        return NULL;
+    }
+
+    ngx_memcpy(target, dir->data, dir->len);
+    target[dir->len] = '/';
+    ngx_memcpy(target + dir->len + 1, rel->data, rel->len);
+    target[dir->len + 1 + rel->len] = '\0';
+
+    return target;
+}
+
+/* creates the directories between the ingest root and the object */
+static ngx_int_t
+ngx_media_hls_ingest_parents(u_char *target, size_t root_len)
+{
+    u_char  *p;
+
+    for (p = target + root_len + 1; *p != '\0'; p++) {
+        if (*p != '/') {
+            continue;
+        }
+
+        *p = '\0';
+        if (mkdir((char *) target, 0755) != 0 && ngx_errno != NGX_EEXIST) {
+            *p = '/';
+            return NGX_ERROR;
+        }
+        *p = '/';
+    }
+
+    return NGX_OK;
+}
+
+/*
+ * The body has been written to a temp file by nginx; it is renamed into
+ * place, so a reader either sees a whole object or none of it.
  */
 static void
 ngx_media_hls_ingest_ready(ngx_http_request_t *r)
 {
     ngx_media_api_loc_conf_t  *mlcf;
-    ngx_str_t                  name, target;
-    u_char                    *slash;
+    ngx_str_t                  rel, name;
+    u_char                    *target;
+    ngx_file_info_t            fi;
+    ngx_uint_t                 existed;
+    ngx_int_t                  status;
     ngx_int_t                  stored;   /* not `rc`: something in the include
                                           * chain defines that name */
-
-    if (r->request_body == NULL || r->request_body->temp_file == NULL) {
-        ngx_http_finalize_request(r, NGX_HTTP_BAD_REQUEST);
-        return;
-    }
 
     mlcf = ngx_http_get_module_loc_conf(r, ngx_media_api_module);
 
@@ -272,71 +436,111 @@ ngx_media_hls_ingest_ready(ngx_http_request_t *r)
         return;
     }
 
-    /* bounded reverse search: r->uri is a slice and is not NUL-terminated */
-    slash = ngx_media_strrlchr(r->uri.data, r->uri.data + r->uri.len, '/');
-    name.data = (slash != NULL) ? slash + 1 : r->uri.data;
-    name.len = r->uri.len - (size_t) (name.data - r->uri.data);
+    status = ngx_media_hls_ingest_path(r, &rel, &name);
+    if (status != NGX_OK) {
+        ngx_http_finalize_request(r, status);
+        return;
+    }
 
-    if (name.len < 4
-        || ngx_memcmp(name.data + name.len - 3, ".ts", 3) != 0
-        || name.data[0] == '.')
-    {
+    if (r->request_body == NULL || r->request_body->temp_file == NULL) {
         ngx_http_finalize_request(r, NGX_HTTP_BAD_REQUEST);
         return;
     }
 
+    target = ngx_media_hls_ingest_target(r, &mlcf->ingest_dir, &rel);
+    if (target == NULL
+        || ngx_media_hls_ingest_parents(target, mlcf->ingest_dir.len)
+           != NGX_OK)
     {
-        size_t  i;
-        for (i = 0; i < name.len; i++) {
-            u_char c = name.data[i];
-            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                  || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
-            {
-                ngx_http_finalize_request(r, NGX_HTTP_BAD_REQUEST);
-                return;
-            }
-        }
-    }
-    target.len = mlcf->ingest_dir.len + 1 + name.len;
-    target.data = ngx_pnalloc(r->pool, target.len + 1);
-
-    if (target.data == NULL) {
         ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
         return;
     }
 
-    ngx_snprintf(target.data, target.len, "%V/%V", &mlcf->ingest_dir, &name);
-    target.data[target.len] = '\0';
+    existed = (ngx_file_info(target, &fi) == 0);
 
     /*
-     * Renamed into place, so a reader either sees a whole segment or none of
-     * it.  nginx writes the body to client_body_temp_path, which therefore
-     * has to be on the same filesystem as the ingest directory - the same
+     * nginx writes the body to client_body_temp_path, which therefore has to
+     * be on the same filesystem as the ingest directory - the same
      * requirement any nginx upload-to-final-location setup has, and the
-     * reason that directive exists.
+     * reason that directive exists.  An object that already exists is
+     * replaced, as the ingest specification requires.
      */
     stored = ngx_rename_file(r->request_body->temp_file->file.name.data,
-                             target.data);
+                             target);
 
     if (stored == NGX_ERROR) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno,
-                      "media: could not store uploaded segment as %V", &target);
+                      "media: could not store uploaded object as %s", target);
         ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
         return;
     }
 
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                  "media: hls ingest stored name=%V dir=%V len=%uz (%O bytes)",
-                  &name, &mlcf->ingest_dir, target.len,
-                  r->request_body->temp_file->file.offset);
+                  "media: hls ingest stored %V in %V (%O bytes)%s",
+                  &rel, &mlcf->ingest_dir,
+                  r->request_body->temp_file->file.offset,
+                  existed ? ", replaced" : "");
 
-    ngx_http_finalize_request(r, NGX_HTTP_CREATED);
+    ngx_http_finalize_request(r, existed ? NGX_HTTP_NO_CONTENT
+                                         : NGX_HTTP_CREATED);
+}
+
+/* DELETE: the uploader removing a segment that has left its playlist */
+static ngx_int_t
+ngx_media_hls_ingest_delete(ngx_http_request_t *r)
+{
+    ngx_media_api_loc_conf_t  *mlcf;
+    ngx_str_t                  rel, name;
+    u_char                    *target, *slash;
+    ngx_int_t                  status;
+
+    mlcf = ngx_http_get_module_loc_conf(r, ngx_media_api_module);
+
+    if (mlcf == NULL || mlcf->ingest_dir.len == 0) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    status = ngx_media_hls_ingest_path(r, &rel, &name);
+    if (status != NGX_OK) {
+        return status;
+    }
+
+    if (ngx_http_discard_request_body(r) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    target = ngx_media_hls_ingest_target(r, &mlcf->ingest_dir, &rel);
+    if (target == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    if (ngx_delete_file(target) == NGX_FILE_ERROR) {
+        return (ngx_errno == NGX_ENOENT) ? NGX_HTTP_NOT_FOUND
+                                         : NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    /* an emptied subdirectory goes too, never the ingest root itself */
+    slash = (u_char *) strrchr((char *) target, '/');
+    if (slash != NULL && (size_t) (slash - target) > mlcf->ingest_dir.len) {
+        *slash = '\0';
+        (void) rmdir((char *) target);
+    }
+
+    r->headers_out.status = NGX_HTTP_OK;
+    r->headers_out.content_length_n = 0;
+    r->header_only = 1;
+
+    return ngx_http_send_header(r);
 }
 
 static ngx_int_t
 ngx_media_hls_ingest_handler(ngx_http_request_t *r)
 {
     ngx_int_t  rc;
+
+    if (r->method == NGX_HTTP_DELETE) {
+        return ngx_media_hls_ingest_delete(r);
+    }
 
     if (!(r->method & (NGX_HTTP_PUT|NGX_HTTP_POST))) {
         return NGX_HTTP_NOT_ALLOWED;
@@ -3126,6 +3330,28 @@ ngx_media_api_destination_json(ngx_media_destination_t *destination,
                          destination->enabled ? "true" : "false",
                          destination->revision);
 
+    if (destination->type == NGX_MEDIA_DEST_HLS_PUSH) {
+        *last = ngx_snprintf(*last, end - *last, ",\"profile\":");
+
+        if (ngx_media_api_json_string(last, end, &destination->profile)
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+
+        *last = ngx_snprintf(*last, end - *last,
+                             ",\"segment_duration_ms\":%ui"
+                             ",\"segment_max_ms\":%ui"
+                             ",\"playlist_window\":%ui"
+                             ",\"method\":\"%s\",\"delete_expired\":%s",
+                             destination->segment_duration_ms,
+                             destination->segment_max_ms,
+                             destination->playlist_window,
+                             destination->http_method
+                                 == NGX_MEDIA_HLS_PUSH_POST ? "POST" : "PUT",
+                             destination->delete_expired ? "true" : "false");
+    }
+
     if (created >= 0) {
         *last = ngx_snprintf(*last, end - *last, ",\"created\":%s",
                              created ? "true" : "false");
@@ -3267,43 +3493,50 @@ ngx_media_api_destination_create(ngx_http_request_t *r,
     }
 
     /*
-     * A platform profile validates the destination and fills its defaults
-     * before anything is started: a configuration the platform would reject
+     * An HLS push destination's segmentation, playlist window, method and
+     * expiry, validated and defaulted before anything is started - against
+     * its platform profile when it names one, or the generic publisher's
+     * limits when it does not.  A configuration the platform would reject
      * should fail here, not on the wire at three in the morning.
      */
-    ngx_str_null(&profile_name);
+    if (type == NGX_MEDIA_DEST_HLS_PUSH) {
+        const ngx_media_hls_profile_t  *profile = NULL;
+        ngx_media_hls_push_settings_t   settings;
+        const char                     *why = "";
 
-    if (ngx_media_api_json_field(&body, "profile", &profile_name) == NGX_OK
-        && profile_name.len > 0)
-    {
-        const ngx_media_hls_profile_t  *profile;
-        const char                     *why;
-        ngx_uint_t                      duration = 0, window = 0, post = 0;
+        ngx_memzero(&settings, sizeof(settings));
+        settings.delete_expired = -1;
 
-        profile = ngx_media_hls_profile_find(&profile_name);
+        ngx_str_null(&profile_name);
 
-        if (profile == NULL) {
-            /*
-             * The object is already linked into the stream by now, so an
-             * error return has to take it back out: otherwise a 400 leaves a
-             * destination that is listed, that the replay contract treats as
-             * created, and that can never carry media because its impl is
-             * NULL.
-             */
-            ngx_media_destination_remove(stream, destination);
+        if (ngx_media_api_json_field(&body, "profile", &profile_name) == NGX_OK
+            && profile_name.len > 0)
+        {
+            profile = ngx_media_hls_profile_find(&profile_name);
 
-            *last = ngx_snprintf(*last, end - *last,
-                                 "{\"error\":\"unknown_profile\"}");
-            return NGX_HTTP_BAD_REQUEST;
+            if (profile == NULL) {
+                /*
+                 * The object is already linked into the stream by now, so an
+                 * error return has to take it back out: otherwise a 400
+                 * leaves a destination that is listed, that the replay
+                 * contract treats as created, and that can never carry media
+                 * because its impl is NULL.
+                 */
+                ngx_media_destination_remove(stream, destination);
+
+                *last = ngx_snprintf(*last, end - *last,
+                                     "{\"error\":\"unknown_profile\"}");
+                return NGX_HTTP_BAD_REQUEST;
+            }
         }
 
         if (ngx_media_api_json_field(&body, "segment_duration_ms", &streamid)
             == NGX_OK)
         {
             n = ngx_atoi(streamid.data, streamid.len);
-
-            if (n > 0) {
-                duration = (ngx_uint_t) n;
+            settings.segment_duration_ms = (n > 0) ? (ngx_uint_t) n : 0;
+            if (n < 0) {
+                why = "segment_duration_ms must be a number of milliseconds";
             }
         }
 
@@ -3311,31 +3544,74 @@ ngx_media_api_destination_create(ngx_http_request_t *r,
             == NGX_OK)
         {
             n = ngx_atoi(streamid.data, streamid.len);
-
-            if (n > 0) {
-                window = (ngx_uint_t) n;
+            settings.playlist_window = (n > 0) ? (ngx_uint_t) n : 0;
+            if (n < 0) {
+                why = "playlist_window must be a number of segments";
             }
         }
 
-        if (ngx_media_hls_profile_apply(profile, &host, &duration, &window,
-                                        &post, &why) != NGX_OK)
+        if (ngx_media_api_json_field(&body, "method", &streamid) == NGX_OK) {
+            if (streamid.len == 3
+                && ngx_strncasecmp(streamid.data, (u_char *) "PUT", 3) == 0)
+            {
+                settings.method = NGX_MEDIA_HLS_PUSH_PUT;
+
+            } else if (streamid.len == 4
+                       && ngx_strncasecmp(streamid.data, (u_char *) "POST", 4)
+                          == 0)
+            {
+                settings.method = NGX_MEDIA_HLS_PUSH_POST;
+
+            } else {
+                why = "method must be PUT or POST";
+            }
+        }
+
+        if (ngx_media_api_json_field(&body, "delete_expired", &streamid)
+            == NGX_OK)
+        {
+            if (streamid.len == 4
+                && ngx_strncmp(streamid.data, "true", 4) == 0)
+            {
+                settings.delete_expired = 1;
+
+            } else if (streamid.len == 5
+                       && ngx_strncmp(streamid.data, "false", 5) == 0)
+            {
+                settings.delete_expired = 0;
+
+            } else {
+                why = "delete_expired must be true or false";
+            }
+        }
+
+        if (why[0] != '\0'
+            || ngx_media_hls_profile_apply(profile, &host, &settings, &why)
+               != NGX_OK)
         {
             ngx_media_destination_remove(stream, destination);
 
             *last = ngx_snprintf(*last, end - *last,
-                                 "{\"error\":\"profile_violation\","
-                                 "\"detail\":\"%s\"}", why);
+                                 "{\"error\":\"%s\","
+                                 "\"detail\":\"%s\"}",
+                                 (profile != NULL) ? "profile_violation"
+                                                   : "invalid_hls_push",
+                                 why);
             return NGX_HTTP_BAD_REQUEST;
         }
 
-        destination->segment_duration_ms = duration;
-        destination->playlist_window = window;
-        destination->http_post = post;
+        destination->segment_duration_ms = settings.segment_duration_ms;
+        destination->segment_max_ms = settings.segment_max_ms;
+        destination->playlist_window = settings.playlist_window;
+        destination->http_method = settings.method;
+        destination->delete_expired = (ngx_uint_t) settings.delete_expired;
 
-        copy = ngx_media_destination_strdup(stream->pool, &profile_name);
+        if (profile != NULL) {
+            copy = ngx_media_destination_strdup(stream->pool, &profile_name);
 
-        if (copy != NULL) {
-            destination->profile = *copy;
+            if (copy != NULL) {
+                destination->profile = *copy;
+            }
         }
     }
 

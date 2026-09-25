@@ -1248,11 +1248,12 @@ responsibility.
   same recording path and the second truncates the first.  A deployment with
   several programs that both record wants separate instances, or a recording
   destination per program once one exists.
-- It does not let a profile configure the segmenter.  A `youtube_live`
-  destination's validated `segment_duration_ms` and `playlist_window` are
-  recorded on the destination and do not drive segmentation, which is fixed at a
-  6 s target with a 6-segment window; the profile guarantees that the
-  destination is one the platform would accept, nothing more.
+- It does not segment per destination.  A stream has one segmenter, shared
+  by the local origin and every HLS push destination, and it follows the
+  strictest destination (shortest duration, tightest maximum, longest window);
+  each destination gets its own window by playlist rewriting, but a
+  destination asking for 6 s segments on a stream that also pushes to YouTube
+  receives 2 s ones.
 - It does not aggregate destination metrics across NGINX workers.  Egress byte,
   drop, transport-error, backpressure, reconnect, deadline and queue metrics
   are worker-local; the emergency switch count is only in the detail JSON —

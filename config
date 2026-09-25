@@ -139,6 +139,7 @@ ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/core/ngx_media_egress_manager.c \
                  $ngx_addon_dir/src/core/ngx_media_file.c \
                  $ngx_addon_dir/src/core/ngx_media_hls_push.c \
+                 $ngx_addon_dir/src/core/ngx_media_hls_playlist.c \
                  $ngx_addon_dir/src/core/ngx_media_http.c \
                  $ngx_addon_dir/src/core/ngx_media_hls_pull.c \
                  $ngx_addon_dir/src/core/ngx_media_hls_ingest.c \

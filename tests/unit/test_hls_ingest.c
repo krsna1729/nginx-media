@@ -23,6 +23,8 @@
 #include "ngx_media_ts_mux.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -216,6 +218,132 @@ drain_until_units(ngx_media_feed_t *feed, uint64_t want)
     return 0;
 }
 
+/* an empty file: ordering reads names, never contents */
+static void
+touch(const char *dir, const char *name)
+{
+    char   path[512];
+    FILE  *f;
+
+    (void) snprintf(path, sizeof(path), "%s/%s", dir, name);
+    f = fopen(path, "wb");
+    if (f != NULL) {
+        (void) fputc('G', f);
+        fclose(f);
+    }
+}
+
+static void
+write_text(const char *dir, const char *name, const char *text)
+{
+    char   path[512];
+    FILE  *f;
+
+    (void) snprintf(path, sizeof(path), "%s/%s", dir, name);
+    f = fopen(path, "wb");
+    if (f != NULL) {
+        (void) fputs(text, f);
+        fclose(f);
+    }
+}
+
+static void
+empty_dir(const char *dir)
+{
+    char   cmd[600];
+
+    (void) snprintf(cmd, sizeof(cmd), "rm -rf '%s' && mkdir -p '%s'", dir, dir);
+    TEST_ASSERT(system(cmd) == 0);
+}
+
+/*
+ * The order segments are read in, which is the order the demuxer assembles
+ * access units across them.  Encoders number segments without padding and
+ * send a media playlist after each one (RFC 8216; DASH-IF Live Media Ingest
+ * Interface-2); both have to produce presentation order.
+ */
+static void
+test_ingest_order(void)
+{
+    char        names[16][256];
+    void       *state = NULL;
+    ngx_uint_t  n;
+
+    TEST_CASE("segment names compare by their trailing number");
+    TEST_ASSERT(ngx_media_hls_ingest_name_cmp("index9.ts", "index10.ts") < 0);
+    TEST_ASSERT(ngx_media_hls_ingest_name_cmp("index10.ts", "index9.ts") > 0);
+    TEST_ASSERT(ngx_media_hls_ingest_name_cmp("seg-00001.ts", "seg-00002.ts") < 0);
+    TEST_ASSERT(ngx_media_hls_ingest_name_cmp("seg-01.ts", "seg-1.ts") != 0);
+    TEST_ASSERT(ngx_media_hls_ingest_name_cmp("a1.ts", "b0.ts") < 0);
+    TEST_ASSERT(ngx_media_hls_ingest_name_cmp("x.ts", "x.ts") == 0);
+
+    TEST_CASE("without a playlist, unpadded names are read in number order");
+    empty_dir(ROOT_DIR "/order");
+    touch(ROOT_DIR "/order", "index8.ts");
+    touch(ROOT_DIR "/order", "index9.ts");
+    touch(ROOT_DIR "/order", "index10.ts");
+    touch(ROOT_DIR "/order", "index11.ts");
+    n = ngx_media_hls_ingest_order(&state, ROOT_DIR "/order", names, 16);
+    TEST_ASSERT_EQ_INT(n, 4);
+    TEST_ASSERT(strcmp(names[0], "index8.ts") == 0);
+    TEST_ASSERT(strcmp(names[1], "index9.ts") == 0);
+    TEST_ASSERT(strcmp(names[2], "index10.ts") == 0);
+    TEST_ASSERT(strcmp(names[3], "index11.ts") == 0);
+    touch(ROOT_DIR "/order", "index12.ts");
+    TEST_ASSERT_EQ_INT(ngx_media_hls_ingest_order(&state, ROOT_DIR "/order",
+                                                  names, 16), 1);
+    TEST_ASSERT(strcmp(names[0], "index12.ts") == 0);
+    ngx_media_hls_ingest_order_free(state);
+    state = NULL;
+
+    TEST_CASE("a media playlist decides the order, by media sequence");
+    empty_dir(ROOT_DIR "/playlist");
+    touch(ROOT_DIR "/playlist", "zulu.ts");
+    touch(ROOT_DIR "/playlist", "alpha.ts");
+    touch(ROOT_DIR "/playlist", "mike.ts");
+    write_text(ROOT_DIR "/playlist", "live.m3u8",
+               "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n"
+               "#EXT-X-MEDIA-SEQUENCE:40\n"
+               "#EXTINF:2.0,\nzulu.ts\n#EXTINF:2.0,\nalpha.ts\n");
+    n = ngx_media_hls_ingest_order(&state, ROOT_DIR "/playlist", names, 16);
+    TEST_ASSERT_EQ_INT(n, 2);
+    TEST_ASSERT(strcmp(names[0], "zulu.ts") == 0);
+    TEST_ASSERT(strcmp(names[1], "alpha.ts") == 0);
+
+    /* the window slides: the next playlist drops the oldest and adds one */
+    write_text(ROOT_DIR "/playlist", "live.m3u8",
+               "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n"
+               "#EXT-X-MEDIA-SEQUENCE:41\n"
+               "#EXTINF:2.0,\nalpha.ts\n#EXTINF:2.0,\nmike.ts\n");
+    n = ngx_media_hls_ingest_order(&state, ROOT_DIR "/playlist", names, 16);
+    TEST_ASSERT_EQ_INT(n, 1);
+    TEST_ASSERT(strcmp(names[0], "mike.ts") == 0);
+
+    /* a listed segment that never arrived is passed over, not waited for */
+    touch(ROOT_DIR "/playlist", "papa.ts");
+    write_text(ROOT_DIR "/playlist", "live.m3u8",
+               "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:42\n"
+               "#EXTINF:2.0,\nmike.ts\n#EXTINF:2.0,\nlost.ts\n"
+               "#EXT-X-DISCONTINUITY\n#EXTINF:2.0,\npapa.ts\n");
+    n = ngx_media_hls_ingest_order(&state, ROOT_DIR "/playlist", names, 16);
+    TEST_ASSERT_EQ_INT(n, 1);
+    TEST_ASSERT(strcmp(names[0], "papa.ts") == 0);
+    ngx_media_hls_ingest_order_free(state);
+    state = NULL;
+
+    TEST_CASE("a master playlist is not a segment list");
+    empty_dir(ROOT_DIR "/master");
+    touch(ROOT_DIR "/master", "seg2.ts");
+    touch(ROOT_DIR "/master", "seg10.ts");
+    write_text(ROOT_DIR "/master", "master.m3u8",
+               "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nlow/index.m3u8\n");
+    n = ngx_media_hls_ingest_order(&state, ROOT_DIR "/master", names, 16);
+    TEST_ASSERT_EQ_INT(n, 2);
+    TEST_ASSERT(strcmp(names[0], "seg2.ts") == 0);
+    TEST_ASSERT(strcmp(names[1], "seg10.ts") == 0);
+    ngx_media_hls_ingest_order_free(state);
+}
+
 int
 main(void)
 {
@@ -354,6 +482,8 @@ main(void)
     ngx_media_ts_mux_destroy(&f.mux);
     ngx_media_trackset_destroy(&f.tracks);
     ngx_destroy_pool(pool);
+
+    test_ingest_order();
 
     TEST_LEAKS();
 

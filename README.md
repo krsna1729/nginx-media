@@ -58,6 +58,8 @@ Every claim below is produced by a command in this repository.
 | Core suites | 25 unit binaries, clean under ASan/UBSan, concurrency suites clean under ThreadSanitizer |
 | Integration | 24 targets: ingest, demux, selection, failover, HLS, recording, RTMP, SRT output, transport security, churn, soak, fault injection, and a network-namespace topology with `tc netem` |
 | Capacity | `fanout_delay` percentiles (p50/p95/p99/p99.9) with conditions, a receiver storm against a 700 ms failover SLA, `bench-burst-sizing`'s real-media TS sweep, and `bench-capacity-curve`'s offered-load/fairness curve |
+| HLS push interop | inbound and outbound HLS push follow YouTube's HLS ingest and DASH-IF Live Media Ingest Interface-2; what to send us, what we send (measured), and the per-destination settings: `docs/hls-push-interop.md` |
+| ffmpeg interop | ffmpeg on both sides of every protocol - SRT, RTMP, HLS push, HLS pull and file in; HLS, RTMP play, SRT, RTMP push and HLS push out - with H.264/HEVC and AAC, judged on what ffmpeg decodes: `make ffmpeg-interop`, `docs/development.md` |
 | Benchmarks in CI | `scripts/bench-ci.sh` at four tiers - every pull request, every merge to main, nightly and weekly (fixed vs adaptive SRT senders, libsrt vs robotweax/srt) - with results appended to a history on the `gh-pages` branch |
 | Scaling | `make bench-worker-scaling`, `make bench-ingest-egress`, and `make bench-ingest-egress-fanout` (where each side saturates, per thread) |
 | Static analysis | CodeQL on every pull request, on every push to main, and weekly |
