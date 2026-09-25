@@ -332,6 +332,43 @@ frame rollovers and whether the remux remained lossless; the first lossless
 row is a measurement for the fixture's access-unit distribution, not a
 universal bitrate-derived setting.
 
+#### CI tiers and history
+
+`scripts/bench-ci.sh pr|branch|nightly|weekly` runs a versioned recipe per
+tier (`.github/workflows/bench.yml` calls it): `pr` on every pull request,
+`branch` after a merge to main, `nightly` all seven workloads, `weekly` long
+rungs plus the fixed-vs-adaptive SRT sender comparison, HLS preparation off,
+and libsrt vs robotweax/srt (one pinned commit, `ROBOTWEAX_REF` in
+`bench.yml`, recorded in each run so a shift is ours and not the library's).
+
+The gate (`bench_history.py gate`) fails the job on:
+
+- a setup failure - the rung was never measured;
+- an incomplete run - before a configuration runs, `bench-ci.sh` writes the
+  mixes and rungs it expects (`expected.json`), and every one of them must end
+  in a diagnostics bundle or in the harness's own list of rungs skipped after
+  consecutive failures at the capacity boundary; a harness that did not reach
+  its end marker, a mix never started, or a ladder cut short by a crash is
+  incomplete, never a short green run;
+- a quality failure at a rung the tier requires every host to carry.
+
+The boundary itself is recorded, never gated, and a CPU-per-Gbit/s regression
+against the recent history of the same tier is a warning (shared runners are
+too noisy to gate on it).
+
+`bench.yml` only measures, with a read-only token.  Publishing is
+`bench-publish.yml`, the one job that writes to the repository, which
+`master.yml`, `nightly.yml` and `weekly.yml` call after the benchmark: a
+called workflow can never hold more permission than its caller grants, and a
+pull request's caller grants `contents: read`.
+`scripts/check-workflow-permissions.py` (the `workflows` job in `ci.yml`)
+refuses any reusable workflow that asks for more than a caller grants, which
+GitHub otherwise reports only as a startup failure with no jobs and no log.
+
+`branch`, `nightly` and `weekly` results are appended to `data/<tier>.jsonl`
+on the `gh-pages` branch, whose `index.html` (`tests/bench/history/index.html`)
+charts them; enable GitHub Pages on that branch to browse it.
+
 ## Conventions
 
 These are not style preferences; each one is load-bearing, and the next section

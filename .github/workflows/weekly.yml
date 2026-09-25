@@ -76,3 +76,29 @@ jobs:
           name: weekly-logs
           path: .build/**/logs/error.log
           if-no-files-found: ignore
+
+  # Long rungs, SRT sender concurrency (fixed 1/2/4 vs adaptive), HLS
+  # preparation off, and the transport library comparison (libsrt vs
+  # robotweax/srt).  Each group is its own runner so the week's run fits the
+  # job limit; the publish job merges them into one record.
+  bench:
+    uses: ./.github/workflows/bench.yml
+    with:
+      tier: weekly
+      timeout-minutes: 350
+      configs: >-
+        ["all", "srt-senders-1 srt-senders-2",
+         "srt-senders-4 srt-senders-adaptive srt-no-hls", "srt-robotweax"]
+    permissions:
+      contents: read
+      actions: write
+
+  publish:
+    needs: bench
+    # published even when a rung failed: a failure is part of the history
+    if: always() && needs.bench.result != 'cancelled'
+    uses: ./.github/workflows/bench-publish.yml
+    with:
+      tier: weekly
+    permissions:
+      contents: write
