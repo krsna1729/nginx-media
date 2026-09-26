@@ -413,7 +413,13 @@ def srt_section(case_dir, workers_before, workers_after):
                 "ns": int(row["sample_ns"]), "feed": 0.0, "out": 0.0})
             rnd["feed"] += float(row["feed_queue_units"] or 0)
             rnd["out"] += float(row["output_queue_units"] or 0)
-            lane = per_lane.setdefault(row["shard"], [])
+            # A lane is a shard *of one worker*: every worker numbers its
+            # shards from zero, so keying by shard alone merges different
+            # lanes' counters into one series and the rate it reports is
+            # whichever worker's last sample happened to be read last - a
+            # lane serving 156 Mbit/s showed as 0 that way.
+            lane = per_lane.setdefault(
+                f"w{row['worker']}:s{row['shard']}", [])
             lane.append((int(row["sample_ns"]), float(row["sent_bytes"] or 0)))
         rounds = sorted(by_round.values(), key=lambda r: r["ns"])
         section["queue_timeline"] = ok(
