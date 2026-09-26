@@ -109,16 +109,31 @@ def test_preflight_classifies_a_short_environment(work):
                        "8000000", "--sender", sender, "--network", rx,
                        "--probe-sender", tx, "--json",
                        os.path.join(case, "judge.json"))
-    check(result.returncode == 2,
-          f"a short receiver must be infrastructure-limited: {result.stdout}")
-    check("preflight_verdict=infrastructure-limited" in result.stdout,
-          "the verdict must be explicit")
+    # The probe's own receiver dropped datagrams, so the probe cannot say
+    # whether the path carries more: that is evidence about the probe, and
+    # the measurement it did take is still reported.
+    check(result.returncode == 3,
+          f"a probe that dropped its own datagrams is not a limit: "
+          f"{result.stdout}")
+    check("preflight_unknown=probe/receiver-socket-drops" in result.stdout,
+          f"the probe's own limit must be named: {result.stdout}")
     with open(os.path.join(case, "judge.json"), encoding="utf-8") as source:
         judged = json.load(source)
-    check(judged["limits"][0]["side"] == "receiver",
-          f"the short side must be named: {judged['limits']}")
     check_close(judged["request"]["required_network_gbps"], 9.6,
                 "the request's network need must be explicit")
+    check_close(judged["request"]["measured_network_gbps"], 5.36,
+                "the measurement it did take is reported")
+
+    # ... but a measured cost per delivered Gbit/s that does not fit the
+    # permitted CPUs is a limit, and that is the number the ladder feeds it
+    # from the rung that ran before
+    result = preflight("judge", "--destinations", "1000", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx, "--sender-cpu-per-gbps", "140")
+    check(result.returncode == 2,
+          f"a sender that cannot afford the load is a limit: {result.stdout}")
+    check("preflight_limit=sender/cpu" in result.stdout,
+          f"the short side must be the sender: {result.stdout}")
 
     # the same measurements for a request the environment can carry
     result = preflight("judge", "--destinations", "64", "--bitrate-bps",
@@ -151,14 +166,15 @@ def test_preflight_classifies_a_short_environment(work):
     check("preflight_unknown=sender/cpu" in result.stdout,
           f"the unknown CPU must be reported: {result.stdout}")
 
-    # a measured cost that does not fit the permitted CPUs is a limit
+    # and the receiver's CPU, when a measurement says what it costs
     result = preflight("judge", "--destinations", "1000", "--bitrate-bps",
                        "8000000", "--sender", sender, "--network", rx,
-                       "--probe-sender", tx, "--sender-cpu-per-gbps", "140")
+                       "--probe-sender", tx, "--receiver", sender,
+                       "--receiver-cpu-per-gbps", "200")
     check(result.returncode == 2,
-          f"an unaffordable CPU requirement must be a limit: {result.stdout}")
-    check("preflight_limit=sender/cpu" in result.stdout,
-          f"the short side must be the sender: {result.stdout}")
+          f"an unaffordable receiver must be a limit: {result.stdout}")
+    check("preflight_limit=receiver/cpu" in result.stdout,
+          f"the short side must be the receiver: {result.stdout}")
 
 
 def test_preflight_probe_is_measured_at_both_ends(work):

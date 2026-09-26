@@ -502,22 +502,25 @@ def judge(args):
         details["probe_receiver_socket_drops"] = drops
         if measured_bps < required_bps:
             if drops:
-                # The receiver's own socket dropped datagrams: the setup as
-                # configured cannot absorb what it was offered, so it cannot
-                # carry the request either.  That is a receiver limit, and it
-                # must not be read as a slow path or a sender problem.
-                offered_text = (f"the sender offered {offered_bps / 1e9:.2f} "
-                                f"Gbit/s; " if offered_bps else "")
-                limits.append({
-                    "side": "receiver", "resource": "socket-drops",
-                    "measured": round(measured_bps / 1e9, 4),
-                    "required": round(required_bps / 1e9, 4), "unit": "Gbit/s",
-                    "reason": f"the receiver counted {measured_bps / 1e9:.2f} "
-                              f"Gbit/s and its UDP socket dropped {drops} "
-                              f"datagrams while {offered_text}"
-                              f"{required_bps / 1e9:.2f} Gbit/s was requested, "
-                              f"so the receiver side is short (more listener "
-                              f"sockets or a stronger receiver host)"})
+                # The probe's own receiver dropped datagrams, so the probe
+                # stopped being a valid instrument at that rate: it cannot say
+                # whether the path could carry more.  The benchmark's own
+                # receivers are sharded C programs and may still carry it, so
+                # this is evidence about the probe - reported, never turned
+                # into a limit.  The receiver's *CPU* is the number that
+                # decides the receiver side (see the CPU check below).
+                unknown.append({
+                    "side": "probe", "resource": "receiver-socket-drops",
+                    "reason": f"the probe's own receiver counted "
+                              f"{measured_bps / 1e9:.2f} Gbit/s and dropped "
+                              f"{drops} datagrams"
+                              + (f" while the sender offered "
+                                 f"{offered_bps / 1e9:.2f} Gbit/s"
+                                 if offered_bps else "")
+                              + f", below the {required_bps / 1e9:.2f} Gbit/s "
+                              f"requested; the probe cannot say whether the "
+                              f"path carries more (more probe threads, or the "
+                              f"CPU check)"})
             elif offered_bps is not None and offered_bps < required_bps:
                 # Nothing was lost, but the load was never offered: that is a
                 # limit of the probe, not a statement about the path.

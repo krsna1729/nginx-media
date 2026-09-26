@@ -260,6 +260,66 @@ Gbit/s is the best guide to a larger host of the same class: at roughly 1.3–1.
 per Gbit/s for the SRT sender, 512 SRT destinations at 8.8 Mbit/s
 (4.5 Gbit/s) need about 6–7 cores for nginx alone, plus the receivers.
 
+## Receiver topology and pure-SRT scaling (2026-09-26)
+
+First measurements on a workstation rather than a 4-vCPU container, and the
+first taken over anything other than loopback.  Host: Intel i9-13900H, six
+P-cores with SMT (12 threads) and eight E-cores, 20 CPUs online, 15 GiB,
+kernel 7.2.5, libsrt 1.5.3; source 8 Mbit/s 720p25 H.264 TS; 30 s rungs;
+`CAPACITY_NGINX_CPUS` and `CAPACITY_RECEIVER_CPUS` pin sender and receivers
+apart, and every rung's bundle records the placement.
+
+### Loopback against a real device path
+
+The receivers were moved into their own network namespace behind a veth pair
+(`tests/bench/capacity_veth.sh up`, `CAPACITY_RECEIVER_ADDR=10.200.0.2`), so
+the traffic crosses a device with an MTU and the kernel's UDP path instead of
+loopback.  Same source, same rungs, same placement (nginx 0-5, receivers
+12-19):
+
+| Topology | Destinations | Delivered Gbit/s | Sender %core/Gbit/s | Receiver %core/Gbit/s | Min delivery ratio |
+|---|---|---|---|---|---|
+| loopback | 1 | 0.0091 | 1235.71 | 296.57 | 1.0 |
+| loopback | 64 | 0.5830 | 128.16 | 88.42 | 1.00055 |
+| loopback | 128 | 1.1607 | 142.20 | 111.29 | 0.99591 |
+| veth | 1 | 0.0091 | 1166.34 | 302.59 | 1.0 |
+| veth | 64 | 0.5818 | 134.00 | 92.88 | 1.00020 |
+| veth | 128 | 1.1642 | 120.48 | 91.57 | 1.00071 |
+
+The device path costs nothing measurable at this rate: delivered rate,
+delivery ratio and CPU per delivered Gbit/s agree within run-to-run
+variation.  Nothing in the sender or the receivers depends on loopback.
+
+### Where pure SRT first fails on this host
+
+| Destinations | Outcome | Delivered Gbit/s | Sender %core/Gbit/s | Receiver %core/Gbit/s | Min ratio | Interval floor | SndQ %core | App senders %core | Queue lag median |
+|---|---|---|---|---|---|---|---|---|---|
+| 128 | pass | 1.1572 | 114.8 | 89.4 | 0.99817 | 0.927 | 81.4 | 26.4 | 5 ms |
+| 192 | pass | 1.7462 | 145.1 | 133.2 | 1.00404 | 0.933 | 158.4 | 50.9 | — |
+| 256 | pass | 2.3558 | 159.5 | 128.5 | 1.01580 | 0.932 | 229.1 | 82.8 | 5 ms |
+| 384 | quality-failure | 2.2740 | 215.3 | 184.0 | 0.56140 | 0.502 | 262.9 | 100.9 | 7115 ms |
+
+At 384 the destination queues back up to seven seconds and the output queue
+drops units: the SRT send path stops draining them, the delivered rate falls
+below what 256 delivered while the offered load rises, and 25 destinations
+miss the gate.  The sender's own CPU is 490% of a core (4.9 cores of the 12
+P-threads it is given), the receivers 418% of one core, no kernel socket
+drops on either side, and libsrt's `SndQ` threads total 263% of a core
+across 16 lanes - about 16% each, so no single lane is the bottleneck.
+
+Two controls say what the limit is not:
+
+| 384-destination control | Delivered Gbit/s | Min ratio | Sender %core/Gbit/s | Receiver %core/Gbit/s | Queue lag median | Output queue drops |
+|---|---|---|---|---|---|---|
+| receivers on E-cores (12-19) | 2.2740 | 0.561 | 215.3 | 184.0 | 7115 ms | 52056 |
+| receivers on P-cores (6-11) | 2.7217 | 0.770 | 179.3 | 129.5 | 6906 ms | 8352 |
+
+Faster receivers move the number (delivered +20%, minimum ratio 0.56 to 0.77)
+without removing the failure, so the receiver side contributes but is not the
+whole story.  What remains is the sender: at this rung nginx needs more CPU
+per delivered Gbit/s than it has, and the per-destination output queues
+absorb the difference until they overflow.
+
 ## Where this leaves the roadmap
 
 | Deliverable | Status |

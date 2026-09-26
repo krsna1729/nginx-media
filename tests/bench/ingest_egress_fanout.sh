@@ -211,7 +211,7 @@ CAPACITY_RECEIVER_ADDR="${CAPACITY_RECEIVER_ADDR:-127.0.0.1}"
 CAPACITY_PREFLIGHT="${CAPACITY_PREFLIGHT:-auto}"
 CAPACITY_PREFLIGHT_MIN_DESTINATIONS="${CAPACITY_PREFLIGHT_MIN_DESTINATIONS:-128}"
 CAPACITY_PREFLIGHT_SECONDS="${CAPACITY_PREFLIGHT_SECONDS:-5}"
-CAPACITY_PREFLIGHT_THREADS="${CAPACITY_PREFLIGHT_THREADS:-2}"
+CAPACITY_PREFLIGHT_THREADS="${CAPACITY_PREFLIGHT_THREADS:-4}"
 CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS="${CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS:-}"
 CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS="${CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS:-}"
 # a command that copies receiver-side artifacts back from a remote receiver
@@ -3600,6 +3600,45 @@ receiver_fetch() {   # <path>
         || { echo "could not fetch $1 from the receiver host" >&2; return 1; }
 }
 
+# What a rung costs per delivered Gbit/s, measured by the rungs that ran
+# before it.  A core count cannot say how much CPU a Gbit/s needs, so the
+# CPU half of the judgement is calibrated from the last rung that passed
+# with a delivery number - never from a model, and never silently: the
+# figure is written next to the preflight it was used for.
+capacity_preflight_calibration() {   # <case dir>
+    local case_dir="$1" bundle
+
+    [ -n "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
+        && [ -n "$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS" ] && return 0
+    bundle="$(ls -1t "$RUN"/capacity/quality-*/diagnostics.json 2>/dev/null \
+              | while read -r candidate; do
+                    [ "$candidate" = "$case_dir/diagnostics.json" ] && continue
+                    grep -q '"outcome": "pass"' "$candidate" && { echo "$candidate"; break; }
+                done)"
+    [ -n "$bundle" ] || return 0
+    local values
+    values="$(python3 - "$bundle" <<'PY'
+import json, sys
+bundle = json.load(open(sys.argv[1]))
+eff = bundle.get("efficiency") or {}
+def value(name):
+    field = eff.get(name) or {}
+    return field.get("value") if field.get("status") == "ok" else None
+print(value("sender_cpu_per_gbps") or "", value("receiver_cpu_per_gbps") or "")
+PY
+)"
+    set -- $values
+    [ -n "${1:-}" ] && [ -z "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
+        && CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS="$1"
+    [ -n "${2:-}" ] && [ -z "$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS" ] \
+        && CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS="$2"
+    [ -z "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
+        || echo "   preflight: calibrated from $(basename "$(dirname "$bundle")")" \
+                "(sender ${CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS}%core/Gbit/s," \
+                "receiver ${CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS:-?}%core/Gbit/s)"
+    return 0
+}
+
 # Preflight: fingerprint the sender, the receivers and the path between
 # them, and decide whether this rung can be measured at all before spending
 # its window on it.  A host or a path that cannot carry the offered load is
@@ -3657,6 +3696,7 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s>
                  --network "$case_dir/preflight.rx.json"
                  --probe-sender "$case_dir/preflight.tx.json"
                  --json "$case_dir/preflight.json" )
+    capacity_preflight_calibration "$case_dir"
     [ -z "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
         || judge_args+=( --sender-cpu-per-gbps \
                          "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" )
