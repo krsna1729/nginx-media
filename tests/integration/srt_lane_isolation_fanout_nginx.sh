@@ -311,8 +311,12 @@ shard_metric() {   # <metric> <shard>
             'index($0, m "{") == 1 && index($0, s) { print $NF; exit }'
 }
 placement() {   # <destination>
+    # Any per-destination egress metric carries the placement label; the lag
+    # gauge is the first, but a destination with no media flowing yet may
+    # only render the byte gauge.
     curl -fsS "$API/metrics" \
-        | grep "^nginx_media_egress_queue_lag_ms{" | grep "destination=\"$1\"" \
+        | grep -E "^nginx_media_egress_queue_(lag_ms|bytes)\\{" \
+        | grep "destination=\"$1\"" \
         | sed -n 's/.*placement="\([0-9]*\)".*/\1/p' | head -1
 }
 destination_count() {
