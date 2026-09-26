@@ -1072,7 +1072,8 @@ ngx_media_amf_get_double(const u_char *p)
  */
 static ngx_int_t
 ngx_media_amf_read_value(const u_char *data, size_t len,
-    ngx_media_amf_value_t *out, size_t *consumed, ngx_uint_t record)
+    ngx_media_amf_value_t *out, size_t *consumed, ngx_uint_t record,
+    ngx_uint_t nesting)
 {
     ngx_uint_t  type;
 
@@ -1136,6 +1137,14 @@ ngx_media_amf_read_value(const u_char *data, size_t len,
     case NGX_MEDIA_AMF_OBJECT:
     case NGX_MEDIA_AMF_ECMA_ARRAY:
     case NGX_MEDIA_AMF_STRICT_ARRAY:
+        /*
+         * Aggregates are the only values that recurse; scalars cost a frame
+         * but no further depth.  Refuse the aggregate before descending.
+         */
+        if (nesting > NGX_MEDIA_AMF_MAX_DEPTH) {
+            return NGX_ERROR;
+        }
+
         break;
 
     default:
@@ -1188,7 +1197,7 @@ ngx_media_amf_read_value(const u_char *data, size_t len,
                     pos += 2 + nlen;
 
                     rc = ngx_media_amf_read_value(data + pos, len - pos, out,
-                                                  &used, 0);
+                                                  &used, 0, nesting + 1);
 
                     if (rc != NGX_OK) {
                         return rc;
@@ -1239,7 +1248,7 @@ ngx_media_amf_read_value(const u_char *data, size_t len,
 
             rc = ngx_media_amf_read_value(data + pos + 2 + nlen,
                                           len - pos - 2 - nlen, &member, &used,
-                                          0);
+                                          0, nesting + 1);
 
             if (rc != NGX_OK) {
                 return rc;
@@ -1270,7 +1279,7 @@ ngx_media_amf_read(const u_char *data, size_t len, ngx_media_amf_value_t *out,
 {
     memset(out, 0, sizeof(ngx_media_amf_value_t));
 
-    return ngx_media_amf_read_value(data, len, out, consumed, 1);
+    return ngx_media_amf_read_value(data, len, out, consumed, 1, 1);
 }
 
 const ngx_str_t *
