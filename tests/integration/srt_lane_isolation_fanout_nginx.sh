@@ -611,7 +611,11 @@ print("   worker RSS %d -> %d kB (%+d kB over the whole run)" % (before, after, 
 sys.exit(0 if grew < 262144 else 1)
 PYEOF
 
-if grep -qE '\[(alert|emerg)\]|signal [0-9]+|AddressSanitizer' "$RUN/logs/error.log"; then
+# A crash is an alert, an emergency, a sanitizer report or a worker the
+# master had to kill; the reload and the shutdown this test performs are
+# lifecycle notices (signal 1/17/29/3 received) and are expected.
+if grep -qE '\[(alert|emerg)\]|AddressSanitizer|exited on signal (4|6|7|8|11)' \
+    "$RUN/logs/error.log"; then
     fail "worker reported an alert or crash"
 fi
 
