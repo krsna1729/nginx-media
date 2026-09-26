@@ -209,8 +209,8 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
 
 
 
-def serve(port):
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), HlsPushSink)
+def serve(port, bind="127.0.0.1"):
+    server = http.server.ThreadingHTTPServer((bind, port), HlsPushSink)
     server.daemon_threads = True
     server.destinations_lock = threading.Lock()
     server.ts_destinations = set()
@@ -634,6 +634,9 @@ def main():
 
     sink_parser = subparsers.add_parser("serve")
     sink_parser.add_argument("--port", type=int, required=True)
+    # loopback unless the sink is asked to listen where the sender can
+    # reach it: a receiver in its own namespace, or on another host
+    sink_parser.add_argument("--bind", default="127.0.0.1")
 
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--before-prefix", required=True)
@@ -660,7 +663,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == "serve":
-        serve(args.port)
+        serve(args.port, args.bind)
     else:
         try:
             if args.command == "readiness-report":

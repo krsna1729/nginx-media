@@ -1,6 +1,7 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit tsan bench-reporting nginx graph-conflict incarnation smoke bench-worker-scaling \
+.PHONY: unit tsan bench-reporting bench-veth-up bench-veth-down bench-preflight \
+    nginx graph-conflict incarnation smoke bench-worker-scaling \
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
     bench-capacity-curve bench-capacity-quality bench-burst-sizing test-image test-in-container \
     srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph \
@@ -17,6 +18,18 @@ unit:
 # The reporting pipeline's own tests: no nginx, no network, plain python3.
 bench-reporting:
 	python3 tests/bench/test_reporting.py
+
+# The receiver topologies for capacity runs, and the two-host orchestrator.
+# veth-up/veth-down need root (sudo -n is used for the ip commands only).
+bench-veth-up:
+	tests/bench/capacity_veth.sh up
+
+bench-veth-down:
+	tests/bench/capacity_veth.sh down
+
+bench-preflight:
+	python3 tests/bench/capacity_preflight.py host --role sender \
+	    --json /tmp/nginx-media-preflight-sender.json
 
 tsan:
 	$(MAKE) -C tests/unit tsan

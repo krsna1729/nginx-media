@@ -223,6 +223,9 @@ def summarize(args):
             entry["first_quality_failure"] = min(failing) if failing else None
             entry["setup_limited"] = [r["destinations"] for r in entry["rungs"]
                                       if r["outcome"] == "setup-failure"]
+            entry["infrastructure_limited"] = [
+                r["destinations"] for r in entry["rungs"]
+                if r["outcome"] == "infrastructure-limited"]
         configs[name] = {"harness_status": statuses.get(name), "mixes": mixes}
         configs[name].update(completeness(args.results, name, mixes))
     record = {
@@ -244,7 +247,9 @@ def summarize(args):
         for mix, entry in config["mixes"].items():
             print(f"bench {name} {mix} highest_passing={entry['highest_passing']}"
                   f" first_quality_failure={entry['first_quality_failure']}"
-                  f" setup_limited={entry['setup_limited'] or 'none'}")
+                  f" setup_limited={entry['setup_limited'] or 'none'}"
+                  f" infrastructure_limited="
+                  f"{entry.get('infrastructure_limited') or 'none'}")
     return 0
 
 
@@ -289,6 +294,13 @@ def gate(args):
         for message in config.get("missing", []):
             errors.append(f"{name}: incomplete - {message}")
         for mix, entry in config["mixes"].items():
+            for rung in entry.get("infrastructure_limited") or []:
+                # Not a failure and not a result: the environment could not
+                # carry the offered load, so the rung was never measured.
+                print(f"::notice title=bench infrastructure::"
+                      f"{name}/{mix} at {rung} destinations was not measured: "
+                      f"the preflight found the host, the path or the "
+                      f"receivers short")
             if entry["setup_limited"]:
                 errors.append(f"{name}/{mix}: setup failure at "
                               f"{entry['setup_limited']} (never measured)")
