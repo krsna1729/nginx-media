@@ -1,13 +1,14 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit tsan bench-reporting nginx graph-conflict incarnation smoke bench-worker-scaling \
+.PHONY: unit tsan bench-reporting bench-veth-up bench-veth-down bench-preflight \
+    nginx graph-conflict incarnation smoke bench-worker-scaling \
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
     bench-capacity-curve bench-capacity-quality bench-burst-sizing test-image test-in-container \
     srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph \
-    failover hls hls-push hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
+    failover hls hls-push hls-push-faults hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
     file-source transform \
     stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
-    srt-lane-isolation srt-crypto \
+    srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
     srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls \
     bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
@@ -17,6 +18,18 @@ unit:
 # The reporting pipeline's own tests: no nginx, no network, plain python3.
 bench-reporting:
 	python3 tests/bench/test_reporting.py
+
+# The receiver topologies for capacity runs, and the two-host orchestrator.
+# veth-up/veth-down need root (sudo -n is used for the ip commands only).
+bench-veth-up:
+	tests/bench/capacity_veth.sh up
+
+bench-veth-down:
+	tests/bench/capacity_veth.sh down
+
+bench-preflight:
+	python3 tests/bench/capacity_preflight.py host --role sender \
+	    --json /tmp/nginx-media-preflight-sender.json
 
 tsan:
 	$(MAKE) -C tests/unit tsan
@@ -53,6 +66,9 @@ hls:
 
 hls-push:
 	tests/integration/hls_push_nginx.sh
+
+hls-push-faults:
+	tests/integration/hls_push_faults_nginx.sh
 
 hls-pull:
 	tests/integration/hls_pull_nginx.sh
@@ -121,6 +137,9 @@ srt-output-mux:
 srt-lane-isolation:
 	tests/integration/srt_lane_isolation_nginx.sh
 
+srt-lane-isolation-fanout:
+	tests/integration/srt_lane_isolation_fanout_nginx.sh
+
 srt-output:
 	tests/integration/srt_output_nginx.sh
 
@@ -160,10 +179,10 @@ BASE ?= debian:trixie
 DOCKER_CACHE_ARGS ?=
 TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
-    hls-profile hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
+    hls-profile hls-push-faults hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
     graph-conflict churn \
     rtmp \
-    rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux srt-lane-isolation srt-crypto \
+    rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
     srt-worker-ports \
     srt-shared-port multi-worker soak fault
 

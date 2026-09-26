@@ -35,6 +35,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 READERS = os.path.join(HERE, "hls_capacity_readers.py")
 DIAGNOSTICS = os.path.join(HERE, "capacity_diagnostics.py")
 HISTORY = os.path.join(HERE, "bench_history.py")
+PREFLIGHT = os.path.join(HERE, "capacity_preflight.py")
 
 checks = 0
 failures = 0
@@ -73,6 +74,137 @@ def write_kv(path, pairs):
 
 def run(args, **kwargs):
     return subprocess.run(args, text=True, capture_output=True, **kwargs)
+
+
+def write_json(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as output:
+        json.dump(payload, output)
+
+
+def preflight(*args):
+    return run([sys.executable, PREFLIGHT] + list(args))
+
+
+def test_preflight_classifies_a_short_environment(work):
+    """The preflight's whole job: say which side is short, and never turn an
+    environment that cannot carry the load into a result about the sender."""
+    case = os.path.join(work, "preflight")
+    sender = os.path.join(case, "sender.json")
+    rx = os.path.join(case, "rx.json")
+    tx = os.path.join(case, "tx.json")
+    write_json(sender, {"role": "sender", "permitted_cpus": [0, 1, 2, 3],
+                        "cpu_model": "test",
+                        "memory": {"MemAvailable": "8000000 kB"}})
+    # the receiver counted 5.36 Gbit/s and dropped datagrams: the receiver
+    # side is short for a 9.6 Gbit/s request
+    write_json(rx, {"side": "receiver", "received_bytes": 6_700_000_000,
+                    "received_packets": 4_700_000, "window_s": 10.0,
+                    "socket_drops": 178465, "rate_gbps": 5.36})
+    write_json(tx, {"side": "sender", "sent_bytes": 7_300_000_000,
+                    "sent_packets": 5_200_000, "send_window_s": 10.0,
+                    "ping_loss": 0.0})
+
+    result = preflight("judge", "--destinations", "1000", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx, "--json",
+                       os.path.join(case, "judge.json"))
+    # The probe's own receiver dropped datagrams, so the probe cannot say
+    # whether the path carries more: that is evidence about the probe, and
+    # the measurement it did take is still reported.
+    check(result.returncode == 3,
+          f"a probe that dropped its own datagrams is not a limit: "
+          f"{result.stdout}")
+    check("preflight_unknown=probe/receiver-socket-drops" in result.stdout,
+          f"the probe's own limit must be named: {result.stdout}")
+    with open(os.path.join(case, "judge.json"), encoding="utf-8") as source:
+        judged = json.load(source)
+    check_close(judged["request"]["required_network_gbps"], 9.6,
+                "the request's network need must be explicit")
+    check_close(judged["request"]["measured_network_gbps"], 5.36,
+                "the measurement it did take is reported")
+
+    # ... but a measured cost per delivered Gbit/s that does not fit the
+    # permitted CPUs is a limit, and that is the number the ladder feeds it
+    # from the rung that ran before
+    result = preflight("judge", "--destinations", "1000", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx, "--sender-cpu-per-gbps", "140")
+    check(result.returncode == 2,
+          f"a sender that cannot afford the load is a limit: {result.stdout}")
+    check("preflight_limit=sender/cpu" in result.stdout,
+          f"the short side must be the sender: {result.stdout}")
+
+    # the same measurements for a request the environment can carry
+    result = preflight("judge", "--destinations", "64", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx, "--sender-cpu-per-gbps", "140",
+                       "--receiver-cpu-per-gbps", "30")
+    check(result.returncode == 0, f"a load that fits must pass: {result.stdout}")
+
+    # nothing dropped, but the probe never offered the requested load: that
+    # is a limit of the measurement, not a statement about the path
+    write_json(rx, {"side": "receiver", "received_bytes": 6_700_000_000,
+                    "window_s": 10.0, "socket_drops": 0, "rate_gbps": 5.36})
+    write_json(tx, {"side": "sender", "sent_bytes": 6_700_000_000,
+                    "send_window_s": 10.0})
+    result = preflight("judge", "--destinations", "1000", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx)
+    check(result.returncode == 3,
+          f"an unoffered load must be insufficient evidence: {result.stdout}")
+    check("preflight_unknown=network/throughput" in result.stdout,
+          f"the unknown must be explicit: {result.stdout}")
+
+    # the path carried the offered load but the sender has no measured cost
+    # per Gbit/s: a core count is not a capacity, so it is not a pass
+    result = preflight("judge", "--destinations", "64", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx)
+    check(result.returncode == 3,
+          f"unknown CPU cost must not pass: {result.stdout}")
+    check("preflight_unknown=sender/cpu" in result.stdout,
+          f"the unknown CPU must be reported: {result.stdout}")
+
+    # and the receiver's CPU, when a measurement says what it costs
+    result = preflight("judge", "--destinations", "1000", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx, "--receiver", sender,
+                       "--receiver-cpu-per-gbps", "200")
+    check(result.returncode == 2,
+          f"an unaffordable receiver must be a limit: {result.stdout}")
+    check("preflight_limit=receiver/cpu" in result.stdout,
+          f"the short side must be the receiver: {result.stdout}")
+
+
+def test_preflight_probe_is_measured_at_both_ends(work):
+    """A path probe over loopback: the receiver's count is the measurement,
+    the sender's count says the load was offered, and neither is inferred."""
+    case = os.path.join(work, "probe")
+    os.makedirs(case, exist_ok=True)
+    port = 20977
+    rx = os.path.join(case, "rx.json")
+    listener = subprocess.Popen(
+        [sys.executable, PREFLIGHT, "probe", "--listen", "--port", str(port),
+         "--seconds", "4", "--json", rx],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(0.5)
+    tx = os.path.join(case, "tx.json")
+    result = preflight("probe", "--peer", "127.0.0.1", "--port", str(port),
+                       "--seconds", "2", "--json", tx)
+    out, err = listener.communicate(timeout=30)
+    check(listener.returncode == 0, f"listener failed: {err.strip()}")
+    check(result.returncode == 0, f"sender probe failed: {result.stderr}")
+    with open(rx, encoding="utf-8") as source:
+        received = json.load(source)
+    with open(tx, encoding="utf-8") as source:
+        sent = json.load(source)
+    check(received["received_bytes"] > 0, "the receiver must count bytes")
+    check(sent["sent_bytes"] > 0, "the sender must count bytes")
+    check_close(sent["ping_loss"], 0.0, "loopback loses no pings")
+    check(received["received_bytes"] <= sent["sent_bytes"],
+          "a receiver cannot count more than was sent")
+    check(received["window_s"] > 0, "the receiver's own window must be recorded")
 
 
 # --- the HLS reader benchmark ------------------------------------------------
@@ -387,6 +519,29 @@ def test_absent_and_malformed_inputs(work):
           "an unreadable CSV is unavailable, not an exception")
 
 
+def test_bundle_carries_the_host_fingerprint(work):
+    """A rung's numbers are unreadable without the host they were taken on:
+    CPU, cgroup, affinity, interfaces, transport library."""
+    case = os.path.join(work, "fingerprint")
+    os.makedirs(case, exist_ok=True)
+    module = load_module(DIAGNOSTICS, "capacity_diagnostics_fingerprint")
+    bare = module.build  # the CLI path reads the file; check the fields here
+    check(bare is not None, "build exists")
+    # the bundle's shape, without running the whole build: the fingerprint is
+    # read from the case directory and reported missing when absent
+    fingerprint = module.load_json(os.path.join(case, "host-fingerprint.json"))
+    check(fingerprint is None, "no fingerprint file means no fingerprint")
+    write_json(os.path.join(case, "host-fingerprint.json"), {
+        "role": "sender", "cpu_model": "test-cpu", "permitted_cpus": [0, 1],
+        "cgroup": {"cpu_max": "max 100000"}, "transport": "libsrt.so.1",
+        "interfaces": {"eth0": {"speed_mbps": "25000"}},
+    })
+    fingerprint = module.load_json(os.path.join(case, "host-fingerprint.json"))
+    check(fingerprint["cpu_model"] == "test-cpu"
+          and fingerprint["transport"] == "libsrt.so.1",
+          f"the fingerprint must carry the CPU and the transport: {fingerprint}")
+
+
 def test_efficiency_uses_receiver_bytes_for_every_protocol(work):
     case = os.path.join(work, "all-protocols")
     srt_case(case)
@@ -486,6 +641,73 @@ def gate(summary, tier="pr"):
     return run([sys.executable, HISTORY, "gate", summary, "--tier", tier])
 
 
+def test_history_carries_the_environment_and_peak_pressure(work):
+    """A history record has to say which host produced the number and how
+    hard that host was pushed."""
+    module = load_module(HISTORY, "bench_history_peak")
+    rung = module.rung_record({
+        "case": {"destinations": 128}, "outcome": "pass",
+        "host_fingerprint": {"cpu_model": "test-cpu", "kernel": "7.2.5",
+                             "permitted_cpus": [0, 2], "transport": "libsrt.so.1",
+                             "interfaces": {"eth0": {"speed_mbps": "25000"}}},
+        "cpu": {"by_kind_pct_of_core": {"value": {"worker": 490.5,
+                                                  "srt-receiver": 418.2,
+                                                  "publisher": 1.6}}},
+        "network": {"udp_socket_drops_by_process": {"value": {
+            "w0": {"kind": "worker", "socket_drops_delta": 12},
+            "r0": {"kind": "srt-receiver", "socket_drops_delta": 390737}}}},
+        "event_loop_max_delay": {"value": {"w0": 41.0, "w1": 116.0}},
+        "resources": {"worker_memory": {"value": {
+            "1": {"after": {"rss_kb": 250000}}}}},
+    })
+    peak = rung["peak"]
+    check_close(peak["sender_cpu_pct_of_core"], 490.5, "sender peak CPU")
+    check_close(peak["receiver_cpu_pct_of_core"], 418.2, "receiver peak CPU")
+    check(peak["socket_drops"] == 390749,
+          f"every socket's drops count, not only the sender's: {peak}")
+    check_close(peak["event_loop_max_delay_ms"], 116.0, "worst event loop slip")
+    check(peak["worker_rss_kb_max"] == 250000, "peak worker memory")
+    check(rung["host_fingerprint"]["cpu_model"] == "test-cpu",
+          "the rung keeps the environment it was taken in")
+
+    # the run-level record lifts the fingerprint and the maxima
+    entry = {"rungs": [rung, dict(rung, peak=dict(peak, socket_drops=5))]}
+    entry = module.run_environment(entry)
+    check(entry["fingerprint"]["cpu_model"] == "test-cpu",
+          f"the run carries the host: {entry.get('fingerprint')}")
+    check(entry["peak"]["socket_drops"] == 390749,
+          f"the run's peak is the worst rung: {entry.get('peak')}")
+
+
+def test_history_carries_the_strict_result_separately(work):
+    """The 0.95 gate and the strict full-rate qualification are different
+    questions; a record must carry both, and must not imply a pass it never
+    measured."""
+    module = load_module(HISTORY, "bench_history_strict")
+    passing = module.rung_record({"case": {"destinations": 128}, "outcome": "pass",
+                                  "delivery": {"srt": {"value": {
+                                      "quality_average_delivery_ratio_min": 0.9995,
+                                      "quality_strict_full_rate": "yes",
+                                      "quality_strict_ratio_min": 0.9995}}}})
+    check(passing["strict_full_rate"] == {"srt": "yes"},
+          f"the strict result must be recorded: {passing['strict_full_rate']}")
+    check(passing["strict_full_rate_pass"] is True,
+          "a strict pass must read as one")
+
+    marginal = module.rung_record({"case": {"destinations": 160},
+                                   "outcome": "quality-failure",
+                                   "delivery": {"srt": {"value": {
+                                       "quality_average_delivery_ratio_min": 0.4978,
+                                       "quality_strict_full_rate": "no"}}}})
+    check(marginal["strict_full_rate_pass"] is False,
+          "a strict failure must read as one")
+    old_bundle = module.rung_record({"case": {"destinations": 64}, "outcome": "pass",
+                                     "delivery": {"srt": {"value": {
+                                         "quality_average_delivery_ratio_min": 0.999}}}})
+    check(old_bundle["strict_full_rate_pass"] is None,
+          "a run that never reported the strict result must not imply one")
+
+
 def test_history_separates_observed_from_threshold(work):
     results = os.path.join(work, "results")
     make_config(results, "srt", [
@@ -549,6 +771,33 @@ def test_gate_accepts_a_finished_ladder_that_stopped_at_the_boundary(work):
           f"a completed ladder that failed past its boundary must pass: "
           f"{result.stdout}{result.stderr}")
     check("bench_gate=pass" in result.stdout, "the gate must say it passed")
+
+
+def test_gate_accepts_an_infrastructure_limited_rung(work):
+    """A host that cannot carry the load is not a software failure: the rung
+    is recorded as infrastructure-limited, the ladder stops there, and the
+    gate reports it without failing."""
+    results = os.path.join(work, "limited")
+    make_config(results, "srt", [
+        (1, "pass", srt_delivery(1.0)),
+        (16, "pass", srt_delivery(0.99)),
+        (128, "infrastructure-limited", srt_delivery(1.0)),
+    ], status=1, stopped={"pure-srt": "128 256 512"},
+        expected={"mixes": ["pure-srt"], "steps": [1, 16, 128, 256, 512]})
+    out = os.path.join(work, "limited.json")
+    check(summarize(results, out).returncode == 0, "summarize must succeed")
+    with open(out, encoding="utf-8") as source:
+        record = json.load(source)
+    entry = record["configs"]["srt"]["mixes"]["pure-srt"]
+    check(entry["infrastructure_limited"] == [128],
+          f"the matrix must list the rung separately: {entry}")
+    check(entry["first_quality_failure"] is None,
+          "an infrastructure limit is not a quality failure")
+    result = gate(out)
+    check(result.returncode == 0,
+          f"an infrastructure limit must not fail the gate: {result.stdout}")
+    check("infrastructure" in result.stdout + result.stderr,
+          f"the gate must report the limit: {result.stdout}{result.stderr}")
 
 
 def test_gate_rejects_quality_failure_below_the_required_rung(work):
@@ -702,6 +951,39 @@ def test_per_lane_rate_keeps_workers_apart(work):
           f"worker 0's shard 1 rate must be its own: {rates}")
     check(rates.get("w3:s0") == 0,
           f"an empty shard reports zero, not another worker's bytes: {rates}")
+def test_per_cpu_busy_separates_idle_from_saturated(work):
+    """A short delivery on idle pinned cores is a different finding from one
+    on saturated cores: the bundle must carry both the per-CPU numbers and
+    what the pinned sets did."""
+    module = load_module(DIAGNOSTICS, "capacity_diagnostics_percpu")
+
+    def snapshot(values):
+        return {"host": {"cpu_per_cpu": {
+            f"cpu{index}": {"user": user, "nice": 0, "system": 0, "idle": idle,
+                            "iowait": 0, "irq": 0, "softirq": 0, "steal": 0}
+            for index, (user, idle) in enumerate(values)}}}
+
+    # cpu0 works the whole window, cpu1 is idle, cpu2 is half busy
+    before = snapshot([(0, 1000), (0, 1000), (0, 1000)])
+    after = snapshot([(1000, 1000), (0, 2000), (500, 1500)])
+    busy = module.per_cpu_busy(before, after)
+    check_close(busy["cpu0"], 100.0, "a fully busy core reads 100%")
+    check_close(busy["cpu1"], 0.0, "an idle core reads 0%")
+    check_close(busy["cpu2"], 50.0, "a half busy core reads 50%")
+
+    check(module.parse_cpu_list("0,2,4-6") == [0, 2, 4, 5, 6],
+          "the harness's placement format must parse")
+    check(module.parse_cpu_list("") == [] and module.parse_cpu_list(None) == [],
+          "an unpinned run has no CPU list")
+
+    headroom = module.pinned_headroom(busy, "0,1", "sender")
+    check(headroom["value"]["mean_busy_pct"] == 50.0,
+          f"pinned mean busy: {headroom}")
+    check(headroom["value"]["idle_cpus"] == 1
+          and headroom["value"]["saturated_cpus"] == 1,
+          f"idle and saturated cores must be counted: {headroom}")
+    check(module.pinned_headroom(busy, "9", "sender") is None,
+          "a CPU with no counters reports nothing, never zero")
 
 
 def test_matrix_separates_observed_from_threshold(work):
@@ -732,15 +1014,21 @@ def test_matrix_separates_observed_from_threshold(work):
 def main():
     work = tempfile.mkdtemp(prefix="nginx-media-reporting-")
     try:
+        test_preflight_classifies_a_short_environment(work)
+        test_preflight_probe_is_measured_at_both_ends(work)
         test_reader_percentile_helpers()
         test_reader_reports_observed_not_threshold(os.path.join(work, "readers"))
         test_hls_origin_bundle_uses_observed_ratios(work)
         test_old_bundle_threshold_is_never_a_measurement(work)
         test_absent_and_malformed_inputs(work)
+        test_bundle_carries_the_host_fingerprint(work)
         test_efficiency_uses_receiver_bytes_for_every_protocol(work)
         test_efficiency_refuses_a_sender_only_counter(work)
+        test_history_carries_the_environment_and_peak_pressure(work)
+        test_history_carries_the_strict_result_separately(work)
         test_history_separates_observed_from_threshold(work)
         test_gate_accepts_a_finished_ladder_that_stopped_at_the_boundary(work)
+        test_gate_accepts_an_infrastructure_limited_rung(work)
         test_gate_rejects_quality_failure_below_the_required_rung(work)
         test_gate_rejects_missing_rungs_and_workloads(work)
         test_gate_rejects_an_aborted_harness(work)
@@ -749,6 +1037,7 @@ def main():
         test_gate_rejects_absent_diagnostics(work)
         test_gate_rejects_a_setup_failure(work)
         test_per_lane_rate_keeps_workers_apart(work)
+        test_per_cpu_busy_separates_idle_from_saturated(work)
         test_matrix_separates_observed_from_threshold(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)

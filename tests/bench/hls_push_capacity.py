@@ -89,6 +89,9 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
                     "monotonic": time.monotonic(),
                     "mark_monotonic": self.server.mark_monotonic,
                     "http_errors": self.server.http_errors,
+                    "fault_puts": self.server.fault_puts,
+                    "fault_failures": self.server.fault_failures,
+                    "fault_closed": self.server.fault_closed,
                     "destinations": {
                         destination: {
                             "ts_bytes": self.server.ts_bytes[destination],
@@ -120,6 +123,27 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
     def do_PUT(self):
         upload_started = time.monotonic()
         parsed = urlsplit(self.path)
+        server = self.server
+        # Fault injection, for the isolation test: a sink that refuses every
+        # Nth upload, closes the connection after N of them, or answers
+        # slowly.  All zero by default, so capacity runs are unaffected.
+        if server.fault_close_after or server.fault_fail_every:
+            with server.fault_lock:
+                server.fault_puts += 1
+                sequence = server.fault_puts
+            if server.fault_close_after and sequence % server.fault_close_after == 0:
+                with server.fault_lock:
+                    server.fault_closed += 1
+                self.close_connection = True
+                return
+            if server.fault_fail_every and sequence % server.fault_fail_every == 0:
+                with server.fault_lock:
+                    server.fault_failures += 1
+                self._reply(500)
+                return
+        if server.fault_latency_ms:
+            time.sleep(server.fault_latency_ms / 1000.0)
+
         parts = parsed.path.strip("/").split("/", 1)
         if not parts[0]:
             self._reply(400)
@@ -209,8 +233,17 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
 
 
 
-def serve(port):
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), HlsPushSink)
+def serve(port, bind="127.0.0.1", fail_every=0, close_after=0,
+          latency_ms=0):
+    server = http.server.ThreadingHTTPServer((bind, port), HlsPushSink)
+    # fault injection, off unless asked for: see the isolation test
+    server.fault_lock = threading.Lock()
+    server.fault_fail_every = fail_every
+    server.fault_close_after = close_after
+    server.fault_latency_ms = latency_ms
+    server.fault_puts = 0
+    server.fault_failures = 0
+    server.fault_closed = 0
     server.daemon_threads = True
     server.destinations_lock = threading.Lock()
     server.ts_destinations = set()
@@ -634,6 +667,15 @@ def main():
 
     sink_parser = subparsers.add_parser("serve")
     sink_parser.add_argument("--port", type=int, required=True)
+    # loopback unless the sink is asked to listen where the sender can
+    # reach it: a receiver in its own namespace, or on another host
+    sink_parser.add_argument("--bind", default="127.0.0.1")
+    # fault injection for the isolation test: refuse every Nth upload, close
+    # the connection after N uploads, or answer after a delay.  Zero means
+    # none, which is what every capacity run uses.
+    sink_parser.add_argument("--fail-every", type=int, default=0)
+    sink_parser.add_argument("--close-after", type=int, default=0)
+    sink_parser.add_argument("--latency-ms", type=int, default=0)
 
     report_parser = subparsers.add_parser("report")
     report_parser.add_argument("--before-prefix", required=True)
@@ -660,7 +702,8 @@ def main():
     args = parser.parse_args()
 
     if args.command == "serve":
-        serve(args.port)
+        serve(args.port, args.bind, args.fail_every, args.close_after,
+              args.latency_ms)
     else:
         try:
             if args.command == "readiness-report":

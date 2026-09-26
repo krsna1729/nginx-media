@@ -119,6 +119,7 @@ jobs:
           make srt-output
           make srt-output-mux
           make srt-lane-isolation
+          make srt-lane-isolation-fanout
 
       - name: Integration - transport security
         run: |

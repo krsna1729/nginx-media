@@ -547,6 +547,8 @@ main(int argc, char **argv)
     char *colon;
     int epoll_id = SRT_ERROR;
     struct sockaddr_in address;
+    const char *bind_text;
+    in_addr_t bind_address;
     struct sigaction action;
     struct timespec snapshot_time;
     SRT_EPOLL_EVENT *events = NULL;
@@ -559,6 +561,21 @@ main(int argc, char **argv)
     for (l = 0; l < LISTENER_CAP; l++) {
         listeners[l] = SRT_INVALID_SOCK;
     }
+    /* Where to listen.  Loopback by default; the capacity harness sets
+     * SRT_SINK_BIND so the measuring receiver can live in its own network
+     * namespace - or on another host - while the sender dials that address. */
+    bind_text = getenv("SRT_SINK_BIND");
+    if (bind_text == NULL || bind_text[0] == '\0') {
+        bind_text = "127.0.0.1";
+    }
+    bind_address = inet_addr(bind_text);
+    if (bind_address == INADDR_NONE
+        && strcmp(bind_text, "255.255.255.255") != 0)
+    {
+        fprintf(stderr, "SRT_SINK_BIND is not an IPv4 address: %s\n", bind_text);
+        return EXIT_FAILURE;
+    }
+
     if (argc > 1 && strlen(argv[1]) < sizeof(port_text)) {
         strcpy(port_text, argv[1]);
         colon = strchr(port_text, ':');
@@ -691,13 +708,13 @@ main(int argc, char **argv)
         memset(&address, 0, sizeof(address));
         address.sin_family = AF_INET;
         address.sin_port = htons((uint16_t) (port_arg + l));
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_addr.s_addr = bind_address;
         if (srt_bind(listener, (struct sockaddr *) &address, sizeof(address))
                 == SRT_ERROR
             || srt_listen(listener, (int) expected) == SRT_ERROR)
         {
-            fprintf(stderr, "cannot bind/listen on 127.0.0.1:%lu: %s\n",
-                    port_arg + l, srt_getlasterror_str());
+            fprintf(stderr, "cannot bind/listen on %s:%lu: %s\n",
+                    bind_text, port_arg + l, srt_getlasterror_str());
             failure = 1;
             goto done;
         }
