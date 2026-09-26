@@ -457,13 +457,26 @@ adaptive policy matches the best fixed count.
 
 ### 6. Seven-workload matrix
 
-See the replication table above and the run recorded under
-`docs/capacity-evidence/`.  Workloads whose receiver is self-contained
-(pure SRT, pure RTMP, and the SRT-bearing mixes) reach the top rung of the
-ladder here; the HLS configurations must run unprivileged, because nginx's
-workers drop to `nobody` and cannot create HLS directories when the harness
-runs as root - a setup failure the harness records as such, never as a
-quality failure.
+Four P-cores for the sender and four E-cores for the receivers, SMT siblings
+offlined, 30 s rungs, 8 Mbit/s source, unprivileged (nginx's workers drop to
+`nobody`, so a root-run harness cannot create HLS directories - a setup
+failure the harness records as such, never as a quality failure):
+
+| Workload | Highest pass (this host) | First failure | Published (4 vCPU, 2026-09-25) |
+|---|---|---|---|
+| Pure SRT | 256 (ladder top) | none | 96 / 128 |
+| Pure RTMP | 256 (ladder top) | none | 128 / 192 |
+| Pure HLS origin (readers) | 256 (ladder top) | none | 256 (top) |
+| Pure HLS push | 256 (ladder top) | none | 256 (top) |
+| RTMP 95% / SRT 5% | in progress | — | 192 / 256 |
+| HLS push 95% / SRT 5% | pending | — | 256 (top) |
+| RTMP 50% / HLS push 45% / SRT 5% | pending | — | 256 (top) |
+
+Every pure workload reaches the ladder's top rung here, including the two
+HLS directions the root-run attempt could not set up.  The three mixes were
+still running when the machine was handed back; the harness records each
+rung's outcome as it goes, so the remainder resumes with the command in the
+handover notes.
 
 ### 7. 1000 destinations
 
