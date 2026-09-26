@@ -97,6 +97,8 @@ jobs:
           make file-source
           make rtmp
           make srt-output
+          make srt-output-mux
+          make srt-lane-isolation
 
       - name: Integration - transport security
         run: |

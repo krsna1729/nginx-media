@@ -17,9 +17,13 @@
 #include "ngx_media_test.h"
 
 #include "ngx_media_srt_output_queue.h"
+#include "ngx_media_srt_udp.h"
+
+#include <pthread.h>
 
 #include <dirent.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 #define CHECK(cond, fmt, ...)                                                 \
@@ -291,12 +295,21 @@ test_references(void)
     ngx_media_srt_queue_destroy(&q);
 }
 
+/*
+ * The module's own sender threads, by the name each gives itself
+ * (srt-egress-NN).  Counting every task in the process instead made these
+ * checks depend on whatever else runs in it: ThreadSanitizer starts a thread
+ * of its own, and on Debian trixie a sanitizer or library thread appeared
+ * between two counts in CI ("stopping joined every sender: 17 -> 2").
+ */
 static ngx_uint_t
 thread_count(void)
 {
     DIR           *dir;
     struct dirent *ent;
     ngx_uint_t     n = 0;
+    char           path[320], comm[32];
+    FILE          *f;
 
     dir = opendir("/proc/self/task");
 
@@ -305,12 +318,45 @@ thread_count(void)
     }
 
     while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] != '.') {
+        if (ent->d_name[0] == '.') {
+            continue;
+        }
+
+        (void) snprintf(path, sizeof(path), "/proc/self/task/%s/comm",
+                        ent->d_name);
+        f = fopen(path, "r");
+        if (f == NULL) {
+            continue;
+        }
+        if (fgets(comm, sizeof(comm), f) != NULL
+            && strncmp(comm, "srt-egress-", 11) == 0)
+        {
             n++;
         }
+        (void) fclose(f);
     }
 
     closedir(dir);
+
+    return n;
+}
+
+/* a sender names itself once it runs: give new ones a moment to */
+static ngx_uint_t
+thread_count_settled(ngx_uint_t want)
+{
+    ngx_uint_t  i, n = 0;
+
+    for (i = 0; i < 200; i++) {
+        n = thread_count();
+        if (n == want) {
+            break;
+        }
+        {
+            struct timespec  ts = { 0, 5 * 1000 * 1000 };
+            (void) nanosleep(&ts, NULL);
+        }
+    }
 
     return n;
 }
@@ -340,7 +386,8 @@ test_shared_sender_pool(void)
     CHECK(listener != NULL, "listener created");
 
     base = thread_count();
-    CHECK(base > 0, "thread count readable: %lu", (unsigned long) base);
+    CHECK(base == 0, "no sender threads before the pool starts: %lu",
+          (unsigned long) base);
 
     memset(&conf, 0, sizeof(conf));
     conf.application.len = 4;
@@ -359,24 +406,11 @@ test_shared_sender_pool(void)
     CHECK(ngx_media_srt_outputs_start(&outs, &conf, 1, 16, NULL) == NGX_OK,
           "outputs started");
 
-    after_start = thread_count();
-#ifndef __SANITIZE_THREAD__
+    after_start = thread_count_settled(base + NGX_MEDIA_SRT_EGRESS_SHARDS);
     CHECK(after_start == base + NGX_MEDIA_SRT_EGRESS_SHARDS,
           "exactly %ui egress shard threads started: %lu -> %lu",
           NGX_MEDIA_SRT_EGRESS_SHARDS, (unsigned long) base,
           (unsigned long) after_start);
-#else
-    /*
-     * ThreadSanitizer starts a background thread of its own the first time
-     * the process creates one, so the count is at least the shards here;
-     * "no thread per destination" is still checked exactly below, as the
-     * difference between two counts taken after it exists.
-     */
-    CHECK(after_start >= base + NGX_MEDIA_SRT_EGRESS_SHARDS,
-          "at least %ui egress shard threads started: %lu -> %lu",
-          NGX_MEDIA_SRT_EGRESS_SHARDS, (unsigned long) base,
-          (unsigned long) after_start);
-#endif
 
     for (i = 0; i < 3; i++) {
         CHECK(ngx_media_srt_outputs_add(outs, &conf, NULL, NULL) == NGX_OK,
@@ -477,17 +511,182 @@ test_shared_sender_pool(void)
     ngx_media_srt_listen_close(listener);
 
     /*
-     * Under ThreadSanitizer this check is skipped rather than weakened: TSan
-     * runs threads of its own, so a kernel task count cannot say whether a
-     * sender survived.  It is not needed there either - if the join did not
-     * happen, the sender keeps walking the table after stop has freed it, and
-     * TSan reports that as a use-after-free, which is a stronger statement
-     * than this count.
+     * stop joins its senders before it returns, but pthread_join returns
+     * when the kernel clears the thread's tid (CLONE_CHILD_CLEARTID, in
+     * mm_release) - a moment before the exiting task leaves
+     * /proc/self/task.  So the count is allowed that moment to settle; a
+     * sender stop did not end keeps running and never leaves, and still
+     * fails this.
      */
-#ifndef __SANITIZE_THREAD__
-    CHECK(thread_count() == base, "stopping joined every sender: %lu -> %lu",
-          (unsigned long) after_media, (unsigned long) thread_count());
-#endif
+    {
+        ngx_uint_t  left = thread_count_settled(base);
+
+        CHECK(left == base, "stopping joined every sender: %lu -> %lu",
+              (unsigned long) after_media, (unsigned long) left);
+    }
+}
+
+/*
+ * A backend that records the multiplexer group each destination connects in
+ * and otherwise behaves as the UDP test double.  Destinations are told apart
+ * by their stream id, "dN".
+ */
+#define RECORD_MAX  32
+
+static ngx_media_srt_ops_t  recording_ops;
+static pthread_mutex_t      recording_lock = PTHREAD_MUTEX_INITIALIZER;
+static ngx_int_t            recorded_group[RECORD_MAX];
+static ngx_uint_t           plain_connects;
+
+static ngx_media_srt_session_t *
+recording_connect(const u_char *host, ngx_uint_t port,
+    const u_char *streamid, size_t streamid_len, ngx_msec_t timeout_ms,
+    const ngx_media_srt_params_t *params, ngx_log_t *log)
+{
+    (void) pthread_mutex_lock(&recording_lock);
+    plain_connects++;
+    (void) pthread_mutex_unlock(&recording_lock);
+
+    return ngx_media_srt_udp_ops.connect(host, port, streamid, streamid_len,
+                                         timeout_ms, params, log);
+}
+
+static ngx_media_srt_session_t *
+recording_connect_shared(const u_char *host, ngx_uint_t port,
+    const u_char *streamid, size_t streamid_len, ngx_msec_t timeout_ms,
+    const ngx_media_srt_params_t *params, ngx_uint_t group, ngx_log_t *log)
+{
+    int  n;
+
+    if (streamid != NULL && streamid_len > 1 && streamid[0] == 'd'
+        && sscanf((const char *) streamid + 1, "%d", &n) == 1
+        && n >= 0 && n < RECORD_MAX)
+    {
+        (void) pthread_mutex_lock(&recording_lock);
+        recorded_group[n] = (ngx_int_t) group;
+        (void) pthread_mutex_unlock(&recording_lock);
+    }
+
+    return ngx_media_srt_udp_ops.connect(host, port, streamid, streamid_len,
+                                         timeout_ms, params, log);
+}
+
+/*
+ * A destination's logical lane is its transport multiplexer group, so a
+ * lane's destinations share one library endpoint and the library's thread
+ * count follows the lanes rather than the fanout.  The group must be the same
+ * for every destination of a lane and nonzero (zero means "private").
+ */
+static void
+test_lane_multiplexer_groups(void)
+{
+    ngx_media_srt_listener_t    *listener;
+    ngx_media_srt_outputs_t     *outs = NULL;
+    ngx_media_srt_output_conf_t  conf;
+    ngx_media_srt_out_event_t    events[64];
+    ngx_media_srt_session_t     *session;
+    u_char                       ids[RECORD_MAX][8];
+    ngx_uint_t                   seen[RECORD_MAX];
+    ngx_uint_t                   total = NGX_MEDIA_SRT_EGRESS_SHARDS + 2;
+    ngx_uint_t                   connected, i, n, tries;
+
+    TEST_CASE("destinations connect in their lane's multiplexer group");
+
+    recording_ops = ngx_media_srt_udp_ops;
+    recording_ops.connect = recording_connect;
+    recording_ops.connect_shared = recording_connect_shared;
+    for (i = 0; i < RECORD_MAX; i++) {
+        recorded_group[i] = -1;
+        seen[i] = 0;
+    }
+    plain_connects = 0;
+    ngx_media_srt_set_backend(&recording_ops);
+
+    listener = ngx_media_srt_listen((const u_char *) "127.0.0.1", 24591, NULL,
+                                    NULL);
+    CHECK(listener != NULL, "listener created");
+
+    memset(&conf, 0, sizeof(conf));
+    conf.application.len = 4;
+    conf.application.data = (u_char *) "live";
+    conf.stream.len = 4;
+    conf.stream.data = (u_char *) "news";
+    conf.host.len = 9;
+    conf.host.data = (u_char *) "127.0.0.1";
+    conf.port = 24591;
+    conf.max_units = 64;
+    conf.max_bytes = 256 * 1024;
+    conf.connect_timeout = 1000;
+    conf.send_timeout = 1000;
+
+    CHECK(ngx_media_srt_outputs_start(&outs, NULL, 0, 64, NULL) == NGX_OK,
+          "outputs started");
+
+    for (i = 0; i < total; i++) {
+        conf.streamid.len = (size_t) snprintf((char *) ids[i], sizeof(ids[i]),
+                                              "d%lu", (unsigned long) i);
+        conf.streamid.data = ids[i];
+        CHECK(ngx_media_srt_outputs_add(outs, &conf, NULL, NULL) == NGX_OK,
+              "destination %lu added", (unsigned long) i);
+    }
+
+    connected = 0;
+    for (tries = 0; connected < total && tries < 500; tries++) {
+        n = ngx_media_srt_outputs_event_read(outs, events, 64);
+        for (i = 0; i < n; i++) {
+            if (events[i].type == NGX_MEDIA_SRT_OUT_EVENT_CONNECTED
+                && events[i].index < total && !seen[events[i].index])
+            {
+                seen[events[i].index] = 1;
+                connected++;
+            }
+        }
+        if (connected < total) {
+            struct timespec  ts = { 0, 10 * 1000 * 1000 };
+
+            (void) nanosleep(&ts, NULL);
+        }
+    }
+    CHECK(connected == total, "every destination connected: %lu of %lu",
+          (unsigned long) connected, (unsigned long) total);
+
+    ngx_media_srt_outputs_stop(outs);
+
+    for (i = 0; i < total; i++) {
+        CHECK(recorded_group[i]
+              == (ngx_int_t) (i % NGX_MEDIA_SRT_EGRESS_SHARDS) + 1,
+              "destination %lu connected in its lane's group: %ld",
+              (unsigned long) i, (long) recorded_group[i]);
+    }
+    CHECK(recorded_group[0] == recorded_group[NGX_MEDIA_SRT_EGRESS_SHARDS],
+          "two destinations of one lane share a group");
+    CHECK(plain_connects == 0, "no destination fell back to a private "
+          "connect: %lu", (unsigned long) plain_connects);
+
+    /* a backend without groups is still connected to, privately */
+    recording_ops.connect_shared = NULL;
+    session = ngx_media_srt_connect_shared((const u_char *) "127.0.0.1",
+                                           24591, NULL, 0, 1000, NULL, 3,
+                                           NULL);
+    CHECK(session != NULL, "a backend without groups still connects");
+    CHECK(plain_connects == 1, "and it does so through connect()");
+    if (session != NULL) {
+        ngx_media_srt_session_close(session);
+    }
+
+    /* group 0 is a private endpoint even when the backend has groups */
+    recording_ops.connect_shared = recording_connect_shared;
+    session = ngx_media_srt_connect_shared((const u_char *) "127.0.0.1",
+                                           24591, NULL, 0, 1000, NULL, 0,
+                                           NULL);
+    CHECK(session != NULL && plain_connects == 2,
+          "group 0 connects privately");
+    if (session != NULL) {
+        ngx_media_srt_session_close(session);
+    }
+
+    ngx_media_srt_listen_close(listener);
+    ngx_media_srt_set_backend(&ngx_media_srt_udp_ops);
 }
 
 int
@@ -502,6 +701,7 @@ main(void)
     test_keyframe_resync();
     test_references();
     test_shared_sender_pool();
+    test_lane_multiplexer_groups();
 
     TEST_LEAKS();
     TEST_MAIN_END();

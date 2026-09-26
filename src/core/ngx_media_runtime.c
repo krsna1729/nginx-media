@@ -996,6 +996,27 @@ active:
     return out;
 }
 
+static ngx_media_runtime_outputs_t *
+ngx_media_runtime_outputs_find(ngx_media_stream_t *stream)
+{
+    ngx_media_runtime_outputs_t  *out;
+
+    for (out = ngx_media_runtime_outputs; out != NULL; out = out->next) {
+        if (out->used && out->stream == stream) {
+            return out;
+        }
+    }
+
+    return NULL;
+}
+
+ngx_int_t
+ngx_media_runtime_package(ngx_media_stream_t *stream, ngx_log_t *log)
+{
+    return ngx_media_runtime_outputs_get(stream, log) != NULL
+           ? NGX_OK : NGX_ERROR;
+}
+
 ngx_int_t
 ngx_media_runtime_admit(ngx_media_stream_t *stream, ngx_log_t *log)
 {
@@ -2333,19 +2354,27 @@ ngx_media_runtime_visit(ngx_log_t *log)
                                res.emergency != NULL);
             }
         }
-        if (policy != NULL
-            && (policy->hls_path.len > 0
-                || policy->record_program_path.len > 0
-                || policy->record_iso_path.len > 0
-                || policy->transform_executor.executable.len > 0))
         {
-            ngx_media_runtime_outputs_t  *out;
+            ngx_media_runtime_outputs_t  *out = NULL;
 
-            out = ngx_media_runtime_outputs_get(stream, log);
+            /*
+             * Prepared when the policy has a file consumer (HLS, recording,
+             * a transform), or when a destination asked for the preparation
+             * on demand - an SRT destination on a program with neither.
+             */
+            if (policy != NULL
+                && (policy->hls_path.len > 0
+                    || policy->record_program_path.len > 0
+                    || policy->record_iso_path.len > 0
+                    || policy->transform_executor.executable.len > 0))
+            {
+                out = ngx_media_runtime_outputs_get(stream, log);
+
+            } else {
+                out = ngx_media_runtime_outputs_find(stream);
+            }
 
             if (out != NULL) {
-
-
                 ngx_media_runtime_outputs_drain(out, log, &budget);
             }
         }

@@ -1,12 +1,14 @@
 name: master
 
-# Merge to master: the full integration suite, including the multi-worker
+# Merge to main: the full integration suite, including the multi-worker
 # routing, the soak test and the fault injection run.  CI covers the fast
-# paths; this is the one that has to be green before anything is tagged.
+# paths; this is the one that has to be green before anything is tagged.  (It
+# used to trigger on "master", a branch this repository does not have, so it
+# never ran.)
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -75,6 +77,8 @@ jobs:
           make rtmp-hevc
           make rtmps
           make srt-output
+          make srt-output-mux
+          make srt-lane-isolation
           make srt-crypto
           make multi-worker
           make soak

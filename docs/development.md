@@ -61,7 +61,8 @@ configuration), `udp`, or `both`.  It is documented in `configuration.md`; for
 development, `udp` is the one that builds with no libsrt at all, which is what
 lets the rest of the module be built and tested on a machine without the
 library.  The library is found through `pkg-config`; `SRT_DIR` selects an
-installation that ships no `.pc` file.
+installation that ships no `.pc` file, and `MEDIA_SRT_PKG` a package with a
+different name (`robotweax-srt`, see `configuration.md`).
 
 ### The container
 
@@ -175,7 +176,8 @@ test-in-container`, which runs the Makefile's `TEST_TARGETS` in the shipped
 image's environment: `.github/workflows/ci.yml` runs it (beside the fast subset
 it names individually) on a pull request, and `.github/workflows/master.yml`
 runs the individual targets — ingest and fixture, selection and switching, the
-HLS directions, RTMP and RTMPS, srt-output and srt-crypto, multi-worker, soak
+HLS directions, RTMP and RTMPS, srt-output, srt-output-mux, srt-lane-isolation
+and srt-crypto, multi-worker, soak
 and fault — before anything is tagged.  A new suite target belongs in
 `TEST_TARGETS` for that reason; `srt-worker-ports`, the per-worker SRT ingest
 endpoints, is the most recent one.  `make srt-qualify` is separate: it rebuilds
@@ -240,6 +242,89 @@ on the same program owner and validates each protocol against its calibrated
 single-destination reference. `CAPACITY_QUALITY_MIXES` selects a subset;
 `CAPACITY_QUALITY_STEPS` chooses the strictly increasing destination counts
 (starting at one), and `CAPACITY_QUALITY_SECONDS` sets each measurement window.
+
+#### Per-rung diagnostics and outcomes
+
+Every capacity rung leaves `diagnostics.json` in its case directory
+(`.build/ingest-egress-fanout/capacity/<label>/`), written by
+`tests/bench/capacity_diagnostics.py`.  Every field is
+`{"value", "unit", "status"}`; a measurement that could not be collected is
+`"status": "unavailable"` with a reason, never a zero.  It holds:
+
+- **cpu** — per worker: event loop, each `srt-egress-NN` sender and their sum,
+  libsrt `SndQ`/`RcvQ`/`TsbPd`, HLS uploaders; the SRT/RTMP/HLS receivers and
+  the publishers; all as percent of one core over the CPU window, and the
+  sampled total as a share of the permitted CPUs.  Each process's own
+  counter is the authoritative total - it keeps the CPU of threads that
+  exited during the window, which no thread snapshot sees - and thread deltas
+  only attribute it; what they cannot attribute is the process's
+  `(unattributed)` role (`thread_accounting.processes`).  TID reuse is
+  detected by start time, ticks use the kernel's `SC_CLK_TCK`, and a negative
+  delta is rejected rather than summed.
+- **cpu_environment** — online and permitted CPUs, every thread's affinity,
+  cgroup quota and throttling, CPU frequency where the platform exposes it,
+  host busy/steal/softirq fractions, threads per process and involuntary
+  context switches.
+- **network** — UDP/TCP counters from `/proc/net/snmp` and `netstat`,
+  softnet drops, and UDP socket drops *per process* from `/proc/net/udp`, so
+  a receive-buffer overflow is attributed to the side that overflowed.
+- **srt / rtmp / hls_push** — queue timelines, per-lane service rates,
+  enqueue-to-send lag, blocked sends, retransmissions, drops; RTMP scheduler
+  visit counters; HLS uploader and segment accounting.
+- **delivery** — each protocol's quality report and the short-interval ratios.
+- **efficiency** — delivered Gbit/s, and sender and receiver CPU per delivered
+  Gbit/s.  Delivered means counted by the receivers (never a sender counter
+  such as bytes queued, which keeps counting what a failing receiver never
+  got), over each protocol's own receiver-side window.  The boundary rung
+  depends on the host far more than this ratio does, which makes it the
+  number to compare across commits and SRT libraries - within one host class,
+  since CPU model and frequency, kernel, library version, compiler and NIC
+  topology still move it.
+- **saturation_notes** — plain statements of which side ran out first.
+
+A rung has one of three outcomes: `setup-failure` (receivers, publishers or
+destinations never became ready — quality was not measured, and the ladder
+for that workload stops there without stopping the other workloads),
+`quality-failure` (measured, and a delivery, continuity, error or lag
+criterion failed), or `pass`.  A setup timeout is never turned into a
+throughput number.  After the ladders, `capacity-matrix.json` in the run
+directory lists, per workload, the highest passing rung, the first quality
+failure and the setup-limited rungs.
+
+The measuring side is kept from becoming the measured limit:
+
+- The SRT receiver listens on several ports (`PORT:N`) so no single receiver
+  UDP socket and libsrt receive thread carries more than
+  `CAPACITY_SRT_RECEIVER_PEERS` destinations (16 by default).
+- `CAPACITY_NGINX_CPUS`, `CAPACITY_RECEIVER_CPUS` and
+  `CAPACITY_PUBLISHER_CPUS` take `taskset` lists.  Unset means no pinning; on
+  a host where sender and receivers share cores, pinning them apart turns
+  "the host saturated" into an attributable result.
+- `CAPACITY_NGINX` runs a different nginx binary against the same harness,
+  e.g. a baseline build or one linked against robotweax/srt.
+- `CAPACITY_SRT_HLS=no` measures pure SRT without HLS preparation (the
+  default keeps it on as the regression baseline), and
+  `CAPACITY_FIXED_SRT_WORKERS=1|2|4|…|adaptive` pins the SRT sender count.
+- `CAPACITY_QUALITY_STOP_AFTER_FAILURES=N` ends a workload's ladder after N
+  consecutive quality failures; the rungs above are reported as unmeasured,
+  never as failures.  The CI tiers use 2.
+- Each run takes a 256-port block from 10240-17919, chosen from its PID
+  (`CAPACITY_BASE` overrides): below the kernel's ephemeral range, where an
+  outgoing socket of the previous run can briefly hold a listener's port, and
+  clear of the integration suites' fixed ports.
+
+Run the suites and the benchmarks as an ordinary user.  Started as root,
+nginx drops its workers to `nobody`, which cannot create HLS directories
+under a root-owned build tree: HLS writes then fail, and suites that check
+HLS output fail with them.
+
+RTMP delivery divides by the interval between two receiver scrapes stamped
+with the monotonic clock around each request, not by a shell-measured window,
+and a 1 s receiver sampler provides the short-interval floor and the longest
+stall.  HLS push is judged on identified segments: the segments first
+delivered inside the window, each checked per destination for arrival,
+exactly-once upload, size, lag behind the first destination, and a playlist
+that referenced it before its upload completed.
 
 `bench-burst-sizing` runs the in-process demux/mux/remux fixture at each
 capacity in `CAPACITIES` (bytes).  It reports burst count, observed byte range,

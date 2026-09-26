@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <srt/srt.h>
@@ -57,6 +58,9 @@ struct ngx_media_srt_session_s {
     ngx_media_srt_listener_t *listener;
     ngx_media_srt_session_t  *next;
     ngx_log_t                *log;
+
+    /* the multiplexer group slot + 1 this caller holds a reference on */
+    ngx_uint_t                mux_group;
 };
 
 struct ngx_media_srt_poll_s {
@@ -65,6 +69,14 @@ struct ngx_media_srt_poll_s {
 
 static ngx_media_srt_listener_t *ngx_media_srt_listeners;
 static ngx_media_srt_session_t  *ngx_media_srt_callers;
+
+/*
+ * Caller sessions are created and closed by the SRT output's sender threads,
+ * several of which can connect at once, so the list they share is locked.
+ */
+static pthread_mutex_t  ngx_media_srt_callers_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void ngx_media_srt_haivision_mux_release(ngx_uint_t group);
 static ngx_uint_t                ngx_media_srt_started;
 
 /* the last failure, for the caller's own diagnostics */
@@ -152,6 +164,10 @@ static ngx_media_srt_session_t *ngx_media_srt_haivision_connect(
     const u_char *host, ngx_uint_t port, const u_char *streamid,
     size_t streamid_len, ngx_msec_t timeout_ms,
     const ngx_media_srt_params_t *params, ngx_log_t *log);
+static ngx_media_srt_session_t *ngx_media_srt_haivision_connect_shared(
+    const u_char *host, ngx_uint_t port, const u_char *streamid,
+    size_t streamid_len, ngx_msec_t timeout_ms,
+    const ngx_media_srt_params_t *params, ngx_uint_t group, ngx_log_t *log);
 static ngx_int_t ngx_media_srt_haivision_send(
     ngx_media_srt_session_t *session, const u_char *buf, size_t len,
     ngx_msec_t timeout_ms);
@@ -205,7 +221,8 @@ ngx_media_srt_ops_t ngx_media_srt_haivision_ops = {
     ngx_media_srt_haivision_last_error,
     ngx_media_srt_haivision_shutdown,
     ngx_media_srt_haivision_listen_bond,
-    ngx_media_srt_haivision_listen_shared
+    ngx_media_srt_haivision_listen_shared,
+    ngx_media_srt_haivision_connect_shared
 };
 
 /*
@@ -858,8 +875,10 @@ ngx_media_srt_session_wrap(ngx_media_srt_listener_t *listener, SRTSOCKET sock,
         listener->sessions = session;
 
     } else {
+        (void) pthread_mutex_lock(&ngx_media_srt_callers_lock);
         session->next = ngx_media_srt_callers;
         ngx_media_srt_callers = session;
+        (void) pthread_mutex_unlock(&ngx_media_srt_callers_lock);
     }
 
     return session;
@@ -896,6 +915,138 @@ ngx_media_srt_haivision_connect(const u_char *host, ngx_uint_t port,
     const u_char *streamid, size_t streamid_len, ngx_msec_t timeout_ms,
     const ngx_media_srt_params_t *params, ngx_log_t *log)
 {
+    return ngx_media_srt_haivision_connect_shared(host, port, streamid,
+                                                  streamid_len, timeout_ms,
+                                                  params, 0, log);
+}
+
+/*
+ * Multiplexer groups.  libsrt gives every caller socket that is not bound
+ * its own multiplexer: a UDP socket plus a send thread and a receive thread.
+ * A worker with hundreds of destinations then runs hundreds of pacing
+ * threads, each waking for one stream, and that wakeup traffic - not the
+ * packets - is what a large fanout spends its CPU on.  Callers bound to the
+ * same local endpoint share one multiplexer instead, so a group costs one
+ * thread pair however many destinations it has.
+ *
+ * A group remembers the local port its first caller was given, and only for
+ * as long as one of this process's sessions still holds that endpoint open.
+ * While one does, libsrt resolves a bind to the port to its own existing
+ * multiplexer and no second UDP socket is created.  Once the last one closes,
+ * the kernel may hand the port to anyone - another nginx worker included - and
+ * binding it again with address reuse would split its datagrams between two
+ * sockets, so the group forgets it and its next caller takes a fresh port.
+ * A failed bind falls back to a private endpoint: sharing never stands
+ * between a destination and its connection.
+ */
+#define NGX_MEDIA_SRT_MUX_GROUPS  64
+
+static pthread_mutex_t  ngx_media_srt_mux_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint16_t         ngx_media_srt_mux_port[NGX_MEDIA_SRT_MUX_GROUPS];
+static ngx_uint_t       ngx_media_srt_mux_sessions[NGX_MEDIA_SRT_MUX_GROUPS];
+
+/* a connected caller takes a reference on its group's endpoint */
+static void
+ngx_media_srt_haivision_mux_hold(ngx_media_srt_session_t *session,
+    ngx_uint_t slot, uint16_t port)
+{
+    (void) pthread_mutex_lock(&ngx_media_srt_mux_lock);
+    if (ngx_media_srt_mux_sessions[slot] == 0) {
+        ngx_media_srt_mux_port[slot] = port;
+    }
+    if (ngx_media_srt_mux_port[slot] == port) {
+        ngx_media_srt_mux_sessions[slot]++;
+        session->mux_group = slot + 1;
+    }
+    (void) pthread_mutex_unlock(&ngx_media_srt_mux_lock);
+}
+
+static void
+ngx_media_srt_haivision_mux_release(ngx_uint_t group)
+{
+    ngx_uint_t  slot;
+
+    if (group == 0) {
+        return;
+    }
+
+    slot = group - 1;
+    (void) pthread_mutex_lock(&ngx_media_srt_mux_lock);
+    if (ngx_media_srt_mux_sessions[slot] > 0
+        && --ngx_media_srt_mux_sessions[slot] == 0)
+    {
+        ngx_media_srt_mux_port[slot] = 0;
+    }
+    (void) pthread_mutex_unlock(&ngx_media_srt_mux_lock);
+}
+
+/* binds a caller into its group; *bound is the local port it got */
+static ngx_int_t
+ngx_media_srt_haivision_bind_group(SRTSOCKET sock, ngx_uint_t slot,
+    uint16_t *bound)
+{
+    struct sockaddr_in  local;
+    int                 yes = 1, len;
+    uint16_t            port;
+
+    if (srt_setsockopt(sock, 0, SRTO_REUSEADDR, &yes, sizeof(yes))
+        == SRT_ERROR)
+    {
+        return NGX_ERROR;
+    }
+
+    /* a port no live session of ours holds is not ours to reuse */
+    (void) pthread_mutex_lock(&ngx_media_srt_mux_lock);
+    port = (ngx_media_srt_mux_sessions[slot] != 0)
+           ? ngx_media_srt_mux_port[slot] : 0;
+    (void) pthread_mutex_unlock(&ngx_media_srt_mux_lock);
+
+    ngx_memzero(&local, sizeof(local));
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+    local.sin_port = htons(port);
+
+    if (srt_bind(sock, (struct sockaddr *) &local, sizeof(local))
+        == SRT_ERROR)
+    {
+        if (port == 0) {
+            return NGX_ERROR;
+        }
+
+        /* the group's endpoint is gone and its port was taken: start over */
+        local.sin_port = 0;
+        if (srt_bind(sock, (struct sockaddr *) &local, sizeof(local))
+            == SRT_ERROR)
+        {
+            return NGX_ERROR;
+        }
+        port = 0;
+    }
+
+    if (port != 0) {
+        *bound = port;
+        return NGX_OK;
+    }
+
+    len = sizeof(local);
+    if (srt_getsockname(sock, (struct sockaddr *) &local, &len)
+        == SRT_ERROR)
+    {
+        *bound = 0;
+        return NGX_OK;
+    }
+
+    *bound = ntohs(local.sin_port);
+    return NGX_OK;
+}
+
+static ngx_media_srt_session_t *
+ngx_media_srt_haivision_connect_shared(const u_char *host, ngx_uint_t port,
+    const u_char *streamid, size_t streamid_len, ngx_msec_t timeout_ms,
+    const ngx_media_srt_params_t *params, ngx_uint_t group, ngx_log_t *log)
+{
+    ngx_uint_t                slot;
+    uint16_t                  bound;
     ngx_media_srt_session_t  *session;
     struct sockaddr_in        addr;
     SRTSOCKET                 sock;
@@ -977,6 +1128,19 @@ ngx_media_srt_haivision_connect(const u_char *host, ngx_uint_t port,
         return NULL;
     }
 
+    /* a group that cannot be joined is a private endpoint, not a failure */
+    slot = group % NGX_MEDIA_SRT_MUX_GROUPS;
+    bound = 0;
+    if (group != 0
+        && ngx_media_srt_haivision_bind_group(sock, slot, &bound) != NGX_OK)
+    {
+        (void) srt_close(sock);
+        return ngx_media_srt_haivision_connect_shared(host, port, streamid,
+                                                      streamid_len,
+                                                      timeout_ms, params, 0,
+                                                      log);
+    }
+
     if (srt_connect(sock, (struct sockaddr *) &addr, sizeof(addr))
         == SRT_ERROR)
     {
@@ -985,12 +1149,19 @@ ngx_media_srt_haivision_connect(const u_char *host, ngx_uint_t port,
         return NULL;
     }
 
-    /* a caller session belongs to no listener */
+    /*
+     * A caller session belongs to no listener.  On failure the wrap has
+     * already released the socket: closing it again here could close a new
+     * socket that libsrt handed the same id.
+     */
     session = ngx_media_srt_session_wrap(NULL, sock, log);
 
     if (session == NULL) {
-        (void) srt_close(sock);
         return NULL;
+    }
+
+    if (group != 0 && bound != 0) {
+        ngx_media_srt_haivision_mux_hold(session, slot, bound);
     }
 
     return session;
@@ -1114,6 +1285,7 @@ ngx_media_srt_haivision_session_shutdown(ngx_media_srt_session_t *session)
     }
 
     (void) srt_close(session->sock);
+    ngx_media_srt_haivision_mux_release(session->mux_group);
 }
 
 static void
@@ -1132,6 +1304,11 @@ ngx_media_srt_haivision_session_close(ngx_media_srt_session_t *session)
      */
     if (ngx_atomic_fetch_add(&session->closed, 1) == 0) {
         (void) srt_close(session->sock);
+        ngx_media_srt_haivision_mux_release(session->mux_group);
+    }
+
+    if (session->listener == NULL) {
+        (void) pthread_mutex_lock(&ngx_media_srt_callers_lock);
     }
 
     for (pp = (session->listener != NULL) ? &session->listener->sessions
@@ -1142,6 +1319,10 @@ ngx_media_srt_haivision_session_close(ngx_media_srt_session_t *session)
             *pp = session->next;
             break;
         }
+    }
+
+    if (session->listener == NULL) {
+        (void) pthread_mutex_unlock(&ngx_media_srt_callers_lock);
     }
 
     ngx_free(session);
@@ -1201,15 +1382,17 @@ ngx_media_srt_session_by_socket(SRTSOCKET sock)
         }
     }
 
+    (void) pthread_mutex_lock(&ngx_media_srt_callers_lock);
     for (session = ngx_media_srt_callers; session != NULL;
          session = session->next)
     {
         if (session->sock == sock) {
-            return session;
+            break;
         }
     }
+    (void) pthread_mutex_unlock(&ngx_media_srt_callers_lock);
 
-    return NULL;
+    return session;
 }
 
 static ngx_media_srt_listener_t *

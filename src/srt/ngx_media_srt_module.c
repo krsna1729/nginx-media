@@ -1073,6 +1073,11 @@ ngx_media_srt_destination_add(ngx_media_stream_t *stream,
     conf.connect_timeout = 2000;
     conf.send_timeout = 2000;
 
+    /* the bursts this destination sends are the shared TS preparation */
+    if (ngx_media_runtime_package(stream, log) != NGX_OK) {
+        return NGX_ERROR;
+    }
+
     if (ngx_media_srt_outputs_add(ngx_media_srt_outputs, &conf, &index, log)
         != NGX_OK)
     {

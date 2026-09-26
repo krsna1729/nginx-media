@@ -10,6 +10,12 @@ ngx_addon_name=ngx_media
 #   PKG_CONFIG_PATH=/opt/robotweax/lib/pkgconfig make nginx
 #   SRT_DIR=/opt/robotweax make nginx           # if it ships no .pc file
 #
+# robotweax/srt 0.2 installs its metadata as robotweax-srt.pc (and a static
+# C++ archive), so on a host that also has libsrt the lookup of "srt" would
+# quietly pick libsrt.  MEDIA_SRT_PKG names the pkg-config package instead:
+#
+#   SRT_DIR=/opt/robotweax MEDIA_SRT_PKG=robotweax-srt make nginx
+#
 # and the module, the qualification suite and the integration tests all run
 # against it unchanged.  Which library ended up linked is reported at startup
 # through srt_getversion().
@@ -36,23 +42,31 @@ ngx_addon_name=ngx_media
 # it exposes the same C API as Haivision/srt, so it is selected by the
 # library the build links.
 MEDIA_SRT_BACKEND=${MEDIA_SRT_BACKEND:-srt}
+MEDIA_SRT_PKG=${MEDIA_SRT_PKG:-srt}
+media_srt_pc_static=
+case "$MEDIA_SRT_PKG" in
+    # a static C++ archive: its private dependencies and the C++ runtime
+    # have to be on the link line of a C program
+    robotweax-srt) media_srt_pc_static=--static ;;
+esac
 
 # An SRT library that ships no .pc file (some robotweax builds) is selected
 # with SRT_DIR instead.
-if [ -z "`pkg-config --libs srt 2>/dev/null`" ] && [ -n "$SRT_DIR" ]; then
+if [ -n "$SRT_DIR" ] && { [ "$MEDIA_SRT_PKG" != srt ] \
+        || [ -z "`pkg-config --libs srt 2>/dev/null`" ]; }; then
     export PKG_CONFIG_PATH="$SRT_DIR/lib/pkgconfig:$SRT_DIR/lib64/pkgconfig:$PKG_CONFIG_PATH"
 fi
 
 # The headers do not have to live in a system include directory: robotweax
 # installs them under include/robotweax-srt, and its .pc file is what says so.
 # CORE_INCS entries are prefixed with -I by nginx, so the flag is stripped.
-media_srt_include_dirs=`pkg-config --cflags-only-I srt 2>/dev/null \
+media_srt_include_dirs=`pkg-config --cflags-only-I $MEDIA_SRT_PKG 2>/dev/null \
                         | sed 's/-I//g'`
 
 case "$MEDIA_SRT_BACKEND" in
     srt)
         media_srt_srcs="$ngx_addon_dir/src/srt/ngx_media_srt_haivision.c"
-        media_srt_libs=`pkg-config --libs srt 2>/dev/null`
+        media_srt_libs=`pkg-config --libs $media_srt_pc_static $MEDIA_SRT_PKG 2>/dev/null`
 
         if [ -z "$media_srt_libs" ] && [ -n "$SRT_DIR" ]; then
             media_srt_libs="-L$SRT_DIR/lib -L$SRT_DIR/lib64 -lsrt"
@@ -68,7 +82,7 @@ case "$MEDIA_SRT_BACKEND" in
     both)
         media_srt_srcs="$ngx_addon_dir/src/srt/ngx_media_srt_haivision.c \
                         $ngx_addon_dir/src/srt/ngx_media_srt_udp.c"
-        media_srt_libs=`pkg-config --libs srt 2>/dev/null`
+        media_srt_libs=`pkg-config --libs $media_srt_pc_static $MEDIA_SRT_PKG 2>/dev/null`
 
         if [ -z "$media_srt_libs" ] && [ -n "$SRT_DIR" ]; then
             media_srt_libs="-L$SRT_DIR/lib -L$SRT_DIR/lib64 -lsrt"
@@ -155,6 +169,10 @@ ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $media_srt_srcs \
                  $ngx_addon_dir/src/srt/ngx_media_srt_ingest.c \
                  $ngx_addon_dir/src/srt/ngx_media_srt_module.c"
+if [ "$MEDIA_SRT_PKG" = robotweax-srt ] && [ -n "$media_srt_libs" ]; then
+    media_srt_libs="$media_srt_libs -lstdc++ -lm"
+fi
+
 ngx_module_libs="$media_srt_libs -lpthread"
 ngx_module_order=
 

@@ -171,6 +171,15 @@ typedef void (*ngx_media_runtime_sink_pt)(void *ctx, ngx_media_stream_t *stream,
 
 void ngx_media_runtime_set_sink(ngx_media_runtime_sink_pt cb, void *ctx);
 
+/*
+ * The shared transport-stream preparation of a stream, created on demand.
+ * An SRT destination asks for it when it starts, so a program whose only
+ * consumers are SRT destinations is prepared too - not only one that also
+ * has HLS or recording configured.
+ */
+ngx_int_t ngx_media_runtime_package(ngx_media_stream_t *stream,
+    ngx_log_t *log);
+
 /* the shared FLV preparation of a stream, created on demand */
 ngx_media_rtmp_prepare_t *ngx_media_runtime_prepare(ngx_media_stream_t *stream,
     ngx_log_t *log);

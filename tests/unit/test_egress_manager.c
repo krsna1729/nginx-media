@@ -1,4 +1,9 @@
+#define _DEFAULT_SOURCE 1
+
 #include "ngx_media_test.h"
+
+#include <stdio.h>
+#include <time.h>
 
 #include "ngx_media_egress_manager.h"
 
@@ -169,82 +174,164 @@ test_rtmp_event_loop_activity_tracks_admission(void)
                            NGX_MEDIA_EGRESS_ENGINE_RTMP_EVENT_LOOP], 0);
 }
 
+/* past the policy's two-second hysteresis between changes */
 static void
-test_worker_budget_requires_local_pressure_and_cpu_headroom(void)
+settle(void)
+{
+    struct timespec  ts = { 2, 100 * 1000 * 1000 };
+
+    (void) nanosleep(&ts, NULL);
+}
+
+static void
+test_srt_senders_follow_lanes_up_to_granted_cpus(void)
 {
     static const u_char  app_data[] = "studio";
     static const u_char  stream_data[] = "program";
-    static const u_char  destination_a[] = "srt://receiver-a";
-    static const u_char  destination_b[] = "srt://receiver-b";
     ngx_media_egress_descriptor_t  descriptor;
-    ngx_media_egress_report_t      report;
-    uint64_t                       id_a = 0, id_b = 0;
+    uint64_t                       ids[6];
+    u_char                         names[6][32];
+    ngx_uint_t                     i;
 
-    TEST_CASE("SRT scaling requires independent pressured shards");
+    TEST_CASE("SRT senders follow the lanes in use, up to the granted CPUs");
 
     ngx_memzero(&descriptor, sizeof(descriptor));
     descriptor.application.data = (u_char *) app_data;
     descriptor.application.len = sizeof(app_data) - 1;
     descriptor.stream.data = (u_char *) stream_data;
     descriptor.stream.len = sizeof(stream_data) - 1;
-    descriptor.destination.data = (u_char *) destination_a;
-    descriptor.destination.len = sizeof(destination_a) - 1;
     descriptor.protocol = NGX_MEDIA_DEST_SRT;
     descriptor.engine = NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD;
-    descriptor.placement = 0;
 
+    /* six destinations on three lanes: 0, 1, 2, 0, 1, 2 */
+    for (i = 0; i < 6; i++) {
+        descriptor.destination.len = (size_t) snprintf(
+            (char *) names[i], sizeof(names[i]), "srt://receiver-%lu",
+            (unsigned long) i);
+        descriptor.destination.data = names[i];
+        descriptor.placement = i % 3;
+        TEST_ASSERT_EQ_INT(ngx_media_egress_manager_admit(&descriptor,
+                                                          &ids[i], NULL),
+                           NGX_OK);
+    }
+
+    /* no pressure at all: the target is structural, not reactive */
+    ngx_media_egress_manager_worker_resources(4000, 100, 100);
+    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
+                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 1, 1, 16),
+                       3);
+
+    /* hysteresis: no second change inside two seconds */
+    ngx_media_egress_manager_worker_resources(2000, 100, 100);
+    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
+                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 3, 1, 16),
+                       3);
+
+    /* fewer CPUs granted (a tighter cgroup quota) cap it */
+    settle();
+    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
+                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 3, 1, 16),
+                       2);
+
+    /* more CPUs than lanes: one sender per lane in use, no more */
+    settle();
+    ngx_media_egress_manager_worker_resources(16000, 100, 100);
+    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
+                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 2, 1, 16),
+                       3);
+
+    /* the pool's own ceiling still holds */
+    settle();
+    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
+                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 3, 1, 2),
+                       2);
+
+    /* lanes emptied: back to the minimum */
+    for (i = 0; i < 6; i++) {
+        ngx_media_egress_manager_release(ids[i]);
+    }
+    settle();
+    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
+                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 3, 1, 16),
+                       1);
+    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_count(), 0);
+}
+
+static void
+test_idle_srt_senders_do_not_crowd_out_hls(void)
+{
+    static const u_char  app_data[] = "studio";
+    static const u_char  stream_data[] = "program";
+    static const u_char  destination_a[] = "https://edge-a/live";
+    static const u_char  destination_b[] = "https://edge-b/live";
+    ngx_media_egress_descriptor_t  descriptor;
+    ngx_media_egress_report_t      report;
+    uint64_t                       id_a = 0, id_b = 0;
+
+    TEST_CASE("idle SRT senders count for the CPU they use, not one each");
+
+    ngx_memzero(&descriptor, sizeof(descriptor));
+    descriptor.application.data = (u_char *) app_data;
+    descriptor.application.len = sizeof(app_data) - 1;
+    descriptor.stream.data = (u_char *) stream_data;
+    descriptor.stream.len = sizeof(stream_data) - 1;
+    descriptor.protocol = NGX_MEDIA_DEST_HLS_PUSH;
+    descriptor.engine = NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL;
+    descriptor.destination.data = (u_char *) destination_a;
+    descriptor.destination.len = sizeof(destination_a) - 1;
     TEST_ASSERT_EQ_INT(ngx_media_egress_manager_admit(&descriptor, &id_a, NULL),
                        NGX_OK);
     descriptor.destination.data = (u_char *) destination_b;
     descriptor.destination.len = sizeof(destination_b) - 1;
-    descriptor.placement = 1;
     TEST_ASSERT_EQ_INT(ngx_media_egress_manager_admit(&descriptor, &id_b, NULL),
                        NGX_OK);
 
+    /*
+     * Four CPUs, three of them for egress; four SRT senders active but each
+     * at 5% of a core.  Counted as threads they would leave the HLS pool no
+     * room at all; counted by use they take one CPU.
+     */
     ngx_media_egress_manager_worker_resources(4000, 100, 100);
     ngx_media_egress_manager_engine_load(
-        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 900, 1);
+        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 50, 4);
+    ngx_media_egress_manager_engine_load(
+        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 600, 1);
 
     ngx_memzero(&report, sizeof(report));
-    report.transport_errors = 100;
+    report.queue_bytes = 1024 * 1024;
+    report.queue_lag_msec = 100;
     ngx_media_egress_manager_report(id_a, &report);
-    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
-                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 1, 1, 16),
-                       1);
+    ngx_media_egress_manager_report(id_b, &report);
+    (void) ngx_media_egress_manager_recommend_workers(
+        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 1, 1, 4);
 
+    /* backlogs growing on both: the pool may grow past one */
     report.queue_bytes = 2 * 1024 * 1024;
     report.queue_lag_msec = 200;
-    report.backpressure_events = 1;
     ngx_media_egress_manager_report(id_a, &report);
-    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
-                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 1, 1, 16),
-                       1);
-    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
-                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 1, 1, 16),
-                       1);
-
-    report.placement = 1;
+    ngx_media_egress_manager_report(id_b, &report);
+    (void) ngx_media_egress_manager_recommend_workers(
+        NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 1, 1, 4);
+    report.queue_bytes = 3 * 1024 * 1024;
+    report.queue_lag_msec = 300;
+    ngx_media_egress_manager_report(id_a, &report);
     ngx_media_egress_manager_report(id_b, &report);
     TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
-                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 1, 1, 16),
+                           NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 1, 1, 4),
+                       2);
+
+    /* the same senders busy (90% each) do take the room */
+    ngx_media_egress_manager_engine_load(
+        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 900, 4);
+    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
+                           NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL, 2, 1, 4),
                        1);
-    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
-                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 1, 1, 16),
-                       2);
 
-    ngx_media_egress_manager_worker_resources(4000, 900, 100);
-    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
-                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 2, 1, 16),
-                       2);
-
-    ngx_media_egress_manager_worker_resources(4000, 100, 300);
-    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_recommend_workers(
-                           NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 2, 1, 16),
-                       2);
-
+    ngx_media_egress_manager_engine_load(
+        NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD, 0, 0);
     ngx_media_egress_manager_release(id_a);
     ngx_media_egress_manager_release(id_b);
-    TEST_ASSERT_EQ_U64(ngx_media_egress_manager_count(), 0);
+    settle();  /* the next case starts outside this one's change hold */
 }
 
 static void
@@ -357,7 +444,8 @@ main(void)
     test_manager_tracks_destination_lifecycle_and_quality();
     test_manager_rejects_incomplete_identity();
     test_rtmp_event_loop_activity_tracks_admission();
-    test_worker_budget_requires_local_pressure_and_cpu_headroom();
+    test_srt_senders_follow_lanes_up_to_granted_cpus();
+    test_idle_srt_senders_do_not_crowd_out_hls();
     test_hls_backlog_trend_requires_multiple_destinations();
     TEST_LEAKS();
     TEST_MAIN_END();

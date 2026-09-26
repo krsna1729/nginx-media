@@ -254,8 +254,8 @@ operator configuration on purpose — an encoder cannot promote itself.
 ### `media_srt_output <application/stream> <host:port> [streamid];`
 
 Pushes that program to an SRT destination as a caller.  Each worker keeps 16
-stable logical egress shards and adaptively changes active sender concurrency
-within a shared CPU budget with HLS push; the output table holds up to 1000
+stable logical egress shards and runs one active sender per shard in use, up
+to the CPUs the worker is granted; the output table holds up to 1000
 destinations per worker.  Each destination has a bounded queue of 256 units /
 8 MiB, while each logical shard's feed queue is bounded at 64 units / 8 MiB.
 Queue overrun drops bursts and resynchronizes at the next keyframe; a slow
@@ -487,7 +487,24 @@ process-scope limitations.
 ```sh
 PKG_CONFIG_PATH=/opt/robotweax/lib/pkgconfig make nginx
 SRT_DIR=/opt/robotweax make nginx          # if it ships no .pc file
+SRT_DIR=/opt/robotweax MEDIA_SRT_PKG=robotweax-srt make nginx
 ```
+
+robotweax/srt 0.2.5 installs its metadata as `robotweax-srt.pc` (and a
+static C++ archive) rather than `srt.pc`, so on a host that also has libsrt
+installed the first two forms silently link libsrt.  `MEDIA_SRT_PKG` names
+the pkg-config package to use; for `robotweax-srt` the build links its
+private dependencies and the C++ runtime as a static archive needs.  The
+selection is part of the build's configure stamp, so switching it
+reconfigures.  A binary built this way carries the library statically, so
+`ldd` does not show it; the capacity harness identifies it by the library's
+own symbols.
+
+Destinations use the library's multiplexer differently per library.  With
+libsrt, every destination of one SRT egress lane binds the lane's local
+endpoint, so a worker has at most 16 output `SndQ`/`RcvQ` thread pairs
+whatever its fanout; robotweax/srt runs a fixed scheduler pool either way.
+Measured side by side on one host in `capacity-results.md`.
 
 Startup logs which library answered, which is how a deployment knows what it
 linked: `library=libsrt 1.5.6` for the packaged Haivision build, `libsrt

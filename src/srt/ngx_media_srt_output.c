@@ -575,11 +575,18 @@ ngx_media_srt_out_service(ngx_media_srt_outputs_t *outs,
         epoch = dest->epoch;
         (void) pthread_mutex_unlock(&dest->mutex);
 
-        session = ngx_media_srt_connect(
+        /*
+         * The destination's logical lane is its multiplexer group: a lane's
+         * destinations share one transport endpoint and one pair of library
+         * threads, so the transport's thread count follows the lanes and not
+         * the fanout.  Lanes are stable for a destination's lifetime, which
+         * a shared endpoint needs - a session cannot move between them.
+         */
+        session = ngx_media_srt_connect_shared(
             connect_conf.host.data, connect_conf.port,
             connect_conf.streamid.len ? connect_conf.streamid.data : NULL,
             connect_conf.streamid.len, connect_conf.connect_timeout,
-            connect_conf.params, outs->log);
+            connect_conf.params, dest->shard + 1, outs->log);
 
         (void) pthread_mutex_lock(&dest->mutex);
 

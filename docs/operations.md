@@ -304,14 +304,17 @@ retains its references until it completes or reaches its deadline.
 ### A slow SRT or RTMP receiver
 
 SRT destinations share 16 stable logical egress shards per worker; the manager
-adapts active sender concurrency within the shared SRT/HLS worker CPU budget.
+runs one active sender per shard in use, up to the CPUs the worker is granted
+(its CPU affinity and cgroup `cpu.max`), changing at most every 2 s.  HLS push
+uploaders share the remaining budget, counting SRT senders by the CPU they
+use.
 An output does not create a sender thread.  Static and runtime outputs share
 1000 destination slots per worker.  Each destination has a bounded queue of
 256 units / 8 MiB, and each logical shard has a 64-unit / 8 MiB feed queue.
 Queue overrun drops bursts and resynchronizes at the next keyframe, so a slow
 remote does not stall its program.  Queue occupancy and drops are available in
 the shard and destination metrics.  SRT transport retransmissions are measured
-but do not independently cause sender growth.  Connection state is reported
+but do not change the sender count.  Connection state is reported
 through the worker eventfd: `WARN` when an output is disconnected and `NOTICE`
 when it connects.  The logged `<n>` is a destination-table slot, not the
 destination ID; correlate it with `media: srt destination <id> started ...`.
@@ -922,15 +925,37 @@ does.  That is the same conclusion the endpoint table above reaches for
 placement, arrived at from the other side: a worker given its own port is given
 its own receive thread with it.
 
-**The module pool is fixed; Haivision transport threads remain per destination.**
-An outgoing connection is autobound to its own ephemeral port, so Haivision
-libsrt creates an `SRT:RcvQ`/`SRT:SndQ` pair for each destination; it also
-creates `SRT:TsbPd` work for live sessions.  Those are library costs and still
-grow with active transport sessions.  Separately, nginx-media uses a fixed
-pool of 16 `srt-egress-*` shard threads per worker, regardless of destination
-count.  A destination assigned to a shard changes which module thread calls
-the sender API; it does not remove the per-socket library cost.  The 1000-slot
-per-worker output limit bounds that socket-side growth.
+**The module pool is fixed, and so are the transport threads of the outputs.**
+An outgoing connection that the library autobinds gets its own ephemeral
+port, and Haivision libsrt gives every such port its own multiplexer - an
+`SRT:RcvQ`/`SRT:SndQ` pair.  With one pair per destination, a worker with 64
+destinations ran 154 threads, and the pacing wakeups of 64 `SndQ` threads cost
+more CPU than the packets they sent (123% of one core in `SndQ` alone at
+64 x 8.8 Mbit/s, against 46% once shared; see "SRT output multiplexer groups"
+below).  Sampled stacks confirm what that cost is: of the `SndQ` threads' CPU
+at 64 x 8 Mbit/s, 61.7% of a core was context switches and wakeups and 11%
+the sending itself (`capacity-results.md`).  Destinations are therefore connected in their logical lane's
+multiplexer group: every destination of one lane binds the lane's local UDP
+endpoint, so a worker has at most 16 output `RcvQ`/`SndQ` pairs whatever its
+fanout.  `SRT:TsbPd` work is still per live session.  nginx-media's own pool
+is 16 `srt-egress-*` lane threads per worker, independent of destination
+count.  Robotweax/srt runs a fixed scheduler pool in either case.
+
+#### SRT output multiplexer groups
+
+A group remembers its local port only while a session of this worker still
+holds it open; libsrt then resolves the bind to its existing multiplexer and
+no second UDP socket exists.  When a group's last session closes, the port is
+forgotten - by then the kernel may have given it to another process, and
+binding it again with address reuse would split its datagrams - and the next
+destination of that lane takes a fresh port.  A bind that fails for any other
+reason connects the destination on a private endpoint instead; sharing is an
+efficiency, never a condition for connecting.  All of a lane's destinations
+leave through one UDP socket, so its kernel send buffer and the lane's one
+`SndQ` thread are shared by them; the per-destination queues and the per-socket
+SRT send buffers remain separate, and one slow destination still only fills its
+own queue.  `make srt-output-mux` checks the thread bound and the
+remove/re-add path against the real library.
 
 ### Which side does what
 
@@ -1089,7 +1114,7 @@ That is a different ceiling, not automatically a higher one:
 | More publishers on one port | share that port's `RcvQ` | share that channel's scheduler work |
 | More ports in one worker | add an `RcvQ`/`SndQ` pair per port | share the fixed pool |
 | More live sessions | add `TsbPd` per session | share the fixed pool |
-| More SRT destinations | add an `RcvQ`/`SndQ` pair per destination | share the fixed pool |
+| More SRT destinations | share their lane's `RcvQ`/`SndQ` pair (at most 16 per worker) | share the fixed pool |
 | More nginx workers | add process-local libsrt runtimes | add process-local Robotweax runtimes |
 
 Haivision therefore offers more receive lanes as endpoints are added, but its

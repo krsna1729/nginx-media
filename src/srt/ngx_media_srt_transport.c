@@ -312,6 +312,25 @@ ngx_media_srt_connect(const u_char *host, ngx_uint_t port,
                                             timeout_ms, params, log);
 }
 
+ngx_media_srt_session_t *
+ngx_media_srt_connect_shared(const u_char *host, ngx_uint_t port,
+    const u_char *streamid, size_t streamid_len, ngx_msec_t timeout_ms,
+    const ngx_media_srt_params_t *params, ngx_uint_t group, ngx_log_t *log)
+{
+    if (ngx_media_srt_backend() == NULL) {
+        return NULL;
+    }
+
+    if (group == 0 || ngx_media_srt_backend()->connect_shared == NULL) {
+        return ngx_media_srt_connect(host, port, streamid, streamid_len,
+                                     timeout_ms, params, log);
+    }
+
+    return ngx_media_srt_backend()->connect_shared(host, port, streamid,
+                                                   streamid_len, timeout_ms,
+                                                   params, group, log);
+}
+
 ngx_int_t
 ngx_media_srt_session_send(ngx_media_srt_session_t *session, const u_char *buf,
     size_t len, ngx_msec_t timeout_ms)

@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
-"""Discarding HLS PUT sink and per-destination capacity-quality report."""
+"""Discarding HLS PUT sink and per-destination capacity-quality report.
+
+Throughput is judged on identified segments, not on bytes that happened to
+complete inside a window: with multi-second segments a window edge moves a
+whole segment in or out, which reads as a 10-20% rate change that is not one.
+The report takes the exact set of segments first delivered (to any
+destination) inside the window and asks, per destination, whether each of them
+arrived, exactly once, with the same size, and how long after the first
+destination had it.  A playlist PUT that references a segment the destination
+has not completely received yet is counted as an ordering violation.
+"""
 
 import argparse
 import csv
 import http.server
 import json
+import os
 import re
 import sys
 import threading
@@ -91,6 +102,12 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
                             ),
                             "upload_durations_ms":
                                 list(self.server.ts_upload_durations_ms[destination]),
+                            "segment_detail":
+                                dict(self.server.ts_detail.get(destination, {})),
+                            "playlist_puts":
+                                self.server.playlist_puts.get(destination, 0),
+                            "playlist_violations":
+                                self.server.playlist_violations.get(destination, 0),
                         }
                         for destination in self.server.ts_destinations
                     },
@@ -118,6 +135,8 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
             return
 
         received = 0
+        keep = parsed.path.lower().endswith(".m3u8")
+        body = []
         while remaining:
             chunk = self.rfile.read(min(65536, remaining))
             if not chunk:
@@ -125,10 +144,24 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
                 return
             remaining -= len(chunk)
             received += len(chunk)
+            if keep:
+                body.append(chunk)
+        if keep:
+            self._check_playlist(parts[0], parts[1] if len(parts) > 1 else "",
+                                 b"".join(body))
 
+        name = parts[1] if len(parts) > 1 else ""
         if parsed.path.lower().endswith(".ts"):
             with self.server.destinations_lock:
                 destination = parts[0]
+                detail = self.server.ts_detail.setdefault(destination, {})
+                record = detail.get(name)
+                if record is None:
+                    detail[name] = {"bytes": received, "at": time.monotonic(),
+                                    "count": 1}
+                else:
+                    record["count"] += 1
+                    record["bytes"] = received
                 self.server.ts_destinations.add(destination)
                 self.server.ts_bytes[destination] = (
                     self.server.ts_bytes.get(destination, 0) + received
@@ -141,6 +174,23 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
                     (time.monotonic() - upload_started) * 1000
                 )
         self._reply(201)
+
+    def _check_playlist(self, destination, name, body):
+        base = os.path.dirname(name)
+        referenced = [
+            os.path.normpath(os.path.join(base, line.strip()))
+            for line in body.decode("utf-8", "replace").splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        with self.server.destinations_lock:
+            detail = self.server.ts_detail.get(destination, {})
+            missing = [uri for uri in referenced if uri not in detail]
+            self.server.playlist_puts[destination] = (
+                self.server.playlist_puts.get(destination, 0) + 1)
+            if missing:
+                self.server.playlist_violations[destination] = (
+                    self.server.playlist_violations.get(destination, 0)
+                    + len(missing))
 
     def _reply(self, status, body=b"", content_type=None, count_error=True):
         if count_error and status >= 400:
@@ -168,6 +218,9 @@ def serve(port):
     server.ts_segments = {}
     server.ts_first_at = {}
     server.ts_upload_durations_ms = {}
+    server.ts_detail = {}
+    server.playlist_puts = {}
+    server.playlist_violations = {}
     server.mark_monotonic = None
     server.http_errors = 0
     server.serve_forever(poll_interval=0.25)
@@ -368,6 +421,9 @@ def report(args):
             "upload_durations_ms": measured_durations,
         })
 
+    segment_summary = segment_accounting(args, sink_before, sink_after,
+                                         records)
+
     reference = args.reference_bps
     if reference <= 0:
         reference = records[0]["rate_bps"]
@@ -376,17 +432,39 @@ def report(args):
 
     failures = []
     ratios = []
+    window_ratios = []
     for record in records:
+        # The byte rate over the window is kept for reference; the gate is
+        # the identified-segment ratio, which a window edge cannot move.
         ratio = record["rate_bps"] / reference
+        record["window_byte_ratio"] = ratio
+        ratio = record["segment_ratio"]
         record["ratio"] = ratio
         ratios.append(ratio)
+        window_ratios.append(record["window_byte_ratio"])
         if record["segments"] == 0:
             failures.append(f"{record['destination']}: no HLS segments delivered")
         if ratio < args.min_delivery_ratio:
             failures.append(
-                f"{record['destination']}: delivery ratio {ratio:.5f} below "
-                f"{args.min_delivery_ratio:.5f}"
+                f"{record['destination']}: segment delivery ratio {ratio:.5f} "
+                f"below {args.min_delivery_ratio:.5f}"
             )
+        if record["missing_segments"]:
+            failures.append(f"{record['destination']}: "
+                            f"{record['missing_segments']} window segments missing")
+        if record["duplicate_segments"]:
+            failures.append(f"{record['destination']}: "
+                            f"{record['duplicate_segments']} segments uploaded twice")
+        if record["size_mismatches"]:
+            failures.append(f"{record['destination']}: "
+                            f"{record['size_mismatches']} segments differ in size")
+        if record["late_segments"]:
+            failures.append(f"{record['destination']}: {record['late_segments']} "
+                            f"segments later than {segment_summary['lag_limit_s']:.1f}s")
+        if record["playlist_violations"]:
+            failures.append(f"{record['destination']}: playlist referenced "
+                            f"{record['playlist_violations']} segments before "
+                            "their upload completed")
         if record["dropped_units"]:
             failures.append(
                 f"{record['destination']}: {record['dropped_units']} queued files dropped"
@@ -402,13 +480,22 @@ def report(args):
         with report_path.open("w", newline="", encoding="utf-8") as output:
             writer = csv.writer(output)
             writer.writerow(("destination", "delivered_bytes", "segments", "rate_bps",
-                             "delivery_ratio", "dropped_units", "transport_errors",
+                             "delivery_ratio", "window_byte_ratio",
+                             "missing_segments", "duplicate_segments",
+                             "segment_lag_max_s", "playlist_violations",
+                             "dropped_units", "transport_errors",
                              "queue_bytes", "queue_lag_ms",
                              "first_segment_latency_ms", "upload_duration_p95_ms"))
             for record in records:
                 writer.writerow((record["destination"], record["bytes"],
                                  record["segments"], f"{record['rate_bps']:.2f}",
-                                 f"{record['ratio']:.5f}", record["dropped_units"],
+                                 f"{record['ratio']:.5f}",
+                                 f"{record['window_byte_ratio']:.5f}",
+                                 record["missing_segments"],
+                                 record["duplicate_segments"],
+                                 f"{record['lag_max_s']:.3f}",
+                                 record["playlist_violations"],
+                                 record["dropped_units"],
                                  record["transport_errors"], record["queue_bytes"],
                                  record["queue_lag_ms"],
                                  f"{record['first_segment_latency_ms']:.3f}",
@@ -432,6 +519,18 @@ def report(args):
     print(f"quality_measurement_s={duration:.3f}")
     print(f"quality_reference_payload_bps={reference:.2f}")
     print(f"quality_average_delivery_ratio_min={min(ratios):.5f}")
+    print("quality_ratio_basis=identified-segments")
+    print(f"quality_window_byte_ratio_min={min(window_ratios):.5f}")
+    print(f"quality_window_segments={segment_summary['window_segments']}")
+    print(f"quality_window_segment_bytes={segment_summary['window_bytes']}")
+    print(f"quality_segment_interval_s={segment_summary['segment_interval_s']:.3f}")
+    print(f"quality_segment_lag_limit_s={segment_summary['lag_limit_s']:.3f}")
+    print(f"quality_segment_lag_p95_s={segment_summary['lag_p95_s']:.3f}")
+    print(f"quality_segment_lag_max_s={segment_summary['lag_max_s']:.3f}")
+    print(f"quality_missing_segments={sum(r['missing_segments'] for r in records)}")
+    print(f"quality_duplicate_segments={sum(r['duplicate_segments'] for r in records)}")
+    print(f"quality_playlist_violations={sum(r['playlist_violations'] for r in records)}")
+    print(f"quality_total_bytes={segment_summary['delivered_bytes']}")
     print(f"quality_total_segments={sum(r['segments'] for r in records)}")
     print(f"quality_dropped_units={sum(r['dropped_units'] for r in records)}")
     print(f"quality_transport_errors={sum(r['transport_errors'] for r in records)}")
@@ -457,6 +556,78 @@ def report(args):
         print(f"quality_failure_more={len(failures) - 12}")
 
 
+def segment_accounting(args, sink_before, sink_after, records):
+    """Per-destination delivery of the exact segment set of the window."""
+    start = sink_before["monotonic"]
+    end = sink_after["monotonic"]
+    first_at = {}
+    sizes = {}
+    for record in records:
+        detail = sink_after["destinations"][record["destination"]].get(
+            "segment_detail", {})
+        for name, entry in detail.items():
+            if name not in first_at or entry["at"] < first_at[name]:
+                first_at[name] = entry["at"]
+            sizes.setdefault(name, []).append(entry["bytes"])
+    produced = sorted(t for t in first_at.values())
+    gaps = [b - a for a, b in zip(produced, produced[1:]) if b > a]
+    interval = sorted(gaps)[len(gaps) // 2] if gaps else 0.0
+    # A segment first seen within the last lag limit of the window may still
+    # be on its way to slower destinations: it is outside the judged set.
+    lag_limit = args.segment_lag_limit_s or max(2 * interval, 2.0)
+    window = sorted(name for name, at in first_at.items()
+                    if start <= at <= end - lag_limit)
+    canonical = {name: max(set(v), key=v.count) for name, v in sizes.items()}
+    window_bytes = sum(canonical[name] for name in window)
+    lags = []
+    delivered = 0
+    for record in records:
+        final = sink_after["destinations"][record["destination"]]
+        detail = final.get("segment_detail", {})
+        initial = sink_before["destinations"].get(record["destination"], {})
+        got = 0
+        missing = duplicates = mismatches = late = 0
+        lag_max = 0.0
+        for name in window:
+            entry = detail.get(name)
+            if entry is None:
+                missing += 1
+                continue
+            if entry["count"] > 1:
+                duplicates += 1
+            if entry["bytes"] != canonical[name]:
+                mismatches += 1
+            lag = entry["at"] - first_at[name]
+            lags.append(lag)
+            lag_max = max(lag_max, lag)
+            if lag > lag_limit:
+                late += 1
+            got += entry["bytes"]
+        delivered += got
+        record["segment_ratio"] = got / window_bytes if window_bytes else 0.0
+        record["missing_segments"] = missing
+        record["duplicate_segments"] = duplicates
+        record["size_mismatches"] = mismatches
+        record["late_segments"] = late
+        record["lag_max_s"] = lag_max
+        record["playlist_violations"] = (
+            final.get("playlist_violations", 0)
+            - initial.get("playlist_violations", 0))
+    if not window:
+        raise RuntimeError("no identified segment was produced inside the "
+                           "window; lengthen the measurement")
+    lags.sort()
+    return {
+        "window_segments": len(window),
+        "window_bytes": window_bytes,
+        "segment_interval_s": interval,
+        "lag_limit_s": lag_limit,
+        "lag_p95_s": lags[int((len(lags) - 1) * 0.95)] if lags else 0.0,
+        "lag_max_s": lags[-1] if lags else 0.0,
+        "delivered_bytes": delivered,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -475,6 +646,8 @@ def main():
     report_parser.add_argument("--reference-bps", type=float, default=0)
     report_parser.add_argument("--min-delivery-ratio", type=float, default=0.95)
     report_parser.add_argument("--report")
+    report_parser.add_argument("--segment-lag-limit-s", type=float, default=0,
+                               help="0: twice the observed segment interval")
     readiness_parser = subparsers.add_parser("readiness-report")
     readiness_parser.add_argument("--metrics-prefix", required=True)
     readiness_parser.add_argument("--stream", required=True)

@@ -69,9 +69,10 @@ Each output registers with the worker-local egress manager.  Its destination
 record carries the application and stream incarnation, protocol, engine,
 placement, representation ID and epoch, and feed ID and epoch alongside
 per-destination delivery, drop, error, and queue telemetry.  The manager samples
-worker CPU capacity and event-loop lag, then adapts SRT and HLS sender
-concurrency under one budget that reserves one CPU for the event loop; SRT
-retransmissions alone are not growth pressure.  The manager never migrates a
+worker CPU capacity and event-loop lag.  It runs one SRT sender per shard in
+use, up to the granted CPUs, and grows HLS uploaders on pressure within the
+CPUs left after one for the event loop and what the SRT senders use; SRT
+retransmissions do not change the sender count.  The manager never migrates a
 destination between workers, and RTMP sockets remain on their owning event
 loop.
 
@@ -532,7 +533,7 @@ flowchart LR
 | `listen`, `listen_bond`, `listen_shared` | endpoint policy and retry | socket binding, listener state, group admission, or acquired-socket attachment |
 | `poll_create`, `poll_add_*`, `poll_wait` | the ingest event loop | readiness and transport progress |
 | `accept`, `accept_ready`, `streamid`, `recv` | the ingest thread and caller buffers | handshake, UDP receive, packet demultiplexing, reassembly, loss handling and receive buffering |
-| `connect`, `send`, `stats` | destination queues and the fixed egress shard pool | connect, pacing, retransmission, UDP writes and transport statistics |
+| `connect`, `connect_shared`, `send`, `stats` | destination queues, the fixed egress shard pool, and which lane (multiplexer group) a destination connects in | connect, the shared local endpoint of a group, pacing, retransmission, UDP writes and transport statistics |
 | `session_shutdown`, `session_close` | ordered thread teardown | waking blocked operations and releasing transport state |
 | `library_version`, `last_error`, `shutdown` | startup logging and lifecycle | implementation identity, diagnostics and backend-global cleanup |
 
@@ -561,11 +562,15 @@ The source-level path is intentionally visible:
   session rather than growing the scheduler.
 - `src/srt/ngx_media_srt_output.c` and `ngx_media_srt_output_queue.*` own
   bounded per-destination queues and 16 stable logical egress shards.  A
-  destination's slot maps to its logical shard modulo 16; the adaptive physical
-  sender pool maps those logical lanes across its current active worker count,
+  destination's slot maps to its logical shard modulo 16; the physical sender
+  pool - one per lane in use, up to the granted CPUs - maps those logical
+  lanes across its current active worker count,
   so scaling does not move a destination to a different shard.  Each lane
-  services its slots and calls only `connect`, `send`, `stats`,
-  `session_shutdown` and `session_close`.
+  services its slots and calls only `connect_shared`, `send`, `stats`,
+  `session_shutdown` and `session_close`.  The lane is also the destination's
+  transport multiplexer group: a lane's destinations share one library
+  endpoint, so the library's send and receive threads follow the 16 lanes
+  rather than the fanout (a backend without groups connects privately).
 - `src/srt/ngx_media_srt_udp.c` is a plain-UDP conformance double.  It is not a
   third SRT runtime and must not be used to infer reliability, encryption,
   pacing, group or library-thread behavior.
@@ -661,7 +666,7 @@ and the runtime itself has no internal reuseport-equivalent.
 | One port | one receive thread | one scheduler thread |
 | More ports in one worker | adds queue threads and receive lanes | shares the fixed pool; at most the measured scheduler parallelism |
 | More sessions | adds per-session `TsbPd` threads | shares the pool; no permanent thread per session |
-| More destinations | adds an `RcvQ`/`SndQ` pair per destination | shares the pool |
+| More destinations | share their lane's `RcvQ`/`SndQ` pair (at most 16 per worker) | shares the pool |
 | More nginx workers | independent process-local runtimes | independent process-local runtimes |
 | Bonding | build-dependent, same-process group registry | built-in groups, same-process group domain |
 | Shared port | application-owned socket plus kernel `SO_REUSEPORT` when supported | same acquired-socket requirement; no internal reuseport pool |
