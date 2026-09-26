@@ -353,20 +353,21 @@ receiver drops disappear, and only then re-read the SRT boundary.
 
 ### Sampled stacks at the first bottleneck
 
-`perf record -a -g` for 15 s during the 160-destination rung that fails on
-four isolated cores, then reported per CPU (the benchmark's own 0,2,4,6; the
-machine also carried the user's interactive session on the other CPUs, which
-the filter excludes).  The shares are of the samples taken on those four
-CPUs:
+`perf record --cpu=0,2,4,6 -g` for 15 s during the 160-destination rung that
+fails on four isolated cores, run under the same `omarchy-benchmark
+--isolate` scope as the benchmark itself, so only the benchmark's own CPUs
+are sampled and the desktop session on the other cores cannot dilute the
+profile:
 
 | Process | Share | What it was doing |
 |---|---|---|
-| `curl` | 26.2% | the harness polling the control API and the samplers |
-| `swapper` (idle) | 15.4% | |
-| `bash` | 9.1% | the harness itself |
-| `srt-egress-00` | 7.2% | `pthread_mutex_lock` first, then `ngx_media_srt_out_thread` |
-| `SRT:RcvQ:w1..w9` | ~1.7-4.0% each | libsrt receive: `CRcvQueue::worker`, `worker_RetrieveUnit`, `CChannel::recvfrom` |
-| `nginx` (worker) | 3.1% | spread thin, nothing above 2% |
+| `curl` | 20.9% | the harness polling the control API and the samplers |
+| `swapper` (idle) | 15.8% | |
+| `srt-egress-00` | 11.0% | `pthread_mutex_lock` first, then `ngx_media_srt_out_thread` |
+| `bash` | 7.8% | the harness itself |
+| `nginx` (worker) | 3.8% | spread thin, nothing above 2% |
+| `SRT:RcvQ:w1,3,6,7,10` | 1.7-3.6% each | libsrt receive: `CRcvQueue::worker`, `worker_RetrieveUnit`, `CChannel::recvfrom` |
+| `srt-egress-01` | 1.8% | the second application sender |
 
 Two findings, and neither is the transport:
 
@@ -478,13 +479,27 @@ appeared, and the per-CPU accounting separates them:
 
 ### 5. Concurrency configurations
 
-Fixed 1, 2, 4 and 8 SRT senders against adaptive at 128 and 192
-destinations: the delivered rate is identical to three decimals
-(1.1426-1.1433 and 1.7134-1.715 Gbit/s) and CPU per delivered Gbit/s falls
-from 49.5 (one sender) to 38.7 (eight) at 128 destinations, against 29.7 of
-a core in the lane's own `SndQ` threads.  No scheduling optimisation is
-justified by this profile: the lane multiplexer is not the limit, and the
-adaptive policy matches the best fixed count.
+Fixed 1, 2, 4, 8 and 16 SRT senders against adaptive at 128 and 192
+destinations, 30 s rungs, sender on four P-cores and receivers on four
+E-cores:
+
+| Senders | 128 dest: delivered | sender %core/Gbit/s | lane `SndQ` %core | app senders %core | 192 dest: delivered | sender %core/Gbit/s |
+|---|---|---|---|---|---|---|
+| 1 | 1.1426 Gbit/s | 49.50 | 29.71 | 10.49 | 1.7134 Gbit/s | 40.58 |
+| 2 | 1.1433 | 46.16 | 26.47 | 10.02 | 1.7139 | 38.08 |
+| 4 | 1.1431 | 39.63 | 22.08 | 8.56 | 1.7138 | 35.62 |
+| 8 | 1.1426 | 38.68 | 21.05 | 8.36 | 1.7150 | 35.85 |
+| 16 | 1.1426 | 39.62 | 21.22 | 8.29 | 1.7141 | 32.97 |
+| adaptive | 1.1430 | 37.37 | 20.79 | 7.73 | 1.7132 | 40.61 |
+
+The delivered rate is identical to four significant figures in every
+configuration, so the sender count is not what sets it.  CPU per delivered
+Gbit/s falls from 49.5 with one sender to 37-40 with four or more, and the
+adaptive policy is at the best fixed count's level at 128 destinations and
+within run-to-run variation at 192.  No scheduling optimisation is justified
+by this profile: the lane multiplexer is not the limit, more senders do not
+buy more delivery, and what is left of the sender's cost is its own loop and
+lock (see the sampled stacks).
 
 ### 6. Seven-workload matrix
 
