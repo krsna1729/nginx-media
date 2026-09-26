@@ -477,6 +477,29 @@ appeared, and the per-CPU accounting separates them:
   receiver socket drops.  The method's answer is to change the topology, not
   the sender, and that is what the follow-up should do.
 
+### Mixed SRT session options in one lane: a capability gap, not a test gap
+
+The brief asks for mixed SRT connection settings - different latency and
+encryption - sharing one lane, "where supported".  They are not supported
+per destination, and that is worth stating precisely rather than papering
+over:
+
+| Setting | Where it is configured | Per destination? |
+|---|---|---|
+| passphrase, key length, crypto mode | `media_srt_crypto` (the listener and its outgoing sessions), `media_srt_crypto_stream <application/stream>` (per stream) | no |
+| stream id | the destination document's `streamid` | **yes** |
+| HLS push path, `segment_duration_ms`, `playlist_window`, `ca_file` | the destination document | **yes** |
+| latency, `SRTO_LATENCY`/`SRTO_RCVLATENCY` | nowhere in the configuration | no |
+
+A lane belongs to one stream, so two destinations of the same program cannot
+differ in encryption or latency today: the crypto directives are
+listener- and stream-scoped, and latency is not exposed at all.  What the
+fanout isolation test does exercise is the per-destination part of that
+contract - distinct stream ids and paths for every destination sharing a
+lane - and `make srt-crypto` covers encryption at the listener.  A
+per-destination SRT option set would be a feature, not a test, and is
+recorded in the remaining limits rather than implemented here.
+
 ### SRT library comparison (2026-09-26)
 
 Same source, same rungs, same placement (sender on four P-cores, receivers on
@@ -596,8 +619,11 @@ RTMP and HLS in one program.
    isolated CPU set funnels loopback softirq onto one core; the receivers
    must be placed on CPUs the sender does not use before any boundary is
    read as a software limit.
-3. **Mixed session options and cross-protocol contention** are implemented
-   for the shared-lane case but not yet exercised (see 8).
+3. **Per-destination SRT options do not exist.**  Encryption is listener- and
+   stream-scoped and latency is not exposed, so mixed session settings within
+   one lane cannot be tested today; the per-destination fields that do exist
+   (stream id, path, segment duration, playlist window, CA file) are exercised
+   by the fanout isolation test.  Cross-protocol contention is still open.
 4. **HLS push against a lossy, failing sink** is covered by the conformance
    fixtures; loss, latency, closure and intermittent HTTP errors are not
    injected yet.
