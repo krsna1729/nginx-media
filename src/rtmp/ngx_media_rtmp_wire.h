@@ -201,6 +201,16 @@ ngx_int_t ngx_media_rtmp_message_footprint(const ngx_media_rtmp_writer_t *w,
 #define NGX_MEDIA_AMF_MAX_MEMBERS 24
 
 /*
+ * Nested aggregates are read by recursing one frame per nesting level and
+ * every frame carries a full ngx_media_amf_value_t, so the peer's input
+ * decides how much stack the parse costs.  Real AMF0 commands nest a handful
+ * of levels; input deeper than this is rejected instead of being allowed to
+ * consume the worker's stack.  The fuzz generators build inputs on both sides
+ * of this boundary.
+ */
+#define NGX_MEDIA_AMF_MAX_DEPTH 1024
+
+/*
  * A bounded AMF0 value.  String member data points into the message payload
  * that is alive for the duration of the callback; type NGX_MEDIA_AMF_OBJECT
  * members are recorded as OBJECT with an empty string.

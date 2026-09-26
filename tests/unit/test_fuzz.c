@@ -44,10 +44,27 @@ fuzz_next(void)
  * How many rounds each generator runs.  A nightly job wants far more than a
  * developer waiting on a build, so the multiplier comes from the
  * environment: NGX_MEDIA_FUZZ_SCALE=20 is twenty times the default work.
+ *
+ * Scale multiplies iterations only.  The length of any input a generator
+ * produces is a property of its storage, never of the iteration count, and
+ * every generator that assembles bytes by hand proves it with FUZZ_BUF_WRITE
+ * so that an unbounded generator fails the suite instead of scribbling past
+ * the buffer it was given.
  */
 static ngx_uint_t  fuzz_scale = 1;
 
 #define FUZZ_ROUNDS(n)  ((ngx_uint_t) (n) * fuzz_scale)
+
+#define FUZZ_BUF_WRITE(buf, cap, off, need)                                   \
+    do {                                                                      \
+        if ((size_t) (off) + (size_t) (need) > (size_t) (cap)) {              \
+            ngx_media_test_failures++;                                        \
+            printf("FAIL %s:%d: generator write of %zu bytes at offset %zu "  \
+                   "exceeds the %zu-byte buffer\n", __FILE__, __LINE__,       \
+                   (size_t) (need), (size_t) (off), (size_t) (cap));          \
+            return 0;                                                         \
+        }                                                                     \
+    } while (0)
 
 static void
 fuzz_fill(u_char *buf, size_t len)
@@ -201,13 +218,69 @@ test_rtmp_reader(void)
     }
 }
 
+/*
+ * Builds `depth` nested AMF0 objects, each with one member, terminated at
+ * every level: 4 bytes of object header and 3 bytes of object end per level,
+ * plus a 4-byte string as the innermost value.
+ *
+ * The depth is an argument, not a loop count, so the input can never outgrow
+ * the buffer that holds it however many rounds the caller runs.
+ */
+static size_t
+fuzz_amf_nest(u_char *buf, size_t cap, size_t depth)
+{
+    size_t  i, pos = 0;
+
+    for (i = 0; i < depth; i++) {
+        FUZZ_BUF_WRITE(buf, cap, pos, 4);
+
+        buf[pos++] = NGX_MEDIA_AMF_OBJECT;
+        buf[pos++] = 0;
+        buf[pos++] = 1;
+        buf[pos++] = 'a';
+    }
+
+    FUZZ_BUF_WRITE(buf, cap, pos, 4);
+
+    buf[pos++] = NGX_MEDIA_AMF_STRING;
+    buf[pos++] = 0;
+    buf[pos++] = 1;
+    buf[pos++] = 'x';
+
+    for (i = 0; i < depth; i++) {
+        FUZZ_BUF_WRITE(buf, cap, pos, 3);
+
+        buf[pos++] = 0;
+        buf[pos++] = 0;
+        buf[pos++] = NGX_MEDIA_AMF_OBJECT_END;
+    }
+
+    return pos;
+}
+
+#define AMF_NEST_LEVEL_BYTES  7   /* 4 header + 3 terminator */
+#define AMF_NEST_LEAF_BYTES   4   /* the innermost string value */
+
+/* The deepest input this buffer can hold: never derived from fuzz_scale. */
+#define AMF_NEST_CAPACITY                                                     \
+    ((sizeof(amf_nest) - AMF_NEST_LEAF_BYTES) / AMF_NEST_LEVEL_BYTES)
+
 static void
 test_amf(void)
 {
     ngx_media_amf_value_t  value;
     u_char                 buf[512];
+    u_char                 amf_nest[8 * 1024];
     ngx_uint_t             i;
     size_t                 consumed;
+
+    /*
+     * The generator must be able to build inputs deeper than the parser
+     * accepts, otherwise the rejection path is never exercised.
+     */
+    _Static_assert(AMF_NEST_CAPACITY > NGX_MEDIA_AMF_MAX_DEPTH,
+                   "the deep-nesting buffer must encode more levels than the "
+                   "parser accepts");
 
     TEST_CASE("fuzz: amf0 decoder");
 
@@ -221,16 +294,50 @@ test_amf(void)
         CHECK(consumed <= len, "consumed within the input");
     }
 
-    /* deep nesting must be rejected rather than recursing without bound */
+    /*
+     * Deep nesting must be rejected rather than recursing without bound.  The
+     * depths are the parser's limit and its immediate neighbours: at the limit
+     * the input is well formed and must be accepted, one level past it the
+     * parser must refuse instead of recursing, and the deepest input the
+     * buffer can hold must be refused too.  Every round draws another depth
+     * from the whole encodable range, so coverage grows with the iteration
+     * count while the generated input stays inside amf_nest.
+     */
     for (i = 0; i < FUZZ_ROUNDS(64); i++) {
-        buf[i * 4] = NGX_MEDIA_AMF_OBJECT;
-        buf[i * 4 + 1] = 0;
-        buf[i * 4 + 2] = 1;
-        buf[i * 4 + 3] = 'a';
+        size_t     depth = 1 + (fuzz_next() % AMF_NEST_CAPACITY);
+        size_t     len;
+        ngx_int_t  rc;
+
+        len = fuzz_amf_nest(amf_nest, sizeof(amf_nest), depth);
+        rc = ngx_media_amf_read(amf_nest, len, &value, &consumed);
+
+        CHECK(consumed <= len, "consumed within the nesting input");
+        CHECK(rc == (depth <= NGX_MEDIA_AMF_MAX_DEPTH ? NGX_OK : NGX_ERROR),
+              "depth %zu: expected %s, got %ld", depth,
+              depth <= NGX_MEDIA_AMF_MAX_DEPTH ? "NGX_OK" : "NGX_ERROR",
+              (long) rc);
     }
 
-    (void) ngx_media_amf_read(buf, 64 * 4, &value, &consumed);
-    CHECK(1, "deep nesting survived");
+    {
+        static const size_t  boundary[] = {
+            NGX_MEDIA_AMF_MAX_DEPTH - 1,
+            NGX_MEDIA_AMF_MAX_DEPTH,
+            NGX_MEDIA_AMF_MAX_DEPTH + 1,
+            AMF_NEST_CAPACITY,
+        };
+
+        for (i = 0; i < sizeof(boundary) / sizeof(boundary[0]); i++) {
+            size_t     len = fuzz_amf_nest(amf_nest, sizeof(amf_nest),
+                                           boundary[i]);
+            ngx_int_t  rc = ngx_media_amf_read(amf_nest, len, &value,
+                                               &consumed);
+
+            CHECK(consumed <= len, "consumed within the boundary input");
+            CHECK(rc == (boundary[i] <= NGX_MEDIA_AMF_MAX_DEPTH
+                             ? NGX_OK : NGX_ERROR),
+                  "boundary depth %zu: got %ld", boundary[i], (long) rc);
+        }
+    }
 }
 
 static void
