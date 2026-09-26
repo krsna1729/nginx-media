@@ -773,6 +773,8 @@ def build(args):
         "hls_push": hls_push_section(case_dir, workers_before, workers_after),
         "delivery": delivery_section(case_dir),
         "resources": resources_section(case_dir, cpu_total, host_after),
+        "preflight": (load_json(os.path.join(case_dir, "preflight.json"))
+                      or missing("mixed", "no preflight for this rung")),
     }
     bundle["efficiency"] = efficiency_section(bundle)
     bundle["saturation_notes"] = saturation_summary(cpu, env, net)
@@ -816,9 +818,12 @@ def matrix(args):
                    if r["outcome"] == "quality-failure"]
         setup = [r["destinations"] for r in rungs
                  if r["outcome"] == "setup-failure"]
+        limited = [r["destinations"] for r in rungs
+                   if r["outcome"] == "infrastructure-limited"]
         entry["highest_passing"] = max(passing) if passing else None
         entry["first_quality_failure"] = min(failing) if failing else None
         entry["setup_limited"] = setup
+        entry["infrastructure_limited"] = limited
     host = {}
     first = next(iter(glob.glob(os.path.join(args.run_dir, "capacity", "*",
                                              "host.after.json"))), None)
@@ -836,7 +841,9 @@ def matrix(args):
     for mix, entry in mixes.items():
         print(f"matrix mix={mix} highest_passing={entry['highest_passing']} "
               f"first_quality_failure={entry['first_quality_failure']} "
-              f"setup_limited={','.join(map(str, entry['setup_limited'])) or 'none'}")
+              f"setup_limited={','.join(map(str, entry['setup_limited'])) or 'none'} "
+              f"infrastructure_limited="
+              f"{','.join(map(str, entry.get('infrastructure_limited') or [])) or 'none'}")
 
 
 # Which field carries the observed ratio, per protocol.  A configured

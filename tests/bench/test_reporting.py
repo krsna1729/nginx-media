@@ -35,6 +35,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 READERS = os.path.join(HERE, "hls_capacity_readers.py")
 DIAGNOSTICS = os.path.join(HERE, "capacity_diagnostics.py")
 HISTORY = os.path.join(HERE, "bench_history.py")
+PREFLIGHT = os.path.join(HERE, "capacity_preflight.py")
 
 checks = 0
 failures = 0
@@ -73,6 +74,121 @@ def write_kv(path, pairs):
 
 def run(args, **kwargs):
     return subprocess.run(args, text=True, capture_output=True, **kwargs)
+
+
+def write_json(path, payload):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as output:
+        json.dump(payload, output)
+
+
+def preflight(*args):
+    return run([sys.executable, PREFLIGHT] + list(args))
+
+
+def test_preflight_classifies_a_short_environment(work):
+    """The preflight's whole job: say which side is short, and never turn an
+    environment that cannot carry the load into a result about the sender."""
+    case = os.path.join(work, "preflight")
+    sender = os.path.join(case, "sender.json")
+    rx = os.path.join(case, "rx.json")
+    tx = os.path.join(case, "tx.json")
+    write_json(sender, {"role": "sender", "permitted_cpus": [0, 1, 2, 3],
+                        "cpu_model": "test",
+                        "memory": {"MemAvailable": "8000000 kB"}})
+    # the receiver counted 5.36 Gbit/s and dropped datagrams: the receiver
+    # side is short for a 9.6 Gbit/s request
+    write_json(rx, {"side": "receiver", "received_bytes": 6_700_000_000,
+                    "received_packets": 4_700_000, "window_s": 10.0,
+                    "socket_drops": 178465, "rate_gbps": 5.36})
+    write_json(tx, {"side": "sender", "sent_bytes": 7_300_000_000,
+                    "sent_packets": 5_200_000, "send_window_s": 10.0,
+                    "ping_loss": 0.0})
+
+    result = preflight("judge", "--destinations", "1000", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx, "--json",
+                       os.path.join(case, "judge.json"))
+    check(result.returncode == 2,
+          f"a short receiver must be infrastructure-limited: {result.stdout}")
+    check("preflight_verdict=infrastructure-limited" in result.stdout,
+          "the verdict must be explicit")
+    with open(os.path.join(case, "judge.json"), encoding="utf-8") as source:
+        judged = json.load(source)
+    check(judged["limits"][0]["side"] == "receiver",
+          f"the short side must be named: {judged['limits']}")
+    check_close(judged["request"]["required_network_gbps"], 9.6,
+                "the request's network need must be explicit")
+
+    # the same measurements for a request the environment can carry
+    result = preflight("judge", "--destinations", "64", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx, "--sender-cpu-per-gbps", "140",
+                       "--receiver-cpu-per-gbps", "30")
+    check(result.returncode == 0, f"a load that fits must pass: {result.stdout}")
+
+    # nothing dropped, but the probe never offered the requested load: that
+    # is a limit of the measurement, not a statement about the path
+    write_json(rx, {"side": "receiver", "received_bytes": 6_700_000_000,
+                    "window_s": 10.0, "socket_drops": 0, "rate_gbps": 5.36})
+    write_json(tx, {"side": "sender", "sent_bytes": 6_700_000_000,
+                    "send_window_s": 10.0})
+    result = preflight("judge", "--destinations", "1000", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx)
+    check(result.returncode == 3,
+          f"an unoffered load must be insufficient evidence: {result.stdout}")
+    check("preflight_unknown=network/throughput" in result.stdout,
+          f"the unknown must be explicit: {result.stdout}")
+
+    # the path carried the offered load but the sender has no measured cost
+    # per Gbit/s: a core count is not a capacity, so it is not a pass
+    result = preflight("judge", "--destinations", "64", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx)
+    check(result.returncode == 3,
+          f"unknown CPU cost must not pass: {result.stdout}")
+    check("preflight_unknown=sender/cpu" in result.stdout,
+          f"the unknown CPU must be reported: {result.stdout}")
+
+    # a measured cost that does not fit the permitted CPUs is a limit
+    result = preflight("judge", "--destinations", "1000", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx, "--sender-cpu-per-gbps", "140")
+    check(result.returncode == 2,
+          f"an unaffordable CPU requirement must be a limit: {result.stdout}")
+    check("preflight_limit=sender/cpu" in result.stdout,
+          f"the short side must be the sender: {result.stdout}")
+
+
+def test_preflight_probe_is_measured_at_both_ends(work):
+    """A path probe over loopback: the receiver's count is the measurement,
+    the sender's count says the load was offered, and neither is inferred."""
+    case = os.path.join(work, "probe")
+    os.makedirs(case, exist_ok=True)
+    port = 20977
+    rx = os.path.join(case, "rx.json")
+    listener = subprocess.Popen(
+        [sys.executable, PREFLIGHT, "probe", "--listen", "--port", str(port),
+         "--seconds", "4", "--json", rx],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    time.sleep(0.5)
+    tx = os.path.join(case, "tx.json")
+    result = preflight("probe", "--peer", "127.0.0.1", "--port", str(port),
+                       "--seconds", "2", "--json", tx)
+    out, err = listener.communicate(timeout=30)
+    check(listener.returncode == 0, f"listener failed: {err.strip()}")
+    check(result.returncode == 0, f"sender probe failed: {result.stderr}")
+    with open(rx, encoding="utf-8") as source:
+        received = json.load(source)
+    with open(tx, encoding="utf-8") as source:
+        sent = json.load(source)
+    check(received["received_bytes"] > 0, "the receiver must count bytes")
+    check(sent["sent_bytes"] > 0, "the sender must count bytes")
+    check_close(sent["ping_loss"], 0.0, "loopback loses no pings")
+    check(received["received_bytes"] <= sent["sent_bytes"],
+          "a receiver cannot count more than was sent")
+    check(received["window_s"] > 0, "the receiver's own window must be recorded")
 
 
 # --- the HLS reader benchmark ------------------------------------------------
@@ -551,6 +667,33 @@ def test_gate_accepts_a_finished_ladder_that_stopped_at_the_boundary(work):
     check("bench_gate=pass" in result.stdout, "the gate must say it passed")
 
 
+def test_gate_accepts_an_infrastructure_limited_rung(work):
+    """A host that cannot carry the load is not a software failure: the rung
+    is recorded as infrastructure-limited, the ladder stops there, and the
+    gate reports it without failing."""
+    results = os.path.join(work, "limited")
+    make_config(results, "srt", [
+        (1, "pass", srt_delivery(1.0)),
+        (16, "pass", srt_delivery(0.99)),
+        (128, "infrastructure-limited", srt_delivery(1.0)),
+    ], status=1, stopped={"pure-srt": "128 256 512"},
+        expected={"mixes": ["pure-srt"], "steps": [1, 16, 128, 256, 512]})
+    out = os.path.join(work, "limited.json")
+    check(summarize(results, out).returncode == 0, "summarize must succeed")
+    with open(out, encoding="utf-8") as source:
+        record = json.load(source)
+    entry = record["configs"]["srt"]["mixes"]["pure-srt"]
+    check(entry["infrastructure_limited"] == [128],
+          f"the matrix must list the rung separately: {entry}")
+    check(entry["first_quality_failure"] is None,
+          "an infrastructure limit is not a quality failure")
+    result = gate(out)
+    check(result.returncode == 0,
+          f"an infrastructure limit must not fail the gate: {result.stdout}")
+    check("infrastructure" in result.stdout + result.stderr,
+          f"the gate must report the limit: {result.stdout}{result.stderr}")
+
+
 def test_gate_rejects_quality_failure_below_the_required_rung(work):
     results = os.path.join(work, "low")
     make_config(results, "srt", [
@@ -695,6 +838,8 @@ def test_matrix_separates_observed_from_threshold(work):
 def main():
     work = tempfile.mkdtemp(prefix="nginx-media-reporting-")
     try:
+        test_preflight_classifies_a_short_environment(work)
+        test_preflight_probe_is_measured_at_both_ends(work)
         test_reader_percentile_helpers()
         test_reader_reports_observed_not_threshold(os.path.join(work, "readers"))
         test_hls_origin_bundle_uses_observed_ratios(work)
@@ -704,6 +849,7 @@ def main():
         test_efficiency_refuses_a_sender_only_counter(work)
         test_history_separates_observed_from_threshold(work)
         test_gate_accepts_a_finished_ladder_that_stopped_at_the_boundary(work)
+        test_gate_accepts_an_infrastructure_limited_rung(work)
         test_gate_rejects_quality_failure_below_the_required_rung(work)
         test_gate_rejects_missing_rungs_and_workloads(work)
         test_gate_rejects_an_aborted_harness(work)

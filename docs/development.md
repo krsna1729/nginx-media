@@ -327,6 +327,43 @@ the tests for all of this in seconds, with no nginx and no network.
 
 The measuring side is kept from becoming the measured limit:
 
+- **The receivers can live somewhere other than this host's loopback.**
+  `CAPACITY_RECEIVER_EXEC` is the command prefix that starts a receiver
+  program where it belongs and `CAPACITY_RECEIVER_ADDR` is the address the
+  sender dials; unset, both keep the receivers on `127.0.0.1`, which is what
+  every shared-runner tier uses.  Two other topologies are wired:
+  `ip netns exec <ns>` / `nsenter --net=/run/netns/<ns> --no-fork` with the
+  namespace's own address puts the traffic over a veth pair, and
+  `ssh <host>` puts the receivers on another machine.  The namespace
+  topology is one command - `eval "$(tests/bench/capacity_veth.sh up)"` -
+  and it is the topology to use when the question is whether the software
+  depends on loopback; it is not a NIC, so a number from it is a number
+  about the software, not about a 25 Gbit/s link.
+- **The preflight decides whether a rung can be measured at all.**  Before a
+  rung at or above `CAPACITY_PREFLIGHT_MIN_DESTINATIONS` (128 by default,
+  `CAPACITY_PREFLIGHT=auto|yes|no`), the harness fingerprints the sender and
+  the receiver host (CPU model, permitted set, cgroup quota, frequency and
+  throttling, NUMA, kernel, memory, every interface's speed/driver/offloads/
+  MTU, the kernel's UDP limits, the transport library the binary carries) and
+  measures the path between them with a UDP probe whose receiver counts what
+  arrives.  `capacity_preflight.py judge` compares that with the offered
+  load - payload times an explicit 1.20 overhead factor - and returns `ok`,
+  `insufficient-evidence` (a core count or an unoffered load is not a
+  capacity) or `infrastructure-limited` with the side and the number that
+  was short.  An infrastructure-limited rung is recorded as such and stops
+  that workload's ladder; it is never a quality failure and never a
+  statement about nginx.  The bundle keeps the whole preflight under
+  `preflight`, and the matrix and history list the rung separately.
+- **Two hosts.**  `tests/bench/capacity_distributed.sh --receiver user@host
+  --addr 10.10.0.2` mirrors the repository to the receiver host at the same
+  absolute path, runs the preflight on both sides, then runs the ladder with
+  the receivers started over ssh.  Artifacts come back through
+  `CAPACITY_RECEIVER_FILE_TEST`/`_FETCH`/`_COLLECT` (a no-op when the
+  receivers share this filesystem), so the same harness and the same
+  diagnostics work for both.  The link between the hosts is the measurement:
+  a 1000 x 8 Mbit/s rung needs about 9.6 Gbit/s of path including overhead,
+  and on anything smaller the preflight says so instead of the run
+  pretending.
 - The SRT receiver listens on several ports (`PORT:N`) so no single receiver
   UDP socket and libsrt receive thread carries more than
   `CAPACITY_SRT_RECEIVER_PEERS` destinations (16 by default).
