@@ -320,6 +320,39 @@ whole story.  What remains is the sender: at this rung nginx needs more CPU
 per delivered Gbit/s than it has, and the per-destination output queues
 absorb the difference until they overflow.
 
+### Replicating the published 2026-09-25 numbers
+
+The published phase-2 matrix came from a 4-vCPU Xeon container at 2.10 GHz,
+unpinned.  The same shape here is four physical P-cores shared by the sender,
+the receivers and the publisher, with their SMT siblings offlined and the
+CPUs isolated from other work (`omarchy-benchmark --cpu 0,2,4,6 --isolate
+--turbo on`), so the comparison is four whole cores against four vCPUs:
+
+| Destinations | Published (new-adaptive) | Local (4 P-cores, no SMT) | Delivered Mbit/s per destination (published / local) |
+|---|---|---|---|
+| 1 | pass, 0.0088 Gbit/s | pass, 0.0088 Gbit/s | 8.80 / 8.80 |
+| 32 | pass, 0.2799 | pass, 0.2817 | 8.75 / 8.80 |
+| 64 | pass, 0.5589 | pass, 0.5600 | 8.73 / 8.75 |
+| 96 | pass, 0.8391 | quality failure, 0.8373 | 8.74 / 8.72 |
+| 128 | quality failure, 1.0873 | quality failure, 0.6506 | 8.49 / 5.08 |
+| 160 | quality failure, 0.9550 | quality failure, 0.5955 | 5.97 / 3.72 |
+
+What replicates is the delivery rate itself: within 1% of the published
+per-destination rate up to 96 destinations, on the same 8 Mbit/s source and
+the same 20 s windows.  The boundary lands one rung lower (64 passing, 96
+failing here; 96 passing, 128 failing there), and the 96 rung is marginal
+rather than collapsed: it delivered the full 0.8373 Gbit/s at a minimum
+average ratio of 0.985, and failed on the short-interval floor - every
+destination showed the same 2.39 s interval at 0.736 of reference, a
+transient, not a capacity wall.  The published 128 and 160 rungs show the
+same failure signature as the local ones: the delivered rate falls while the
+offered load rises.
+
+CPU per delivered Gbit/s does not replicate, and should not: 66-70% of a
+core per Gbit/s here against 126-238% there, because an i9 P-core at 5 GHz
+does roughly three times the work of a 2.1 GHz Xeon vCPU.  That is why the
+repo compares this ratio only within a host class.
+
 ## Where this leaves the roadmap
 
 | Deliverable | Status |

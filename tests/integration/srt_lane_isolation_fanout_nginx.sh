@@ -55,6 +55,9 @@ LANE_HEALTHY=(32 48)
 LANE_CONTROL=(1 17 33 49)
 WINDOW="${WINDOW:-20}"
 
+rm -rf "$RUN"
+mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/media"
+
 SINK_PID=""
 RELAY_PID=""
 FLAP_PID=""
