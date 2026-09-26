@@ -281,6 +281,15 @@ Every capacity rung leaves `diagnostics.json` in its case directory
   enqueue-to-send lag, blocked sends, retransmissions, drops; RTMP scheduler
   visit counters; HLS uploader and segment accounting.
 - **delivery** — each protocol's quality report and the short-interval ratios.
+  The SRT report carries two verdicts: `quality_pass` is the ladder's 0.95
+  compatibility gate, and `quality_strict_full_rate` is the stricter one -
+  every destination within `--strict-ratio` (0.999) of the reference, no
+  interval below `--strict-interval-floor` (0.90) of it, zero MPEG-TS sync or
+  continuity errors and no feed or output queue drops - with its components
+  (`quality_strict_ratio_min`, `quality_strict_interval_min`,
+  `quality_strict_ts_errors`).  A rung can pass the gate and fail the strict
+  result; history records both (`strict_full_rate`,
+  `strict_full_rate_pass`, `None` when the run never reported it).
   The two are never mixed up: a *configured* acceptance threshold is reported
   under `delivery_ratio_threshold` and the HLS reader log's original
   `min_delivery_ratio` keeps that meaning, while the measured minimum is
