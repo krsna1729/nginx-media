@@ -667,6 +667,43 @@ def test_gate_rejects_a_setup_failure(work):
     check(result.returncode == 1, "a setup failure must fail the gate")
 
 
+def test_per_lane_rate_keeps_workers_apart(work):
+    """Two workers number their shards from zero: the per-lane rate must not
+    merge them, and must not report zero for a lane that was serving."""
+    case = os.path.join(work, "lanes")
+    os.makedirs(case, exist_ok=True)
+    rows = ["round_id,sample_ns,worker_pid,worker,shard,destinations,"
+            "feed_queue_units,feed_queue_bytes,feed_drops,output_queue_units,"
+            "output_queue_bytes,output_drops,sent_bytes,blocked_sends,"
+            "retransmitted_packets"]
+    # worker 0: shard 0 serves 1000 bytes per sample, shard 1 serves 2000
+    # worker 3: shard 0 exists but serves nothing
+    for index, ns in enumerate((1_000_000_000, 2_000_000_000)):
+        rows.append(f"{index},{ns},111,0,0,16,0,0,0,0,0,0,{1000 * index},0,0")
+        rows.append(f"{index},{ns},111,0,1,16,0,0,0,0,0,0,{2000 * index},0,0")
+        rows.append(f"{index},{ns},222,3,0,0,0,0,0,0,0,0,0,0,0")
+    write(os.path.join(case, "queue-samples.csv"), "\n".join(rows) + "\n")
+    module = load_module(DIAGNOSTICS, "capacity_diagnostics_lanes")
+
+    def metrics(sent_bytes):
+        return [
+            ("nginx_media_srt_egress_shard_destinations",
+             {"worker": "w0", "shard": "0"}, 16.0),
+            ("nginx_media_srt_egress_shard_sent_bytes_total",
+             {"worker": "w0", "shard": "0"}, sent_bytes),
+        ]
+
+    section = module.srt_section(case, {"111": metrics(0)},
+                                 {"111": metrics(3000)})
+    rates = section["per_lane_service_rate"]["value"]
+    check(rates.get("w0:s0") == 8000,
+          f"worker 0's shard 0 rate must be its own: {rates}")
+    check(rates.get("w0:s1") == 16000,
+          f"worker 0's shard 1 rate must be its own: {rates}")
+    check(rates.get("w3:s0") == 0,
+          f"an empty shard reports zero, not another worker's bytes: {rates}")
+
+
 def test_matrix_separates_observed_from_threshold(work):
     run_dir = os.path.join(work, "run")
     case = os.path.join(run_dir, "capacity", "quality-hls-16")
@@ -711,6 +748,7 @@ def main():
         test_gate_rejects_a_run_with_no_status_file(work)
         test_gate_rejects_absent_diagnostics(work)
         test_gate_rejects_a_setup_failure(work)
+        test_per_lane_rate_keeps_workers_apart(work)
         test_matrix_separates_observed_from_threshold(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
