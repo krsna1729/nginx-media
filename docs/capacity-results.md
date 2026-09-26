@@ -477,6 +477,37 @@ appeared, and the per-CPU accounting separates them:
   receiver socket drops.  The method's answer is to change the topology, not
   the sender, and that is what the follow-up should do.
 
+### SRT library comparison (2026-09-26)
+
+Same source, same rungs, same placement (sender on four P-cores, receivers on
+four E-cores, SMT siblings offlined), two binaries: one linked against the
+system libsrt 1.5.3, one against **robotweax/srt v0.2.6** (tag published
+2026-09-26, commit `50cba37b`), built from source with the project's own
+`ROBOTWEAX_SRT_WARNINGS_AS_ERRORS=OFF` because GCC 16 warns about two null
+dereferences in its compat layer that the project's older CI toolchain does
+not.
+
+| Destinations | libsrt 1.5.3 | robotweax v0.2.6 | Sender CPU per delivered Gbit/s |
+|---|---|---|---|
+| 1 | pass, 0.0089 Gbit/s | pass, 0.0089 Gbit/s | 1048.7 vs 1020.3 %core |
+| 128 | pass, 1.1430 | pass, 1.1413 | 37.4 vs **33.4** |
+| 192 | pass, 1.7132 | pass, 1.7120 | 40.6 vs **30.9** |
+| 256 | pass, 2.2860 | pass, 2.2810 | 33.0 vs **29.6** |
+
+The delivered rate is the same at every rung; the sender's CPU per delivered
+Gbit/s is 10-24% lower with robotweax/srt, and its 256-destination rung
+passes the strict full-rate qualification (minimum ratio 0.99903, worst
+interval 0.9355).  That is the same direction the 2026-09-25 comparison
+found, with a wider margin on this host.
+
+Two things to note.  The weekly tier pins robotweax/srt at `b6687f51`
+(a v0.2.5-era commit) on purpose - "moving the pin is a deliberate change
+here" - so this measurement is a reason to move it, not a reason it moved.
+And the diagnostics cannot attribute robotweax's send queue: its threads are
+not named `SRT:SndQ`, so `cpu.workers[*].libsrt_sndq` is absent for that
+build.  The comparison above therefore rests on delivered bytes and total
+sender CPU, both of which are measured the same way for both libraries.
+
 ### 5. Concurrency configurations
 
 Fixed 1, 2, 4, 8 and 16 SRT senders against adaptive at 128 and 192
