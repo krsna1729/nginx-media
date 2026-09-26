@@ -8,7 +8,7 @@ NGINX_VERSION ?= 1.30.5
     failover hls hls-push hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
     file-source transform \
     stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
-    srt-lane-isolation srt-crypto \
+    srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
     srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls \
     bench-hls-fanout bench-push-fanout bench-fanout-delay clean
 
@@ -134,6 +134,9 @@ srt-output-mux:
 srt-lane-isolation:
 	tests/integration/srt_lane_isolation_nginx.sh
 
+srt-lane-isolation-fanout:
+	tests/integration/srt_lane_isolation_fanout_nginx.sh
+
 srt-output:
 	tests/integration/srt_output_nginx.sh
 
@@ -176,7 +179,7 @@ TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
     hls-profile hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
     graph-conflict churn \
     rtmp \
-    rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux srt-lane-isolation srt-crypto \
+    rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
     srt-worker-ports \
     srt-shared-port multi-worker soak fault
 
