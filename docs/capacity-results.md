@@ -325,8 +325,11 @@ absorb the difference until they overflow.
 The published phase-2 matrix came from a 4-vCPU Xeon container at 2.10 GHz,
 unpinned.  The same shape here is four physical P-cores shared by the sender,
 the receivers and the publisher, with their SMT siblings offlined and the
-CPUs isolated from other work (`omarchy-benchmark --cpu 0,2,4,6 --isolate
---turbo on`), so the comparison is four whole cores against four vCPUs:
+CPUs isolated from other work - on this host with the local helper
+`omarchy-benchmark --cpu 0,2,4,6 --isolate --turbo on`, whose portable
+equivalent is `taskset` on the same CPUs plus
+`CAPACITY_NGINX_CPUS`/`CAPACITY_RECEIVER_CPUS` for the harness - so the
+comparison is four whole cores against four vCPUs:
 
 | Destinations | Published (new-adaptive) | Local (4 P-cores, no SMT) | Per-destination Mbit/s (published / local) |
 |---|---|---|---|

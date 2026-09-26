@@ -649,6 +649,72 @@ def resources_section(case_dir, cpu_total, host_after):
     return section
 
 
+def per_cpu_busy(host_before, host_after):
+    """Per-CPU busy fraction over the window, from the sampler's per-CPU
+    counters.
+
+    A short delivery on idle pinned cores is a different finding from a short
+    delivery on saturated ones, and the aggregate line cannot tell them
+    apart."""
+    before = ((host_before or {}).get("host") or {}).get("cpu_per_cpu") or {}
+    after = ((host_after or {}).get("host") or {}).get("cpu_per_cpu") or {}
+    keys = ("user", "nice", "system", "idle", "iowait", "irq", "softirq",
+            "steal")
+    busy = {}
+    for name, later in after.items():
+        earlier = before.get(name)
+        if not earlier:
+            continue
+        try:
+            total = sum(later[k] - earlier[k] for k in keys)
+            idle = ((later["idle"] + later["iowait"])
+                    - (earlier["idle"] + earlier["iowait"]))
+        except (KeyError, TypeError):
+            continue
+        if total <= 0:
+            continue
+        busy[name] = round(100.0 * (1.0 - idle / total), 2)
+    return busy
+
+
+def parse_cpu_list(text):
+    """[0, 2, 4, 5] from "0,2,4-5"; the harness's placement format."""
+    if not isinstance(text, str) or not text.strip():
+        return []
+    cpus = []
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            low, _, high = part.partition("-")
+            try:
+                cpus.extend(range(int(low), int(high) + 1))
+            except ValueError:
+                continue
+        else:
+            try:
+                cpus.append(int(part))
+            except ValueError:
+                continue
+    return cpus
+
+
+def pinned_headroom(busy, placement, label):
+    """What the CPUs a role was pinned to did over the window."""
+    cpus = [f"cpu{n}" for n in parse_cpu_list(placement)]
+    values = [busy[cpu] for cpu in cpus if cpu in busy]
+    if not values:
+        return None
+    return ok({"cpus": cpus,
+               "mean_busy_pct": round(sum(values) / len(values), 2),
+               "min_busy_pct": min(values),
+               "max_busy_pct": max(values),
+               "idle_cpus": sum(1 for value in values if value < 10.0),
+               "saturated_cpus": sum(1 for value in values if value > 90.0)},
+              "% of one core over the window", placement=placement)
+
+
 def saturation_summary(cpu, env, net):
     """Plain statements about which side saturated first; no thresholds that
     depend on the host - only relations between measured quantities."""
@@ -782,6 +848,14 @@ def build(args):
         "preflight": (load_json(os.path.join(case_dir, "preflight.json"))
                       or missing("mixed", "no preflight for this rung")),
     }
+    busy = per_cpu_busy(host_before, host_after)
+    if busy:
+        env["per_cpu_busy_pct"] = ok(busy, "% of one core over the window")
+        for role, key in (("sender", "nginx_cpus"),
+                          ("receiver", "receiver_cpus")):
+            headroom = pinned_headroom(busy, meta.get(key), role)
+            if headroom is not None:
+                env[f"{role}_pinned_headroom"] = headroom
     bundle["efficiency"] = efficiency_section(bundle)
     bundle["saturation_notes"] = saturation_summary(cpu, env, net)
     out = args.out or os.path.join(case_dir, "diagnostics.json")

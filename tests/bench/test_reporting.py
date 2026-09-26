@@ -861,6 +861,39 @@ def test_per_lane_rate_keeps_workers_apart(work):
           f"worker 0's shard 1 rate must be its own: {rates}")
     check(rates.get("w3:s0") == 0,
           f"an empty shard reports zero, not another worker's bytes: {rates}")
+def test_per_cpu_busy_separates_idle_from_saturated(work):
+    """A short delivery on idle pinned cores is a different finding from one
+    on saturated cores: the bundle must carry both the per-CPU numbers and
+    what the pinned sets did."""
+    module = load_module(DIAGNOSTICS, "capacity_diagnostics_percpu")
+
+    def snapshot(values):
+        return {"host": {"cpu_per_cpu": {
+            f"cpu{index}": {"user": user, "nice": 0, "system": 0, "idle": idle,
+                            "iowait": 0, "irq": 0, "softirq": 0, "steal": 0}
+            for index, (user, idle) in enumerate(values)}}}
+
+    # cpu0 works the whole window, cpu1 is idle, cpu2 is half busy
+    before = snapshot([(0, 1000), (0, 1000), (0, 1000)])
+    after = snapshot([(1000, 1000), (0, 2000), (500, 1500)])
+    busy = module.per_cpu_busy(before, after)
+    check_close(busy["cpu0"], 100.0, "a fully busy core reads 100%")
+    check_close(busy["cpu1"], 0.0, "an idle core reads 0%")
+    check_close(busy["cpu2"], 50.0, "a half busy core reads 50%")
+
+    check(module.parse_cpu_list("0,2,4-6") == [0, 2, 4, 5, 6],
+          "the harness's placement format must parse")
+    check(module.parse_cpu_list("") == [] and module.parse_cpu_list(None) == [],
+          "an unpinned run has no CPU list")
+
+    headroom = module.pinned_headroom(busy, "0,1", "sender")
+    check(headroom["value"]["mean_busy_pct"] == 50.0,
+          f"pinned mean busy: {headroom}")
+    check(headroom["value"]["idle_cpus"] == 1
+          and headroom["value"]["saturated_cpus"] == 1,
+          f"idle and saturated cores must be counted: {headroom}")
+    check(module.pinned_headroom(busy, "9", "sender") is None,
+          "a CPU with no counters reports nothing, never zero")
 
 
 def test_matrix_separates_observed_from_threshold(work):
@@ -911,6 +944,7 @@ def main():
         test_gate_rejects_absent_diagnostics(work)
         test_gate_rejects_a_setup_failure(work)
         test_per_lane_rate_keeps_workers_apart(work)
+        test_per_cpu_busy_separates_idle_from_saturated(work)
         test_matrix_separates_observed_from_threshold(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
