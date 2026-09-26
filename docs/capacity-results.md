@@ -351,6 +351,37 @@ The follow-up measurement, when a machine is free: pin the receivers to CPUs
 the sender does not use (or leave the set wider and unisolated), confirm the
 receiver drops disappear, and only then re-read the SRT boundary.
 
+### Sampled stacks at the first bottleneck
+
+`perf record -a -g` for 15 s during the 160-destination rung that fails on
+four isolated cores, then reported per CPU (the benchmark's own 0,2,4,6; the
+machine also carried the user's interactive session on the other CPUs, which
+the filter excludes).  The shares are of the samples taken on those four
+CPUs:
+
+| Process | Share | What it was doing |
+|---|---|---|
+| `curl` | 26.2% | the harness polling the control API and the samplers |
+| `swapper` (idle) | 15.4% | |
+| `bash` | 9.1% | the harness itself |
+| `srt-egress-00` | 7.2% | `pthread_mutex_lock` first, then `ngx_media_srt_out_thread` |
+| `SRT:RcvQ:w1..w9` | ~1.7-4.0% each | libsrt receive: `CRcvQueue::worker`, `worker_RetrieveUnit`, `CChannel::recvfrom` |
+| `nginx` (worker) | 3.1% | spread thin, nothing above 2% |
+
+Two findings, and neither is the transport:
+
+1. **The measurement harness is the largest consumer on the benchmark's own
+   cores** - curl plus bash is roughly a third of the samples, more than the
+   software under test.  On a four-core budget shared by sender and
+   receivers, the sampler competes with the thing it is measuring, which is
+   part of why this rung fails while the host reads 14% busy.
+2. **The application sender is not blocked in the transport**: its hottest
+   symbol is `pthread_mutex_lock`, not `srt_sendmsg` or a libsrt send queue
+   call.  With the lane multiplexer already in place, what is left of the
+   sender's cost is its own loop and its lock, which is where a future
+   scheduling change would have to look - and it needs a rung whose cores are
+   not also running the harness before that profile can be trusted.
+
 ### Replicating the published 2026-09-25 numbers
 
 The published phase-2 matrix came from a 4-vCPU Xeon container at 2.10 GHz,
