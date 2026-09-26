@@ -1,0 +1,66 @@
+name: bench-publish
+
+# Appends a benchmark run's results to the history on the gh-pages branch
+# (data/<tier>.jsonl, with a viewer at its root: tests/bench/history/index.html).
+#
+# Separate from bench.yml because it is the one job that writes to the
+# repository: a pull request calls bench.yml with a read-only token and never
+# calls this, and a called workflow cannot be granted more than its caller
+# holds.  main, nightly and weekly call it after bench.yml in the same run, so
+# the artifacts it collects are that run's.  One publish at a time across
+# every workflow, so appends never race.
+
+on:
+  workflow_call:
+    inputs:
+      tier:
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: bench-pages
+      cancel-in-progress: false
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect every job's results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-${{ inputs.tier }}-*
+          path: results
+          merge-multiple: true
+
+      - name: Summarize
+        run: |
+          python3 tests/bench/bench_history.py summarize results \
+            --tier "${{ inputs.tier }}" --out summary.json
+
+      - name: Append to the gh-pages history
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch origin gh-pages; then
+            git worktree add pages origin/gh-pages
+            git -C pages checkout -B gh-pages
+          else
+            git worktree add --detach pages
+            git -C pages checkout --orphan gh-pages
+            git -C pages rm -rf --quiet .
+          fi
+          python3 tests/bench/bench_history.py publish summary.json --pages pages
+          git -C pages add -A
+          git -C pages commit -m "bench: ${{ inputs.tier }} ${GITHUB_SHA::8}"
+          for attempt in 1 2 3; do
+            git -C pages push origin gh-pages && exit 0
+            sleep $(( attempt * 5 ))
+            git -C pages pull --rebase origin gh-pages
+          done
+          exit 1

@@ -1,10 +1,11 @@
 name: master
 
 # Merge to main: the full integration suite, including the multi-worker
-# routing, the soak test and the fault injection run.  CI covers the fast
-# paths; this is the one that has to be green before anything is tagged.  (It
-# used to trigger on "master", a branch this repository does not have, so it
-# never ran.)
+# routing, the soak test and the fault injection run, then the branch
+# benchmark tier, whose results are published to the gh-pages history.  CI
+# covers the fast paths; this is the one that has to be green before anything
+# is tagged.  (It used to trigger on "master", a branch this repository does
+# not have, so it never ran.)
 
 on:
   push:
@@ -94,3 +95,23 @@ jobs:
           name: master-logs
           path: .build/**/logs/error.log
           if-no-files-found: ignore
+
+  bench:
+    needs: full-suite
+    uses: ./.github/workflows/bench.yml
+    with:
+      tier: branch
+      timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write
+
+  publish:
+    needs: bench
+    # published even when a rung failed: a failure is part of the history
+    if: always() && needs.bench.result != 'cancelled'
+    uses: ./.github/workflows/bench-publish.yml
+    with:
+      tier: branch
+    permissions:
+      contents: write

@@ -1,0 +1,150 @@
+name: bench
+
+# The receiver-verified capacity benchmarks, called by the other workflows
+# with a tier (see scripts/bench-ci.sh for what each tier runs):
+#
+#   pr       ci.yml, every pull request - gates on setup failures and on the
+#            small rungs every host must carry; warns when CPU per Gbit/s
+#            regressed against main's history.
+#   branch   master.yml, every merge to main - published.
+#   nightly  nightly.yml - all seven workloads, published.
+#   weekly   weekly.yml - long rungs, SRT sender concurrency, HLS preparation
+#            on/off and the libsrt vs robotweax/srt comparison, published.
+#
+# This workflow only measures, with a read-only token: a pull request calls
+# it with contents: read, and a called workflow cannot hold more permission
+# than its caller grants (GitHub refuses to start the run).  Publishing the
+# results is bench-publish.yml, which only main, nightly and weekly call.
+#
+# The robotweax/srt comparison builds one pinned commit, so a weekly shift is
+# nginx-media's and not the library's; the commit is recorded in every
+# diagnostics bundle.  Moving the pin is a deliberate change here.
+
+on:
+  workflow_call:
+    inputs:
+      tier:
+        required: true
+        type: string
+      configs:
+        description: JSON list of configuration groups to run as parallel jobs
+        required: false
+        type: string
+        default: '[""]'
+      timeout-minutes:
+        required: false
+        type: number
+        default: 60
+
+env:
+  ROBOTWEAX_REPO: https://github.com/robotweax/srt
+  ROBOTWEAX_REF: b6687f51c3c6d2eddc3b03f346874b114b187514
+
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        configs: ${{ fromJSON(inputs.configs) }}
+
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Take ownership of the apt archive dir
+        run: sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+
+      - name: Cache apt archives
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-bench-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
+          restore-keys: |
+            apt-bench-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake ninja-build gdb \
+            libpcre2-dev zlib1g-dev libssl-dev \
+            ffmpeg libsrt-openssl-dev iproute2
+
+      - name: Cache the pinned nginx source
+        uses: actions/cache@v4
+        with:
+          path: .build/nginx-1.30.5
+          key: nginx-${{ runner.os }}-1.30.5
+
+      - name: Build nginx with the module
+        run: make nginx
+
+      - name: Build robotweax/srt and a second nginx against it
+        if: inputs.tier == 'weekly' && contains(matrix.configs, 'robotweax')
+        run: |
+          git init -q "$RUNNER_TEMP/robotweax-srt"
+          git -C "$RUNNER_TEMP/robotweax-srt" fetch -q --depth 1 \
+            "$ROBOTWEAX_REPO" "$ROBOTWEAX_REF"
+          git -C "$RUNNER_TEMP/robotweax-srt" checkout -q FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/robotweax-srt" rev-parse HEAD)" = "$ROBOTWEAX_REF"
+          echo "robotweax/srt $ROBOTWEAX_REF"
+          echo "BENCH_ROBOTWEAX_REF=$ROBOTWEAX_REF" >> "$GITHUB_ENV"
+          cmake -S "$RUNNER_TEMP/robotweax-srt" -B "$RUNNER_TEMP/robotweax-build" \
+            -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/robotweax"
+          ninja -C "$RUNNER_TEMP/robotweax-build" install
+          mkdir -p "$RUNNER_TEMP/nginx-rw"
+          cp -r .build/nginx-1.30.5 "$RUNNER_TEMP/nginx-rw/"
+          rm -rf "$RUNNER_TEMP/nginx-rw/nginx-1.30.5/objs"
+          BUILD_DIR="$RUNNER_TEMP/nginx-rw" \
+          NGINX_PREFIX="$RUNNER_TEMP/nginx-rw/install" \
+          SRT_DIR="$RUNNER_TEMP/robotweax" MEDIA_SRT_PKG=robotweax-srt \
+            scripts/build-nginx.sh
+          echo "ROBOTWEAX_NGINX=$RUNNER_TEMP/nginx-rw/install/sbin/nginx" >> "$GITHUB_ENV"
+
+      - name: Fetch published history for regression warnings
+        continue-on-error: true
+        run: |
+          history_tier="${{ inputs.tier }}"
+          # a pull request's rungs are a subset of main's
+          [ "$history_tier" = pr ] && history_tier=branch
+          git fetch --depth 1 origin gh-pages \
+            && git show "origin/gh-pages:data/$history_tier.jsonl" \
+                 > "$RUNNER_TEMP/history.jsonl" \
+            && echo "BENCH_HISTORY=$RUNNER_TEMP/history.jsonl" >> "$GITHUB_ENV"
+
+      - name: Capacity benchmark (${{ inputs.tier }} ${{ matrix.configs }})
+        env:
+          BENCH_CONFIGS: ${{ matrix.configs }}
+        run: scripts/bench-ci.sh "${{ inputs.tier }}" .build/bench-results
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### bench ${{ inputs.tier }} ${{ matrix.configs }}"
+            echo '```'
+            grep -h -E '^   (quality_rung_result|matrix )' .build/bench-results/*.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ inputs.tier }}-${{ strategy.job-index }}
+          path: .build/bench-results
+          if-no-files-found: ignore
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-logs-${{ inputs.tier }}-${{ strategy.job-index }}
+          path: .build/**/logs/error.log
+          if-no-files-found: ignore

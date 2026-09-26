@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nginx-media capacity history</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1d1d1b; --muted: #6b6b66; --line: #e3e2de;
+    --card: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151514; --fg: #ecebe8; --muted: #9a9993; --line: #2c2c2a;
+            --card: #1c1c1b; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 32px 0 8px; }
+  p.lede { color: var(--muted); margin: 0 0 16px; max-width: 70ch; }
+  nav { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
+  nav button { border: 1px solid var(--line); background: var(--card);
+               color: var(--fg); padding: 6px 12px; border-radius: 6px;
+               cursor: pointer; font: inherit; }
+  nav button[aria-pressed="true"] { border-color: var(--fg); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+          gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line);
+          border-radius: 8px; padding: 12px; min-width: 0; }
+  .card h3 { font-size: 14px; margin: 0 0 8px; font-weight: 600; }
+  canvas { width: 100% !important; height: 240px !important; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line);
+           font-variant-numeric: tabular-nums; }
+  th { color: var(--muted); font-weight: 500; }
+  .scroll { overflow-x: auto; }
+  code { font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Capacity history</h1>
+  <p class="lede">Receiver-verified capacity per workload, recorded by CI at
+  each tier. The highest passing rung depends on the runner's size; CPU per
+  delivered Gbit/s is the number that compares across hosts and commits.</p>
+  <nav id="tiers"></nav>
+  <h2>Highest passing rung</h2>
+  <div class="grid" id="capacity"></div>
+  <h2>Sender CPU per delivered Gbit/s (lower is better)</h2>
+  <div class="grid" id="efficiency"></div>
+  <h2>Latest run</h2>
+  <div class="card scroll"><table id="latest"></table></div>
+</main>
+<script>
+const charts = [];
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+async function loadTier(tier) {
+  const text = await (await fetch(`data/${tier}.jsonl`, {cache: "no-store"})).text();
+  return text.split("\n").filter(Boolean).map(line => JSON.parse(line));
+}
+
+function series(records, pick) {
+  const out = {};
+  for (const r of records) {
+    for (const [config, c] of Object.entries(r.configs || {})) {
+      for (const [mix, m] of Object.entries(c.mixes || {})) {
+        for (const [label, y] of pick(config, mix, m)) {
+          (out[label] ||= []).push({x: r.timestamp.slice(0, 16).replace("T", " "),
+                                    y, sha: (r.sha || "").slice(0, 8)});
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function chart(container, title, data) {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `<h3>${title}</h3><canvas></canvas>`;
+  container.appendChild(card);
+  if (typeof Chart === "undefined") {
+    // the chart library could not be loaded: keep the numbers readable
+    const rows = Object.entries(data).map(([label, points]) =>
+      `<tr><td>${label}</td><td>${points.map(p => p.y).join(" → ")}</td></tr>`).join("");
+    card.innerHTML = `<h3>${title}</h3><div class="scroll"><table>${rows}</table></div>`;
+    return;
+  }
+  const labels = [...new Set(Object.values(data).flat().map(p => p.x))].sort();
+  charts.push(new Chart(card.querySelector("canvas"), {
+    type: "line",
+    data: { labels, datasets: Object.entries(data).map(([label, points]) => ({
+      label, data: labels.map(x => (points.find(p => p.x === x) || {}).y ?? null),
+      spanGaps: true, tension: 0.2, pointRadius: 2 })) },
+    options: { responsive: true, maintainAspectRatio: false, animation: false,
+      scales: { x: { ticks: { color: css("--muted"), maxRotation: 0, autoSkip: true } },
+                y: { ticks: { color: css("--muted") }, beginAtZero: true } },
+      plugins: { legend: { labels: { color: css("--fg"), boxWidth: 10 } } } }
+  }));
+}
+
+function render(records) {
+  charts.splice(0).forEach(c => c.destroy());
+  for (const id of ["capacity", "efficiency"]) document.getElementById(id).innerHTML = "";
+  const byMix = {};
+  for (const r of records)
+    for (const c of Object.values(r.configs || {}))
+      for (const mix of Object.keys(c.mixes || {})) byMix[mix] = true;
+  for (const mix of Object.keys(byMix).sort()) {
+    chart(document.getElementById("capacity"), mix,
+      series(records, (config, m, e) => m === mix ? [[config, e.highest_passing ?? 0]] : []));
+    chart(document.getElementById("efficiency"), mix,
+      series(records, (config, m, e) => m !== mix ? [] :
+        e.rungs.filter(g => g.outcome === "pass" && g.sender_cpu_per_gbps && g.destinations > 1)
+               .map(g => [`${config} @${g.destinations}`, g.sender_cpu_per_gbps])));
+  }
+  const latest = records[records.length - 1];
+  const table = document.getElementById("latest");
+  if (!latest) { table.innerHTML = "<tr><td>No runs recorded yet.</td></tr>"; return; }
+  let rows = `<tr><th>config</th><th>workload</th><th>highest pass</th><th>first failure</th>` +
+             `<th>setup-limited</th></tr>`;
+  for (const [config, c] of Object.entries(latest.configs))
+    for (const [mix, e] of Object.entries(c.mixes))
+      rows += `<tr><td>${config}</td><td>${mix}</td><td>${e.highest_passing ?? "–"}</td>` +
+              `<td>${e.first_quality_failure ?? "none"}</td>` +
+              `<td>${(e.setup_limited || []).join(", ") || "none"}</td></tr>`;
+  rows += `<tr><td colspan="5"><code>${latest.sha || ""}</code> · ${latest.timestamp} · ` +
+          `${latest.host.nproc} CPUs · ${latest.host.cpu_model || ""}</td></tr>`;
+  table.innerHTML = rows;
+}
+
+(async () => {
+  let tiers = ["nightly"];
+  try { tiers = (await (await fetch("data/index.json", {cache: "no-store"})).json()).tiers; } catch (e) {}
+  const nav = document.getElementById("tiers");
+  const show = async tier => {
+    for (const b of nav.children) b.setAttribute("aria-pressed", b.textContent === tier);
+    try { render(await loadTier(tier)); } catch (e) { render([]); }
+  };
+  for (const tier of tiers) {
+    const b = document.createElement("button");
+    b.textContent = tier; b.onclick = () => show(tier); nav.appendChild(b);
+  }
+  show(tiers.includes("nightly") ? "nightly" : tiers[0]);
+})();
+</script>
+</body>
+</html>

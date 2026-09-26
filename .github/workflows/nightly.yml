@@ -76,3 +76,23 @@ jobs:
           name: nightly-logs
           path: .build/**/logs/error.log
           if-no-files-found: ignore
+
+  # All seven workloads, 30 s rungs, published to the gh-pages history.
+  bench:
+    uses: ./.github/workflows/bench.yml
+    with:
+      tier: nightly
+      timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: write
+
+  publish:
+    needs: bench
+    # published even when a rung failed: a failure is part of the history
+    if: always() && needs.bench.result != 'cancelled'
+    uses: ./.github/workflows/bench-publish.yml
+    with:
+      tier: nightly
+    permissions:
+      contents: write
