@@ -468,15 +468,15 @@ failure the harness records as such, never as a quality failure):
 | Pure RTMP | 256 (ladder top) | none | 128 / 192 |
 | Pure HLS origin (readers) | 256 (ladder top) | none | 256 (top) |
 | Pure HLS push | 256 (ladder top) | none | 256 (top) |
-| RTMP 95% / SRT 5% | in progress | — | 192 / 256 |
-| HLS push 95% / SRT 5% | pending | — | 256 (top) |
-| RTMP 50% / HLS push 45% / SRT 5% | pending | — | 256 (top) |
+| RTMP 95% / SRT 5% | 256 (ladder top) | none | 192 / 256 |
+| HLS push 95% / SRT 5% | not measured (stopped at 1) | — | 256 (top) |
+| RTMP 50% / HLS push 45% / SRT 5% | not measured | — | 256 (top) |
 
-Every pure workload reaches the ladder's top rung here, including the two
-HLS directions the root-run attempt could not set up.  The three mixes were
-still running when the machine was handed back; the harness records each
-rung's outcome as it goes, so the remainder resumes with the command in the
-handover notes.
+Five of the seven workloads reach the ladder's top rung here, including both
+HLS directions the root-run attempt could not set up and the RTMP/SRT mix the
+published host bounded at 192.  The last two configurations were stopped when
+the machine was handed back; the harness records each rung's outcome as it
+goes, so they resume with the command in the handover notes.
 
 ### 7. 1000 destinations
 
