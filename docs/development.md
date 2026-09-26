@@ -185,8 +185,8 @@ image's environment: `.github/workflows/ci.yml` runs it (beside the fast subset
 it names individually) on a pull request, and `.github/workflows/master.yml`
 runs the individual targets — ingest and fixture, selection and switching, the
 HLS directions (with hls-push-conformance), the ffmpeg interop matrix,
-RTMP and RTMPS, srt-output, srt-output-mux, srt-lane-isolation
-and srt-crypto, multi-worker, soak
+RTMP and RTMPS, srt-output, srt-output-mux, srt-lane-isolation,
+srt-lane-isolation-fanout and srt-crypto, multi-worker, soak
 and fault — before anything is tagged.  A new suite target belongs in
 `TEST_TARGETS` for that reason; `srt-worker-ports`, the per-worker SRT ingest
 endpoints, is the most recent one.  `make srt-qualify` is separate: it rebuilds
