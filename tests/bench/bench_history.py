@@ -128,6 +128,9 @@ def rung_record(bundle):
         # corrupted.  Absent means the run predates it or did not report it -
         # never an implied pass.
         "strict_full_rate": strict,
+        # the environment this rung was taken in, and its peak pressure
+        "host_fingerprint": bundle.get("host_fingerprint"),
+        "peak": peak_pressure(bundle),
         "strict_full_rate_pass": (all(v == "yes" for v in strict.values())
                                   if strict else None),
         "delivered_gbps": value(efficiency.get("delivered")),
@@ -154,6 +157,35 @@ def ratio_basis(observed, present, unmeasured, thresholds):
     if thresholds:
         return "threshold-only"
     return "unavailable"
+
+
+def peak_pressure(bundle):
+    """The rung's own peak resource pressure: what the sender and the
+    receivers used, what the kernel dropped, how far the event loop slipped
+    and how much memory the worker held."""
+    cpu = bundle.get("cpu") or {}
+    kinds = (cpu.get("by_kind_pct_of_core") or {}).get("value") or {}
+    sender = kinds.get("worker")
+    receivers = sum(v for k, v in kinds.items()
+                    if k.endswith("receiver") or k == "hls-readers") or None
+    drops = ((bundle.get("network") or {})
+             .get("udp_socket_drops_by_process") or {}).get("value") or {}
+    socket_drops = sum(row.get("socket_drops_delta") or 0
+                       for row in drops.values()) if drops else None
+    delays = (bundle.get("event_loop_max_delay") or {}).get("value") or {}
+    memory = ((bundle.get("resources") or {})
+              .get("worker_memory") or {}).get("value") or {}
+    rss = [snapshot.get("rss_kb")
+           for pid in memory.values()
+           for snapshot in (pid or {}).values()
+           if isinstance(snapshot, dict) and snapshot.get("rss_kb")]
+    return {
+        "sender_cpu_pct_of_core": sender,
+        "receiver_cpu_pct_of_core": receivers,
+        "socket_drops": socket_drops,
+        "event_loop_max_delay_ms": (max(delays.values()) if delays else None),
+        "worker_rss_kb_max": (max(rss) if rss else None),
+    }
 
 
 def harness_log(results, name):
@@ -238,6 +270,7 @@ def summarize(args):
             entry["infrastructure_limited"] = [
                 r["destinations"] for r in entry["rungs"]
                 if r["outcome"] == "infrastructure-limited"]
+            entry = run_environment(entry)
         configs[name] = {"harness_status": statuses.get(name), "mixes": mixes}
         configs[name].update(completeness(args.results, name, mixes))
     record = {
@@ -263,6 +296,29 @@ def summarize(args):
                   f" infrastructure_limited="
                   f"{entry.get('infrastructure_limited') or 'none'}")
     return 0
+
+
+def run_environment(entry):
+    """The environment a workload's rungs were taken in, and the highest
+    pressure any of them reached - lifted from the rungs themselves, so the
+    record describes the run and not whatever host later reads it."""
+    for rung in entry.get("rungs", []):
+        fingerprint = rung.get("host_fingerprint")
+        if isinstance(fingerprint, dict) and "fingerprint" not in entry:
+            entry["fingerprint"] = {
+                key: fingerprint.get(key) for key in
+                ("cpu_model", "kernel", "nproc_online", "permitted_cpus",
+                 "cgroup", "governor", "no_turbo", "numa", "transport",
+                 "kernel_udp_limits")
+                if fingerprint.get(key) is not None}
+    peaks = {}
+    for rung in entry.get("rungs", []):
+        for key, value in (rung.get("peak") or {}).items():
+            if isinstance(value, (int, float)):
+                peaks[key] = max(peaks.get(key, value), value)
+    if peaks:
+        entry["peak"] = peaks
+    return entry
 
 
 def load_history(path, tier):

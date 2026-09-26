@@ -641,6 +641,44 @@ def gate(summary, tier="pr"):
     return run([sys.executable, HISTORY, "gate", summary, "--tier", tier])
 
 
+def test_history_carries_the_environment_and_peak_pressure(work):
+    """A history record has to say which host produced the number and how
+    hard that host was pushed."""
+    module = load_module(HISTORY, "bench_history_peak")
+    rung = module.rung_record({
+        "case": {"destinations": 128}, "outcome": "pass",
+        "host_fingerprint": {"cpu_model": "test-cpu", "kernel": "7.2.5",
+                             "permitted_cpus": [0, 2], "transport": "libsrt.so.1",
+                             "interfaces": {"eth0": {"speed_mbps": "25000"}}},
+        "cpu": {"by_kind_pct_of_core": {"value": {"worker": 490.5,
+                                                  "srt-receiver": 418.2,
+                                                  "publisher": 1.6}}},
+        "network": {"udp_socket_drops_by_process": {"value": {
+            "w0": {"kind": "worker", "socket_drops_delta": 12},
+            "r0": {"kind": "srt-receiver", "socket_drops_delta": 390737}}}},
+        "event_loop_max_delay": {"value": {"w0": 41.0, "w1": 116.0}},
+        "resources": {"worker_memory": {"value": {
+            "1": {"after": {"rss_kb": 250000}}}}},
+    })
+    peak = rung["peak"]
+    check_close(peak["sender_cpu_pct_of_core"], 490.5, "sender peak CPU")
+    check_close(peak["receiver_cpu_pct_of_core"], 418.2, "receiver peak CPU")
+    check(peak["socket_drops"] == 390749,
+          f"every socket's drops count, not only the sender's: {peak}")
+    check_close(peak["event_loop_max_delay_ms"], 116.0, "worst event loop slip")
+    check(peak["worker_rss_kb_max"] == 250000, "peak worker memory")
+    check(rung["host_fingerprint"]["cpu_model"] == "test-cpu",
+          "the rung keeps the environment it was taken in")
+
+    # the run-level record lifts the fingerprint and the maxima
+    entry = {"rungs": [rung, dict(rung, peak=dict(peak, socket_drops=5))]}
+    entry = module.run_environment(entry)
+    check(entry["fingerprint"]["cpu_model"] == "test-cpu",
+          f"the run carries the host: {entry.get('fingerprint')}")
+    check(entry["peak"]["socket_drops"] == 390749,
+          f"the run's peak is the worst rung: {entry.get('peak')}")
+
+
 def test_history_carries_the_strict_result_separately(work):
     """The 0.95 gate and the strict full-rate qualification are different
     questions; a record must carry both, and must not imply a pass it never
@@ -986,6 +1024,7 @@ def main():
         test_bundle_carries_the_host_fingerprint(work)
         test_efficiency_uses_receiver_bytes_for_every_protocol(work)
         test_efficiency_refuses_a_sender_only_counter(work)
+        test_history_carries_the_environment_and_peak_pressure(work)
         test_history_carries_the_strict_result_separately(work)
         test_history_separates_observed_from_threshold(work)
         test_gate_accepts_a_finished_ladder_that_stopped_at_the_boundary(work)
