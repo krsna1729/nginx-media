@@ -89,11 +89,15 @@ same host; its host-busy figure is not representative.
    got its own UDP socket plus `SndQ`/`RcvQ` threads: 154 threads at 64
    destinations, 346 at 160, with `SndQ` alone at 107–139% of a core.  Row:
    "application sender lightly loaded but libsrt `SndQ` saturated → profile
-   libsrt transport processing and session overhead".  What the measurements
-   establish is that the per-destination multiplexer - its socket and its
-   `SndQ`/`RcvQ` threads - is the material cost; which part of that thread's
-   work dominates (pacing wakeups are the likely candidate) is not shown by
-   thread CPU and needs sampled stacks, which remain to be taken.  The fix is
+   libsrt transport processing and session overhead".  A sampled-stack
+   profile of the `SndQ` threads (64 destinations x 8 Mbit/s, identical
+   bytes delivered; `capacity-evidence/2026-09-26-sndq-profile.json`) shows
+   what that cost is: with a multiplexer per destination, 61.7 of the 90.4%
+   of a core the 65 `SndQ` threads used was context switching and wakeups
+   (`finish_task_switch` alone 40% of their time), against 11.0 in the send
+   path itself.  With lane groups the 17 `SndQ` threads used 38.8%: 19.1 in
+   wakeups, 9.0 sending - 42.6 of the 51.6 points saved came off the wakeup
+   path, while the send path, carrying the same bytes, barely moved.  The fix is
    structural rather than a tuned buffer: destinations connect in their
    lane's multiplexer group
    (commit `dcdae24`).  Sender CPU per Gbit/s fell from 342–389% to 126–164%,
@@ -222,7 +226,7 @@ per Gbit/s for the SRT sender, 512 SRT destinations at 8.8 Mbit/s
 
 | Deliverable | Status |
 |---|---|
-| Root cause with profiles and before/after | SRT: libsrt's per-destination multiplexer (a socket and a `SndQ`/`RcvQ` pair per stream), fixed by lane multiplexer groups; sender CPU/Gbit/s 342–389% → 126–164%, highest pass 32 → 96 on this host.  Profiles are thread-level CPU from `/proc`; a sampling profile of the remaining `SndQ` cost is future work. |
+| Root cause with profiles and before/after | SRT: libsrt's per-destination multiplexer (a socket and a `SndQ`/`RcvQ` pair per stream) - its cost, by sampled stacks, is thread wakeups and context switches, not sending - fixed by lane multiplexer groups; sender CPU/Gbit/s 342–389% → 126–164%, highest pass 32 → 96 on this host, `SndQ` wakeup CPU 61.7% → 19.1% of a core at 64 destinations. |
 | Reproducible command and a diagnostic bundle per run | `make bench-capacity-quality`; `diagnostics.json` per rung, `capacity-matrix.json` per run |
 | Capacity matrix, seven workloads | above, and `capacity-evidence/` |
 | Fixed vs adaptive SRT senders | Phase 2: fixed 1, 2, 4 and adaptive pass the same rungs; one sender carries 96 destinations at 29% of a core |

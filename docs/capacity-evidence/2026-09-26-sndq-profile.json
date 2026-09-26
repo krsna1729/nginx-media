@@ -1,0 +1,84 @@
+{
+ "schema": "nginx-media.capacity-evidence/1",
+ "title": "libsrt SndQ sampled-stack profile: per-destination multiplexers vs lane multiplexer groups",
+ "date": "2026-09-26",
+ "host": {
+  "cpus": 4,
+  "cpu": "Intel Xeon 2.1 GHz (4 vCPU)",
+  "kernel": "6.18",
+  "libsrt": "1.5.3",
+  "perf": "linux-tools 6.8, software cpu-clock event (hardware counters not exposed)"
+ },
+ "load": {
+  "destinations": 64,
+  "source": "8 Mbit/s MPEG-TS published live with ffmpeg -re -c copy",
+  "receivers": "srt_fanout_sink, 4 listener ports",
+  "hls": "on (the pre-fix build only prepares TS for SRT with HLS on)",
+  "window_s": 15,
+  "sample_hz": 499
+ },
+ "builds": {
+  "base": "16b9549 (main): a multiplexer per destination",
+  "lanes": "5437db7 (PR-A): destinations share their lane's multiplexer"
+ },
+ "threads": {
+  "base": {
+   "worker": 154,
+   "SndQ": 65
+  },
+  "lanes": {
+   "worker": 58,
+   "SndQ": 17
+  }
+ },
+ "delivered_bytes_per_receiver": {
+  "base": [
+   24893268,
+   24894584
+  ],
+  "lanes": [
+   24460492,
+   24463124
+  ]
+ },
+ "cpu_pct_of_one_core": {
+  "base": {
+   "SndQ": 90.4,
+   "SndQ_sched_wakeup": 61.7,
+   "SndQ_send_path": 11.0,
+   "SndQ_other": 17.6,
+   "egress_senders": 38.6,
+   "RcvQ": 17.8,
+   "worker_total": 149.8
+  },
+  "lanes": {
+   "SndQ": 38.8,
+   "SndQ_sched_wakeup": 19.1,
+   "SndQ_send_path": 9.0,
+   "SndQ_other": 10.7,
+   "egress_senders": 14.9,
+   "RcvQ": 8.4,
+   "worker_total": 63.8
+  }
+ },
+ "top_symbols_pct_of_SndQ_time": {
+  "base": {
+   "finish_task_switch": 40.38,
+   "_raw_spin_unlock_irqrestore": 13.42,
+   "__schedule": 1.74,
+   "futex_wake": 1.34,
+   "_copy_from_iter": 1.8,
+   "__libc_sendmsg": 0.85
+  },
+  "lanes": {
+   "finish_task_switch": 26.85,
+   "_raw_spin_unlock_irqrestore": 14.57,
+   "_copy_from_iter": 3.22,
+   "__libc_sendmsg": 1.4,
+   "srt::CUDT::packData": 1.01
+  }
+ },
+ "classification": "sched/wakeup = context switch, wake and futex paths, scheduler entry/exit; send path = sendmsg, UDP/IP transmit, skb and copy; other = the rest (libsrt bookkeeping, locks)",
+ "finding": "The per-destination SndQ cost is scheduler work: 61.7 of 90.4 %core is context switching and wakeups, against 11.0 in the send path.  Sharing a lane's multiplexer removes 42.6 of the 51.6 points saved from the wakeup path; the send path is nearly unchanged (11.0 -> 9.0), as it should be for the same bytes.",
+ "reproduce": "tests: /tmp driver in the commit message; perf record -F 499 -g -p <worker> -- sleep 15, then perf report --sort comm,sym -n"
+}

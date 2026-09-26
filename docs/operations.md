@@ -929,7 +929,9 @@ port, and Haivision libsrt gives every such port its own multiplexer - an
 destinations ran 154 threads, and the pacing wakeups of 64 `SndQ` threads cost
 more CPU than the packets they sent (123% of one core in `SndQ` alone at
 64 x 8.8 Mbit/s, against 46% once shared; see "SRT output multiplexer groups"
-below).  Destinations are therefore connected in their logical lane's
+below).  Sampled stacks confirm what that cost is: of the `SndQ` threads' CPU
+at 64 x 8 Mbit/s, 61.7% of a core was context switches and wakeups and 11%
+the sending itself (`capacity-results.md`).  Destinations are therefore connected in their logical lane's
 multiplexer group: every destination of one lane binds the lane's local UDP
 endpoint, so a worker has at most 16 output `RcvQ`/`SndQ` pairs whatever its
 fanout.  `SRT:TsbPd` work is still per live session.  nginx-media's own pool
