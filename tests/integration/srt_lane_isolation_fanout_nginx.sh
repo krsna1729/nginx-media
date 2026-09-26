@@ -558,6 +558,32 @@ done
 [ "$(destination_count)" -eq "$COUNT" ] \
     || fail "the shards hold $(destination_count) destinations after re-establishing $COUNT"
 
+# A lane is assigned when a destination connects, so the check needs the
+# destinations connected again: the sink that accepted the pre-reload peers
+# still counts them and refuses new ones, and the publisher died with the old
+# worker, so both are restarted before the placement is compared.
+kill -TERM "$SINK_PID" 2>/dev/null
+wait "$SINK_PID" 2>/dev/null
+rm -f "$RUN/sink.ready"
+"$RUN/sink" "$SINK_PORT:4" "$COUNT" "$RUN/sink.ready" "$RUN/sink.csv" quality \
+    >"$RUN/sink.log" 2>&1 &
+SINK_PID=$!
+kill -KILL "$PUB_PID" 2>/dev/null
+wait "$PUB_PID" 2>/dev/null
+timeout 300 ffmpeg -hide_banner -loglevel error -re \
+    -f lavfi -i "testsrc2=size=640x360:rate=25" -t 120 \
+    -c:v libx264 -preset ultrafast -b:v 1200k -maxrate 1200k -bufsize 600k \
+    -g 25 -pix_fmt yuv420p -f mpegts \
+    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/fan,m=publish,s=enc" \
+    >"$RUN/pub.log" 2>&1 &
+PUB_PID=$!
+for _ in $(seq 1 600); do
+    [ -f "$RUN/sink.ready" ] && break
+    sleep 0.1
+done
+[ -f "$RUN/sink.ready" ] \
+    || fail "the restarted sink did not see all $COUNT destinations again"
+
 stable=1
 for i in $(seq 0 $(( COUNT - 1 ))); do
     after="$(lane_of "$i")"
@@ -569,6 +595,11 @@ done
 [ "$stable" -eq 1 ] \
     || fail "lane placement is not stable across a worker reload"
 echo "   lane placement is identical for all $COUNT destinations after the reload"
+delivered="$(curl -fsS "$API/metrics" \
+    | awk '/^nginx_media_srt_egress_shard_sent_bytes_total\{/ { s += $NF } END { print s + 0 }')"
+[ "${delivered%.*}" -gt 0 ] 2>/dev/null \
+    || fail "the re-established destinations delivered nothing"
+echo "   the re-established lane sent $(python3 -c "print(f'{float('$delivered')/1e6:.1f}')") MB after the reload"
 
 WORKER_PID="$(pgrep -P "$(cat "$RUN/logs/nginx.pid")" | head -1)"
 RSS_AFTER="$(awk '/^VmRSS/ { print $2 }' /proc/"$WORKER_PID"/status)"

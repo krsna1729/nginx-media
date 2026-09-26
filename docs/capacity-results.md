@@ -328,30 +328,35 @@ the receivers and the publisher, with their SMT siblings offlined and the
 CPUs isolated from other work (`omarchy-benchmark --cpu 0,2,4,6 --isolate
 --turbo on`), so the comparison is four whole cores against four vCPUs:
 
-| Destinations | Published (new-adaptive) | Local (4 P-cores, no SMT) | Delivered Mbit/s per destination (published / local) |
+| Destinations | Published (new-adaptive) | Local (4 P-cores, no SMT) | Per-destination Mbit/s (published / local) |
 |---|---|---|---|
-| 1 | pass, 0.0088 Gbit/s | pass, 0.0088 Gbit/s | 8.80 / 8.80 |
-| 32 | pass, 0.2799 | pass, 0.2817 | 8.75 / 8.80 |
-| 64 | pass, 0.5589 | pass, 0.5600 | 8.73 / 8.75 |
-| 96 | pass, 0.8391 | quality failure, 0.8373 | 8.74 / 8.72 |
-| 128 | quality failure, 1.0873 | quality failure, 0.6506 | 8.49 / 5.08 |
-| 160 | quality failure, 0.9550 | quality failure, 0.5955 | 5.97 / 3.72 |
+| 1 | pass, 0.0088 Gbit/s, ratio 1.0 | pass, 0.0088, 1.0 | 8.80 / 8.80 |
+| 32 | pass, 0.2799, 0.9983 | pass, 0.2810, 0.99698 | 8.75 / 8.78 |
+| 64 | pass, 0.5589, 0.99618 | pass, 0.5567, 0.99622 | 8.73 / 8.70 |
+| 96 | pass, 0.8391, 0.99227 | pass, 0.8235, 0.99234 | 8.74 / 8.58 |
+| 128 | **quality failure**, 1.0873, 0.94043 | **pass**, 0.9844, 0.98730 | 8.49 / 7.69 |
+| 160 | quality failure, 0.9550, 0.62979 | quality failure, —, 0.86446 | 5.97 / — |
 
-What replicates is the delivery rate itself: within 1% of the published
-per-destination rate up to 96 destinations, on the same 8 Mbit/s source and
-the same 20 s windows.  The boundary lands one rung lower (64 passing, 96
-failing here; 96 passing, 128 failing there), and the 96 rung is marginal
-rather than collapsed: it delivered the full 0.8373 Gbit/s at a minimum
-average ratio of 0.985, and failed on the short-interval floor - every
-destination showed the same 2.39 s interval at 0.736 of reference, a
-transient, not a capacity wall.  The published 128 and 160 rungs show the
-same failure signature as the local ones: the delivered rate falls while the
-offered load rises.
+What replicates is the delivery itself: within 1.6% of the published
+per-destination rate at 32, 64 and 96 destinations, on the same 8 Mbit/s
+source and the same 20 s windows, with the same minimum-ratio trend
+(0.9983 → 0.9923 published, 0.9970 → 0.9923 local).  The boundary lands one
+rung higher here (128 passing, 160 failing; 96 passing, 128 failing there).
+At 128 the two runs diverge in an instructive way: the published host
+delivered more per destination (8.49 vs 7.69 Mbit/s) but not to all of them,
+so it failed at 0.940; the local run delivered less but evenly, and passed at
+0.987.
 
-CPU per delivered Gbit/s does not replicate, and should not: 66-70% of a
-core per Gbit/s here against 126-238% there, because an i9 P-core at 5 GHz
-does roughly three times the work of a 2.1 GHz Xeon vCPU.  That is why the
-repo compares this ratio only within a host class.
+CPU per delivered Gbit/s does not replicate, and should not: 49-70% of a core
+per Gbit/s here against 126-238% there, because an i9 P-core at 5 GHz does
+roughly three times the work of a 2.1 GHz Xeon vCPU.  That is why the repo
+compares this ratio only within a host class.
+
+The first attempt at this comparison used the tree's existing local nginx
+binary, built 2026-09-25 04:58 - before the HLS interoperability merge.  It
+produced the same SRT delivery rates but a different *unprepared* egress
+behaviour, so it was rebuilt from the current source and every number above
+comes from that build.
 
 ## Where this leaves the roadmap
 
