@@ -347,9 +347,32 @@ than by optimising the sender.  The 384-destination failure on the wider
 topology is the opposite case: no kernel drops anywhere, the sender's pinned
 CPUs busy, destination queues backing up - a sender CPU budget.
 
-The follow-up measurement, when a machine is free: pin the receivers to CPUs
-the sender does not use (or leave the set wider and unisolated), confirm the
-receiver drops disappear, and only then re-read the SRT boundary.
+The follow-up has since been run and confirms it: with the receivers on CPUs
+the sender does not use, the drops disappear and the ladder passes 256
+destinations (see "The receiver-topology follow-up" below).
+
+### The receiver-topology follow-up: the 160-destination failure was the placement
+
+The 160-destination rung failed with the sender and the receivers sharing the
+same four isolated cores, and its bundle showed why: cpu0 at 99.86% while
+cpu2/4/6 sat at 2.35/0.19/1.32%, the host 14% busy, and 390 737 datagrams
+dropped by the *receiver's* sockets.  The follow-up moves the receivers to
+cores the sender does not use (sender 0,2,4,6; receivers 8,10,12,13) and
+re-runs the ladder:
+
+| Destinations | Shared cores (sender + receivers on 0,2,4,6) | Separated (receivers on 8,10,12,13) |
+|---|---|---|
+| 128 | pass, 1.1430 Gbit/s | pass, 1.1480 Gbit/s |
+| 160 | **quality failure**, 390 737 receiver socket drops, cpu0 99.9% | not run |
+| 192 | pass, 1.7132 | pass, 1.7225 |
+| 256 | not run in that shape | pass, 2.2972, **zero** socket drops |
+
+With the receivers off the sender's CPUs the drops disappear entirely and 256
+destinations pass with a minimum ratio of 0.99985.  So the shared-core
+boundary was the benchmark's own placement, exactly as the method predicts
+for receiver-side exhaustion - and the sender, given cores of its own, does
+not stop at 160.  Sender CPU per delivered Gbit/s is 36.9 at 128 and 32.4 at
+256, the same range as every other configuration measured here.
 
 ### Sampled stacks at the first bottleneck
 
