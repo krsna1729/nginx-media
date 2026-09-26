@@ -618,6 +618,35 @@ def gate(summary, tier="pr"):
     return run([sys.executable, HISTORY, "gate", summary, "--tier", tier])
 
 
+def test_history_carries_the_strict_result_separately(work):
+    """The 0.95 gate and the strict full-rate qualification are different
+    questions; a record must carry both, and must not imply a pass it never
+    measured."""
+    module = load_module(HISTORY, "bench_history_strict")
+    passing = module.rung_record({"case": {"destinations": 128}, "outcome": "pass",
+                                  "delivery": {"srt": {"value": {
+                                      "quality_average_delivery_ratio_min": 0.9995,
+                                      "quality_strict_full_rate": "yes",
+                                      "quality_strict_ratio_min": 0.9995}}}})
+    check(passing["strict_full_rate"] == {"srt": "yes"},
+          f"the strict result must be recorded: {passing['strict_full_rate']}")
+    check(passing["strict_full_rate_pass"] is True,
+          "a strict pass must read as one")
+
+    marginal = module.rung_record({"case": {"destinations": 160},
+                                   "outcome": "quality-failure",
+                                   "delivery": {"srt": {"value": {
+                                       "quality_average_delivery_ratio_min": 0.4978,
+                                       "quality_strict_full_rate": "no"}}}})
+    check(marginal["strict_full_rate_pass"] is False,
+          "a strict failure must read as one")
+    old_bundle = module.rung_record({"case": {"destinations": 64}, "outcome": "pass",
+                                     "delivery": {"srt": {"value": {
+                                         "quality_average_delivery_ratio_min": 0.999}}}})
+    check(old_bundle["strict_full_rate_pass"] is None,
+          "a run that never reported the strict result must not imply one")
+
+
 def test_history_separates_observed_from_threshold(work):
     results = os.path.join(work, "results")
     make_config(results, "srt", [
@@ -933,6 +962,7 @@ def main():
         test_absent_and_malformed_inputs(work)
         test_efficiency_uses_receiver_bytes_for_every_protocol(work)
         test_efficiency_refuses_a_sender_only_counter(work)
+        test_history_carries_the_strict_result_separately(work)
         test_history_separates_observed_from_threshold(work)
         test_gate_accepts_a_finished_ladder_that_stopped_at_the_boundary(work)
         test_gate_accepts_an_infrastructure_limited_rung(work)

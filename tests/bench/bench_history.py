@@ -92,6 +92,11 @@ def value(field):
 
 def rung_record(bundle):
     delivery = bundle.get("delivery") or {}
+    strict = {}
+    for protocol in PROTOCOLS:
+        report = value(delivery.get(protocol))
+        if isinstance(report, dict) and "quality_strict_full_rate" in report:
+            strict[protocol] = report["quality_strict_full_rate"]
     observed, thresholds, unmeasured, present = [], [], [], []
     for protocol in PROTOCOLS:
         report = value(delivery.get(protocol))
@@ -118,6 +123,13 @@ def rung_record(bundle):
         "delivery_ratio_threshold": min(thresholds) if thresholds else None,
         "delivery_ratio_basis": ratio_basis(observed, present, unmeasured,
                                             thresholds),
+        # the strict qualification, separate from the 0.95 compatibility gate:
+        # full rate within a documented tolerance, nothing dropped or
+        # corrupted.  Absent means the run predates it or did not report it -
+        # never an implied pass.
+        "strict_full_rate": strict,
+        "strict_full_rate_pass": (all(v == "yes" for v in strict.values())
+                                  if strict else None),
         "delivered_gbps": value(efficiency.get("delivered")),
         "sender_cpu_per_gbps": value(efficiency.get("sender_cpu_per_gbps")),
         "receiver_cpu_per_gbps": value(efficiency.get("receiver_cpu_per_gbps")),
