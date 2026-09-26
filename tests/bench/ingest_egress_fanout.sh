@@ -3718,6 +3718,16 @@ capacity_write_diagnostics() {   # <case dir> <outcome> [key=value ...]
 
     shift 2
     for kv in "$@"; do meta+=( --meta "$kv" ); done
+    # The host's fingerprint travels with every rung, not only with the rungs
+    # the preflight judged: a capacity number is unreadable without the CPU,
+    # the cgroup, the NIC and the transport library it was taken on.  Half a
+    # second, best effort, never a reason to fail a rung.
+    [ -s "$case_dir/host-fingerprint.json" ] \
+        || python3 "$ROOT/tests/bench/capacity_preflight.py" host \
+               --role sender --binary "$NGINX" \
+               --json "$case_dir/host-fingerprint.json" \
+               >"$case_dir/host-fingerprint.log" 2>&1 \
+        || echo "   host fingerprint could not be taken for $case_dir" >&2
     python3 "$ROOT/tests/bench/capacity_diagnostics.py" build "$case_dir" \
         --meta outcome="$outcome" --meta mix="$CAPACITY_CURRENT_MIX" \
         --meta srt_senders="$CAPACITY_FIXED_SRT_WORKERS" \

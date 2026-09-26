@@ -847,6 +847,11 @@ def build(args):
         "resources": resources_section(case_dir, cpu_total, host_after),
         "preflight": (load_json(os.path.join(case_dir, "preflight.json"))
                       or missing("mixed", "no preflight for this rung")),
+        # the host this rung was taken on: CPU, cgroup, affinity, frequency,
+        # interfaces and offloads, transport library
+        "host_fingerprint": (load_json(os.path.join(case_dir,
+                                                    "host-fingerprint.json"))
+                             or missing("mixed", "no host fingerprint")),
     }
     busy = per_cpu_busy(host_before, host_after)
     if busy:

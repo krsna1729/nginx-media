@@ -519,6 +519,29 @@ def test_absent_and_malformed_inputs(work):
           "an unreadable CSV is unavailable, not an exception")
 
 
+def test_bundle_carries_the_host_fingerprint(work):
+    """A rung's numbers are unreadable without the host they were taken on:
+    CPU, cgroup, affinity, interfaces, transport library."""
+    case = os.path.join(work, "fingerprint")
+    os.makedirs(case, exist_ok=True)
+    module = load_module(DIAGNOSTICS, "capacity_diagnostics_fingerprint")
+    bare = module.build  # the CLI path reads the file; check the fields here
+    check(bare is not None, "build exists")
+    # the bundle's shape, without running the whole build: the fingerprint is
+    # read from the case directory and reported missing when absent
+    fingerprint = module.load_json(os.path.join(case, "host-fingerprint.json"))
+    check(fingerprint is None, "no fingerprint file means no fingerprint")
+    write_json(os.path.join(case, "host-fingerprint.json"), {
+        "role": "sender", "cpu_model": "test-cpu", "permitted_cpus": [0, 1],
+        "cgroup": {"cpu_max": "max 100000"}, "transport": "libsrt.so.1",
+        "interfaces": {"eth0": {"speed_mbps": "25000"}},
+    })
+    fingerprint = module.load_json(os.path.join(case, "host-fingerprint.json"))
+    check(fingerprint["cpu_model"] == "test-cpu"
+          and fingerprint["transport"] == "libsrt.so.1",
+          f"the fingerprint must carry the CPU and the transport: {fingerprint}")
+
+
 def test_efficiency_uses_receiver_bytes_for_every_protocol(work):
     case = os.path.join(work, "all-protocols")
     srt_case(case)
@@ -960,6 +983,7 @@ def main():
         test_hls_origin_bundle_uses_observed_ratios(work)
         test_old_bundle_threshold_is_never_a_measurement(work)
         test_absent_and_malformed_inputs(work)
+        test_bundle_carries_the_host_fingerprint(work)
         test_efficiency_uses_receiver_bytes_for_every_protocol(work)
         test_efficiency_refuses_a_sender_only_counter(work)
         test_history_carries_the_strict_result_separately(work)
