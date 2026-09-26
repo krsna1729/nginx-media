@@ -460,23 +460,33 @@ adaptive policy matches the best fixed count.
 Four P-cores for the sender and four E-cores for the receivers, SMT siblings
 offlined, 30 s rungs, 8 Mbit/s source, unprivileged (nginx's workers drop to
 `nobody`, so a root-run harness cannot create HLS directories - a setup
-failure the harness records as such, never as a quality failure):
+failure the harness records as such, never as a quality failure).  The whole
+run is recorded in `capacity-evidence/2026-09-26-seven-workloads.json`.
 
-| Workload | Highest pass (this host) | First failure | Published (4 vCPU, 2026-09-25) |
-|---|---|---|---|
-| Pure SRT | 256 (ladder top) | none | 96 / 128 |
-| Pure RTMP | 256 (ladder top) | none | 128 / 192 |
-| Pure HLS origin (readers) | 256 (ladder top) | none | 256 (top) |
-| Pure HLS push | 256 (ladder top) | none | 256 (top) |
-| RTMP 95% / SRT 5% | 256 (ladder top) | none | 192 / 256 |
-| HLS push 95% / SRT 5% | not measured (stopped at 1) | — | 256 (top) |
-| RTMP 50% / HLS push 45% / SRT 5% | not measured | — | 256 (top) |
+| Workload | Highest pass | First failure | Delivered at the top | Strict full rate | Published (4 vCPU) |
+|---|---|---|---|---|---|
+| Pure SRT | **256** (ladder top) | none | 2.286 Gbit/s | **yes** | 96 / 128 |
+| Pure RTMP | **256** (ladder top) | none | 2.214 Gbit/s | not reported | 128 / 192 |
+| Pure HLS origin (readers) | **256** (ladder top) | none | 2.207 Gbit/s | not reported | 256 (top) |
+| Pure HLS push | **256** (ladder top) | none | 1.855 Gbit/s | not reported | 256 (top) |
+| RTMP 95% / SRT 5% | **256** (ladder top) | none | — | not reported | 192 / 256 |
+| HLS push 95% / SRT 5% | **256** (ladder top) | none | 2.018 Gbit/s | **no** | 256 (top) |
+| RTMP 50% / HLS push 45% / SRT 5% | **256** (ladder top) | none | 2.118 Gbit/s | **yes** | 256 (top) |
 
-Five of the seven workloads reach the ladder's top rung here, including both
-HLS directions the root-run attempt could not set up and the RTMP/SRT mix the
-published host bounded at 192.  The last two configurations were stopped when
-the machine was handed back; the harness records each rung's outcome as it
-goes, so they resume with the command in the handover notes.
+Every workload reaches the ladder's top rung on this host, including the two
+HLS directions the root-run attempt could not set up and both mixes the
+published host bounded.  The ladder's top is 256; a larger host is needed to
+find where any of them actually stops.
+
+The strict column is the separate qualification the method asks for beside
+the 0.95 gate, and it earns its place: the HLS-push/SRT mix passes the gate
+at 256 with an average ratio of 0.99935 and no drops, TS errors or missing
+segments, and still fails the strict test because its worst one-second
+interval delivered 0.839 of the reference - a sub-second dip the average
+hides.  The other two rungs whose bundles carry the verdict pass it.  The
+workloads marked "not reported" ran before the verdict existed in the
+harness; their bundles are unchanged and their strict result is unknown, not
+assumed.
 
 ### 7. 1000 destinations
 
