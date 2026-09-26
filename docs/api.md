@@ -559,12 +559,12 @@ Capacity and health metrics include:
   affinity/cgroup capacity.  `nginx_media_egress_worker_cpu_permille` is the
   worker's process CPU share of that capacity, and
   `nginx_media_egress_event_loop_lag_msec` is the runtime-tick gap.  The
-  worker-local manager reserves one CPU for the owning event loop and shares
-  remaining sender concurrency between SRT and HLS push. SRT scaling counts
-  independently pressured shards. HLS push queue pressure requires queue lag
-  or bytes to rise across samples; a draining startup backlog alone does not
-  expand the pool. New drops or backpressure remain pressure signals, while
-  SRT retransmissions alone do not.
+  worker-local manager runs one SRT sender per shard in use, up to the
+  granted CPUs.  HLS push grows on pressure within the CPUs left after one
+  for the owning event loop and the CPU the SRT senders use.  HLS push queue
+  pressure requires queue lag or bytes to rise across samples; a draining
+  startup backlog alone does not expand the pool.  New drops or backpressure
+  are pressure signals; SRT retransmissions do not change the sender count.
 - **Destination egress.** `nginx_media_egress_delivered_bytes_total` counts
   bytes accepted by the destination transport, not receiver-acknowledged bytes.
   `nginx_media_egress_dropped_units_total`,

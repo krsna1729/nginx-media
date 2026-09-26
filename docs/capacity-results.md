@@ -113,9 +113,19 @@ same host; its host-busy figure is not representative.
    sender and receiver machines (or pinning them apart, which halves both).
 4. **Adaptive vs fixed.**  Adaptive settled on 1–2 active senders, fixed 4 used
    the least CPU per Gbit/s (92–117%) and came closest at 128 (zero drops,
-   0.975 average, 1 s floor 0.698).  One run per configuration on a shared
-   host cannot separate that from noise; it is repeated below before the
-   scaling signal is touched.  No manager change is made on this evidence.
+   0.975 average, 1 s floor 0.698).  Repeated at 96 destinations
+   (`capacity-evidence/2026-09-26-srt-senders.json`), sender CPU per
+   delivered Gbit/s was 128% of a core with 1 sender, 106% with 2, 97% with
+   4, 8 or 16 - flat from one sender per CPU on - and 122–127% adaptive,
+   which held 1–2.  Every configuration delivered the same 0.84 Gbit/s; what
+   more senders buy is parallel submission to the lane multiplexers, not
+   capacity.  The manager grew senders only on backpressure, which a lane
+   group absorbs, and counted every other engine's thread as a whole CPU
+   against `cpus - 1`.  It now runs one sender per lane in use, up to the
+   CPUs the worker is granted (its affinity and cgroup `cpu.max`, read at run
+   time), and counts other engines by the CPU they use.  After the change,
+   in one session: adaptive ran 4 senders at 104–109%, fixed 4 at 107% (the
+   host was noisier than for the first series - compare within a session).
 5. **robotweax/srt** has no per-socket threads (28 in the worker at every
    rung), almost no retransmission, and passed one rung higher (128) at the
    same sender CPU per Gbit/s as libsrt with multiplexer groups (114–150%).
@@ -229,7 +239,7 @@ per Gbit/s for the SRT sender, 512 SRT destinations at 8.8 Mbit/s
 | Root cause with profiles and before/after | SRT: libsrt's per-destination multiplexer (a socket and a `SndQ`/`RcvQ` pair per stream) - its cost, by sampled stacks, is thread wakeups and context switches, not sending - fixed by lane multiplexer groups; sender CPU/Gbit/s 342–389% → 126–164%, highest pass 32 → 96 on this host, `SndQ` wakeup CPU 61.7% → 19.1% of a core at 64 destinations. |
 | Reproducible command and a diagnostic bundle per run | `make bench-capacity-quality`; `diagnostics.json` per rung, `capacity-matrix.json` per run |
 | Capacity matrix, seven workloads | above, and `capacity-evidence/` |
-| Fixed vs adaptive SRT senders | Phase 2: fixed 1, 2, 4 and adaptive pass the same rungs; one sender carries 96 destinations at 29% of a core |
+| Fixed vs adaptive SRT senders | Phase 2: fixed 1, 2, 4 and adaptive pass the same rungs; one sender carries 96 destinations at 29% of a core.  CPU per Gbit/s falls to a floor at one sender per CPU; adaptive now runs one per lane in use up to granted CPUs and matches fixed 4 (104–109% vs 107%, was 122–127%) |
 | Corrected RTMP timing, sustained HLS push | Phase 4; HLS push on identified segments |
 | Unit, sanitizer, integration | pass; the two integration failures that reproduced on the baseline are fixed by the CI repair this is stacked on |
 | 1000 destinations | not reachable on a 4-vCPU single host with the receivers co-located; needs a larger host, or separate sender and receiver hosts |
@@ -250,9 +260,10 @@ per Gbit/s for the SRT sender, 512 SRT destinations at 8.8 Mbit/s
    lanes' median with 0 ms queue lag, on a loopback host.  What remains
    unmeasured is many impaired destinations in one lane at high bitrate,
    where the shared `SndQ` thread's CPU could become the lane's limit.
-3. **Adaptive SRT concurrency** settled on 1–2 senders where fixed 4 used the
-   least CPU per Gbit/s at the edge (one run each).  The scaling signal is
-   unchanged pending repeated runs.
+3. **SRT sender count** now follows lanes in use and granted CPUs; it matched
+   fixed 4 on a 4-CPU host.  On a larger host it will run up to 16 senders
+   (one per lane); that the curve stays flat there, as it did from 4 to 16
+   here, is expected but unmeasured.
 4. **HLS push to YouTube**: the segmenter's 6 s target and 6-segment window
    exceed YouTube's 1–4 s and 5; the `youtube_live` profile validates but does
    not drive the segmenter.

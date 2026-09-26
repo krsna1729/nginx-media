@@ -254,8 +254,8 @@ operator configuration on purpose — an encoder cannot promote itself.
 ### `media_srt_output <application/stream> <host:port> [streamid];`
 
 Pushes that program to an SRT destination as a caller.  Each worker keeps 16
-stable logical egress shards and adaptively changes active sender concurrency
-within a shared CPU budget with HLS push; the output table holds up to 1000
+stable logical egress shards and runs one active sender per shard in use, up
+to the CPUs the worker is granted; the output table holds up to 1000
 destinations per worker.  Each destination has a bounded queue of 256 units /
 8 MiB, while each logical shard's feed queue is bounded at 64 units / 8 MiB.
 Queue overrun drops bursts and resynchronizes at the next keyframe; a slow

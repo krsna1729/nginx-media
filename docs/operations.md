@@ -304,14 +304,17 @@ retains its references until it completes or reaches its deadline.
 ### A slow SRT or RTMP receiver
 
 SRT destinations share 16 stable logical egress shards per worker; the manager
-adapts active sender concurrency within the shared SRT/HLS worker CPU budget.
+runs one active sender per shard in use, up to the CPUs the worker is granted
+(its CPU affinity and cgroup `cpu.max`), changing at most every 2 s.  HLS push
+uploaders share the remaining budget, counting SRT senders by the CPU they
+use.
 An output does not create a sender thread.  Static and runtime outputs share
 1000 destination slots per worker.  Each destination has a bounded queue of
 256 units / 8 MiB, and each logical shard has a 64-unit / 8 MiB feed queue.
 Queue overrun drops bursts and resynchronizes at the next keyframe, so a slow
 remote does not stall its program.  Queue occupancy and drops are available in
 the shard and destination metrics.  SRT transport retransmissions are measured
-but do not independently cause sender growth.  Connection state is reported
+but do not change the sender count.  Connection state is reported
 through the worker eventfd: `WARN` when an output is disconnected and `NOTICE`
 when it connects.  The logged `<n>` is a destination-table slot, not the
 destination ID; correlate it with `media: srt destination <id> started ...`.

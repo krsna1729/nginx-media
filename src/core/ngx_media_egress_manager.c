@@ -604,6 +604,23 @@ ngx_media_egress_manager_fixed_workers(ngx_uint_t engine)
     return workers;
 }
 
+/*
+ * The CPUs an engine's threads actually use - at most its active threads
+ * times its busiest thread's load - rounded up; an engine whose threads are
+ * idle uses none.  Counting a thread as a CPU whatever it does would let a
+ * pool of mostly-sleeping senders crowd out an engine that is busy.
+ */
+static ngx_uint_t
+ngx_media_egress_engine_cpus(ngx_uint_t engine)
+{
+    ngx_uint_t  used;
+
+    used = ngx_media_egress_resources.active_workers[engine]
+           * ngx_media_egress_resources.engine_cpu_permille[engine];
+
+    return (used + 999) / 1000;
+}
+
 ngx_uint_t
 ngx_media_egress_manager_recommend_workers(ngx_uint_t engine,
     ngx_uint_t current, ngx_uint_t minimum, ngx_uint_t maximum)
@@ -611,9 +628,10 @@ ngx_media_egress_manager_recommend_workers(ngx_uint_t engine,
     ngx_media_egress_record_t        *record;
     ngx_media_egress_engine_state_t  *state;
     ngx_msec_t                        now;
-    uint64_t                          placement_mask, bit;
+    uint64_t                          placement_mask, lanes_mask, bit;
     ngx_uint_t                        pressure_units, cpu_limit, other_workers,
-                                      next, record_pressure;
+                                      next, record_pressure, lanes, cpus,
+                                      target;
 
     if (engine == 0 || engine > NGX_MEDIA_EGRESS_ENGINE_MAX
         || minimum == 0 || maximum < minimum)
@@ -632,12 +650,19 @@ ngx_media_egress_manager_recommend_workers(ngx_uint_t engine,
     state = &ngx_media_egress_engines[engine];
     pressure_units = 0;
     placement_mask = 0;
+    lanes_mask = 0;
 
     for (record = ngx_media_egress_records; record != NULL;
          record = record->next)
     {
         if (!record->stats.active || record->stats.engine != engine) {
             continue;
+        }
+
+        if (engine == NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD
+            && record->stats.placement < 64)
+        {
+            lanes_mask |= UINT64_C(1) << record->stats.placement;
         }
 
         record_pressure =
@@ -689,19 +714,69 @@ ngx_media_egress_manager_recommend_workers(ngx_uint_t engine,
         record->sampled_queue_valid = 1;
     }
 
+    /*
+     * SRT senders follow the lanes, not pressure.  A sender hands its lanes'
+     * bursts to their library endpoints and does little work itself (a few
+     * percent of a core each), so what more of them buy is parallel
+     * submission to the lane multiplexers: measured at 96 destinations on
+     * 4 CPUs, CPU per delivered Gbit/s was 128% of a core with one active
+     * sender, 106% with two, and 97% with four, eight or sixteen - flat from
+     * one per CPU on.  Waiting for backpressure before adding one, and
+     * counting each as a whole CPU, held the pool at one or two and cost a
+     * quarter more CPU for the same delivery.  So the target is one sender
+     * per lane in use, up to the CPUs this worker is granted (its affinity
+     * and cgroup quota, measured at run time): a larger host gets more, a
+     * smaller one fewer, and a program on one lane keeps one.
+     */
+    if (engine == NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD) {
+        lanes = 0;
+        for (bit = lanes_mask; bit != 0; bit &= bit - 1) {
+            lanes++;
+        }
+
+        cpus = ngx_media_egress_resources.available_cpu_milli / 1000;
+        if (cpus == 0) {
+            cpus = 1;
+        }
+
+        target = (lanes < cpus) ? lanes : cpus;
+        if (target > maximum) {
+            target = maximum;
+        }
+        if (target < minimum) {
+            target = minimum;
+        }
+
+        state->pressure_samples = 0;
+        state->quiet_samples = 0;
+
+        if (target != current
+            && (state->last_change_msec == 0
+                || now - state->last_change_msec >= 2000))
+        {
+            state->last_change_msec = now;
+            (void) pthread_mutex_unlock(&ngx_media_egress_mutex);
+            return target;
+        }
+
+        (void) pthread_mutex_unlock(&ngx_media_egress_mutex);
+        return current;
+    }
+
     cpu_limit = ngx_media_egress_resources.available_cpu_milli / 1000;
     if (cpu_limit > 0) {
         cpu_limit--;  /* reserve one CPU for the owning NGINX event loop */
     }
 
+    /* the other engines count for the CPU their threads use */
     other_workers = 0;
     if (engine != NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD) {
-        other_workers += ngx_media_egress_resources.active_workers[
-            NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD];
+        other_workers += ngx_media_egress_engine_cpus(
+            NGX_MEDIA_EGRESS_ENGINE_SRT_SHARD);
     }
     if (engine != NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL) {
-        other_workers += ngx_media_egress_resources.active_workers[
-            NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL];
+        other_workers += ngx_media_egress_engine_cpus(
+            NGX_MEDIA_EGRESS_ENGINE_HLS_UPLOAD_POOL);
     }
 
     if (current + other_workers > cpu_limit) {

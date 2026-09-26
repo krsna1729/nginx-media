@@ -69,9 +69,10 @@ Each output registers with the worker-local egress manager.  Its destination
 record carries the application and stream incarnation, protocol, engine,
 placement, representation ID and epoch, and feed ID and epoch alongside
 per-destination delivery, drop, error, and queue telemetry.  The manager samples
-worker CPU capacity and event-loop lag, then adapts SRT and HLS sender
-concurrency under one budget that reserves one CPU for the event loop; SRT
-retransmissions alone are not growth pressure.  The manager never migrates a
+worker CPU capacity and event-loop lag.  It runs one SRT sender per shard in
+use, up to the granted CPUs, and grows HLS uploaders on pressure within the
+CPUs left after one for the event loop and what the SRT senders use; SRT
+retransmissions do not change the sender count.  The manager never migrates a
 destination between workers, and RTMP sockets remain on their owning event
 loop.
 
@@ -561,8 +562,9 @@ The source-level path is intentionally visible:
   session rather than growing the scheduler.
 - `src/srt/ngx_media_srt_output.c` and `ngx_media_srt_output_queue.*` own
   bounded per-destination queues and 16 stable logical egress shards.  A
-  destination's slot maps to its logical shard modulo 16; the adaptive physical
-  sender pool maps those logical lanes across its current active worker count,
+  destination's slot maps to its logical shard modulo 16; the physical sender
+  pool - one per lane in use, up to the granted CPUs - maps those logical
+  lanes across its current active worker count,
   so scaling does not move a destination to a different shard.  Each lane
   services its slots and calls only `connect_shared`, `send`, `stats`,
   `session_shutdown` and `session_close`.  The lane is also the destination's
