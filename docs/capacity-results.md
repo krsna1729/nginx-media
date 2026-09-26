@@ -300,7 +300,8 @@ variation.  Nothing in the sender or the receivers depends on loopback.
 | 384 | quality-failure | 2.2740 | 215.3 | 184.0 | 0.56140 | 0.502 | 262.9 | 100.9 | 7115 ms |
 
 At 384 the destination queues back up to seven seconds and the output queue
-drops units: the SRT send path stops draining them, the delivered rate falls
+drops units (no kernel socket drops on either side, and the sender's pinned
+CPUs all busy): the SRT send path stops draining them, the delivered rate falls
 below what 256 delivered while the offered load rises, and 25 destinations
 miss the gate.  The sender's own CPU is 490% of a core (4.9 cores of the 12
 P-threads it is given), the receivers 418% of one core, no kernel socket
@@ -319,6 +320,36 @@ without removing the failure, so the receiver side contributes but is not the
 whole story.  What remains is the sender: at this rung nginx needs more CPU
 per delivered Gbit/s than it has, and the per-destination output queues
 absorb the difference until they overflow.
+
+### What actually saturates, when nothing looks saturated
+
+The 160-destination rung in the phase-2 shape below fails while the host is
+14% busy, so it is worth naming what is short.  Its bundle now carries
+per-CPU busy and the pinned sets' headroom:
+
+| | |
+|---|---|
+| Per-CPU busy over the window | cpu0 **99.86%**, cpu2 2.35%, cpu4 0.19%, cpu6 1.32% |
+| Pinned set (sender and receivers both on 0,2,4,6) | mean 25.9%, min 0.2%, max 99.9%, three cores idle, one saturated |
+| Host busy | 14.2% |
+| nginx worker / receiver CPU | 51.9% / 34.6% of one core |
+| Receiver socket drops | **390 737** across 10 listener sockets |
+| Sender feed drops, destination drops, blocked sends | 0 / 577 / 0 |
+
+One core saturated and three idle is not a distribution accident: with a
+small isolated CPU set, the loopback receive softirq is funnelled to one CPU,
+so the benchmark's own receiver sockets overflow while the sender has three
+cores to spare.  The same signature appears in the phase-2 replication below
+(38 448 receiver drops at its 160-destination failure, host 10% busy), which
+means that boundary is a **receiver-topology limit, not a sender limit** -
+exactly the case the method says to answer by changing the topology rather
+than by optimising the sender.  The 384-destination failure on the wider
+topology is the opposite case: no kernel drops anywhere, the sender's pinned
+CPUs busy, destination queues backing up - a sender CPU budget.
+
+The follow-up measurement, when a machine is free: pin the receivers to CPUs
+the sender does not use (or leave the set wider and unisolated), confirm the
+receiver drops disappear, and only then re-read the SRT boundary.
 
 ### Replicating the published 2026-09-25 numbers
 
