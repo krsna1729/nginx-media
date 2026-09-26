@@ -86,6 +86,12 @@ jobs:
       - name: Unit tests
         run: make unit
 
+      - name: Capacity reporting tests
+        # What the benchmark reports is as much a part of the result as what it
+        # measures: these pin the observed-versus-threshold split and the
+        # completeness gate.  No dependencies, no network, seconds to run.
+        run: make bench-reporting
+
       - name: Concurrency suites under ThreadSanitizer
         run: make -C tests/unit tsan
 

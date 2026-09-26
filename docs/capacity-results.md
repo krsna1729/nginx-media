@@ -12,6 +12,34 @@ IRQ/NIC topology all move it, so it is compared within one host class.  Every ro
 comes from a rung's `diagnostics.json`; the method is in
 `development.md` ("Per-rung diagnostics and outcomes").
 
+## Reporting corrections (2026-09-26)
+
+Two reporting defects were fixed in the pipeline that produces these tables.
+Neither changes what was measured; both change what the measurement is called.
+
+- **A configured threshold was published as an observed ratio.**  The HLS
+  reader benchmark printed the acceptance threshold (`--min-delivery-ratio`,
+  0.95) in `min_delivery_ratio`, and the diagnostics and history layers read
+  that field as the rung's delivery ratio.  Every HLS-origin row in the
+  phase-5 evidence files therefore carries `"min_delivery_ratio": 0.95` — the
+  gate, not a result — and no observed reader ratio at all.  Those records
+  are left exactly as they were written; `bench-history/2` records separate
+  `observed_delivery_ratio` from `delivery_ratio_threshold` and add
+  `delivery_ratio_basis`, so an old record's basis reads `observed-for-...`
+  and its HLS-origin workload is listed as unmeasured rather than as 0.95.
+  New runs report the readers' own minimum, p5/p50/p95, aggregate receiver
+  bytes, the receiver-side measurement interval and aggregate delivered
+  Gbit/s.
+- **HLS-origin traffic was absent from CPU per delivered Gbit/s.**  The
+  efficiency section summed SRT, RTMP and HLS push only, so a pure HLS-reader
+  rung reported no delivered rate.  HLS origin now contributes its
+  reader-counted bytes over the readers' own interval, which is why the
+  "Pure HLS origin (readers)" row in the phase-5 table below has dashes: that
+  run predates the fix.
+
+The phase-5 numbers for the other six workloads are unaffected: their reports
+already carried receiver-counted bytes and their own measurement interval.
+
 ## Phase 2 — pure SRT diagnosis (2026-09-25)
 
 ### Conditions

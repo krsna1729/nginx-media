@@ -4,6 +4,7 @@
 import argparse
 import asyncio
 import csv
+import math
 import signal
 import sys
 import time
@@ -172,6 +173,34 @@ def parse_playlist(body):
 def validate_ts(body):
     return bool(body) and len(body) % 188 == 0 and all(
         body[pos] == 0x47 for pos in range(0, len(body), 188))
+
+
+def percentile(sorted_values, fraction):
+    """Nearest-rank percentile over an ascending list: the smallest sample at
+    or above `fraction` of the samples.  No interpolation, so every ratio
+    reported here is one a reader actually measured."""
+    if not sorted_values:
+        return None
+    rank = max(1, math.ceil(fraction * len(sorted_values)))
+    return sorted_values[min(rank, len(sorted_values)) - 1]
+
+
+def delivery_ratios(stats, reference):
+    """What the readers counted, per reader: delivered rate over the reader's
+    own measurement interval, divided by the reference rate.  The configured
+    acceptance threshold is not part of any of these numbers."""
+    if reference <= 0:
+        ratios = sorted(item.rate_bps * 0.0 for item in stats)
+    else:
+        ratios = sorted(item.rate_bps / reference for item in stats)
+    lowest = min(stats, key=lambda item: item.rate_bps) if stats else None
+    return {
+        "min": ratios[0] if ratios else 0.0,
+        "min_reader_id": lowest.reader_id if lowest else -1,
+        "p5": percentile(ratios, 0.05),
+        "p50": percentile(ratios, 0.50),
+        "p95": percentile(ratios, 0.95),
+    }
 
 
 async def read_playlist(client, playlist_url, stats):
@@ -364,14 +393,32 @@ async def async_main(args):
             for item in stats)
         if fatal_event.is_set():
             raise MeasurementError("; ".join(fatal_messages) or "reader failed during measurement")
+        observed = delivery_ratios(stats, reference)
+        receiver_bytes = sum(item.bytes_received for item in stats)
+        delivered_gbps = receiver_bytes * 8 / elapsed / 1e9 if elapsed > 0 else 0.0
         write_report(args.report, stats, elapsed, reference, args.min_delivery_ratio,
                      SEGMENT_CONCURRENCY_LIMIT, concurrency[1])
         print(f"quality_pass={'yes' if quality_pass else 'no'}")
         print(f"readers={args.readers}")
         print(f"duration_s={elapsed:.6f}")
         print(f"reference_bps={reference:.2f}")
+        # The gate and the measurement are different numbers: the threshold is
+        # what the run was asked to accept, the observed values are what the
+        # readers counted.  min_delivery_ratio keeps its original meaning - the
+        # configured threshold - so published history that read it is not
+        # reinterpreted; anything that wants a measurement reads observed_*.
+        print(f"delivery_ratio_threshold={args.min_delivery_ratio:.6f}")
         print(f"min_delivery_ratio={args.min_delivery_ratio:.6f}")
-        print(f"total_bytes={sum(item.bytes_received for item in stats)}")
+        print(f"observed_min_delivery_ratio={observed['min']:.6f}")
+        print(f"observed_min_reader_id={observed['min_reader_id']}")
+        print(f"observed_p5_delivery_ratio={observed['p5']:.6f}")
+        print(f"observed_p50_delivery_ratio={observed['p50']:.6f}")
+        print(f"observed_p95_delivery_ratio={observed['p95']:.6f}")
+        print(f"observed_ratio_basis=reader-counted-bytes")
+        print(f"receiver_bytes_total={receiver_bytes}")
+        print(f"receiver_measurement_s={elapsed:.6f}")
+        print(f"delivered_gbps={delivered_gbps:.6f}")
+        print(f"total_bytes={receiver_bytes}")
         print(f"total_segments={sum(item.segments for item in stats)}")
         print(f"playlist_errors={sum(item.playlist_errors for item in stats)}")
         print(f"segment_errors={sum(item.segment_errors for item in stats)}")
