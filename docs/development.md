@@ -119,7 +119,15 @@ built by naming its binary, and run directly.  The suites that drive threads
 `test_srt_output`) are rebuilt into `build/tsan/` under ThreadSanitizer, which
 is a separate directory so a normal build never mixes instrumentation.
 `tests/unit/test_fuzz.c` scales its work with `NGX_MEDIA_FUZZ_SCALE` (the
-nightly workflow runs it at 25).
+nightly workflow runs it at 25).  The scale multiplies the number of inputs,
+never the length of one: a generator's depth comes from the buffer that holds
+it, and `FUZZ_BUF_WRITE` fails the suite if a hand-assembled write would pass
+the end, so a larger nightly scale cannot overflow the harness itself.
+
+`make bench-reporting` runs `tests/bench/test_reporting.py`: the tests for the
+capacity reporting pipeline (observed versus configured delivery ratios, which
+bytes count as delivered, and the benchmark completeness gate).  Plain
+`python3`, no nginx, no network, a few seconds.
 
 ### Integration scripts: `tests/integration`
 
@@ -273,11 +281,22 @@ Every capacity rung leaves `diagnostics.json` in its case directory
   enqueue-to-send lag, blocked sends, retransmissions, drops; RTMP scheduler
   visit counters; HLS uploader and segment accounting.
 - **delivery** — each protocol's quality report and the short-interval ratios.
+  The two are never mixed up: a *configured* acceptance threshold is reported
+  under `delivery_ratio_threshold` and the HLS reader log's original
+  `min_delivery_ratio` keeps that meaning, while the measured minimum is
+  `observed_min_delivery_ratio` (with p5/p50/p95) for HLS origin and
+  `quality_average_delivery_ratio_min` for the other three.  HLS origin's
+  observed values come from `hls-readers.csv`, the per-reader record, so a
+  reader whose row is unreadable is counted as unreadable rather than as a
+  zero; the entry carries `observed_ratio_basis=reader-counted-bytes`.
 - **efficiency** — delivered Gbit/s, and sender and receiver CPU per delivered
   Gbit/s.  Delivered means counted by the receivers (never a sender counter
   such as bytes queued, which keeps counting what a failing receiver never
-  got), over each protocol's own receiver-side window.  The boundary rung
-  depends on the host far more than this ratio does, which makes it the
+  got), over each protocol's own receiver-side window.  All four protocols
+  count, HLS origin included (`receiver_bytes_total` over
+  `receiver_measurement_s`); a protocol whose only byte number is sender-side
+  contributes nothing instead of contributing a cheap number.  The boundary
+  rung depends on the host far more than this ratio does, which makes it the
   number to compare across commits and SRT libraries - within one host class,
   since CPU model and frequency, kernel, library version, compiler and NIC
   topology still move it.
@@ -290,7 +309,21 @@ for that workload stops there without stopping the other workloads),
 criterion failed), or `pass`.  A setup timeout is never turned into a
 throughput number.  After the ladders, `capacity-matrix.json` in the run
 directory lists, per workload, the highest passing rung, the first quality
-failure and the setup-limited rungs.
+failure and the setup-limited rungs.  Each rung there carries
+`observed_delivery_ratio`, `delivery_ratio_threshold` and
+`delivery_ratio_basis` (`observed`, `observed-for-<workloads>` when some
+reported workload had no measurement, `threshold-only` when none did), so a
+rung whose only delivery number is a gate says so.
+
+`bench_history.py summarize` records the same three fields per rung, and its
+gate fails a run that did not finish: no exit status recorded, an exit status
+that is neither 0 nor 1 (a timeout or a kill), no diagnostics bundle for a
+configuration, an expected workload or rung that was neither measured nor
+skipped after the capacity boundary, a setup failure, or a quality failure at
+or below the rung the tier requires every host to carry.  A ladder that stops
+on purpose after two consecutive quality failures is finished, not aborted:
+its remaining rungs are recorded as unmeasured.  `make bench-reporting` runs
+the tests for all of this in seconds, with no nginx and no network.
 
 The measuring side is kept from becoming the measured limit:
 

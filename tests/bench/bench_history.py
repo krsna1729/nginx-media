@@ -29,7 +29,33 @@ import statistics
 import subprocess
 import sys
 
-SCHEMA = "nginx-media.bench-history/1"
+SCHEMA = "nginx-media.bench-history/2"
+
+# Which delivery field carries a *measurement*, per protocol.  A configured
+# threshold is not one: min_delivery_ratio in the HLS reader log is the gate
+# the run was asked to accept, and reading it as a measurement is what made a
+# passing HLS-origin rung look like it delivered exactly 95% of its reference.
+# Records written before this schema hold whatever the old reader reported;
+# they are left as they are and their basis says so.
+OBSERVED_RATIO_KEYS = {
+    "srt": ("quality_average_delivery_ratio_min",),
+    "rtmp": ("quality_min_delivery_ratio",),
+    "hls_push": ("quality_average_delivery_ratio_min",),
+    "hls_readers": ("observed_min_delivery_ratio",),
+}
+
+THRESHOLD_RATIO_KEYS = {
+    "hls_readers": ("delivery_ratio_threshold", "min_delivery_ratio"),
+}
+
+PROTOCOLS = ("srt", "rtmp", "hls_push", "hls_readers")
+
+# The harness's exit status has two meanings that both describe a finished
+# run: 0 (every rung passed) and 1 (quality failures were recorded, which is
+# how a ladder that stopped at the capacity boundary ends).  Anything else -
+# 124 from a timeout, 137 from a kill, a missing status file - means the run
+# did not finish and its bundles are a fragment.
+HARNESS_STATUS_ALLOWED = {0, 1}
 
 # The largest rung each tier requires to pass on any host it runs on.  These
 # are floors that say "the system works", far below any capacity boundary;
@@ -66,25 +92,56 @@ def value(field):
 
 def rung_record(bundle):
     delivery = bundle.get("delivery") or {}
-    ratios = []
-    for key in ("srt", "rtmp", "hls_push", "hls_readers"):
-        report = value(delivery.get(key)) or {}
-        for name in ("quality_average_delivery_ratio_min",
-                     "quality_min_delivery_ratio", "min_delivery_ratio"):
-            if isinstance(report.get(name), (int, float)):
-                ratios.append(report[name])
+    observed, thresholds, unmeasured, present = [], [], [], []
+    for protocol in PROTOCOLS:
+        report = value(delivery.get(protocol))
+        if not isinstance(report, dict):
+            continue
+        present.append(protocol)
+        found = [report[name] for name in OBSERVED_RATIO_KEYS[protocol]
+                 if isinstance(report.get(name), (int, float))]
+        if found:
+            observed.append(min(found))
+        else:
+            unmeasured.append(protocol)
+        thresholds.extend(
+            report[name] for name in THRESHOLD_RATIO_KEYS.get(protocol, ())
+            if isinstance(report.get(name), (int, float)))
     efficiency = bundle.get("efficiency") or {}
     env = bundle.get("cpu_environment") or {}
     return {
         "destinations": bundle.get("case", {}).get("destinations"),
         "outcome": bundle.get("outcome"),
-        "min_delivery_ratio": min(ratios) if ratios else None,
+        "observed_delivery_ratio": min(observed) if observed else None,
+        "observed_delivery_ratio_protocols": [
+            p for p in present if p not in unmeasured],
+        "delivery_ratio_threshold": min(thresholds) if thresholds else None,
+        "delivery_ratio_basis": ratio_basis(observed, present, unmeasured,
+                                            thresholds),
         "delivered_gbps": value(efficiency.get("delivered")),
         "sender_cpu_per_gbps": value(efficiency.get("sender_cpu_per_gbps")),
         "receiver_cpu_per_gbps": value(efficiency.get("receiver_cpu_per_gbps")),
         "host_cpu_busy": value(env.get("host_cpu_busy_fraction")),
         "srt_backend": bundle.get("case", {}).get("srt_backend"),
     }
+
+
+def ratio_basis(observed, present, unmeasured, thresholds):
+    """How much of the reported delivery is a measurement.
+
+    "observed" means every workload the bundle reports had receiver-counted
+    delivery; "observed-for-..." names the ones that did, so a workload whose
+    report carried only a configured gate cannot hide behind the others;
+    "threshold-only" means the bundle carried a gate and no measurement at
+    all, which is a statement about the harness, not about delivery."""
+    measured = [p for p in present if p not in unmeasured]
+    if observed and not unmeasured:
+        return "observed"
+    if observed:
+        return "observed-for-" + ",".join(measured)
+    if thresholds:
+        return "threshold-only"
+    return "unavailable"
 
 
 def harness_log(results, name):
@@ -211,6 +268,18 @@ def gate(args):
     required = REQUIRED_RUNG.get(args.tier, 0)
     errors = []
     for name, config in record["configs"].items():
+        status = config.get("harness_status")
+        if status is None:
+            # bench-ci.sh records the harness's exit status before it reads
+            # anything back; no status file means the runner never got there,
+            # so whatever bundles exist are a fragment of a run.
+            errors.append(f"{name}: no harness exit status was recorded; the "
+                          f"run did not complete")
+        elif status not in HARNESS_STATUS_ALLOWED:
+            errors.append(f"{name}: the harness exited {status}, which is "
+                          f"neither success nor a recorded quality failure - "
+                          f"it was killed, timed out or aborted, so its "
+                          f"results are partial")
         if not config["mixes"]:
             errors.append(f"{name}: no rung produced a diagnostics bundle")
         if not config.get("finished", False):

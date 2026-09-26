@@ -1,6 +1,6 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit tsan nginx graph-conflict incarnation smoke bench-worker-scaling \
+.PHONY: unit tsan bench-reporting nginx graph-conflict incarnation smoke bench-worker-scaling \
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
     bench-capacity-curve bench-capacity-quality bench-burst-sizing test-image test-in-container \
     srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph \
@@ -13,6 +13,10 @@ NGINX_VERSION ?= 1.30.5
 
 unit:
 	$(MAKE) -C tests/unit test
+
+# The reporting pipeline's own tests: no nginx, no network, plain python3.
+bench-reporting:
+	python3 tests/bench/test_reporting.py
 
 tsan:
 	$(MAKE) -C tests/unit tsan

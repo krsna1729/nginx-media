@@ -24,6 +24,7 @@ import argparse
 import csv
 import glob
 import json
+import math
 import os
 import re
 import statistics
@@ -495,6 +496,72 @@ def hls_push_section(case_dir, workers_before, workers_after):
     return section
 
 
+def hls_reader_stats(case_dir):
+    """Observed HLS-origin delivery, straight from the per-reader CSV.
+
+    hls-reader.log reports the configured threshold in `min_delivery_ratio`;
+    the measurement is the readers' own `reference_ratio`, which is why the
+    CSV is the source of the observed numbers and not the log."""
+    rows = load_csv(os.path.join(case_dir, "hls-readers.csv"))
+    if not rows:
+        return None
+    ratios, durations, byte_total, unreadable = [], [], 0, 0
+    for row in rows:
+        try:
+            ratios.append(float(row["reference_ratio"]))
+            byte_total += int(float(row["bytes_received"]))
+            durations.append(float(row["duration_s"]))
+        except (KeyError, TypeError, ValueError):
+            unreadable += 1
+    if not ratios:
+        return None
+    ratios.sort()
+    duration = max(durations) if durations else 0.0
+    return {
+        "observed_min_delivery_ratio": round(ratios[0], 6),
+        "observed_p5_delivery_ratio": round(ratios[percentile_index(ratios, 0.05)], 6),
+        "observed_p50_delivery_ratio": round(ratios[percentile_index(ratios, 0.50)], 6),
+        "observed_p95_delivery_ratio": round(ratios[percentile_index(ratios, 0.95)], 6),
+        "observed_ratio_basis": "reader-counted-bytes",
+        "receiver_bytes_total": byte_total,
+        "receiver_measurement_s": round(duration, 6),
+        "delivered_gbps": (round(byte_total * 8 / duration / 1e9, 6)
+                           if duration > 0 else None),
+        "readers": len(ratios),
+        "unreadable_reader_rows": unreadable,
+    }
+
+
+def percentile_index(values, fraction):
+    rank = max(1, math.ceil(fraction * len(values)))
+    return min(rank, len(values)) - 1
+
+
+def merge_hls_reader_csv(section, case_dir):
+    """Fold the per-reader observations into the reader entry.
+
+    The log is the primary record and the CSV must agree with it; the observed
+    fields are added only where the log does not already carry them, so a log
+    written by the fixed benchmark is never overwritten by the CSV."""
+    stats = hls_reader_stats(case_dir)
+    if stats is None:
+        return
+    entry = section.get("hls_readers")
+    if entry is None:
+        section["hls_readers"] = ok(stats, "mixed", sources=["hls-readers.csv"])
+        return
+    values = entry.get("value")
+    if not isinstance(values, dict):
+        return
+    added = False
+    for key, value in stats.items():
+        if key not in values:
+            values[key] = value
+            added = True
+    if added:
+        entry.setdefault("sources", []).append("hls-readers.csv")
+
+
 def delivery_section(case_dir):
     section = {}
     for name, path in (("srt", "quality-report.txt"),
@@ -519,7 +586,14 @@ def delivery_section(case_dir):
             pass
         keep["failures_sample"] = failures[:20]
         keep["failures_total"] = len(failures)
+        if name == "hls_readers" and "min_delivery_ratio" in keep:
+            # The reader log's min_delivery_ratio is the configured gate, not
+            # a measurement; say so in the field name as well as keeping the
+            # original one, so nothing downstream has to guess.
+            keep.setdefault("delivery_ratio_threshold",
+                            keep["min_delivery_ratio"])
         section[name] = ok(keep, "mixed")
+    merge_hls_reader_csv(section, case_dir)
     intervals = load_csv(os.path.join(case_dir, "interval-throughput.csv"))
     if intervals:
         ratios = [float(r["reference_ratio"]) for r in intervals
@@ -618,17 +692,24 @@ def efficiency_section(bundle):
     delivery = bundle.get("delivery") or {}
     gbps = 0.0
     sources = []
-    for proto, keys in (("srt", ("quality_total_receiver_bytes",)),
-                        ("rtmp", ("quality_aggregate_bytes",)),
-                        ("hls_push", ("quality_total_receiver_bytes",
-                                      "quality_total_bytes"))):
+    for proto, keys, seconds_keys in (
+            ("srt", ("quality_total_receiver_bytes",),
+             ("quality_measurement_s",)),
+            ("rtmp", ("quality_aggregate_bytes",),
+             ("quality_measurement_s",)),
+            ("hls_push", ("quality_total_receiver_bytes", "quality_total_bytes"),
+             ("quality_measurement_s",)),
+            ("hls_readers", ("receiver_bytes_total",),
+             ("receiver_measurement_s",))):
         report = (delivery.get(proto) or {}).get("value") or {}
         for key in keys:
             value = report.get(key)
             if isinstance(value, (int, float)) and value > 0:
-                seconds = report.get("quality_measurement_s")
+                seconds = next((report.get(k) for k in seconds_keys
+                                if isinstance(report.get(k), (int, float))
+                                and report.get(k) > 0), None)
                 basis = "receiver window"
-                if not isinstance(seconds, (int, float)) or seconds <= 0:
+                if seconds is None:
                     seconds, basis = shell_seconds, "shell window"
                 if not seconds:
                     break
@@ -673,7 +754,7 @@ def build(args):
         delay = metric_sum(samples, "nginx_media_worker_event_loop_max_delay_ms")
         event_loop[label] = delay
     bundle = {
-        "schema": "nginx-media.capacity-diagnostics/1",
+        "schema": "nginx-media.capacity-diagnostics/2",
         "case": meta,
         "outcome": meta.get("outcome", "unknown"),
         "intervals": {
@@ -722,7 +803,9 @@ def matrix(args):
             "outcome": bundle.get("outcome"),
             "srt_senders": case.get("srt_senders"),
             "hls": case.get("hls"),
-            "min_delivery_ratio": _min_ratio(bundle),
+            "observed_delivery_ratio": observed_ratio(bundle),
+            "delivery_ratio_threshold": threshold_ratio(bundle),
+            "delivery_ratio_basis": ratio_basis(bundle),
             "diagnostics": os.path.relpath(path, args.run_dir),
         })
     for mix, entry in mixes.items():
@@ -756,16 +839,62 @@ def matrix(args):
               f"setup_limited={','.join(map(str, entry['setup_limited'])) or 'none'}")
 
 
-def _min_ratio(bundle):
+# Which field carries the observed ratio, per protocol.  A configured
+# threshold is never one of them: min_delivery_ratio in the HLS reader log is
+# the gate the run was asked to accept, and reading it as a measurement is
+# what made a passing rung look like a 95% delivery rate.
+OBSERVED_RATIO_KEYS = {
+    "srt": ("quality_average_delivery_ratio_min",),
+    "rtmp": ("quality_min_delivery_ratio",),
+    "hls_push": ("quality_average_delivery_ratio_min",),
+    "hls_readers": ("observed_min_delivery_ratio",),
+}
+
+THRESHOLD_RATIO_KEYS = {
+    "hls_readers": ("delivery_ratio_threshold", "min_delivery_ratio"),
+}
+
+
+def ratio_fields(bundle):
+    """(observed values, threshold values, protocols that reported no
+    measurement, protocols the bundle reports at all)."""
     delivery = bundle.get("delivery") or {}
-    values = []
-    for key in ("srt", "rtmp", "hls_push", "hls_readers"):
-        report = (delivery.get(key) or {}).get("value") or {}
-        for name in ("quality_average_delivery_ratio_min",
-                     "quality_delivery_ratio_min", "min_delivery_ratio"):
-            if isinstance(report.get(name), (int, float)):
-                values.append(report[name])
-    return min(values) if values else None
+    observed, thresholds, unmeasured, present = [], [], [], []
+    for protocol in ("srt", "rtmp", "hls_push", "hls_readers"):
+        report = (delivery.get(protocol) or {}).get("value")
+        if not isinstance(report, dict):
+            continue
+        present.append(protocol)
+        found = [report[name] for name in OBSERVED_RATIO_KEYS.get(protocol, ())
+                 if isinstance(report.get(name), (int, float))]
+        if found:
+            observed.append(min(found))
+        else:
+            unmeasured.append(protocol)
+        thresholds.extend(
+            report[name] for name in THRESHOLD_RATIO_KEYS.get(protocol, ())
+            if isinstance(report.get(name), (int, float)))
+    return observed, thresholds, unmeasured, present
+
+
+def observed_ratio(bundle):
+    return min(ratio_fields(bundle)[0], default=None)
+
+
+def threshold_ratio(bundle):
+    return min(ratio_fields(bundle)[1], default=None)
+
+
+def ratio_basis(bundle):
+    observed, thresholds, unmeasured, present = ratio_fields(bundle)
+    if observed and not unmeasured:
+        return "observed"
+    if observed:
+        return "observed-for-" + ",".join(
+            p for p in present if p not in unmeasured)
+    if thresholds:
+        return "threshold-only"
+    return "unavailable"
 
 
 def main():
