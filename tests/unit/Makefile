@@ -37,6 +37,7 @@ CORE := ../../src/core/ngx_media_buffer.c \
         ../../src/srt/ngx_media_srt_output.c \
         ../../src/core/ngx_media_hls_profile.c \
         ../../src/core/ngx_media_hls_push.c \
+        ../../src/core/ngx_media_hls_playlist.c \
         ../../src/hls/ngx_media_hls_segmenter.c \
         ../../src/record/ngx_media_record.c \
         ../../src/rtmp/ngx_media_rtmp_wire.c \
@@ -45,7 +46,8 @@ CORE := ../../src/core/ngx_media_buffer.c \
 SHIM := shim/ngx_shim.c
 
 TESTS := test_buffer test_destination test_egress_manager test_frame test_feed test_track test_timeline \
-         test_rtmp_wire test_rtmp_flv test_srt_output test_owner test_ipc test_lifecycle test_fuzz test_bounds test_srt_udp test_security test_tombstone test_transform test_executor
+         test_rtmp_wire test_rtmp_flv test_srt_output test_owner test_ipc test_lifecycle test_fuzz test_bounds test_srt_udp test_security test_tombstone test_transform test_executor \
+         test_hls_playlist test_hls
 BINS  := $(addprefix build/,$(TESTS))
 
 .PHONY: all test tsan clean

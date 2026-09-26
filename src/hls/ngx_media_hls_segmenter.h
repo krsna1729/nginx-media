@@ -24,6 +24,12 @@
 
 #define NGX_MEDIA_HLS_MAX_PIECES 4096
 
+/*
+ * The longest playlist window the segmenter keeps.  The ring is sized for it
+ * once, so the window can follow the stream's destinations at runtime.
+ */
+#define NGX_MEDIA_HLS_SEGMENTS_MAX 32
+
 typedef struct {
     ngx_str_t   path;                /* directory that receives the files */
     ngx_str_t   playlist_name;       /* e.g. index.m3u8 */
@@ -58,6 +64,8 @@ typedef struct {
     size_t                 bytes;
     int64_t                first_dts;
     int64_t                last_dts;
+    int64_t                step;          /* the largest dts step in the
+                                           * segment being built */
     unsigned               started:1;      /* a sync boundary was seen */
     unsigned               discontinuity_next:1;
 

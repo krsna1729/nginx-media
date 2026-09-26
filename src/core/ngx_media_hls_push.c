@@ -1,4 +1,5 @@
 #include "ngx_media_hls_push.h"
+#include "ngx_media_hls_playlist.h"
 #include "ngx_media_hls_profile.h"
 #include "ngx_media_http.h"
 #include "ngx_media_destination.h"
@@ -23,6 +24,35 @@
 #define NGX_MEDIA_HLS_PUSH_QUEUE     64
 #define NGX_MEDIA_HLS_PUSH_POOL      4
 
+/*
+ * A failed upload is retried for up to one segment duration (DASH-IF Live
+ * Media Ingest: an ingest source retries for as long as the object is still
+ * useful, then moves on), with a backoff that starts short and doubles.  The
+ * item waits at the head of its destination's queue, so the uploader thread
+ * serves other destinations meanwhile, and the order - segment before the
+ * playlist that names it - is kept.
+ */
+#define NGX_MEDIA_HLS_PUSH_BUDGET_MS      2000    /* no duration stated */
+#define NGX_MEDIA_HLS_PUSH_BACKOFF_MS     100
+#define NGX_MEDIA_HLS_PUSH_BACKOFF_MAX_MS 1000
+
+/* segments that never reached the destination, listed with EXT-X-GAP */
+#define NGX_MEDIA_HLS_PUSH_MISSING   8
+#define NGX_MEDIA_HLS_PUSH_NAME_MAX  64
+
+/* segments uploaded and not yet expired, for DELETE */
+#define NGX_MEDIA_HLS_PUSH_SENT      64
+#define NGX_MEDIA_HLS_PUSH_DELETES   8       /* per playlist, at most */
+
+#define NGX_MEDIA_HLS_PUSH_PLAYLIST_MAX  (256 * 1024)
+
+enum {
+    NGX_MEDIA_HLS_PUSH_DONE = 0,
+    NGX_MEDIA_HLS_PUSH_FAILED,
+    NGX_MEDIA_HLS_PUSH_RETRY,
+    NGX_MEDIA_HLS_PUSH_SKIPPED
+};
+
 typedef struct {
     ngx_atomic_t  refs;
     int           fd;
@@ -33,7 +63,15 @@ typedef struct {
 typedef struct {
     ngx_media_hls_push_file_t  *file;
     struct timespec             enqueued;
+    uint64_t                    first_ns;     /* first attempt, 0 before */
+    uint64_t                    not_before_ns;
+    ngx_uint_t                  attempts;
 } ngx_media_hls_push_item_t;
+
+typedef struct {
+    u_char   data[NGX_MEDIA_HLS_PUSH_NAME_MAX];
+    size_t   len;
+} ngx_media_hls_push_name_t;
 
 
 struct ngx_media_hls_push_t {
@@ -51,6 +89,26 @@ struct ngx_media_hls_push_t {
 
     uint64_t                 egress_token;
     ngx_uint_t               placement;
+
+    /* the destination's settings, validated by its profile */
+    const char              *method;       /* "PUT" or "POST" */
+    ngx_uint_t               window;       /* 0: the stream's */
+    ngx_uint_t               delete_expired;
+    ngx_msec_t               budget_ms;    /* retry budget: a segment */
+
+    /*
+     * Used by the one upload in flight only (push->inflight serialises it),
+     * so without the mutex: the kept connection and the segments uploaded
+     * and not yet expired.
+     */
+    ngx_media_http_conn_t      conn;
+    ngx_media_hls_push_name_t  sent[NGX_MEDIA_HLS_PUSH_SENT];
+    ngx_uint_t                 nsent;
+    ngx_media_hls_push_name_t  first;      /* its first segment */
+
+    /* under the mutex: segments the destination does not have */
+    ngx_media_hls_push_name_t  missing[NGX_MEDIA_HLS_PUSH_MISSING];
+    ngx_uint_t                 nmissing;
     ngx_media_hls_push_item_t  queue[NGX_MEDIA_HLS_PUSH_QUEUE];
     ngx_uint_t               head, tail, count;
     ngx_media_hls_push_item_t  inflight_item;
@@ -65,6 +123,9 @@ struct ngx_media_hls_push_t {
     uint64_t                 uploaded_bytes;
     uint64_t                 dropped;
     uint64_t                 failed;
+    uint64_t                 retried;
+    uint64_t                 gaps;
+    uint64_t                 deleted;
     uint64_t                 reported_uploaded_bytes;
     uint64_t                 reported_dropped;
     uint64_t                 reported_failed;
@@ -86,6 +147,13 @@ static uint64_t               ngx_media_hls_push_last_cpu_ns[
     NGX_MEDIA_HLS_PUSH_POOL];
 static ngx_uint_t             ngx_media_hls_push_cpu_sampled;
 static ngx_log_t              *ngx_media_hls_push_log;
+
+#define NGX_MEDIA_HLS_PUSH_LOG(level, ...)                                    \
+    do {                                                                      \
+        if (ngx_media_hls_push_log != NULL) {                                 \
+            ngx_log_error((level), ngx_media_hls_push_log, 0, __VA_ARGS__);   \
+        }                                                                     \
+    } while (0)
 
 static ngx_uint_t
 ngx_media_hls_push_active(void)
@@ -137,6 +205,11 @@ ngx_media_hls_push_now_ns(void)
 
 /* --- queue --------------------------------------------------------------- */
 
+static const u_char *ngx_media_hls_push_basename(const u_char *path);
+static ngx_uint_t ngx_media_hls_push_is_playlist(const u_char *name);
+static void ngx_media_hls_push_missing_add(ngx_media_hls_push_t *push,
+    const u_char *name);
+
 /*
  * One reference on the object.  The list holds one, every upload in flight
  * holds one, and the last release frees only raw heap storage.
@@ -150,6 +223,8 @@ ngx_media_hls_push_release(ngx_media_hls_push_t *push)
 
     (void) pthread_mutex_destroy(&push->report_mutex);
     (void) pthread_mutex_destroy(&push->mutex);
+
+    ngx_media_http_conn_close(&push->conn);
 
     free(push->directory.data);
     free(push->url.data);
@@ -297,6 +372,14 @@ ngx_media_hls_push_enqueue(ngx_media_hls_push_t *push,
     }
 
     if (push->count == NGX_MEDIA_HLS_PUSH_QUEUE) {
+        const u_char  *lost;
+
+        /* a segment dropped here is one the destination will not have */
+        lost = ngx_media_hls_push_basename(push->queue[push->head].file->path);
+        if (!ngx_media_hls_push_is_playlist(lost)) {
+            ngx_media_hls_push_missing_add(push, lost);
+        }
+
         ngx_media_hls_push_file_release(push->queue[push->head].file);
         ngx_memzero(&push->queue[push->head],
                     sizeof(push->queue[push->head]));
@@ -318,6 +401,328 @@ ngx_media_hls_push_enqueue(ngx_media_hls_push_t *push,
     return NGX_OK;
 }
 
+/* --- one object ----------------------------------------------------------- */
+
+static const u_char *
+ngx_media_hls_push_basename(const u_char *path)
+{
+    const u_char  *base = (const u_char *) strrchr((const char *) path, '/');
+
+    return (base != NULL) ? base + 1 : path;
+}
+
+static ngx_uint_t
+ngx_media_hls_push_is_playlist(const u_char *name)
+{
+    size_t  len = strlen((const char *) name);
+
+    return len > 5
+           && ngx_strncasecmp((u_char *) name + len - 5, (u_char *) ".m3u8", 5)
+              == 0;
+}
+
+static void
+ngx_media_hls_push_name_set(ngx_media_hls_push_name_t *n, const u_char *data,
+    size_t len)
+{
+    n->len = (len < sizeof(n->data)) ? len : sizeof(n->data) - 1;
+    ngx_memcpy(n->data, data, n->len);
+    n->data[n->len] = '\0';
+}
+
+/* under the mutex: the destination lacks this segment */
+static void
+ngx_media_hls_push_missing_add(ngx_media_hls_push_t *push, const u_char *name)
+{
+    if (push->nmissing == NGX_MEDIA_HLS_PUSH_MISSING) {
+        memmove(&push->missing[0], &push->missing[1],
+                    (NGX_MEDIA_HLS_PUSH_MISSING - 1)
+                    * sizeof(push->missing[0]));
+        push->nmissing--;
+    }
+
+    ngx_media_hls_push_name_set(&push->missing[push->nmissing++], name,
+                                strlen((const char *) name));
+}
+
+/*
+ * A status worth trying again: no answer at all, a timeout, a rate limit, or
+ * a server error.  Any other 4xx is the request itself, and sending it again
+ * would get the same answer.
+ */
+static ngx_uint_t
+ngx_media_hls_push_retryable(ngx_int_t status)
+{
+    return status == NGX_ERROR || status == 408 || status == 429
+           || status >= 500;
+}
+
+/*
+ * The destination's playlist: the stream's, trimmed to its window and with
+ * its missing segments marked, and the DELETEs it makes due.
+ */
+static ngx_int_t
+ngx_media_hls_push_playlist(ngx_media_hls_push_t *push,
+    ngx_media_hls_push_file_t *file, const u_char *name)
+{
+    ngx_media_hls_playlist_opts_t   opts;
+    ngx_media_hls_playlist_info_t  *info = NULL;
+    ngx_str_t                       missing[NGX_MEDIA_HLS_PUSH_MISSING];
+    ngx_str_t                       first;
+    ngx_media_hls_push_name_t       names[NGX_MEDIA_HLS_PUSH_MISSING];
+    ngx_media_hls_push_name_t       expired[NGX_MEDIA_HLS_PUSH_DELETES];
+    ngx_uint_t                      i, j, k, nexpired = 0, found;
+    u_char                         *in = NULL, *out = NULL;
+    size_t                          out_len = 0, cap;
+    ssize_t                         n;
+    ngx_int_t                       status, rc;
+
+    if (file->size <= 0 || file->size > NGX_MEDIA_HLS_PUSH_PLAYLIST_MAX) {
+        return ngx_media_http_send(&push->conn, &push->url, &push->ca_file,
+                                   push->method, name, file->fd, NULL,
+                                   file->size, "application/vnd.apple.mpegurl",
+                                   ngx_media_hls_push_log);
+    }
+
+    cap = (size_t) file->size + 64
+          + NGX_MEDIA_HLS_PUSH_MISSING * sizeof("#EXT-X-GAP\n");
+    in = malloc((size_t) file->size);
+    out = malloc(cap);
+    info = malloc(sizeof(*info));
+
+    if (in == NULL || out == NULL || info == NULL) {
+        status = NGX_ERROR;
+        goto done;
+    }
+
+    n = pread(file->fd, in, (size_t) file->size, 0);
+
+    (void) pthread_mutex_lock(&push->mutex);
+    for (i = 0; i < push->nmissing; i++) {
+        names[i] = push->missing[i];
+        missing[i].data = names[i].data;
+        missing[i].len = names[i].len;
+    }
+    opts.nmissing = push->nmissing;
+    (void) pthread_mutex_unlock(&push->mutex);
+
+    first.data = push->first.data;
+    first.len = push->first.len;
+
+    opts.window = push->window;
+    opts.first = &first;
+    opts.missing = missing;
+
+    rc = (n == (ssize_t) file->size)
+         ? ngx_media_hls_playlist_rewrite(in, (size_t) n, &opts, out, cap,
+                                          &out_len, info)
+         : NGX_ERROR;
+
+    if (rc != NGX_OK) {
+        /* not a playlist this can rewrite: it goes as it is */
+        status = ngx_media_http_send(&push->conn, &push->url, &push->ca_file,
+                                     push->method, name, file->fd, NULL,
+                                     file->size,
+                                     "application/vnd.apple.mpegurl",
+                                     ngx_media_hls_push_log);
+        goto done;
+    }
+
+    status = ngx_media_http_send(&push->conn, &push->url, &push->ca_file,
+                                 push->method, name, -1, out, (off_t) out_len,
+                                 "application/vnd.apple.mpegurl",
+                                 ngx_media_hls_push_log);
+
+    if (status < 200 || status >= 300) {
+        goto done;
+    }
+
+    (void) pthread_mutex_lock(&push->mutex);
+
+    push->gaps += info->gaps;
+
+    /* a missing segment that left the window is no longer anyone's concern */
+    for (i = 0, j = 0; i < push->nmissing; i++) {
+        for (k = 0; k < info->segments; k++) {
+            if (info->uri[k].len == push->missing[i].len
+                && ngx_memcmp(info->uri[k].data, push->missing[i].data,
+                              info->uri[k].len) == 0)
+            {
+                push->missing[j++] = push->missing[i];
+                break;
+            }
+        }
+    }
+    push->nmissing = j;
+
+    (void) pthread_mutex_unlock(&push->mutex);
+
+    /*
+     * Expiry, after the playlist that no longer lists them (DASH-IF: the
+     * playlist goes first, so a reader never follows a playlist to a deleted
+     * segment).  Everything uploaded before the first segment the window
+     * still lists has expired.
+     */
+    found = push->nsent;
+
+    for (k = 0; k < info->segments && found == push->nsent; k++) {
+        for (i = 0; i < push->nsent; i++) {
+            if (info->uri[k].len == push->sent[i].len
+                && ngx_memcmp(info->uri[k].data, push->sent[i].data,
+                              info->uri[k].len) == 0)
+            {
+                found = i;
+                break;
+            }
+        }
+    }
+
+    if (found != push->nsent && found > 0) {
+        for (i = 0; i < found; i++) {
+            if (push->delete_expired && nexpired < NGX_MEDIA_HLS_PUSH_DELETES) {
+                expired[nexpired++] = push->sent[i];
+            }
+        }
+
+        memmove(&push->sent[0], &push->sent[found],
+                    (push->nsent - found) * sizeof(push->sent[0]));
+        push->nsent -= found;
+    }
+
+    for (i = 0; i < nexpired && push->delete_expired; i++) {
+        rc = ngx_media_http_send(&push->conn, &push->url, &push->ca_file,
+                                 "DELETE", expired[i].data, -1, NULL, 0, NULL,
+                                 ngx_media_hls_push_log);
+
+        if ((rc >= 200 && rc < 300) || rc == 404) {
+            (void) pthread_mutex_lock(&push->mutex);
+            push->deleted++;
+            (void) pthread_mutex_unlock(&push->mutex);
+
+        } else if (rc == 403 || rc == 405 || rc == 501) {
+            /* an endpoint that does not take DELETE is not asked again */
+            push->delete_expired = 0;
+
+            NGX_MEDIA_HLS_PUSH_LOG(NGX_LOG_NOTICE,
+                          "media: hls push endpoint answered DELETE with %i; "
+                          "expired segments are left to it", rc);
+        }
+    }
+
+done:
+
+    free(info);
+    free(out);
+    free(in);
+
+    return status;
+}
+
+/*
+ * Uploads one queued object.  DONE, FAILED (given up on), RETRY with
+ * item->not_before_ns set, or SKIPPED.
+ */
+static ngx_uint_t
+ngx_media_hls_push_upload(ngx_media_hls_push_t *push,
+    ngx_media_hls_push_item_t *item)
+{
+    ngx_media_hls_push_file_t  *file = item->file;
+    const u_char               *name = ngx_media_hls_push_basename(file->path);
+    ngx_uint_t                  playlist, i;
+    ngx_int_t                   status;
+    uint64_t                    now, backoff;
+
+    playlist = ngx_media_hls_push_is_playlist(name);
+
+    if (playlist && push->first.len == 0) {
+        /*
+         * A destination added between a segment and its playlist: the
+         * playlist lists only segments this destination never had, and a
+         * playlist never goes before its segments.  The next one will.
+         */
+        return NGX_MEDIA_HLS_PUSH_SKIPPED;
+    }
+
+    if (!playlist && push->first.len == 0) {
+        ngx_media_hls_push_name_set(&push->first, name,
+                                    strlen((const char *) name));
+    }
+
+    if (item->first_ns == 0) {
+        item->first_ns = ngx_media_hls_push_now_ns();
+    }
+
+    item->attempts++;
+
+    if (playlist) {
+        status = ngx_media_hls_push_playlist(push, file, name);
+
+    } else {
+        status = ngx_media_http_send(&push->conn, &push->url, &push->ca_file,
+                                     push->method, name, file->fd, NULL,
+                                     file->size, "video/mp2t",
+                                     ngx_media_hls_push_log);
+    }
+
+    if (status >= 200 && status < 300) {
+
+        if (!playlist) {
+            if (push->nsent == NGX_MEDIA_HLS_PUSH_SENT) {
+                memmove(&push->sent[0], &push->sent[1],
+                            (NGX_MEDIA_HLS_PUSH_SENT - 1)
+                            * sizeof(push->sent[0]));
+                push->nsent--;
+            }
+            ngx_media_hls_push_name_set(&push->sent[push->nsent++], name,
+                                        strlen((const char *) name));
+
+            /* a segment that arrives late is no longer missing */
+            (void) pthread_mutex_lock(&push->mutex);
+            for (i = 0; i < push->nmissing; i++) {
+                if (strcmp((char *) push->missing[i].data, (const char *) name) == 0) {
+                    memmove(&push->missing[i], &push->missing[i + 1],
+                                (push->nmissing - i - 1)
+                                * sizeof(push->missing[0]));
+                    push->nmissing--;
+                    break;
+                }
+            }
+            (void) pthread_mutex_unlock(&push->mutex);
+        }
+
+        return NGX_MEDIA_HLS_PUSH_DONE;
+    }
+
+    now = ngx_media_hls_push_now_ns();
+    backoff = (uint64_t) NGX_MEDIA_HLS_PUSH_BACKOFF_MS
+              << (item->attempts - 1 < 4 ? item->attempts - 1 : 4);
+    if (backoff > NGX_MEDIA_HLS_PUSH_BACKOFF_MAX_MS) {
+        backoff = NGX_MEDIA_HLS_PUSH_BACKOFF_MAX_MS;
+    }
+    backoff *= UINT64_C(1000000);
+
+    if (ngx_media_hls_push_retryable(status) && status != NGX_DECLINED
+        && now + backoff - item->first_ns
+           <= (uint64_t) push->budget_ms * UINT64_C(1000000))
+    {
+        item->not_before_ns = now + backoff;
+        return NGX_MEDIA_HLS_PUSH_RETRY;
+    }
+
+    NGX_MEDIA_HLS_PUSH_LOG(NGX_LOG_WARN,
+                  "media: hls push gave up on %s after %ui attempts "
+                  "(last answer %i)%s", name, item->attempts, status,
+                  playlist ? "" : "; playlists list it as a gap");
+
+    if (!playlist) {
+        (void) pthread_mutex_lock(&push->mutex);
+        ngx_media_hls_push_missing_add(push, name);
+        (void) pthread_mutex_unlock(&push->mutex);
+    }
+
+    return NGX_MEDIA_HLS_PUSH_FAILED;
+}
+
 /*
  * One uploader dequeues under the locks and uploads without them.  Holding
  * the destination list while a remote blocks would stall the event-loop
@@ -331,8 +736,8 @@ ngx_media_hls_push_thread(void *data)
     ngx_media_hls_push_item_t   work_item[NGX_MEDIA_HLS_PUSH_POOL * 2];
     ngx_media_hls_push_file_t  *file;
     ngx_uint_t                  worker_id = *(ngx_uint_t *) data;
-    ngx_uint_t                  nwork, i, got, active;
-    ngx_int_t                   rc;
+    ngx_uint_t                  nwork, i, got, active, outcome;
+    uint64_t                    now_ns;
 
     for ( ;; ) {
         active = ngx_media_hls_push_active();
@@ -345,6 +750,7 @@ ngx_media_hls_push_thread(void *data)
         }
 
         nwork = 0;
+        now_ns = ngx_media_hls_push_now_ns();
         (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
 
         for (push = ngx_media_hls_push_all; push != NULL; push = push->next) {
@@ -353,7 +759,10 @@ ngx_media_hls_push_thread(void *data)
             }
 
             (void) pthread_mutex_lock(&push->mutex);
-            if (push->count == 0 || push->stopping || push->inflight) {
+            if (push->count == 0 || push->stopping || push->inflight
+                || (push->queue[push->head].not_before_ns != 0
+                    && push->queue[push->head].not_before_ns > now_ns))
+            {
                 (void) pthread_mutex_unlock(&push->mutex);
                 continue;
             }
@@ -383,17 +792,30 @@ ngx_media_hls_push_thread(void *data)
 
         for (i = 0; i < nwork; i++) {
             file = work_item[i].file;
-            rc = ngx_media_http_put_file(&work_push[i]->url,
-                                         &work_push[i]->ca_file,
-                                         file->path, file->fd, file->size,
-                                         ngx_media_hls_push_log);
+            outcome = ngx_media_hls_push_upload(work_push[i], &work_item[i]);
 
             (void) pthread_mutex_lock(&work_push[i]->mutex);
             work_push[i]->inflight = 0;
             ngx_memzero(&work_push[i]->inflight_item,
                         sizeof(work_push[i]->inflight_item));
 
-            if (rc == NGX_OK) {
+            if (outcome == NGX_MEDIA_HLS_PUSH_RETRY
+                && !work_push[i]->stopping
+                && work_push[i]->count < NGX_MEDIA_HLS_PUSH_QUEUE)
+            {
+                /* back to the head: it still goes before what follows it */
+                work_push[i]->head = (work_push[i]->head
+                                      + NGX_MEDIA_HLS_PUSH_QUEUE - 1)
+                                     % NGX_MEDIA_HLS_PUSH_QUEUE;
+                work_push[i]->queue[work_push[i]->head] = work_item[i];
+                work_push[i]->count++;
+                work_push[i]->retried++;
+                file = NULL;            /* the queue holds the reference */
+
+            } else if (outcome == NGX_MEDIA_HLS_PUSH_SKIPPED) {
+                /* nothing sent, nothing lost */
+
+            } else if (outcome == NGX_MEDIA_HLS_PUSH_DONE) {
                 work_push[i]->uploaded++;
                 work_push[i]->uploaded_bytes += (uint64_t) file->size;
 
@@ -455,6 +877,14 @@ ngx_media_hls_push_add(ngx_media_stream_t *stream,
 
     push->egress_token = destination->egress_token;
     push->placement = 0;
+    push->method = (destination->http_method == NGX_MEDIA_HLS_PUSH_POST)
+                   ? "POST" : "PUT";
+    push->window = destination->playlist_window;
+    push->delete_expired = destination->delete_expired;
+    push->budget_ms = (destination->segment_duration_ms > 0)
+                      ? destination->segment_duration_ms
+                      : NGX_MEDIA_HLS_PUSH_BUDGET_MS;
+    ngx_media_http_conn_init(&push->conn);
     push->refs = 1;                    /* the destination list's reference */
 
     if (pthread_mutex_init(&push->mutex, NULL) != 0) {
@@ -496,8 +926,11 @@ ngx_media_hls_push_add(ngx_media_stream_t *stream,
 
         ngx_log_error(NGX_LOG_NOTICE, log, 0,
                       "media: hls push destination %V started for %V/%V: "
-                      "%V -> %V", &destination->id, &stream->application,
-                      &stream->name, &push->directory, &redacted);
+                      "%V -> %V (%s, window %ui, retry budget %M ms, "
+                      "delete expired %s)", &destination->id,
+                      &stream->application, &stream->name, &push->directory,
+                      &redacted, push->method, push->window, push->budget_ms,
+                      push->delete_expired ? "on" : "off");
     }
 
     return NGX_OK;

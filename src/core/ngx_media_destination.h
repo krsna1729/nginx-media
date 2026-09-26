@@ -40,9 +40,11 @@ typedef struct ngx_media_destination_s {
      * generic publisher.
      */
     ngx_str_t               profile;
-    ngx_uint_t              segment_duration_ms;
-    ngx_uint_t              playlist_window;
-    ngx_uint_t              http_post;
+    ngx_uint_t              segment_duration_ms;  /* 0: the stream's */
+    ngx_uint_t              segment_max_ms;       /* 0: no limit stated */
+    ngx_uint_t              playlist_window;      /* 0: the stream's */
+    ngx_uint_t              http_method;          /* NGX_MEDIA_HLS_PUSH_* */
+    ngx_uint_t              delete_expired;
 
     uint64_t                revision;   /* bumped by every mutation */
     unsigned                enabled:1;  /* desired state */

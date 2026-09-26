@@ -981,20 +981,33 @@ test_http_thread_pool(void)
 /* failure, seen ring, route reload fds, segmenter PSI/bytes.          */
 /* ------------------------------------------------------------------ */
 
-/* mirrors src/api/ngx_media_api_module.c ingest validation */
+/*
+ * mirrors src/api/ngx_media_api_module.c ingest validation: a relative path
+ * of at most four components, each non-empty, not starting with a dot and
+ * in [A-Za-z0-9._-]; the object is a .ts segment or a .m3u8 playlist
+ */
 static int
 sec_valid_segment_name(const u_char *name, size_t len)
 {
-    size_t  i;
+    size_t  i, start = 0, depth = 0;
 
-    if (len < 4 || memcmp(name + len - 3, ".ts", 3) != 0
-        || name[0] == '.')
+    if (len == 0 || len > 255
+        || !((len >= 4 && memcmp(name + len - 3, ".ts", 3) == 0)
+             || (len >= 6 && memcmp(name + len - 5, ".m3u8", 5) == 0)))
     {
         return 0;
     }
 
-    for (i = 0; i < len; i++) {
-        u_char  c = name[i];
+    for (i = 0; i <= len; i++) {
+        u_char  c = (i < len) ? name[i] : '/';
+
+        if (c == '/') {
+            if (i == start || name[start] == '.' || ++depth > 4) {
+                return 0;
+            }
+            start = i + 1;
+            continue;
+        }
 
         if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
               || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
@@ -1009,23 +1022,35 @@ sec_valid_segment_name(const u_char *name, size_t len)
 static void
 test_api_segment_names(void)
 {
-    TEST_CASE("api: HLS ingest segment names are strict *.ts, no dotfiles, "
-              "safe charset");
+    TEST_CASE("api: HLS ingest paths are strict: .ts or .m3u8, no dotfiles or "
+              "traversal in any component, safe charset, bounded depth");
 
     CHECK(sec_valid_segment_name((const u_char *) "seg-1.ts", 8),
           "plain segment accepted");
     CHECK(sec_valid_segment_name((const u_char *) "A_9-.ts", 7),
           "charset boundary accepted");
+    CHECK(sec_valid_segment_name((const u_char *) "index.m3u8", 10),
+          "media playlist accepted");
+    CHECK(sec_valid_segment_name((const u_char *) "live/news/i7.ts", 15),
+          "a stream's subpath accepted");
     CHECK(!sec_valid_segment_name((const u_char *) "../evil.ts", 10),
           "path traversal rejected");
+    CHECK(!sec_valid_segment_name((const u_char *) "a/../b.ts", 9),
+          "inner traversal rejected");
     CHECK(!sec_valid_segment_name((const u_char *) ".hidden.ts", 10),
           "dotfile rejected");
-    CHECK(!sec_valid_segment_name((const u_char *) "seg-1.m3u8", 10),
-          "non-ts suffix rejected");
+    CHECK(!sec_valid_segment_name((const u_char *) "a/.hidden/b.ts", 14),
+          "hidden directory rejected");
+    CHECK(!sec_valid_segment_name((const u_char *) "a//b.ts", 7),
+          "empty component rejected");
+    CHECK(!sec_valid_segment_name((const u_char *) "/abs.ts", 7),
+          "absolute path rejected");
+    CHECK(!sec_valid_segment_name((const u_char *) "a/b/c/d/e.ts", 12),
+          "more than four components rejected");
+    CHECK(!sec_valid_segment_name((const u_char *) "seg-1.m4s", 9),
+          "other suffix rejected");
     CHECK(!sec_valid_segment_name((const u_char *) "seg-1", 5),
           "missing suffix rejected");
-    CHECK(!sec_valid_segment_name((const u_char *) "a/b.ts", 6),
-          "slash rejected");
     CHECK(!sec_valid_segment_name((const u_char *) "a;b.ts", 6),
           "semicolon rejected");
     CHECK(!sec_valid_segment_name((const u_char *) "a b.ts", 6),
@@ -1035,12 +1060,16 @@ test_api_segment_names(void)
 
     CHECK(file_contains(api_paths,
                         sizeof(api_paths) / sizeof(api_paths[0]),
-                        "name.data[0] == '.'"),
-          "api rejects dotfiles");
+                        "*start == '.'"),
+          "api rejects dotfiles in every component");
+    CHECK(file_contains(api_paths,
+                        sizeof(api_paths) / sizeof(api_paths[0]),
+                        "NGX_MEDIA_HLS_INGEST_DEPTH_MAX"),
+          "api bounds the path depth");
     CHECK(file_contains(api_paths,
                         sizeof(api_paths) / sizeof(api_paths[0]),
                         "\".ts\""),
-          "api requires the .ts suffix");
+          "api requires the .ts suffix for segments");
 }
 
 static void

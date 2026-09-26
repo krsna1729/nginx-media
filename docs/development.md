@@ -176,7 +176,8 @@ test-in-container`, which runs the Makefile's `TEST_TARGETS` in the shipped
 image's environment: `.github/workflows/ci.yml` runs it (beside the fast subset
 it names individually) on a pull request, and `.github/workflows/master.yml`
 runs the individual targets — ingest and fixture, selection and switching, the
-HLS directions, RTMP and RTMPS, srt-output, srt-output-mux, srt-lane-isolation
+HLS directions (with hls-push-conformance), the ffmpeg interop matrix,
+RTMP and RTMPS, srt-output, srt-output-mux, srt-lane-isolation
 and srt-crypto, multi-worker, soak
 and fault — before anything is tagged.  A new suite target belongs in
 `TEST_TARGETS` for that reason; `srt-worker-ports`, the per-worker SRT ingest
@@ -368,6 +369,34 @@ GitHub otherwise reports only as a startup failure with no jobs and no log.
 `branch`, `nightly` and `weekly` results are appended to `data/<tier>.jsonl`
 on the `gh-pages` branch, whose `index.html` (`tests/bench/history/index.html`)
 charts them; enable GitHub Pages on that branch to browse it.
+
+
+### ffmpeg interoperability
+
+`make ffmpeg-interop` drives every way media enters with ffmpeg and reads
+every way it leaves with ffmpeg, and judges each case on what ffmpeg itself
+decodes - the codecs it finds, at least 25 decoded video frames, and decode
+timestamps that never go backwards:
+
+| Direction | Protocol | Codecs |
+|---|---|---|
+| in | SRT caller (MPEG-TS) | H.264+AAC, HEVC+AAC, H.264 only |
+| in | RTMP publish (FLV, enhanced RTMP for HEVC) | H.264+AAC, HEVC+AAC, H.264 only |
+| in | HLS push into `media_hls_ingest` (`-f hls -method PUT`, and `POST`) | H.264+AAC |
+| in | HLS pull from an HTTP origin | H.264+AAC |
+| in | file (MPEG-TS) | H.264+AAC |
+| out | HLS origin | H.264+AAC, HEVC+AAC |
+| out | RTMP play | H.264+AAC, HEVC+AAC |
+| out | SRT destination to an ffmpeg listener | H.264+AAC, HEVC+AAC |
+| out | RTMP destination to `ffmpeg -listen 1` | H.264+AAC |
+| out | HLS push to an ingest endpoint, read back by ffmpeg | H.264+AAC |
+
+The first run found two defects, both fixed with it: an RTMP publisher that
+sends audio produced HLS segments without SPS/PPS (RTMP carries parameter
+sets once, in the sequence header; keyframes now carry them in-band), and an
+`hls_push` source could not be created before its encoder's first upload
+created the directory.  Programs without video are not in the matrix: HLS
+segments start at video keyframes.
 
 ## Conventions
 

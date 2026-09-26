@@ -59,11 +59,19 @@ ngx_media_hls_conf_default(ngx_media_hls_conf_t *conf)
 
     ngx_memzero(conf, sizeof(ngx_media_hls_conf_t));
 
-    conf->target_duration = 6000;
-    conf->min_duration = 3000;
-    conf->max_duration = 12000;
+    /*
+     * The defaults are YouTube's HLS ingest contract, the strictest of the
+     * platforms that take HLS push: segments of 1-4 s and a rolling playlist
+     * of at most five.  A segment is cut at the first keyframe after 2 s and
+     * forced at 4 s, so a source with keyframes every 2 s (what platforms ask
+     * encoders for) produces 2 s segments; one with rarer keyframes is cut at
+     * 4 s regardless and says so in forced_cuts.
+     */
+    conf->target_duration = 2000;
+    conf->min_duration = 2000;
+    conf->max_duration = 4000;
     conf->max_segment_bytes = 8 * 1024 * 1024;
-    conf->max_segments = 6;
+    conf->max_segments = 5;
     conf->max_retained_bytes = 64 * 1024 * 1024;
 }
 
@@ -147,11 +155,11 @@ ngx_media_hls_init(ngx_media_hls_t *hls, const ngx_media_hls_conf_t *conf,
     }
 
     if (hls->conf.max_segments == 0) {
-        hls->conf.max_segments = 6;
+        hls->conf.max_segments = 5;
     }
 
     if (hls->conf.target_duration == 0) {
-        hls->conf.target_duration = 6000;
+        hls->conf.target_duration = 2000;
     }
 
     if (hls->conf.min_duration > hls->conf.target_duration) {
@@ -162,7 +170,11 @@ ngx_media_hls_init(ngx_media_hls_t *hls, const ngx_media_hls_conf_t *conf,
         hls->conf.max_duration = hls->conf.target_duration * 2;
     }
 
-    capacity = hls->conf.max_segments + 1;
+    if (hls->conf.max_segments > NGX_MEDIA_HLS_SEGMENTS_MAX) {
+        hls->conf.max_segments = NGX_MEDIA_HLS_SEGMENTS_MAX;
+    }
+
+    capacity = NGX_MEDIA_HLS_SEGMENTS_MAX + 1;
 
     hls->segments = ngx_alloc(capacity * sizeof(ngx_media_hls_segment_t), log);
     if (hls->segments == NULL) {
@@ -272,6 +284,7 @@ ngx_media_hls_add_burst(ngx_media_hls_t *hls,
                 hls->started = 1;
                 hls->first_dts = slice->dts;
                 hls->last_dts = slice->dts;
+                hls->step = 0;
 
             } else {
                 hls->dropped_frames++;
@@ -279,28 +292,64 @@ ngx_media_hls_add_burst(ngx_media_hls_t *hls,
             }
         }
 
-        duration = NGX_MEDIA_HLS_MS(hls->last_dts - hls->first_dts);
+        /*
+         * A segment that ends here ends at this frame, not at the one before
+         * it: measured to the previous frame, a segment of exactly the
+         * minimum at a keyframe interval of the minimum is one frame short,
+         * is not cut, and runs to the next keyframe - 3 s segments for 2 s
+         * asked, and an EXTINF a frame short of the media it covers.
+         */
+        if (hls->npieces > 0 && slice->dts > hls->last_dts
+            && slice->dts - hls->last_dts > hls->step)
+        {
+            hls->step = slice->dts - hls->last_dts;
+        }
+
+        if (slice->dts > hls->first_dts) {
+            duration = NGX_MEDIA_HLS_MS(slice->dts - hls->first_dts);
+
+        } else {
+            duration = NGX_MEDIA_HLS_MS(hls->last_dts - hls->first_dts);
+        }
 
         if (hls->npieces > 0
             && slice->media_type == NGX_MEDIA_TYPE_VIDEO
             && slice->keyframe
             && duration >= hls->conf.min_duration)
         {
+            if (slice->dts > hls->last_dts) {
+                hls->last_dts = slice->dts;
+            }
+
             (void) ngx_media_hls_cut(hls);
 
             hls->started = 1;
             hls->first_dts = slice->dts;
             hls->last_dts = slice->dts;
+            hls->step = 0;
 
         } else if (hls->npieces > 0
-                   && duration >= hls->conf.max_duration)
+                   && (duration >= hls->conf.max_duration
+                       || duration + NGX_MEDIA_HLS_MS(hls->step)
+                          > hls->conf.max_duration))
         {
+            /*
+             * Forced one frame early: cut where the next frame, at the
+             * largest step this segment has seen, would pass the maximum, so
+             * the segment ends at or before it.  A platform that takes 1-4 s
+             * means 4, not 4.008.
+             */
+            if (slice->dts > hls->last_dts) {
+                hls->last_dts = slice->dts;
+            }
+
             (void) ngx_media_hls_cut(hls);
             hls->forced_cuts++;
 
             hls->started = 1;
             hls->first_dts = slice->dts;
             hls->last_dts = slice->dts;
+            hls->step = 0;
         }
 
         if (hls->npieces >= NGX_MEDIA_HLS_MAX_PIECES) {
@@ -457,6 +506,7 @@ reset:
     hls->bytes = 0;
     hls->first_dts = 0;
     hls->last_dts = 0;
+    hls->step = 0;
 
     return NGX_OK;
 }

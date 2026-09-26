@@ -14,9 +14,12 @@ static const ngx_media_hls_profile_t  ngx_media_hls_profiles[] = {
       4000,     /* 4s maximum segment */
       5,        /* no more than 5 outstanding segments */
       1,        /* MPEG-TS */
+      2000,     /* 2s segments by default */
+      NGX_MEDIA_HLS_PUSH_POST,
+      0,        /* YouTube expires segments itself: no DELETE */
     },
 
-    { NULL, 0, 0, 0, 0, 0, 0 }
+    { NULL, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 };
 
 const ngx_media_hls_profile_t *
@@ -42,10 +45,11 @@ ngx_media_hls_profile_find(const ngx_str_t *name)
 
 ngx_int_t
 ngx_media_hls_profile_apply(const ngx_media_hls_profile_t *profile,
-    const ngx_str_t *url, ngx_uint_t *segment_duration_ms,
-    ngx_uint_t *playlist_window, ngx_uint_t *http_post, const char **why)
+    const ngx_str_t *url, ngx_media_hls_push_settings_t *settings,
+    const char **why)
 {
     static const char  *ok = "";
+    ngx_uint_t          min, max, window;
 
     if (why == NULL) {
         why = &ok;
@@ -53,11 +57,7 @@ ngx_media_hls_profile_apply(const ngx_media_hls_profile_t *profile,
 
     *why = "";
 
-    if (profile == NULL) {
-        return NGX_OK;
-    }
-
-    if (profile->https_required) {
+    if (profile != NULL && profile->https_required) {
 
         if (url == NULL || url->len < 8
             || ngx_strncasecmp(url->data, (u_char *) "https://", 8) != 0)
@@ -73,26 +73,55 @@ ngx_media_hls_profile_apply(const ngx_media_hls_profile_t *profile,
      * than quietly clamped - silently changing an operator's number is worse
      * than telling them it is wrong.
      */
-    if (*segment_duration_ms == 0) {
-        *segment_duration_ms = 2000;
+    min = (profile != NULL) ? profile->min_segment_ms
+                            : NGX_MEDIA_HLS_PUSH_SEGMENT_MIN;
+    max = (profile != NULL) ? profile->max_segment_ms
+                            : NGX_MEDIA_HLS_PUSH_SEGMENT_MAX;
+    window = (profile != NULL) ? profile->max_window
+                               : NGX_MEDIA_HLS_PUSH_WINDOW_MAX;
 
-    } else if (*segment_duration_ms < profile->min_segment_ms
-               || *segment_duration_ms > profile->max_segment_ms)
+    if (settings->segment_duration_ms == 0) {
+        settings->segment_duration_ms = (profile != NULL)
+                                        ? profile->default_segment_ms : 0;
+
+    } else if (settings->segment_duration_ms < min
+               || settings->segment_duration_ms > max)
     {
-        *why = "segment duration is outside the profile's range";
+        *why = (profile != NULL)
+               ? "segment duration is outside the profile's range"
+               : "segment duration must be 1000-30000 ms";
         return NGX_DECLINED;
     }
 
-    if (*playlist_window == 0) {
-        *playlist_window = profile->max_window;
+    /*
+     * The longest segment the destination takes: the platform's limit, or
+     * for a generic destination twice what it asked for (RFC 8216 lets a
+     * segment run to the target duration, and a keyframe interval rarely
+     * lands exactly on it).
+     */
+    settings->segment_max_ms = (profile != NULL)
+                               ? profile->max_segment_ms
+                               : settings->segment_duration_ms * 2;
 
-    } else if (*playlist_window > profile->max_window) {
-        *why = "playlist window exceeds the profile's maximum";
+    if (settings->playlist_window == 0) {
+        settings->playlist_window = (profile != NULL) ? profile->max_window
+                                                      : 0;
+
+    } else if (settings->playlist_window > window) {
+        *why = (profile != NULL)
+               ? "playlist window exceeds the profile's maximum"
+               : "playlist window must be 1-32 segments";
         return NGX_DECLINED;
     }
 
-    if (*http_post == 0) {
-        *http_post = 1;
+    if (settings->method == 0) {
+        settings->method = (profile != NULL) ? profile->default_method
+                                             : NGX_MEDIA_HLS_PUSH_PUT;
+    }
+
+    if (settings->delete_expired < 0) {
+        settings->delete_expired = (profile != NULL)
+                                   ? (ngx_int_t) profile->delete_expired : 1;
     }
 
     return NGX_OK;

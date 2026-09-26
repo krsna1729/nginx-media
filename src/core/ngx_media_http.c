@@ -393,7 +393,8 @@ ngx_media_http_write(ngx_int_t fd, void *ssl, const u_char *buf, size_t len)
     int      err;
 
     if (ssl == NULL) {
-        return write(fd, buf, len);
+        /* a kept connection the remote closed must not raise SIGPIPE */
+        return send(fd, buf, len, MSG_NOSIGNAL);
     }
 
     n = (ssize_t) SSL_write((SSL *) ssl, buf, (int) len);
@@ -547,126 +548,76 @@ ngx_media_http_get(const ngx_str_t *url, const ngx_str_t *ca_file,
     return NGX_OK;
 }
 
-/*
- * One blocking PUT of an already-open file snapshot.  The descriptor is
- * caller-owned and may be shared across destinations: sendfile uses an
- * explicit offset, and userspace TLS uses pread so neither path mutates its
- * shared file position.
- */
-ngx_int_t
-ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
-    const u_char *path, int file_fd, off_t size, ngx_log_t *log)
+/* the whole buffer, or the count written before the connection failed */
+static ssize_t
+ngx_media_http_write_all(ngx_int_t fd, void *ssl, const u_char *buf,
+    size_t len)
 {
-    ngx_str_t   host, target;
-    ngx_int_t   port = 80;
-    ngx_int_t   fd, rc;
-    ngx_uint_t  tls = 0;
-    void       *ssl = NULL;
-    off_t       sent = 0, offset = 0;
-    ssize_t     n;
-    u_char      header[1024];
-    int         header_len;
-    u_char      response[512];
-    ssize_t     rn;
-    u_char      full[NGX_MEDIA_HTTP_PATH_MAX];
+    size_t   done = 0;
+    ssize_t  n;
 
-    if (path == NULL || file_fd < 0 || size < 0) {
-        return NGX_ERROR;
-    }
+    while (done < len) {
+        n = ngx_media_http_write(fd, ssl, buf + done, len - done);
 
-    rc = ngx_media_http_split(url, &host, &port, &target, &tls, log);
-
-    if (rc != NGX_OK) {
-        return rc;
-    }
-
-    /* the destination directory is the endpoint's prefix */
-    {
-        u_char *base = (u_char *) strrchr((char *) path, '/');
-
-        if (target.len + 1 + (base != NULL ? strlen((char *) base + 1) : 0)
-            >= sizeof(full))
-        {
-            return NGX_ERROR;
+        if (n > 0) {
+            done += (size_t) n;
+            continue;
         }
 
-        ngx_memcpy(full, target.data, target.len);
-        full[target.len] = '\0';
-
-        if (target.data[target.len - 1] != '/') {
-            full[target.len] = '/';
-            full[target.len + 1] = '\0';
+        if (n < 0 && errno == EINTR) {
+            continue;
         }
 
-        if (base != NULL) {
-            strncat((char *) full, (char *) base + 1,
-                    sizeof(full) - strlen((char *) full) - 1);
-        }
-
-        target.data = full;
-        target.len = strlen((char *) full);
+        break;
     }
 
-    fd = ngx_media_http_connect(&host, port, log);
-    if (fd < 0) {
-        return NGX_ERROR;
+    return (ssize_t) done;
+}
+
+/* --- requests on a kept connection ------------------------------------- */
+
+void
+ngx_media_http_conn_init(ngx_media_http_conn_t *c)
+{
+    ngx_memzero(c, sizeof(*c));
+    c->fd = -1;
+}
+
+void
+ngx_media_http_conn_close(ngx_media_http_conn_t *c)
+{
+    if (c->ssl != NULL) {
+        SSL_free((SSL *) c->ssl);
+        c->ssl = NULL;
     }
 
-    ngx_media_http_deadline(fd);
-
-    if (tls) {
-        ssl = ngx_media_http_tls_start(fd, &host, ca_file, log);
-
-        if (ssl == NULL) {
-            (void) close(fd);
-            return NGX_ERROR;
-        }
+    if (c->fd >= 0) {
+        (void) close(c->fd);
+        c->fd = -1;
     }
 
+    c->key[0] = '\0';
+}
 
-    header_len = snprintf((char *) header, sizeof(header),
-                          "PUT %.*s HTTP/1.1\r\n"
-                          "Host: %.*s\r\n"
-                          "Content-Length: %lld\r\n"
-                          "Content-Type: video/mp2t\r\n"
-                          "Connection: close\r\n\r\n",
-                          (int) target.len, (char *) target.data,
-                          (int) host.len, (char *) host.data,
-                          (long long) size);
+/*
+ * The body of a PUT, in the fewest copies this connection allows.
+ *
+ * Plain or kTLS: sendfile, so the page cache goes straight to the socket
+ * and the kernel encrypts if there is anything to encrypt.  sendfile is not
+ * a server-side privilege - it works on any socket, including this client
+ * connection - and with kTLS it is the only way to keep a TLS upload out of
+ * user space, which is what TLS_TX_ZEROCOPY_RO exists for.
+ *
+ * Userspace TLS: SSL_write, because OpenSSL needs plaintext in user space
+ * and cannot be handed a file descriptor.  That is one extra copy per
+ * destination, and it is reported rather than pretended away.
+ */
+static off_t
+ngx_media_http_send_body(ngx_int_t fd, void *ssl, int file_fd, off_t size)
+{
+    off_t    sent = 0, offset = 0;
+    ssize_t  n;
 
-    if (header_len < 0 || (size_t) header_len >= sizeof(header)) {
-        if (ssl != NULL) {
-            SSL_free((SSL *) ssl);
-        }
-        (void) close(fd);
-        return NGX_ERROR;
-    }
-
-    if (ngx_media_http_write(fd, ssl, header, (size_t) header_len)
-        != header_len)
-    {
-
-        if (ssl != NULL) {
-            SSL_free((SSL *) ssl);
-        }
-
-        (void) close(fd);
-        return NGX_ERROR;
-    }
-
-    /*
-     * The body takes the fewest copies this connection allows.
-     *
-     * Plain or kTLS: sendfile, so the page cache goes straight to the socket
-     * and the kernel encrypts if there is anything to encrypt.  sendfile is
-     * not a server-side privilege - it works on any socket, including this
-     * client connection - and with kTLS it is the only way to keep a TLS
-     * upload out of user space, which is what TLS_TX_ZEROCOPY_RO exists for.
-     *
-     * Userspace TLS: SSL_write, because OpenSSL needs plaintext in user space
-     * and cannot be handed a file descriptor.  That is one extra copy per
-     * destination, and it is reported rather than pretended away.
-     */
     if (ssl == NULL || ngx_media_http_ktls_active(ssl)) {
 
         while (sent < size) {
@@ -685,33 +636,25 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
             /*
              * EAGAIN is the socket deadline, and on a send it means the
              * remote stopped reading for NGX_MEDIA_HTTP_IO_TIMEOUT_MS.  The
-             * transfer is then short, which the check below fails: a truncated
+             * transfer is then short, which the caller fails: a truncated
              * segment must not be published.
              */
             break;
         }
 
-        if (ssl != NULL && sent == size) {
-            NGX_MEDIA_HTTP_LOG(NGX_LOG_INFO, log,
-                          "media: upload used kTLS sendfile (no user-space "
-                          "copy) to %V", url);
-        }
+        return sent;
+    }
 
-    } else {
+    {
         u_char  buf[16384];
         size_t  want;
-
-        NGX_MEDIA_HTTP_LOG(NGX_LOG_INFO, log,
-                      "media: upload to %V is userspace TLS, so the body "
-                      "goes through user space; kTLS would remove that copy",
-                      url);
 
         while (sent < size) {
             want = (size - sent > (off_t) sizeof(buf))
                        ? sizeof(buf) : (size_t) (size - sent);
             n = pread(file_fd, buf, want, offset);
             if (n > 0) {
-                if (ngx_media_http_write(fd, ssl, buf, (size_t) n) != n) {
+                if (ngx_media_http_write_all(fd, ssl, buf, (size_t) n) != n) {
                     break;
                 }
                 sent += n;
@@ -726,43 +669,323 @@ ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
         }
     }
 
-    /* a short transfer would publish a truncated segment: fail rather than lie */
-    if (sent != size) {
-        NGX_MEDIA_HTTP_LOG(NGX_LOG_WARN, log,
-                      "media: hls push sent %O of %O bytes from %s",
-                      sent, size, path);
-
-        if (ssl != NULL) {
-            SSL_free((SSL *) ssl);
-        }
-
-        (void) close(fd);
-        return NGX_ERROR;
-    }
-
-
-    rn = ngx_media_http_read(fd, ssl, response, sizeof(response) - 1);
-
-    if (ssl != NULL) {
-        SSL_free((SSL *) ssl);
-    }
-
-    (void) close(fd);
-
-    if (rn <= 0) {
-        return NGX_ERROR;
-    }
-
-    response[rn] = '\0';
-
-    /* "HTTP/1.1 2xx" is the whole contract */
-    if (response[9] != '2') {
-        NGX_MEDIA_HTTP_LOG(NGX_LOG_WARN, log,
-                      "media: hls push got %.3s from the endpoint",
-                      response + 9);
-        return NGX_ERROR;
-    }
-
-    return NGX_OK;
+    return sent;
 }
 
+/* a header's value, case-insensitively, or NULL; hdr is NUL-terminated */
+static const char *
+ngx_media_http_header(const char *hdr, const char *name)
+{
+    size_t       len = strlen(name);
+    const char  *p = strstr(hdr, "\r\n");
+
+    while (p != NULL && p[2] != '\r' && p[2] != '\0') {
+        p += 2;
+        if (strncasecmp(p, name, len) == 0 && p[len] == ':') {
+            p += len + 1;
+            while (*p == ' ' || *p == '\t') {
+                p++;
+            }
+            return p;
+        }
+        p = strstr(p, "\r\n");
+    }
+
+    return NULL;
+}
+
+/*
+ * Reads one response: the header block, then as much body as the header
+ * says, so the next request on the connection starts clean.  Returns the
+ * status, or NGX_ERROR; *reusable says whether the connection may carry
+ * another request.
+ */
+static ngx_int_t
+ngx_media_http_response(ngx_int_t fd, void *ssl, ngx_uint_t *reusable)
+{
+    char         buf[4096];
+    size_t       have = 0, header_len;
+    ssize_t      n;
+    char        *end;
+    const char  *v;
+    long long    length = -1, remain;
+    ngx_int_t    status;
+
+    *reusable = 0;
+
+    for ( ;; ) {
+        if (have + 1 >= sizeof(buf)) {
+            return NGX_ERROR;           /* a header larger than we accept */
+        }
+
+        n = ngx_media_http_read(fd, ssl, (u_char *) buf + have,
+                                sizeof(buf) - have - 1);
+        if (n > 0) {
+            have += (size_t) n;
+            buf[have] = '\0';
+            if ((end = strstr(buf, "\r\n\r\n")) != NULL) {
+                break;
+            }
+            continue;
+        }
+
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+
+        return NGX_ERROR;               /* closed or timed out, no status */
+    }
+
+    header_len = (size_t) (end - buf) + 4;
+    end[2] = '\0';                      /* headers end at the blank line */
+
+    if (have < 12 || strncmp(buf, "HTTP/1.", 7) != 0
+        || buf[9] < '1' || buf[9] > '5')
+    {
+        return NGX_ERROR;
+    }
+
+    status = (buf[9] - '0') * 100 + (buf[10] - '0') * 10 + (buf[11] - '0');
+
+    if ((v = ngx_media_http_header(buf, "Content-Length")) != NULL) {
+        length = atoll(v);
+    }
+
+    *reusable = (buf[7] == '1');        /* HTTP/1.1 defaults to keep-alive */
+
+    if ((v = ngx_media_http_header(buf, "Connection")) != NULL
+        && strncasecmp(v, "close", 5) == 0)
+    {
+        *reusable = 0;
+    }
+
+    if (ngx_media_http_header(buf, "Transfer-Encoding") != NULL) {
+        *reusable = 0;                  /* not decoded: the body ends at close */
+        return status;
+    }
+
+    if (status == 204 || status == 304 || (status >= 100 && status < 200)) {
+        return status;
+    }
+
+    if (length < 0) {
+        *reusable = 0;                  /* the body runs to close */
+        return status;
+    }
+
+    /* discard the body: what is already buffered, then the rest */
+    remain = length - (long long) (have - header_len);
+
+    while (remain > 0) {
+        n = ngx_media_http_read(fd, ssl, (u_char *) buf,
+                                (size_t) (remain < (long long) sizeof(buf)
+                                          ? remain : (long long) sizeof(buf)));
+        if (n > 0) {
+            remain -= n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+        *reusable = 0;
+        break;
+    }
+
+    return status;
+}
+
+ngx_int_t
+ngx_media_http_send(ngx_media_http_conn_t *c, const ngx_str_t *url,
+    const ngx_str_t *ca_file, const char *method, const u_char *name,
+    int file_fd, const u_char *buf, off_t size, const char *content_type,
+    ngx_log_t *log)
+{
+    ngx_str_t   host, target;
+    ngx_int_t   port = 80, rc, status;
+    ngx_uint_t  tls = 0, attempt, reused, reusable;
+    u_char      header[1200];
+    int         header_len;
+    u_char      full[NGX_MEDIA_HTTP_PATH_MAX];
+    u_char      key[sizeof(c->key)];
+    ngx_uint_t  body = (file_fd >= 0 || buf != NULL);
+
+    if (name == NULL) {
+        return NGX_ERROR;
+    }
+
+    rc = ngx_media_http_split(url, &host, &port, &target, &tls, log);
+
+    if (rc != NGX_OK) {
+        return rc;
+    }
+
+    /*
+     * Where the object's name goes.  A path endpoint is a directory: the
+     * name follows it after a slash.  An endpoint with a query string names
+     * the object in a parameter, which is YouTube's form
+     * (http_upload_hls?cid=KEY&copy=0&file=NAME): the name completes a
+     * trailing "file=" or "=", or is appended as "&file=NAME".
+     */
+    if (target.len + 8 + strlen((char *) name) >= sizeof(full)) {
+        return NGX_ERROR;
+    }
+
+    ngx_memcpy(full, target.data, target.len);
+    full[target.len] = '\0';
+
+    if (ngx_strlchr(target.data, target.data + target.len, '?') != NULL) {
+        if (target.data[target.len - 1] != '=') {
+            strcat((char *) full,
+                   (target.data[target.len - 1] == '?'
+                    || target.data[target.len - 1] == '&')
+                       ? "file=" : "&file=");
+        }
+
+    } else if (target.data[target.len - 1] != '/') {
+        strcat((char *) full, "/");
+    }
+
+    strcat((char *) full, (char *) name);
+
+    target.data = full;
+    target.len = strlen((char *) full);
+
+    (void) snprintf((char *) key, sizeof(key), "%u|%.*s|%d|%.*s",
+                    (unsigned) tls, (int) host.len, (char *) host.data,
+                    (int) port,
+                    (ca_file != NULL) ? (int) ca_file->len : 0,
+                    (ca_file != NULL && ca_file->data != NULL)
+                        ? (char *) ca_file->data : "");
+
+    if (body) {
+        header_len = snprintf((char *) header, sizeof(header),
+                              "%s %.*s HTTP/1.1\r\n"
+                              "Host: %.*s\r\n"
+                              "User-Agent: nginx-media\r\n"
+                              "Content-Length: %lld\r\n"
+                              "Content-Type: %s\r\n"
+                              "Connection: keep-alive\r\n\r\n",
+                              method, (int) target.len, (char *) target.data,
+                              (int) host.len, (char *) host.data,
+                              (long long) size,
+                              content_type != NULL ? content_type
+                                                   : "application/octet-stream");
+    } else {
+        header_len = snprintf((char *) header, sizeof(header),
+                              "%s %.*s HTTP/1.1\r\n"
+                              "Host: %.*s\r\n"
+                              "User-Agent: nginx-media\r\n"
+                              "Content-Length: 0\r\n"
+                              "Connection: keep-alive\r\n\r\n",
+                              method, (int) target.len, (char *) target.data,
+                              (int) host.len, (char *) host.data);
+    }
+
+    if (header_len < 0 || (size_t) header_len >= sizeof(header)) {
+        return NGX_ERROR;
+    }
+
+    /*
+     * A kept connection may have been closed by the remote since its last
+     * request; that is found out only by using it, so a request that fails
+     * on a reused connection before any status arrives is sent once more on
+     * a new one.  A request on a new connection is not repeated.
+     */
+    for (attempt = 0; attempt < 2; attempt++) {
+
+        reused = (c->fd >= 0 && strcmp((char *) c->key, (char *) key) == 0);
+
+        if (!reused) {
+            ngx_media_http_conn_close(c);
+
+            c->fd = (int) ngx_media_http_connect(&host, port, log);
+            if (c->fd < 0) {
+                c->fd = -1;
+                return NGX_ERROR;
+            }
+
+            ngx_media_http_deadline(c->fd);
+
+            if (tls) {
+                c->ssl = ngx_media_http_tls_start(c->fd, &host, ca_file, log);
+                if (c->ssl == NULL) {
+                    ngx_media_http_conn_close(c);
+                    return NGX_ERROR;
+                }
+
+                NGX_MEDIA_HTTP_LOG(NGX_LOG_INFO, log,
+                              ngx_media_http_ktls_active(c->ssl)
+                                  ? "media: upload used kTLS sendfile (no "
+                                    "user-space copy) to %V"
+                                  : "media: upload to %V is userspace TLS; "
+                                    "kTLS would remove a copy per object",
+                              url);
+            }
+
+            ngx_memcpy(c->key, key, sizeof(key));
+            c->connects++;
+        }
+
+        if (ngx_media_http_write_all(c->fd, c->ssl, header,
+                                     (size_t) header_len)
+            != header_len)
+        {
+            ngx_media_http_conn_close(c);
+            if (reused) {
+                continue;
+            }
+            return NGX_ERROR;
+        }
+
+        if (body) {
+            off_t  sent;
+
+            if (file_fd >= 0) {
+                sent = ngx_media_http_send_body(c->fd, c->ssl, file_fd, size);
+
+            } else {
+                sent = ngx_media_http_write_all(c->fd, c->ssl, buf,
+                                                (size_t) size);
+            }
+
+
+            /* a short transfer would publish a truncated object */
+            if (sent != size) {
+                NGX_MEDIA_HTTP_LOG(NGX_LOG_WARN, log,
+                              "media: hls push sent %O of %O bytes of %s",
+                              sent, size, name);
+                ngx_media_http_conn_close(c);
+                if (reused && sent == 0) {
+                    continue;
+                }
+                return NGX_ERROR;
+            }
+        }
+
+        status = ngx_media_http_response(c->fd, c->ssl, &reusable);
+
+        if (status == NGX_ERROR) {
+            ngx_media_http_conn_close(c);
+            if (reused) {
+                continue;
+            }
+            return NGX_ERROR;
+        }
+
+        c->requests++;
+
+        if (!reusable) {
+            ngx_media_http_conn_close(c);
+        }
+
+        if (status < 200 || status >= 300) {
+            NGX_MEDIA_HTTP_LOG(NGX_LOG_WARN, log,
+                          "media: hls push %s %s got %i from the endpoint",
+                          method, name, status);
+        }
+
+        return status;
+    }
+
+    return NGX_ERROR;
+}

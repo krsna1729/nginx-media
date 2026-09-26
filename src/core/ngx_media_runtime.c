@@ -1,4 +1,5 @@
 #include "ngx_media_runtime.h"
+#include "ngx_media_destination.h"
 #include "ngx_media_executor.h"
 #include "ngx_media_transform.h"
 #include "ngx_media_file.h"
@@ -66,6 +67,14 @@ struct ngx_media_runtime_outputs_s {
     uint64_t               generation;
     uint64_t               frames;
     uint64_t               bursts;
+
+    /* when the destinations' segmentation limits were last applied */
+    ngx_msec_t             limits_at;
+    uint64_t               limits_revision;
+    ngx_uint_t             limits_target;
+    ngx_uint_t             limits_max;
+    ngx_uint_t             limits_window;
+
     ngx_media_runtime_outputs_t *next;
 };
 typedef struct ngx_media_runtime_prepare_s ngx_media_runtime_prepare_t;
@@ -920,8 +929,9 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
 
         hls_conf.path = *dir;
         hls_conf.target_duration = NGX_MEDIA_RUNTIME_HLS_TARGET;
-        hls_conf.min_duration = NGX_MEDIA_RUNTIME_HLS_TARGET / 2;
-        hls_conf.max_duration = NGX_MEDIA_RUNTIME_HLS_TARGET * 2;
+        hls_conf.min_duration = NGX_MEDIA_RUNTIME_HLS_MIN;
+        hls_conf.max_duration = NGX_MEDIA_RUNTIME_HLS_MAX;
+        hls_conf.max_segments = NGX_MEDIA_RUNTIME_HLS_WINDOW;
 
         if (ngx_media_hls_init(&out->hls, &hls_conf, log) != NGX_OK) {
             ngx_media_runtime_outputs_stop(out);
@@ -930,6 +940,9 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
         }
 
         out->hls_ready = 1;
+        out->limits_target = NGX_MEDIA_RUNTIME_HLS_TARGET;
+        out->limits_max = NGX_MEDIA_RUNTIME_HLS_MAX;
+        out->limits_window = NGX_MEDIA_RUNTIME_HLS_WINDOW;
 
         ngx_log_error(NGX_LOG_NOTICE, log, 0,
                       "media: hls output started for %V/%V in %V",
@@ -994,6 +1007,114 @@ active:
     ngx_media_runtime_outputs = out;
     ngx_media_runtime_outputs_count++;
     return out;
+}
+
+/*
+ * A destination profile's segment duration drives the stream's segmenter.
+ * Segmentation is shared by every consumer of a program - the local origin
+ * and every push destination read the same segments - so the strictest
+ * destination sets it: the shortest requested duration becomes the target
+ * and the keyframe threshold, and the forced cut stays at twice that (never
+ * above the default ceiling).  Removing the destination restores the
+ * defaults.  Applied at most once a second; a change takes effect at the
+ * next segment boundary.  The playlist window is per destination and is
+ * applied where each destination's playlist is uploaded.
+ */
+static void
+ngx_media_runtime_hls_limits(ngx_media_runtime_outputs_t *out,
+    ngx_msec_t now)
+{
+    ngx_media_destination_t  *destination;
+    ngx_queue_t              *q;
+    ngx_uint_t                target = 0, max = 0;
+    ngx_uint_t                window = NGX_MEDIA_RUNTIME_HLS_WINDOW;
+
+    /*
+     * On every change to the stream's desired state - a destination added,
+     * removed or toggled - so a destination's first segment is already cut
+     * to its rules, and once a second besides.
+     */
+    if (!out->hls_ready
+        || (out->limits_revision == out->stream->revision
+            && out->limits_at != 0 && now - out->limits_at < 1000))
+    {
+        return;
+    }
+
+    out->limits_at = now;
+    out->limits_revision = out->stream->revision;
+
+    /*
+     * The strictest of the stream's HLS push destinations: the shortest
+     * segment any of them asks for, the tightest ceiling any of them states,
+     * and the longest window any of them lists.  Each destination then gets
+     * its own window from the playlist rewrite; the segments are shared.
+     */
+    for (q = ngx_queue_head(&out->stream->destinations);
+         q != ngx_queue_sentinel(&out->stream->destinations);
+         q = ngx_queue_next(q))
+    {
+        destination = ngx_queue_data(q, ngx_media_destination_t, queue);
+
+        if (destination->type != NGX_MEDIA_DEST_HLS_PUSH
+            || !destination->enabled)
+        {
+            continue;
+        }
+
+        if (destination->segment_duration_ms > 0
+            && (target == 0 || destination->segment_duration_ms < target))
+        {
+            target = destination->segment_duration_ms;
+        }
+
+        if (destination->segment_max_ms > 0
+            && (max == 0 || destination->segment_max_ms < max))
+        {
+            max = destination->segment_max_ms;
+        }
+
+        if (destination->playlist_window > window) {
+            window = destination->playlist_window;
+        }
+    }
+
+    if (target == 0) {
+        target = NGX_MEDIA_RUNTIME_HLS_TARGET;
+    }
+
+    if (max == 0) {
+        max = (target == NGX_MEDIA_RUNTIME_HLS_TARGET)
+              ? NGX_MEDIA_RUNTIME_HLS_MAX : target * 2;
+    }
+
+    if (max < target) {
+        max = target;
+    }
+
+    if (window > NGX_MEDIA_HLS_SEGMENTS_MAX) {
+        window = NGX_MEDIA_HLS_SEGMENTS_MAX;
+    }
+
+    if (target == out->limits_target && max == out->limits_max
+        && window == out->limits_window)
+    {
+        return;
+    }
+
+    out->hls.conf.target_duration = target;
+    out->hls.conf.min_duration = target;
+    out->hls.conf.max_duration = max;
+    out->hls.conf.max_segments = window;
+    out->limits_target = target;
+    out->limits_max = max;
+    out->limits_window = window;
+
+    ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
+                  "media: hls segmentation for %V/%V is now %ui-%ui ms, "
+                  "window %ui, for its destinations",
+                  &out->stream->application, &out->stream->name,
+                  target, max, window);
 }
 
 static ngx_media_runtime_outputs_t *
@@ -2375,6 +2496,7 @@ ngx_media_runtime_visit(ngx_log_t *log)
             }
 
             if (out != NULL) {
+                ngx_media_runtime_hls_limits(out, now);
                 ngx_media_runtime_outputs_drain(out, log, &budget);
             }
         }

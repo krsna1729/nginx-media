@@ -264,11 +264,12 @@ per Gbit/s for the SRT sender, 512 SRT destinations at 8.8 Mbit/s
    fixed 4 on a 4-CPU host.  On a larger host it will run up to 16 senders
    (one per lane); that the curve stays flat there, as it did from 4 to 16
    here, is expected but unmeasured.
-4. **HLS push to YouTube**: the segmenter's 6 s target and 6-segment window
-   exceed YouTube's 1–4 s and 5; the `youtube_live` profile validates but does
-   not drive the segmenter.
-5. **Outbound HLS push** opens a connection per object and does not retry a
-   failed upload; under packet loss to a distant origin this costs segments.
+4. **HLS push to YouTube** is checked against the published contract with a
+   YouTube-shaped endpoint (`make hls-push-conformance`), not against
+   YouTube itself: nothing in the test suite talks to the platform.
+5. **Outbound HLS push under loss**: persistent connections, retry within a
+   segment duration and `EXT-X-GAP` are in place and tested against refusing
+   endpoints; their behaviour over a lossy long-distance path is not measured.
 6. **robotweax/srt** passed one rung higher than libsrt at equal CPU per
    Gbit/s, but it is pre-1.0 (0.2.5); its receiver-side cost and behaviour
    under loss are not measured here.

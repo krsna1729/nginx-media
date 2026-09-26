@@ -26,7 +26,16 @@
 #define NGX_MEDIA_RUNTIME_VISIT_MAX_FRAMES 64
 #define NGX_MEDIA_RUNTIME_VISIT_MAX_BYTES  (4 * 1024 * 1024)
 #define NGX_MEDIA_RUNTIME_VISIT_MAX_MS     2
-#define NGX_MEDIA_RUNTIME_HLS_TARGET      6000
+/*
+ * HLS segmentation defaults: YouTube's HLS ingest contract (1-4 s segments,
+ * at most five in the playlist), which every HLS push destination and the
+ * local origin then satisfy without a profile.  A destination profile that
+ * asks for shorter segments tightens the stream's segmenter at runtime.
+ */
+#define NGX_MEDIA_RUNTIME_HLS_TARGET      2000
+#define NGX_MEDIA_RUNTIME_HLS_MIN         2000
+#define NGX_MEDIA_RUNTIME_HLS_MAX         4000
+#define NGX_MEDIA_RUNTIME_HLS_WINDOW      5
 
 /*
  * Worker initialisation: adopts the shared owner directory.  Every worker

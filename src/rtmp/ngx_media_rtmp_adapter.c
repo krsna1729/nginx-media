@@ -705,14 +705,31 @@ ngx_media_rtmp_publisher_video_config(ngx_media_rtmp_publisher_t *pub,
  * Annex B the core carries, then emit them as one program frame.  The two
  * paths differ only in how they found the payload and which codec it is.
  */
+/* whether a NAL unit is a parameter set: SPS/PPS, or VPS/SPS/PPS for HEVC */
+static ngx_uint_t
+ngx_media_rtmp_parameter_set(ngx_uint_t codec, u_char header)
+{
+    ngx_uint_t  type;
+
+    if (codec == NGX_MEDIA_CODEC_H265) {
+        type = (header >> 1) & 0x3f;
+        return type >= 32 && type <= 34;
+    }
+
+    type = header & 0x1f;
+    return type == 7 || type == 8;
+}
+
 static ngx_int_t
 ngx_media_rtmp_publisher_video_payload(ngx_media_rtmp_publisher_t *pub,
     uint32_t timestamp_ms, size_t nal_length_size, const u_char *payload,
     size_t payload_len, ngx_uint_t keyframe, int32_t cts, ngx_uint_t codec,
     ngx_media_rtmp_frame_pt frame_cb, void *ctx)
 {
-    ngx_media_buf_t  *buf;
+    ngx_media_buf_t  *buf, *sets = NULL;
     size_t            capacity, i, nals = 0, pos = 0, out_len = 0;
+    size_t            sets_len = 0;
+    ngx_uint_t        has_sets = 0;
     u_char           *out;
 
     /* one start code per NAL unit replaces its length prefix */
@@ -721,6 +738,13 @@ ngx_media_rtmp_publisher_video_payload(ngx_media_rtmp_publisher_t *pub,
 
         for (i = 0; i < nal_length_size; i++) {
             nlen = (nlen << 8) | payload[pos + i];
+        }
+
+        if (nlen > 0 && pos + nal_length_size < payload_len
+            && ngx_media_rtmp_parameter_set(codec,
+                                            payload[pos + nal_length_size]))
+        {
+            has_sets = 1;
         }
 
         pos += nal_length_size + nlen;
@@ -737,7 +761,23 @@ ngx_media_rtmp_publisher_video_payload(ngx_media_rtmp_publisher_t *pub,
         return NGX_OK;
     }
 
-    capacity = payload_len + nals * 4;
+    /*
+     * RTMP carries the parameter sets once, in the sequence header, and an
+     * encoder writing FLV (ffmpeg, OBS) does not repeat them in its IDR
+     * frames.  MPEG-TS has no sequence header: a segment, a late joiner or a
+     * player that seeks has only what is in the stream.  So a keyframe that
+     * does not carry its parameter sets gets the track's current ones in
+     * front of it, as Annex B, which is what every TS-based consumer expects
+     * - without this every HLS segment but the first was undecodable.
+     */
+    if (keyframe && !has_sets && pub->have_video
+        && pub->tracks.tracks[pub->video_track].config != NULL)
+    {
+        sets = pub->tracks.tracks[pub->video_track].config;
+        sets_len = ngx_media_buf_size(sets);
+    }
+
+    capacity = sets_len + payload_len + nals * 4;
 
     buf = ngx_media_buf_alloc(capacity);
 
@@ -747,15 +787,21 @@ ngx_media_rtmp_publisher_video_payload(ngx_media_rtmp_publisher_t *pub,
 
     out = ngx_media_buf_data(buf);
 
+    if (sets_len > 0) {
+        ngx_memcpy(out, ngx_media_buf_data(sets), sets_len);
+    }
+
     if (ngx_media_rtmp_avcc_payload_to_annexb(payload, payload_len,
-                                              nal_length_size, out,
-                                              capacity, &out_len)
+                                              nal_length_size, out + sets_len,
+                                              capacity - sets_len, &out_len)
         != NGX_OK)
     {
         ngx_media_buf_unref(buf);
         pub->errors++;
         return NGX_OK;
     }
+
+    out_len += sets_len;
 
     pub->last_dts = (int64_t) timestamp_ms * NGX_MEDIA_RTMP_TIMESCALE;
 

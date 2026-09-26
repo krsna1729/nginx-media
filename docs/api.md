@@ -360,7 +360,10 @@ enhanced-RTMP signalling it arrived with.
 
 Uploads run on a four-thread-ceiling pool; active concurrency starts at one
 and adapts within the worker's shared CPU budget.  Each destination has one
-upload in flight and a 64-file queue.  Queue overflow drops and counts the
+upload in flight, a 64-file queue and one kept HTTP/1.1 connection.  A failed
+upload waits at the head of its queue and is retried within the destination's
+segment duration; a segment never delivered is listed as `#EXT-X-GAP` in the
+playlists that destination is sent.  Queue overflow drops and counts the
 oldest queued file.  The notifier opens each sealed inode once, so HLS
 retention can unlink or replace its path without changing the queued snapshot.
 Deletion removes the destination from scheduling and drops queued files;
@@ -400,13 +403,39 @@ A profile is validation and defaults layered on the generic HLS publisher, not
 a special path through the media core, so when the platform changes its rules
 only the profile moves.  `youtube_live` requires an `https` endpoint, a segment
 duration between 1000 and 4000 ms, and at most five outstanding segments in the
-playlist; it fills 2000 ms and a window of five when a field is unset.  A
-configuration the platform would reject is refused — `400` with
-`{"error":"profile_violation","detail":"..."}` — rather than clamped, because
-silently changing an operator's number is worse than telling them it is wrong.
-An unknown profile is `400` `{"error":"unknown_profile"}`.  The profile is
-tested as a contract (`tests/integration/hls_profile_nginx.sh`); nothing in the
-test suite talks to the platform.
+playlist; it fills 2000 ms, a window of five, `POST` and no `DELETE` when a
+field is unset.  A configuration the platform would reject is refused — `400`
+with `{"error":"profile_violation","detail":"..."}` — rather than clamped,
+because silently changing an operator's number is worse than telling them it
+is wrong.  An unknown profile is `400` `{"error":"unknown_profile"}`.
+
+Without a profile the same fields apply with the generic limits:
+
+| Field | Values | Default |
+|---|---|---|
+| `segment_duration_ms` | 1000–30000 | the stream's (2000) |
+| `playlist_window` | 1–32 | the stream's (5) |
+| `method` | `"PUT"`, `"POST"` | `"PUT"` |
+| `delete_expired` | `true`, `false` | `true` |
+
+A value outside them is `400` `{"error":"invalid_hls_push","detail":"..."}`.
+The destination read reports what is in force:
+
+```json
+{"id":"yt","type":3,"host":"https://a.upload.youtube.com/http_upload_hls",
+ "port":0,"enabled":true,"revision":1,"profile":"youtube_live",
+ "segment_duration_ms":2000,"segment_max_ms":4000,"playlist_window":5,
+ "method":"POST","delete_expired":false}
+```
+
+The settings reach the wire: the stream's segmenter follows its strictest HLS
+push destination, and each destination is sent a playlist rewritten to its own
+window.  An endpoint with a query string, as YouTube's is, receives each
+object's name in its `file=` parameter; a path endpoint receives it as the last
+path component.  The contract is tested with a YouTube-shaped endpoint
+(`tests/integration/hls_profile_nginx.sh`,
+`tests/integration/hls_push_conformance.sh`); nothing in the test suite talks
+to the platform.
 
 The profile's validated numbers are recorded on the destination.  They do not
 yet drive the segmenter, which still decides its own segmentation, and the

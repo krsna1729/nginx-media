@@ -170,20 +170,36 @@ ngx_log_error(ngx_uint_t level, ngx_log_t *log, int err, const char *fmt, ...)
     (void) fmt;
 }
 
-/*
- * Unit suites do not perform network I/O.  HLS push integration exercises the
- * real HTTP client; the linked worker-pool code still uses its real notifier.
- */
-ngx_int_t
-ngx_media_http_put_file(const ngx_str_t *url, const ngx_str_t *ca_file,
-    const u_char *path, int file_fd, off_t size, ngx_log_t *log)
+/* Unit suites do not perform network I/O; HLS push integration does. */
+void
+ngx_media_http_conn_init(ngx_media_http_conn_t *c)
 {
+    ngx_memzero(c, sizeof(*c));
+    c->fd = -1;
+}
+
+void
+ngx_media_http_conn_close(ngx_media_http_conn_t *c)
+{
+    c->fd = -1;
+}
+
+ngx_int_t
+ngx_media_http_send(ngx_media_http_conn_t *c, const ngx_str_t *url,
+    const ngx_str_t *ca_file, const char *method, const u_char *name,
+    int file_fd, const u_char *buf, off_t size, const char *content_type,
+    ngx_log_t *log)
+{
+    (void) c;
     (void) url;
     (void) ca_file;
-    (void) path;
+    (void) method;
+    (void) name;
     (void) file_fd;
+    (void) buf;
     (void) size;
+    (void) content_type;
     (void) log;
 
-    return NGX_ERROR;
+    return NGX_DECLINED;
 }

@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -97,6 +98,16 @@ struct ngx_media_hls_ingest_source_s {
     ngx_uint_t               seen_next;
     u_char                   last_name[NGX_MEDIA_HLS_INGEST_NAME_MAX];
     ngx_uint_t               last_name_set;
+
+    /*
+     * The media sequence number of the last segment read, when a media
+     * playlist ordered it.  A playlist is how HLS says what comes next
+     * (RFC 8216 6.2.1), so while the uploader sends one it decides the
+     * order; without one the segment names do.
+     */
+    uint64_t                 last_seq;
+    ngx_uint_t               last_seq_set;
+    uint64_t                 playlist_segments;
     uint64_t                 segments;
     uint64_t                 frames;
     uint64_t                 failures;
@@ -484,6 +495,58 @@ ngx_media_hls_ingest_transport(ngx_media_hls_ingest_source_t *ingest,
 }
 
 /*
+ * Segment name order.  HLS encoders name segments with a number that grows
+ * by one per segment (DASH-IF Live Media Ingest, Interface-2 naming rule 5),
+ * but they do not pad it: ffmpeg writes index9.ts and then index10.ts, which
+ * compare the wrong way as strings.  Names are ordered by what precedes the
+ * trailing number, then by the number as a number, then as strings.
+ */
+static ngx_int_t
+ngx_media_hls_ingest_cmp(const u_char *a, const u_char *b)
+{
+    size_t      la = strlen((char *) a), lb = strlen((char *) b);
+    size_t      ea = la, eb = lb, da, db, sa, sb;
+    int         c;
+
+    /* the number sits before the extension */
+    while (ea > 0 && a[ea - 1] != '.') {
+        ea--;
+    }
+    while (eb > 0 && b[eb - 1] != '.') {
+        eb--;
+    }
+    ea = (ea > 0) ? ea - 1 : la;
+    eb = (eb > 0) ? eb - 1 : lb;
+
+    for (da = ea; da > 0 && a[da - 1] >= '0' && a[da - 1] <= '9'; da--) {
+        /* void */
+    }
+    for (db = eb; db > 0 && b[db - 1] >= '0' && b[db - 1] <= '9'; db--) {
+        /* void */
+    }
+
+    if (da == ea || db == eb || da != db || ngx_memcmp(a, b, da) != 0) {
+        return strcmp((char *) a, (char *) b);
+    }
+
+    /* same stem: compare the digit runs by value, ignoring leading zeros */
+    for (sa = da; sa + 1 < ea && a[sa] == '0'; sa++) {
+        /* void */
+    }
+    for (sb = db; sb + 1 < eb && b[sb] == '0'; sb++) {
+        /* void */
+    }
+
+    if (ea - sa != eb - sb) {
+        return (ea - sa < eb - sb) ? -1 : 1;
+    }
+
+    c = ngx_memcmp(a + sa, b + sb, ea - sa);
+
+    return (c != 0) ? c : strcmp((char *) a, (char *) b);
+}
+
+/*
  * Whether this name has already been read.  Read-only on purpose.
  *
  * It used to record the name it was asked about, which made it a filter that
@@ -493,17 +556,18 @@ ngx_media_hls_ingest_transport(ngx_media_hls_ingest_source_t *ingest,
  */
 static ngx_uint_t
 ngx_media_hls_ingest_seen(ngx_media_hls_ingest_source_t *ingest,
-    const u_char *name, size_t len)
+    const u_char *name, size_t len, ngx_uint_t by_name)
 {
     ngx_uint_t  i;
 
     /*
-     * The directory scan is lexical and the demuxer consumes segments in that
-     * order.  Keep a high-water mark as well as the bounded duplicate ring:
-     * once the ring wraps, an old immutable segment must not be replayed.
+     * Ordered by name, the demuxer consumes segments in name order, so keep
+     * a high-water mark as well as the bounded duplicate ring: once the ring
+     * wraps, an old immutable segment must not be replayed.  Ordered by a
+     * playlist, the media sequence number is the high-water mark instead.
      */
-    if (ingest->last_name_set
-        && strcmp((char *) name, (char *) ingest->last_name) <= 0)
+    if (by_name && ingest->last_name_set
+        && ngx_media_hls_ingest_cmp(name, ingest->last_name) <= 0)
     {
         return 1;
     }
@@ -542,17 +606,217 @@ ngx_media_hls_ingest_record(ngx_media_hls_ingest_source_t *ingest,
     ingest->seen[slot][len] = '\0';
 
     if (!ingest->last_name_set
-        || strcmp((char *) name, (char *) ingest->last_name) > 0)
+        || ngx_media_hls_ingest_cmp(name, ingest->last_name) > 0)
     {
         ngx_memcpy(ingest->last_name, name, len + 1);
         ingest->last_name_set = 1;
     }
 }
 
+/* a segment name the reader may open: flat, .ts, safe characters */
+static ngx_uint_t
+ngx_media_hls_ingest_segment_name(const u_char *name, size_t len)
+{
+    size_t  i;
+
+    if (len < 4 || len >= NGX_MEDIA_HLS_INGEST_NAME_MAX || name[0] == '.'
+        || ngx_memcmp(name + len - 3, ".ts", 3) != 0)
+    {
+        return 0;
+    }
+
+    for (i = 0; i < len; i++) {
+        u_char c = name[i];
+
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+              || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
+        {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+#define NGX_MEDIA_HLS_INGEST_PLAYLIST_MAX  (64 * 1024)
+
+/* no usable media playlist in the directory: order by segment name */
+#define NGX_MEDIA_HLS_INGEST_NO_PLAYLIST   (-100)
+
 /*
- * Reads the directory and returns the first name not yet read.  Names are
- * compared lexically so segments arrive in the order the uploader wrote them,
- * which matters because the demuxer assembles access units across them.
+ * The next segment by the media playlist in the directory, if there is one:
+ * NGX_OK with a name, NGX_DECLINED when the playlist lists nothing new yet,
+ * NGX_MEDIA_HLS_INGEST_NO_PLAYLIST when there is no usable media playlist.
+ *
+ * A master playlist lists variants, not segments, and is not what a source
+ * reads: point the source at one variant's directory.  With several media
+ * playlists the most recently written one is used.
+ */
+static ngx_int_t
+ngx_media_hls_ingest_next_by_playlist(ngx_media_hls_ingest_source_t *ingest,
+    u_char *out, size_t cap)
+{
+    DIR            *d;
+    struct dirent  *de;
+    struct stat     st;
+    time_t          newest = 0;
+    u_char          path[NGX_MEDIA_HLS_INGEST_NAME_MAX + 512];
+    u_char          chosen[NGX_MEDIA_HLS_INGEST_NAME_MAX];
+    char           *text, *line, *save;
+    FILE           *file;
+    size_t          n;
+    uint64_t        seq, base = 0;
+    ngx_uint_t      media = 0, found = 0;
+    ngx_int_t       rc = NGX_DECLINED;
+
+    d = opendir((char *) ingest->directory.data);
+    if (d == NULL) {
+        return NGX_ERROR;
+    }
+
+    chosen[0] = '\0';
+
+    while ((de = readdir(d)) != NULL) {
+        size_t  len = strlen(de->d_name);
+
+        if (len < 6 || len >= sizeof(chosen) || de->d_name[0] == '.'
+            || strcmp(de->d_name + len - 5, ".m3u8") != 0)
+        {
+            continue;
+        }
+
+        if (snprintf((char *) path, sizeof(path), "%s/%s",
+                     ingest->directory.data, de->d_name)
+                >= (int) sizeof(path)
+            || stat((char *) path, &st) != 0)
+        {
+            continue;
+        }
+
+        if (!found || st.st_mtime > newest
+            || (st.st_mtime == newest
+                && strcmp(de->d_name, (char *) chosen) > 0))
+        {
+            newest = st.st_mtime;
+            ngx_memcpy(chosen, de->d_name, len + 1);
+            found = 1;
+        }
+    }
+
+    closedir(d);
+
+    if (!found) {
+        return NGX_MEDIA_HLS_INGEST_NO_PLAYLIST;
+    }
+
+    (void) snprintf((char *) path, sizeof(path), "%s/%s",
+                    ingest->directory.data, chosen);
+
+    file = fopen((char *) path, "rb");
+    if (file == NULL) {
+        return NGX_MEDIA_HLS_INGEST_NO_PLAYLIST;
+    }
+
+    text = malloc(NGX_MEDIA_HLS_INGEST_PLAYLIST_MAX + 1);
+    if (text == NULL) {
+        fclose(file);
+        return NGX_ERROR;
+    }
+
+    n = fread(text, 1, NGX_MEDIA_HLS_INGEST_PLAYLIST_MAX, file);
+    fclose(file);
+    text[n] = '\0';
+
+    if (n < 7 || strncmp(text, "#EXTM3U", 7) != 0
+        || strstr(text, "#EXT-X-STREAM-INF") != NULL)
+    {
+        free(text);
+        return NGX_MEDIA_HLS_INGEST_NO_PLAYLIST;
+    }
+
+    seq = 0;
+
+    for (line = strtok_r(text, "\r\n", &save); line != NULL;
+         line = strtok_r(NULL, "\r\n", &save))
+    {
+        if (strncmp(line, "#EXT-X-MEDIA-SEQUENCE:", 22) == 0) {
+            base = strtoull(line + 22, NULL, 10);
+            continue;
+        }
+
+        if (strncmp(line, "#EXTINF", 7) == 0) {
+            media = 1;
+            continue;
+        }
+
+        if (line[0] == '#' || line[0] == '\0') {
+            continue;
+        }
+
+        /* a URI line: the (base + index)th segment of the presentation */
+        {
+            char   *name = strrchr(line, '/');
+            size_t  len;
+
+            name = (name != NULL) ? name + 1 : line;
+            len = strlen(name);
+
+            /*
+             * A reader that ordered by name until now resumes after the
+             * last name it read rather than from the top of the playlist.
+             */
+            if (!ingest->last_seq_set && ingest->last_name_set
+                && strcmp(name, (char *) ingest->last_name) == 0)
+            {
+                ingest->last_seq = base + seq;
+                ingest->last_seq_set = 1;
+                seq++;
+                continue;
+            }
+
+            if ((!ingest->last_seq_set || base + seq > ingest->last_seq)
+                && ngx_media_hls_ingest_segment_name((u_char *) name, len)
+                && len < cap
+                && !ngx_media_hls_ingest_seen(ingest, (u_char *) name, len, 0))
+            {
+                if (snprintf((char *) path, sizeof(path), "%s/%s",
+                             ingest->directory.data, name)
+                        < (int) sizeof(path)
+                    && access((char *) path, R_OK) == 0)
+                {
+                    ngx_memcpy(out, name, len + 1);
+                    ingest->last_seq = base + seq;
+                    ingest->last_seq_set = 1;
+                    ingest->playlist_segments++;
+                    ngx_media_hls_ingest_record(ingest, out, len);
+                    rc = NGX_OK;
+                    break;
+                }
+
+                /*
+                 * Listed but not there: the segment is uploaded before the
+                 * playlist that names it, so a missing one failed to upload
+                 * and is passed over rather than waited for - the uploader
+                 * marks such a gap with a discontinuity (RFC 8216 6.2.1).
+                 */
+                ingest->failures++;
+                ingest->last_seq = base + seq;
+                ingest->last_seq_set = 1;
+            }
+        }
+
+        seq++;
+    }
+
+    free(text);
+
+    return media ? rc : NGX_MEDIA_HLS_INGEST_NO_PLAYLIST;
+}
+
+/*
+ * The next segment to read.  A media playlist in the directory decides the
+ * order when there is one; otherwise the names do, by their trailing
+ * sequence number (see ngx_media_hls_ingest_cmp).
  */
 static ngx_int_t
 ngx_media_hls_ingest_next(ngx_media_hls_ingest_source_t *ingest, u_char *out,
@@ -562,6 +826,13 @@ ngx_media_hls_ingest_next(ngx_media_hls_ingest_source_t *ingest, u_char *out,
     struct dirent  *de;
     u_char          best[NGX_MEDIA_HLS_INGEST_NAME_MAX];
     ngx_uint_t      found = 0;
+    ngx_int_t       rc;
+
+    rc = ngx_media_hls_ingest_next_by_playlist(ingest, out, cap);
+
+    if (rc != NGX_MEDIA_HLS_INGEST_NO_PLAYLIST) {
+        return rc;
+    }
 
     d = opendir((char *) ingest->directory.data);
 
@@ -575,18 +846,18 @@ ngx_media_hls_ingest_next(ngx_media_hls_ingest_source_t *ingest, u_char *out,
 
         size_t  len = strlen(de->d_name);
 
-        if (len < 4 || len >= sizeof(best)
-            || strcmp(de->d_name + len - 3, ".ts") != 0)
-        {
+        if (!ngx_media_hls_ingest_segment_name((u_char *) de->d_name, len)) {
             continue;
         }
 
-        if (ngx_media_hls_ingest_seen(ingest, (u_char *) de->d_name, len)) {
+        if (ngx_media_hls_ingest_seen(ingest, (u_char *) de->d_name, len, 1)) {
             continue;
         }
 
         /* take the lowest remaining name; recording happens below, once */
-        if (!found || strcmp(de->d_name, (char *) best) < 0) {
+        if (!found
+            || ngx_media_hls_ingest_cmp((u_char *) de->d_name, best) < 0)
+        {
             ngx_memcpy(best, de->d_name, len + 1);
             found = 1;
         }
@@ -604,6 +875,54 @@ ngx_media_hls_ingest_next(ngx_media_hls_ingest_source_t *ingest, u_char *out,
 
     return NGX_OK;
 }
+
+#ifdef NGX_MEDIA_UNIT_TEST
+
+ngx_uint_t
+ngx_media_hls_ingest_order(void **state, const char *directory,
+    char names[][256], ngx_uint_t max)
+{
+    ngx_media_hls_ingest_source_t  *ingest = *state;
+    ngx_uint_t                      n = 0;
+
+    if (ingest == NULL) {
+        ingest = calloc(1, sizeof(*ingest));
+        if (ingest == NULL) {
+            return 0;
+        }
+        ingest->directory.data = (u_char *) strdup(directory);
+        ingest->directory.len = strlen(directory);
+        *state = ingest;
+    }
+
+    while (n < max
+           && ngx_media_hls_ingest_next(ingest, (u_char *) names[n], 256)
+              == NGX_OK)
+    {
+        n++;
+    }
+
+    return n;
+}
+
+void
+ngx_media_hls_ingest_order_free(void *state)
+{
+    ngx_media_hls_ingest_source_t  *ingest = state;
+
+    if (ingest != NULL) {
+        free(ingest->directory.data);
+        free(ingest);
+    }
+}
+
+ngx_int_t
+ngx_media_hls_ingest_name_cmp(const char *a, const char *b)
+{
+    return ngx_media_hls_ingest_cmp((const u_char *) a, (const u_char *) b);
+}
+
+#endif
 
 /*
  * Source removal publishes pending_remove before detaching the source.  The
@@ -769,14 +1088,26 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
 
     d = opendir((char *) copy->data);
 
-    if (d == NULL) {
+    if (d != NULL) {
+        closedir(d);
+
+    } else if (ngx_errno == ENOENT) {
+        /*
+         * The ingest endpoint creates a stream's directory with its first
+         * upload, so a source created first - the order an operator sets
+         * things up in - finds nothing yet.  The reader polls the directory
+         * and starts when it appears.
+         */
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: hls ingest directory \"%V\" does not exist "
+                      "yet; waiting for the first upload", directory);
+
+    } else {
         ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
                       "media: hls ingest directory \"%V\" is not readable",
                       directory);
         return NULL;
     }
-
-    closedir(d);
 
     ingest->source = ngx_media_stream_source_add(stream, id,
                                                  NGX_MEDIA_SOURCE_HLS_PUSH, 0,
