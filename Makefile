@@ -5,7 +5,7 @@ NGINX_VERSION ?= 1.30.5
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
     bench-capacity-curve bench-capacity-quality bench-burst-sizing test-image test-in-container \
     srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph \
-    failover hls hls-push hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
+    failover hls hls-push hls-push-faults hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
     file-source transform \
     stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
     srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
@@ -66,6 +66,9 @@ hls:
 
 hls-push:
 	tests/integration/hls_push_nginx.sh
+
+hls-push-faults:
+	tests/integration/hls_push_faults_nginx.sh
 
 hls-pull:
 	tests/integration/hls_pull_nginx.sh
@@ -176,7 +179,7 @@ BASE ?= debian:trixie
 DOCKER_CACHE_ARGS ?=
 TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
-    hls-profile hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
+    hls-profile hls-push-faults hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
     graph-conflict churn \
     rtmp \
     rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
