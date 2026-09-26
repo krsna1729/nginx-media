@@ -347,6 +347,17 @@ echo "==       d01=$P_CONTROL0 d17=$P_CONTROL1 d33=$P_CONTROL2 d49=$P_CONTROL3"
 
 RSS_BEFORE="$(awk '/^VmRSS/ { print $2 }' /proc/"$(pgrep -P "$(cat "$RUN/logs/nginx.pid")" | head -1)"/status)"
 
+health_counters() {   # <suffix> ; reconnect/drop/error counters for the
+                      # healthy lane-mates, read at the window's edges
+    local suffix="$1" i id
+    for i in 32 48; do
+        id="$(printf 'd%02d' "$i")"
+        eval "RECONNECT_${suffix}_${i}=\"$(metric nginx_media_egress_reconnects_total "$id")\""
+        eval "DROPPED_${suffix}_${i}=\"$(metric nginx_media_egress_dropped_units_total "$id")\""
+        eval "TRANSPORT_${suffix}_${i}=\"$(metric nginx_media_egress_transport_errors_total "$id")\""
+    done
+}
+
 snapshot() {   # <output>
     rm -f "$RUN/sink.csv.snapshot"
     kill -USR1 "$SINK_PID" || fail "sink exited"
@@ -358,9 +369,11 @@ snapshot() {   # <output>
 }
 
 sleep 5
+health_counters before
 snapshot "$RUN/a.csv"
 sleep "$WINDOW"
 snapshot "$RUN/b.csv"
+health_counters after
 kill -USR1 "$RELAY_PID"
 kill -USR1 "$FLAP_PID"
 sleep 0.3
@@ -380,13 +393,21 @@ python3 - "$RUN/a.csv" "$RUN/b.csv" "$RUN/relay.json" "$RUN/relay-flap.json" \
     "$WINDOW" "$RETRANS_LANE" "$RETRANS_CONTROL" \
     "${LAG[32]:-}" "${LAG[48]:-}" "${LAG[0]:-}" "${LAG[16]:-}" \
     "${RECONNECT[32]:-}" "${DROPPED[32]:-}" "${TRANSPORT[32]:-}" \
-    "${RECONNECT[48]:-}" "${DROPPED[48]:-}" "${TRANSPORT[48]:-}" <<'PYEOF' \
+    "${RECONNECT[48]:-}" "${DROPPED[48]:-}" "${TRANSPORT[48]:-}" \
+    "${RECONNECT_before_32:-}" "${DROPPED_before_32:-}" "${TRANSPORT_before_32:-}" \
+    "${RECONNECT_before_48:-}" "${DROPPED_before_48:-}" "${TRANSPORT_before_48:-}" \
+    "${RECONNECT_after_32:-}" "${DROPPED_after_32:-}" "${TRANSPORT_after_32:-}" \
+    "${RECONNECT_after_48:-}" "${DROPPED_after_48:-}" "${TRANSPORT_after_48:-}" <<'PYEOF' \
     || fail "lane isolation at fanout"
 import json, statistics, sys
 
 (a_path, b_path, relay_path, flap_path, window, retrans_lane, retrans_control,
  lag32, lag48, lag0, lag16, reconnects32, dropped32, transport32,
- reconnects48, dropped48, transport48) = sys.argv[1:19]
+ reconnects48, dropped48, transport48,
+ reconnects32_before, dropped32_before, transport32_before,
+ reconnects48_before, dropped48_before, transport48_before,
+ reconnects32_after, dropped32_after, transport32_after,
+ reconnects48_after, dropped48_after, transport48_after) = sys.argv[1:31]
 window = float(window)
 
 def load(path):
@@ -458,12 +479,17 @@ for label, lag in (("d32", lag32), ("d48", lag48)):
     if lag not in ("", None):
         check(float(lag) <= 1000,
               "%s queue lag %s ms stays bounded (<= 1000)" % (label, lag))
-for label, value in (("d32", reconnects32), ("d48", reconnects48),
-                     ("d32", dropped32), ("d48", dropped48),
-                     ("d32", transport32), ("d48", transport48)):
-    if value not in ("", None):
-        check(float(value) == 0,
-              "%s %s is zero" % (label, value))
+for label, before, after in (("reconnects", reconnects32_before, reconnects32),
+                             ("drops", dropped32_before, dropped32),
+                             ("transport errors", transport32_before, transport32),
+                             ("reconnects", reconnects48_before, reconnects48),
+                             ("drops", dropped48_before, dropped48),
+                             ("transport errors", transport48_before, transport48)):
+    if before in ("", None) or after in ("", None):
+        continue
+    check(float(after) == float(before),
+          "d32/d48 %s did not move during the impaired window (%s -> %s)"
+          % (label, before, after))
 sys.exit(0 if ok else 1)
 PYEOF
 
