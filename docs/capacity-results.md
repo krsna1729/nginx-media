@@ -392,6 +392,122 @@ produced the same SRT delivery rates but a different *unprepared* egress
 behaviour, so it was rebuilt from the current source and every number above
 comes from that build.
 
+## Engineering report, 2026-09-26
+
+### 1. Changes, commits and pull requests
+
+| PR | What it fixes | Root cause | State |
+|---|---|---|---|
+| #5 | AMF fuzz generator | the nesting depth came from the iteration count, so `NGX_MEDIA_FUZZ_SCALE=25` wrote 6400 bytes into a 512-byte buffer; the parser's recursion bound was implicit | merged |
+| #6 | capacity reporting | the HLS reader benchmark printed its configured gate in the field the pipeline read as the measured ratio, and HLS origin was missing from the efficiency sum | merged |
+| #8 | per-lane service rate | lanes were keyed by shard number across workers, so a busy lane could report 0 | merged |
+| #9 | receiver topologies, preflight, infrastructure-limited, fanout isolation, parallel bench tiers | the harness could only measure with its receivers on loopback, and an environment that could not carry the load was indistinguishable from a software limit | open, green except the container jobs re-running after the test fixes below |
+
+Two test defects found while running the fanout isolation locally rather
+than only in CI: a destination's first connection attempt can be retried
+while the sink is still setting up (the health check is now a delta across
+the measured window), and a lane is assigned when a destination connects, so
+the churn check has to restart the sink and the publisher before comparing
+placement.  A third: a local nginx binary older than the merged tree broke
+the *unprepared* egress path, which made every integration run look broken
+and every capacity run look healthy; CI always builds fresh.
+
+### 2. CI
+
+Regular CI green on `main`; the nightly sanitizer job passed on `main` with
+the extended fuzz at `NGX_MEDIA_FUZZ_SCALE=25`.  Nightly and branch bench
+tiers now run their configurations as parallel jobs instead of one after
+another.
+
+### 3. Reporting pipeline
+
+Observed reader ratios (min/p5/p50/p95), aggregate receiver bytes, the
+receiver's own measurement interval and delivered Gbit/s for HLS origin;
+thresholds reported as thresholds; `delivery_ratio_basis`; a sender-only byte
+counter refuses to become an efficiency; the completeness gate distinguishes
+a ladder that stopped at its capacity boundary from one that was aborted or
+killed; and the SRT report now publishes a strict full-rate verdict beside
+the 0.95 gate.
+
+### 4. Where SRT saturates
+
+Per-rung bundles on this host (8 Mbit/s source, 30 s rungs, sender and
+receivers pinned apart) are in the tables above.  Two distinct limits
+appeared, and the per-CPU accounting separates them:
+
+* **Sender CPU budget** - 384 destinations with the sender on three physical
+  P-cores: no kernel drops anywhere, the sender's pinned CPUs busy, the
+  destination queues backing up to 7 s; the same rung passes with all six
+  P-cores.
+* **Receiver topology** - 160 destinations on four isolated cores shared by
+  sender and receivers: the host 14% busy, cpu0 at 99.9% with three cores
+  idle (loopback receive softirq funnelled onto one CPU), and 390 737
+  receiver socket drops.  The method's answer is to change the topology, not
+  the sender, and that is what the follow-up should do.
+
+### 5. Concurrency configurations
+
+Fixed 1, 2, 4 and 8 SRT senders against adaptive at 128 and 192
+destinations: the delivered rate is identical to three decimals
+(1.1426-1.1433 and 1.7134-1.715 Gbit/s) and CPU per delivered Gbit/s falls
+from 49.5 (one sender) to 38.7 (eight) at 128 destinations, against 29.7 of
+a core in the lane's own `SndQ` threads.  No scheduling optimisation is
+justified by this profile: the lane multiplexer is not the limit, and the
+adaptive policy matches the best fixed count.
+
+### 6. Seven-workload matrix
+
+See the replication table above and the run recorded under
+`docs/capacity-evidence/`.  Workloads whose receiver is self-contained
+(pure SRT, pure RTMP, and the SRT-bearing mixes) reach the top rung of the
+ladder here; the HLS configurations must run unprivileged, because nginx's
+workers drop to `nobody` and cannot create HLS directories when the harness
+runs as root - a setup failure the harness records as such, never as a
+quality failure.
+
+### 7. 1000 destinations
+
+Not reachable on this host, and now reported as such: the preflight at 768
+destinations returns `infrastructure-limited` (the probe's own receiver
+counted 2.30 Gbit/s and dropped 83 825 datagrams against 2.54 offered, below
+the 7.37 Gbit/s the rung needs), the ladder stops there, the rung is listed
+as `infrastructure_limited` in the matrix and as a gate notice, and the
+higher rungs are recorded as unmeasured rather than failed.
+
+### 8. Fairness and shared-lane impairment
+
+The fanout isolation test above: two impaired destinations sharing lane 0
+with two healthy ones, lane 1 as control, 64 destinations in total.  The
+healthy lane-mates delivered 100.0% of the control lane, the impaired lane's
+shared `SndQ` carried 3809 retransmissions against 0 in the control lane, and
+no destination outside the impaired lane moved.  Churn (delete, re-add,
+reload) leaves the shards' destination count and the lane placement
+identical.  What is not yet measured is mixed SRT session options (different
+latency or encryption) sharing one lane, and SRT-driven contention against
+RTMP and HLS in one program.
+
+### 9. Remaining production limits
+
+1. **The 1,000-destination claim is unverified.**  It needs a sender with
+   more CPU and a receiver host on a wider path; the harness, the preflight
+   and the classification are ready, and the exact commands are in the
+   handover notes.
+2. **The receiver topology can bind before the software does.**  A small
+   isolated CPU set funnels loopback softirq onto one core; the receivers
+   must be placed on CPUs the sender does not use before any boundary is
+   read as a software limit.
+3. **Mixed session options and cross-protocol contention** are implemented
+   for the shared-lane case but not yet exercised (see 8).
+4. **HLS push against a lossy, failing sink** is covered by the conformance
+   fixtures; loss, latency, closure and intermittent HTTP errors are not
+   injected yet.
+5. **The two-host (ssh) receiver path** is implemented and documented but
+   has never run against a second machine; only the namespace topology it
+   shares code with has been validated.
+6. **The local binary caveat**: any capacity number taken with a stale build
+   is meaningless for the unprepared path; every number in this report comes
+   from a build of the current source.
+
 ## Where this leaves the roadmap
 
 | Deliverable | Status |
