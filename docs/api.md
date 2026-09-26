@@ -599,9 +599,9 @@ Capacity and health metrics include:
   anything above it is time the worker could not get back to its timer.
   `_max_delay_ms` is the worst gap this worker has seen and
   `_late_ticks_total` counts ticks that missed their interval by more than
-  half.  `nginx_media_runtime_outputs` is the number of per-stream output slots
-  in use; it is bounded, and a count that does not fall after streams are
-  deleted means teardown is leaking a slot.  `nginx_media_streams_draining`
+  half.  `nginx_media_runtime_outputs` is the number of per-stream outputs in
+  use, allocated on demand; a count that does not fall after streams are
+  deleted means teardown is leaking one.  `nginx_media_streams_draining`
   counts deleted streams whose memory is still held by a reader that owns a
   thread and is stopping: it returns to zero on its own within a tick or two,
   and a value that stays up is a reader that will not leave.

@@ -360,10 +360,23 @@ test_shared_sender_pool(void)
           "outputs started");
 
     after_start = thread_count();
+#ifndef __SANITIZE_THREAD__
     CHECK(after_start == base + NGX_MEDIA_SRT_EGRESS_SHARDS,
           "exactly %ui egress shard threads started: %lu -> %lu",
           NGX_MEDIA_SRT_EGRESS_SHARDS, (unsigned long) base,
           (unsigned long) after_start);
+#else
+    /*
+     * ThreadSanitizer starts a background thread of its own the first time
+     * the process creates one, so the count is at least the shards here;
+     * "no thread per destination" is still checked exactly below, as the
+     * difference between two counts taken after it exists.
+     */
+    CHECK(after_start >= base + NGX_MEDIA_SRT_EGRESS_SHARDS,
+          "at least %ui egress shard threads started: %lu -> %lu",
+          NGX_MEDIA_SRT_EGRESS_SHARDS, (unsigned long) base,
+          (unsigned long) after_start);
+#endif
 
     for (i = 0; i < 3; i++) {
         CHECK(ngx_media_srt_outputs_add(outs, &conf, NULL, NULL) == NGX_OK,

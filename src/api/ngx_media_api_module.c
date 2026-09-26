@@ -2874,6 +2874,13 @@ ngx_media_api_source_delete(ngx_media_stream_t *stream, ngx_str_t *source_id,
         return NGX_HTTP_OK;
     }
 
+    /*
+     * Here first, then on the other workers: the broadcast reaches peers
+     * only, so without the local removal a single-worker deployment - or the
+     * worker that answered - kept the source and its session.
+     */
+    ngx_media_stream_source_remove(stream, source);
+    ngx_media_stream_touch(stream);
 
     (void) ngx_media_graph_source_delete(stream, source_id, stream->revision);
 
