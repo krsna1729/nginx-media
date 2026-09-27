@@ -224,6 +224,12 @@ CAPACITY_RECEIVER_KILL="${CAPACITY_RECEIVER_KILL:-}"
 CAPACITY_RECEIVER_FILE_TEST="${CAPACITY_RECEIVER_FILE_TEST:-}"
 CAPACITY_RECEIVER_FETCH="${CAPACITY_RECEIVER_FETCH:-}"
 CAPACITY_RECEIVER_MKDIR="${CAPACITY_RECEIVER_MKDIR:-}"
+# How many programs the quality ladder runs, each owned by a different
+# worker: 1 for every published tier, more for the contention repeats where
+# the question is whether one program's SRT load starves another program's
+# RTMP or HLS work.  The harness prints the placement it achieved, and the
+# bundle records it.
+CAPACITY_QUALITY_PROGRAMS="${CAPACITY_QUALITY_PROGRAMS:-1}"
 CAPACITY_QUALITY_REFERENCE_RTMP_BPS="${CAPACITY_QUALITY_REFERENCE_RTMP_BPS:-0}"
 CAPACITY_QUALITY_REFERENCE_HLS_BPS="${CAPACITY_QUALITY_REFERENCE_HLS_BPS:-0}"
 CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS="${CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS:-0}"
@@ -3916,7 +3922,7 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
         fi
         [ "$preflight_status" -eq 0 ] \
             || echo "   preflight did not complete (status $preflight_status); measuring anyway"
-        if capacity_case "quality-$mix-$destinations" 1 \
+        if capacity_case "quality-$mix-$destinations" "$CAPACITY_QUALITY_PROGRAMS" \
             "$CAPACITY_QUALITY_RATE" "$destinations" \
             "$CAPACITY_QUALITY_SECONDS" "$protocol" "" yes \
             "$srt_share" "$hls_push_share"
@@ -3975,6 +3981,10 @@ phase_capacity_quality_ladder() {
         rtmp-95-srt-5:rtmp:5
         hls-push-95-srt-5:hls-push:5
         rtmp-50-hls-push-45-srt-5:rtmp-hls-push:5:45
+        # contention: SRT at half the destinations, with RTMP and HLS push
+        # beside it, which the published mixes never exercise (their SRT
+        # share is 5%)
+        srt-50-rtmp-25-hls-push-25:rtmp-hls-push:50:25
     )
     local -a requested_mixes=() selected_mix_specs=()
 
@@ -3986,7 +3996,7 @@ phase_capacity_quality_ladder() {
             || { echo "CAPACITY_QUALITY_MIXES must not be empty" >&2; return 1; }
         for requested in "${requested_mixes[@]}"; do
             case "$requested" in
-                pure-srt|pure-rtmp|pure-hls|pure-hls-push|rtmp-95-srt-5|hls-push-95-srt-5|rtmp-50-hls-push-45-srt-5)
+                pure-srt|pure-rtmp|pure-hls|pure-hls-push|rtmp-95-srt-5|hls-push-95-srt-5|rtmp-50-hls-push-45-srt-5|srt-50-rtmp-25-hls-push-25)
                     ;;
                 *)
                     echo "unknown capacity quality mix: $requested" >&2
