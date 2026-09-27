@@ -192,6 +192,21 @@ check(not short_dest.get("playlist_violations")
 check(short_dest.get("playlist_puts", 0) > 0
       and long_dest.get("playlist_puts", 0) > 0,
       "both destinations published playlists")
+# Each destination's playlist carries its own window: the short profile asked
+# for 3 entries, the long one for 8, and the sink counts what each playlist
+# actually named.
+short_entries = short_dest.get("playlist_entries", 0)
+long_entries = long_dest.get("playlist_entries", 0)
+print(f"   playlist entries: d-short {short_entries}, d-long {long_entries}")
+check(0 < short_entries <= 4,
+      f"the short profile's playlist stays within its 3-segment window "
+      f"({short_entries})")
+check(0 < long_entries <= 9,
+      f"the long profile's playlist stays within its 8-segment window "
+      f"({long_entries})")
+check(long_entries > short_entries,
+      f"the long profile's playlist is the larger one "
+      f"({long_entries} > {short_entries})")
 
 # Shared preparation: one prepared feed for the program, not one per
 # destination.  The feed metrics carry application and name labels; a second

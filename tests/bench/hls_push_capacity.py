@@ -109,6 +109,8 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
                                 dict(self.server.ts_detail.get(destination, {})),
                             "playlist_puts":
                                 self.server.playlist_puts.get(destination, 0),
+                            "playlist_entries":
+                                self.server.playlist_entries.get(destination, 0),
                             "playlist_violations":
                                 self.server.playlist_violations.get(destination, 0),
                         }
@@ -211,6 +213,9 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
             missing = [uri for uri in referenced if uri not in detail]
             self.server.playlist_puts[destination] = (
                 self.server.playlist_puts.get(destination, 0) + 1)
+            # how many segments the playlist names: the destination's own
+            # window, which a per-destination profile is supposed to set
+            self.server.playlist_entries[destination] = len(referenced)
             if missing:
                 self.server.playlist_violations[destination] = (
                     self.server.playlist_violations.get(destination, 0)
@@ -253,6 +258,7 @@ def serve(port, bind="127.0.0.1", fail_every=0, close_after=0,
     server.ts_upload_durations_ms = {}
     server.ts_detail = {}
     server.playlist_puts = {}
+    server.playlist_entries = {}
     server.playlist_violations = {}
     server.mark_monotonic = None
     server.http_errors = 0
