@@ -594,6 +594,21 @@ if that passes, bisect downward.
 What is *not* in question: the mix is accepted, the ladder computes the
 shares as intended, the destinations are created with the right IDs, and the
 SRT reference calibration for the mix passes.
+### The 120-second repeat at the boundary
+
+The highest passing rung, re-measured with a 120-second window instead of 30
+(receivers on their own CPUs, sender on 0,2,4,6):
+
+| Destinations | Window | Outcome | Delivered | Sender %core/Gbit/s | Kernel drops | Min average ratio | Interval floor | Strict full rate |
+|---|---|---|---|---|---|---|---|---|
+| 384 | 120.2 s | pass | 3.444 Gbit/s | 31.8 | 0 | 0.99991 | 0.9258 | **yes** |
+
+The rung holds up at four times the window: same delivered rate and the same
+sender cost per delivered Gbit/s as the 30-second run (3.445 Gbit/s at 31.5),
+no kernel drops anywhere, and the strict verdict passes.  The 512 rung's
+repeat was cut short when the machine window ended, so the first-failure
+repeat is still outstanding.
+
 ### SRT library comparison (2026-09-26)
 
 Same source, same rungs, same placement (sender on four P-cores, receivers on
