@@ -523,6 +523,29 @@ lane - and `make srt-crypto` covers encryption at the listener.  A
 per-destination SRT option set would be a feature, not a test, and is
 recorded in the remaining limits rather than implemented here.
 
+### HLS push isolation: a failing destination does not delay a healthy one
+
+`make hls-push-faults` puts one program's two HLS PUT destinations in the
+same worker: `d-ok` against a healthy sink, `d-bad` against a sink that
+refuses every third upload, closes the connection after every seventh and
+answers 15 ms late.  Measured over 30 s:
+
+| | |
+|---|---|
+| Faulty sink | uploads refused and connections closed, both counted by the sink |
+| Healthy sink | 0 HTTP errors |
+| Healthy destination | every segment received once, longest gap between uploads 2.03 s, still receiving after 28.0 s, queue lag 0 ms |
+| Worker | no alert, no emergency, no sanitizer report |
+
+The two failure modes the brief names - intermittent HTTP errors and
+connection closure - are injected at the sink; the retry behaviour they
+provoke is visible in the healthy destination's clean cadence and in the
+worker's own counters, and the failing destination never stalls its
+lane-mate.  The capacity sink gained the switches for this
+(`--fail-every`, `--close-after`, `--latency-ms`, all zero by default, with
+counters in its snapshot), and the smoke test drives four PUTs against
+`--fail-every 2` and sees 201, 500, 201, 500.
+
 ### SRT library comparison (2026-09-26)
 
 Same source, same rungs, same placement (sender on four P-cores, receivers on
