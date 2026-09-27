@@ -570,6 +570,30 @@ between the last pass and the first failure.
 The 120-second repeats of 384 and 512 and the sustained run are the next
 steps; the machine window ended before them.
 
+### Contention: the mix exists, its first rung does not pass readiness
+
+The brief asks for supplementary contention - SRT near its sustainable
+capacity while RTMP and HLS push stay active - and the harness now supports
+it: `srt-50-rtmp-25-hls-push-25` (half the destinations SRT, a quarter each
+RTMP and HLS push), `CAPACITY_QUALITY_PROGRAMS` for several programs on
+different workers, program-aware quality analyzers, and a first-rung rule
+that lets a mix begin at the smallest rung it can form rather than insisting
+on one destination.
+
+The run does not yet complete, and the failure is precise: at the first rung
+(two destinations, then four) the HLS push destination never delivers its
+first segment, so the sink's readiness endpoint reports it missing
+(`readiness_missing_ids=d0001`, `d0003`) and the rung ends as a setup
+failure.  The published mixes never exercise HLS push at their first rung
+either - their 45% share rounds to zero there - so this is the first time
+the combination has been asked for, and it needs a dedicated look rather
+than a guess: the next step is to run the same mix with its first rung above
+the smallest (32, where all three protocols have several destinations) and,
+if that passes, bisect downward.
+
+What is *not* in question: the mix is accepted, the ladder computes the
+shares as intended, the destinations are created with the right IDs, and the
+SRT reference calibration for the mix passes.
 ### SRT library comparison (2026-09-26)
 
 Same source, same rungs, same placement (sender on four P-cores, receivers on
@@ -689,7 +713,12 @@ RTMP and HLS in one program.
    isolated CPU set funnels loopback softirq onto one core; the receivers
    must be placed on CPUs the sender does not use before any boundary is
    read as a software limit.
-3. **Per-destination SRT options do not exist.**  Encryption is listener- and
+3. **The SRT-heavy contention mix does not pass its first rung yet** (see
+   above): the HLS push destination never delivers its first segment at two
+   or four destinations, so the rung ends as a setup failure.  Everything
+   else about the mix works, and the bisect downward from 32 is the next
+   step.
+4. **Per-destination SRT options do not exist.**  Encryption is listener- and
    stream-scoped and latency is not exposed, so mixed session settings within
    one lane cannot be tested today; the per-destination fields that do exist
    (stream id, path, segment duration, playlist window, CA file) are exercised
