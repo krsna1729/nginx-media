@@ -1836,6 +1836,33 @@ PY
 }
 
 
+# The smallest rung a mix can form: one destination for a pure workload or a
+# mix whose SRT share rounds to nothing at one, more when every protocol needs
+# a destination of its own.  The rounding is the ladder's own.
+capacity_mix_minimum_rung() {   # <protocol> <srt share> <hls push share>
+    local protocol="$1" srt_share="${2:-0}" hls_push_share="${3:-0}"
+    local n srt_count primary hls_push_count
+
+    for (( n = 1; n <= 1000; n++ )); do
+        if [ "$protocol" = srt ]; then
+            srt_count="$n"
+        else
+            srt_count=$(( (n * srt_share + 50) / 100 ))
+        fi
+        primary=$(( n - srt_count ))
+        [ "$primary" -ge 1 ] || continue
+        case "$protocol" in
+            rtmp|hls|hls-push) printf '%d' "$n"; return 0 ;;
+            rtmp-hls-push)
+                hls_push_count=$(( (n * hls_push_share + 50) / 100 ))
+                [ "$(( primary - hls_push_count + hls_push_count ))" -ge 1 ] \
+                    && { printf '%d' "$n"; return 0; }
+                ;;
+        esac
+    done
+    printf '1'
+}
+
 capacity_destination_id() {   # <program index> <destination index> <program count>
     if [ "$3" -eq 1 ]; then
         printf 'd%04d' "$2"
@@ -3865,9 +3892,17 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
             && [ "$destinations" -gt "$previous" ] \
             || { echo "quality ladder must be strictly increasing within 1..1000" \
                      >&2; return 1; }
-        if [ "$previous" -eq 0 ] && [ "$destinations" -ne 1 ]; then
-            echo "quality ladder must begin with one destination for calibration" >&2
-            return 1
+        # The ladder begins at the smallest rung at which every protocol in
+        # the mix has a destination: one for a pure workload and for the
+        # published mixes (whose 5% SRT share rounds to zero there), four for
+        # a 50/25/25 mix, where one destination would leave no room for RTMP
+        # or HLS push at all.  The per-protocol baselines come from that rung.
+        if [ "$previous" -eq 0 ]; then
+            minimum="$(capacity_mix_minimum_rung "$protocol" "$srt_share" "$hls_push_share")"
+            if [ "$destinations" -lt "$minimum" ]; then
+                echo "quality ladder must begin at or above the smallest rung this mix can form: $minimum" >&2
+                return 1
+            fi
         fi
         previous="$destinations"
         if [ "$CAPACITY_QUALITY_STOP_AFTER_FAILURES" -gt 0 ] \

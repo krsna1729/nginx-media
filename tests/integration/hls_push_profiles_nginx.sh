@@ -175,9 +175,14 @@ print(f"   d-long:  {long_segments} segments, {long_dest.get('ts_bytes', 0)} byt
 
 check(short_segments >= 8, f"the short profile received segments ({short_segments})")
 check(long_segments >= 3, f"the long profile received segments ({long_segments})")
-check(short_segments > long_segments,
-      f"the short profile segmented finer than the long one "
-      f"({short_segments} > {long_segments})")
+# Segmentation is shared: the program has one segmenter, so both destinations
+# receive the same segments.  What a destination's profile changes is its
+# upload deadline (segment_duration_ms) and its playlist window, not the
+# segmentation - which is the "shared segmentation, destination-specific
+# playlist generation" the method asks for.
+check(abs(short_segments - long_segments) <= 1,
+      f"both destinations received the same shared segments "
+      f"({short_segments} vs {long_segments})")
 check(short["http_errors"] == 0 and long_sink["http_errors"] == 0,
       f"neither sink saw HTTP errors ({short['http_errors']}, "
       f"{long_sink['http_errors']})")
@@ -207,6 +212,24 @@ check(0 < long_entries <= 9,
 check(long_entries > short_entries,
       f"the long profile's playlist is the larger one "
       f"({long_entries} > {short_entries})")
+
+# The per-destination upload deadline: segment_duration_ms is the budget the
+# destination's uploads have to fit in (ngx_media_hls_push.c's push->budget_ms,
+# ngx_media_destination.c's descriptor deadline), so the short profile's
+# uploads must fit a 1000 ms budget and the long one's a 4000 ms one.
+def percentile(values, fraction):
+    if not values:
+        return None
+    values = sorted(values)
+    return values[min(len(values) - 1, max(0, int(fraction * len(values)) - 1))]
+
+short_p95 = percentile(short_dest.get("upload_durations_ms", []), 0.95)
+long_p95 = percentile(long_dest.get("upload_durations_ms", []), 0.95)
+print(f"   upload duration p95: d-short {short_p95} ms, d-long {long_p95} ms")
+check(short_p95 is not None and short_p95 <= 1000,
+      f"the short profile's uploads fit its 1000 ms budget (p95 {short_p95})")
+check(long_p95 is not None and long_p95 <= 4000,
+      f"the long profile's uploads fit its 4000 ms budget (p95 {long_p95})")
 
 # Shared preparation: one prepared feed for the program, not one per
 # destination.  The feed metrics carry application and name labels; a second
