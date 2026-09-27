@@ -52,10 +52,8 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
             except (KeyError, IndexError, ValueError):
                 self._reply(400)
                 return
-            expected_ids = {
-                f"d{destination:04d}"
-                for destination in range(offset, offset + expected)
-            }
+            expected_ids = set(expected_destination_ids(
+                int(query.get("programs", ["1"])[0]), expected, offset))
             with self.server.destinations_lock:
                 now = time.monotonic()
                 received = self.server.ts_destinations & expected_ids
@@ -342,11 +340,8 @@ def readiness_report(args):
     with Path(args.progress).open(encoding="utf-8") as source:
         progress = json.load(source)
 
-    expected = [
-        f"d{index:04d}"
-        for index in range(args.destination_offset,
-                           args.destination_offset + args.destinations)
-    ]
+    expected = expected_destination_ids(args.programs, args.destinations,
+                                        args.destination_offset)
     destinations = sink["destinations"]
     received = [destination for destination in expected
                 if destination in destinations]
@@ -399,6 +394,18 @@ def readiness_report(args):
     print(f"readiness_dropped_units={drops}")
     print(f"readiness_transport_errors={errors}")
     print(f"readiness_sink_http_errors={sink['http_errors']}")
+
+
+def expected_destination_ids(programs, destinations, offset):
+    """The destination IDs a rung creates: one program numbers them d0000..,
+    several programs prefix each with its own p0000- (the harness's
+    capacity_destination_id)."""
+    if programs <= 1:
+        return [f"d{index:04d}"
+                for index in range(offset, offset + destinations)]
+    return [f"p{program:04d}-d{index:04d}"
+            for program in range(programs)
+            for index in range(offset, offset + destinations)]
 
 
 def report(args):
@@ -688,6 +695,10 @@ def main():
     report_parser.add_argument("--after-prefix", required=True)
     report_parser.add_argument("--stream", required=True)
     report_parser.add_argument("--destinations", type=int, required=True)
+    report_parser.add_argument("--programs", type=int, default=1,
+                               help="programs the rung ran; each owns its own "
+                                    "set of destinations, numbered "
+                                    "pNNNN-dNNNN")
     report_parser.add_argument("--destination-offset", type=int, default=0)
     report_parser.add_argument("--sink-before", required=True)
     report_parser.add_argument("--sink-after", required=True)
@@ -701,6 +712,7 @@ def main():
     readiness_parser.add_argument("--stream", required=True)
     readiness_parser.add_argument("--destinations", type=int, required=True)
     readiness_parser.add_argument("--destination-offset", type=int, default=0)
+    readiness_parser.add_argument("--programs", type=int, default=1)
     readiness_parser.add_argument("--sink-snapshot", required=True)
     readiness_parser.add_argument("--progress", required=True)
 

@@ -266,11 +266,22 @@ def jain(values):
     return total * total / (len(values) * squares) if values and squares else 0.0
 
 
+def expected_ids(programs, destinations):
+    """The destination IDs a rung creates: one program numbers them d0000..,
+    several programs prefix each with its own p0000- (the harness's
+    capacity_destination_id)."""
+    if programs <= 1:
+        return {f"d{index:04d}" for index in range(destinations)}
+    return {f"p{program:04d}-d{index:04d}"
+            for program in range(programs)
+            for index in range(destinations)}
+
+
 def quality_report(args):
     failures = []
     baseline_ns, baseline = read_receiver_snapshot(args.baseline)
     final_ns, final = read_receiver_snapshot(args.final)
-    expected = {f"d{i:04d}" for i in range(args.destinations)}
+    expected = expected_ids(args.programs, args.destinations)
     if set(baseline) != expected or set(final) != expected:
         raise ValueError("receiver snapshot IDs do not match the quality rung")
     if final_ns <= baseline_ns:
@@ -627,6 +638,9 @@ def main():
     report.add_argument("--destination-report", required=True)
     report.add_argument("--interval-report", required=True)
     report.add_argument("--destinations", type=int, required=True)
+    report.add_argument("--programs", type=int, default=1,
+                        help="programs the rung ran; each owns its own set of "
+                             "destinations, numbered pNNNN-dNNNN")
     report.add_argument("--prepared-source", required=True)
     report.add_argument("--source-duration-s", type=float, default=30.0)
     report.add_argument("--reference-bps", type=float, default=0.0)

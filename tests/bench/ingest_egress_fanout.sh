@@ -2930,6 +2930,7 @@ PY
                     --metrics-prefix "$case_dir/workers.readiness" \
                     --stream "${names[0]}" \
                     --destinations "$hls_push_destinations" \
+                    --programs "$programs" \
                     --destination-offset "$((srt_destinations + rtmp_destinations))" \
                     --sink-snapshot "$case_dir/hls-push.readiness.json" \
                     --progress "$hls_push_progress_file" \
@@ -3349,6 +3350,7 @@ PY
             --stream "${names[0]}" \
             --destination-offset "$((srt_destinations + rtmp_destinations))" \
             --destinations "$hls_push_destinations" \
+            --programs "$programs" \
             --sink-before "$case_dir/hls-push.before.json" \
             --sink-after "$case_dir/hls-push.after.json" \
             --reference-bps "$hls_push_reference_bps" \
