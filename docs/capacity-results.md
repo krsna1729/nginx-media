@@ -546,6 +546,30 @@ lane-mate.  The capacity sink gained the switches for this
 counters in its snapshot), and the smoke test drives four PUTs against
 `--fail-every 2` and sees 201, 500, 201, 500.
 
+### The boundary above 256, and what fails at 512
+
+The receiver-topology fix removes the shared-core artifact, so the ladder was
+extended past the old top with the receivers on their own CPUs (sender
+0,2,4,6; receivers 8,10,12,13; 30 s rungs):
+
+| Destinations | Outcome | Delivered | Sender %core/Gbit/s | Receiver %core/Gbit/s | Kernel drops | Min average ratio | Strict full rate |
+|---|---|---|---|---|---|---|---|
+| 256 | pass | 2.296 Gbit/s | 31.4 | 36.0 | 0 | 0.99994 | yes |
+| 384 | pass | 3.445 | 31.5 | 43.2 | 0 | 0.99971 | **yes** |
+| 512 | **quality failure** | 4.686 | 32.0 | 44.8 | 4 292 (receiver) | 0.99993 | no |
+
+**Highest passing rung: 384. First quality failure: 512.**  The 512 rung is
+the interesting one: it delivered 4.69 Gbit/s with a minimum *average* ratio
+of 0.99993 - the average gate passed - and failed on the short-interval floor
+(0.933) and the strict verdict, with 4 292 datagrams dropped by the
+receiver's sockets and none by the sender.  So the boundary is again
+receiver-side at the margin, and the sender's CPU per delivered Gbit/s stays
+flat at 31-32% across 256, 384 and 512: nothing about the sender changed
+between the last pass and the first failure.
+
+The 120-second repeats of 384 and 512 and the sustained run are the next
+steps; the machine window ended before them.
+
 ### SRT library comparison (2026-09-26)
 
 Same source, same rungs, same placement (sender on four P-cores, receivers on
