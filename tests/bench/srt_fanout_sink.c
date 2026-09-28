@@ -275,17 +275,60 @@ write_snapshot(const char *path, const peer_t *peers, size_t count,
         free(temporary);
         return -1;
     }
-    if (fprintf(file, "destination_id,bytes_received,snapshot_ns\n") < 0) {
-        goto failed;
-    }
-    for (i = 0; i < count; i++) {
-        if (fprintf(file, "%s,%llu,%llu\n", peers[i].destination,
-                    (unsigned long long) peers[i].bytes_received,
-                    (unsigned long long) snapshot_ns) < 0)
+    /* The snapshot carries the same accounting as the final result, so a
+     * measurement taken during a run can say whether the media was continuous
+     * and whether the peer stalled, not only how many bytes had arrived. */
+    {
+        const struct timespec *first = NULL;
+
+        for (i = 0; i < count; i++) {
+            if (peers[i].has_first_byte
+                && (first == NULL
+                    || peers[i].first_byte_at.tv_sec < first->tv_sec
+                    || (peers[i].first_byte_at.tv_sec == first->tv_sec
+                        && peers[i].first_byte_at.tv_nsec < first->tv_nsec)))
+            {
+                first = &peers[i].first_byte_at;
+            }
+        }
+
+        if (fprintf(file,
+                    "destination_id,bytes_received,first_ms,stalled,"
+                    "transport_error,ts_packets,ts_sync_errors,"
+                    "ts_continuity_errors,ts_tei_errors,snapshot_ns\n") < 0)
         {
             goto failed;
         }
+
+        for (i = 0; i < count; i++) {
+            if (fprintf(file, "%s,%llu,", peers[i].destination,
+                        (unsigned long long) peers[i].bytes_received) < 0)
+            {
+                goto failed;
+            }
+            if (peers[i].has_first_byte && first != NULL) {
+                double  first_ms = (peers[i].first_byte_at.tv_sec
+                                    - first->tv_sec) * 1000.0
+                                   + (peers[i].first_byte_at.tv_nsec
+                                      - first->tv_nsec) / 1000000.0;
+
+                if (fprintf(file, "%.3f", first_ms) < 0) {
+                    goto failed;
+                }
+            }
+            if (fprintf(file, ",%d,%d,%llu,%llu,%llu,%llu,%llu\n",
+                        peers[i].stalled, peers[i].transport_error,
+                        (unsigned long long) peers[i].ts_packets,
+                        (unsigned long long) peers[i].ts_sync_errors,
+                        (unsigned long long) peers[i].ts_continuity_errors,
+                        (unsigned long long) peers[i].ts_tei_errors,
+                        (unsigned long long) snapshot_ns) < 0)
+            {
+                goto failed;
+            }
+        }
     }
+
     if (fclose(file) != 0) {
         file = NULL;
         goto failed;
@@ -547,6 +590,8 @@ main(int argc, char **argv)
     char *colon;
     int epoll_id = SRT_ERROR;
     struct sockaddr_in address;
+    const char *bind_text;
+    in_addr_t bind_address;
     struct sigaction action;
     struct timespec snapshot_time;
     SRT_EPOLL_EVENT *events = NULL;
@@ -559,6 +604,21 @@ main(int argc, char **argv)
     for (l = 0; l < LISTENER_CAP; l++) {
         listeners[l] = SRT_INVALID_SOCK;
     }
+    /* Where to listen.  Loopback by default; the capacity harness sets
+     * SRT_SINK_BIND so the measuring receiver can live in its own network
+     * namespace - or on another host - while the sender dials that address. */
+    bind_text = getenv("SRT_SINK_BIND");
+    if (bind_text == NULL || bind_text[0] == '\0') {
+        bind_text = "127.0.0.1";
+    }
+    bind_address = inet_addr(bind_text);
+    if (bind_address == INADDR_NONE
+        && strcmp(bind_text, "255.255.255.255") != 0)
+    {
+        fprintf(stderr, "SRT_SINK_BIND is not an IPv4 address: %s\n", bind_text);
+        return EXIT_FAILURE;
+    }
+
     if (argc > 1 && strlen(argv[1]) < sizeof(port_text)) {
         strcpy(port_text, argv[1]);
         colon = strchr(port_text, ':');
@@ -691,13 +751,13 @@ main(int argc, char **argv)
         memset(&address, 0, sizeof(address));
         address.sin_family = AF_INET;
         address.sin_port = htons((uint16_t) (port_arg + l));
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_addr.s_addr = bind_address;
         if (srt_bind(listener, (struct sockaddr *) &address, sizeof(address))
                 == SRT_ERROR
             || srt_listen(listener, (int) expected) == SRT_ERROR)
         {
-            fprintf(stderr, "cannot bind/listen on 127.0.0.1:%lu: %s\n",
-                    port_arg + l, srt_getlasterror_str());
+            fprintf(stderr, "cannot bind/listen on %s:%lu: %s\n",
+                    bind_text, port_arg + l, srt_getlasterror_str());
             failure = 1;
             goto done;
         }

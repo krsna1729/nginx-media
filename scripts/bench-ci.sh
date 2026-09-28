@@ -7,7 +7,8 @@
 #            setup failures and on quality failures at rungs every supported
 #            host must carry; capacity is recorded, not gated.
 #   branch   the pr recipe plus RTMP 95%/SRT 5%, after a merge to main.
-#   nightly  all seven workloads, 30 s rungs up to the host's boundary.
+#   nightly  all seven workloads in four parallel configurations, 30 s
+#            rungs up to the host's boundary.
 #   weekly   the nightly ladders at 120 s, the fixed-vs-adaptive SRT sender
 #            comparison, HLS preparation on/off, and the transport library
 #            comparison (libsrt vs robotweax/srt) when ROBOTWEAX_NGINX names a
@@ -101,9 +102,21 @@ case "$TIER" in
         done
         ;;
     nightly)
-        run_config all CAPACITY_QUALITY_MIXES=all \
-            CAPACITY_QUALITY_STEPS="${BENCH_STEPS:-1 16 64 128 256 512}" \
-            CAPACITY_QUALITY_SECONDS=30
+        # Four configurations, run as parallel jobs (nightly.yml passes them
+        # as the matrix), so the tier's wall time is the slowest group rather
+        # than the sum of all seven workloads.  The publish job collects every
+        # job's results and writes one record with these four config names.
+        steps="${BENCH_STEPS:-1 16 64 128 256 512}"
+        run_config srt-rtmp CAPACITY_QUALITY_MIXES="pure-srt pure-rtmp" \
+            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30
+        run_config hls CAPACITY_QUALITY_MIXES="pure-hls pure-hls-push" \
+            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30
+        run_config mix-srt-share \
+            CAPACITY_QUALITY_MIXES="rtmp-95-srt-5 hls-push-95-srt-5" \
+            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30
+        run_config mix-all-protocols \
+            CAPACITY_QUALITY_MIXES="rtmp-50-hls-push-45-srt-5" \
+            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30
         ;;
     weekly)
         steps="${BENCH_STEPS:-1 32 64 128 192 256 384 512 768 1000}"

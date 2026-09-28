@@ -12,6 +12,15 @@ IRQ/NIC topology all move it, so it is compared within one host class.  Every ro
 comes from a rung's `diagnostics.json`; the method is in
 `development.md` ("Per-rung diagnostics and outcomes").
 
+## What landed, and why
+
+| Pull request | Root cause | Fix |
+| --- | --- | --- |
+| [#5](https://github.com/krsna1729/nginx-media/pull/5) | The fuzz test's AMF nesting generator wrote a fixed number of levels (64 x 1025 bytes) into a 512-byte buffer: a harness overflow, not a parser bug, and the reason the nightly fuzz run died | The generator is bounded by the destination buffer's capacity, and the parser now refuses nesting beyond a stated depth instead of recursing until the stack runs out |
+| [#6](https://github.com/krsna1729/nginx-media/pull/6) | The HLS reader benchmark published its acceptance threshold in the field the diagnostics and history layers read as the observed ratio, so every HLS-origin record carried 0.95 as a result | `observed_delivery_ratio` is reported separately from the threshold, with a `delivery_ratio_basis` that says which it is; history schema `bench-history/2` |
+| [#8](https://github.com/krsna1729/nginx-media/pull/8) | A lane is a shard of one worker, so two workers' shard 0 are two lanes; the report compared shard numbers across workers and merged unrelated queues | The lane key is the worker plus the shard, and the report's lane totals are per worker |
+| [#9](https://github.com/krsna1729/nginx-media/pull/9) | Loopback softirq collapses onto one CPU when the receiver CPUs are too few, so a boundary read from that topology is the host's, not the software's; and the SRT-heavy contention mix failed its first rung for want of an RTMP reference | Receiver topologies are named and recorded per rung, a preflight classifies the host before a run, `capacity_mix_minimum_rung` derives the first rung a mix can actually calibrate from, and a two-host orchestrator exists for the runs this host cannot carry |
+
 ## Reporting corrections (2026-09-26)
 
 Two reporting defects were fixed in the pipeline that produces these tables.
@@ -260,13 +269,628 @@ Gbit/s is the best guide to a larger host of the same class: at roughly 1.3–1.
 per Gbit/s for the SRT sender, 512 SRT destinations at 8.8 Mbit/s
 (4.5 Gbit/s) need about 6–7 cores for nginx alone, plus the receivers.
 
+## Receiver topology and pure-SRT scaling (2026-09-26)
+
+First measurements on a workstation rather than a 4-vCPU container, and the
+first taken over anything other than loopback.  Host: Intel i9-13900H, six
+P-cores with SMT (12 threads) and eight E-cores, 20 CPUs online, 15 GiB,
+kernel 7.2.5, libsrt 1.5.3; source 8 Mbit/s 720p25 H.264 TS; 30 s rungs;
+`CAPACITY_NGINX_CPUS` and `CAPACITY_RECEIVER_CPUS` pin sender and receivers
+apart, and every rung's bundle records the placement.
+
+### Loopback against a real device path
+
+The receivers were moved into their own network namespace behind a veth pair
+(`tests/bench/capacity_veth.sh up`, `CAPACITY_RECEIVER_ADDR=10.200.0.2`), so
+the traffic crosses a device with an MTU and the kernel's UDP path instead of
+loopback.  Same source, same rungs, same placement (nginx 0-5, receivers
+12-19):
+
+| Topology | Destinations | Delivered Gbit/s | Sender %core/Gbit/s | Receiver %core/Gbit/s | Min delivery ratio |
+|---|---|---|---|---|---|
+| loopback | 1 | 0.0091 | 1235.71 | 296.57 | 1.0 |
+| loopback | 64 | 0.5830 | 128.16 | 88.42 | 1.00055 |
+| loopback | 128 | 1.1607 | 142.20 | 111.29 | 0.99591 |
+| veth | 1 | 0.0091 | 1166.34 | 302.59 | 1.0 |
+| veth | 64 | 0.5818 | 134.00 | 92.88 | 1.00020 |
+| veth | 128 | 1.1642 | 120.48 | 91.57 | 1.00071 |
+
+The device path costs nothing measurable at this rate: delivered rate,
+delivery ratio and CPU per delivered Gbit/s agree within run-to-run
+variation.  Nothing in the sender or the receivers depends on loopback.
+
+### Where pure SRT first fails on this host
+
+| Destinations | Outcome | Delivered Gbit/s | Sender %core/Gbit/s | Receiver %core/Gbit/s | Min ratio | Interval floor | SndQ %core | App senders %core | Queue lag median |
+|---|---|---|---|---|---|---|---|---|---|
+| 128 | pass | 1.1572 | 114.8 | 89.4 | 0.99817 | 0.927 | 81.4 | 26.4 | 5 ms |
+| 192 | pass | 1.7462 | 145.1 | 133.2 | 1.00404 | 0.933 | 158.4 | 50.9 | — |
+| 256 | pass | 2.3558 | 159.5 | 128.5 | 1.01580 | 0.932 | 229.1 | 82.8 | 5 ms |
+| 384 | quality-failure | 2.2740 | 215.3 | 184.0 | 0.56140 | 0.502 | 262.9 | 100.9 | 7115 ms |
+
+At 384 the destination queues back up to seven seconds and the output queue
+drops units (no kernel socket drops on either side, and the sender's pinned
+CPUs all busy): the SRT send path stops draining them, the delivered rate falls
+below what 256 delivered while the offered load rises, and 25 destinations
+miss the gate.  The sender's own CPU is 490% of a core (4.9 cores of the 12
+P-threads it is given), the receivers 418% of one core, no kernel socket
+drops on either side, and libsrt's `SndQ` threads total 263% of a core
+across 16 lanes - about 16% each, so no single lane is the bottleneck.
+
+Two controls say what the limit is not:
+
+| 384-destination control | Delivered Gbit/s | Min ratio | Sender %core/Gbit/s | Receiver %core/Gbit/s | Queue lag median | Output queue drops |
+|---|---|---|---|---|---|---|
+| receivers on E-cores (12-19) | 2.2740 | 0.561 | 215.3 | 184.0 | 7115 ms | 52056 |
+| receivers on P-cores (6-11) | 2.7217 | 0.770 | 179.3 | 129.5 | 6906 ms | 8352 |
+
+Faster receivers move the number (delivered +20%, minimum ratio 0.56 to 0.77)
+without removing the failure, so the receiver side contributes but is not the
+whole story.  What remains is the sender: at this rung nginx needs more CPU
+per delivered Gbit/s than it has, and the per-destination output queues
+absorb the difference until they overflow.
+
+### What actually saturates, when nothing looks saturated
+
+The 160-destination rung in the phase-2 shape below fails while the host is
+14% busy, so it is worth naming what is short.  Its bundle now carries
+per-CPU busy and the pinned sets' headroom:
+
+| | |
+|---|---|
+| Per-CPU busy over the window | cpu0 **99.86%**, cpu2 2.35%, cpu4 0.19%, cpu6 1.32% |
+| Pinned set (sender and receivers both on 0,2,4,6) | mean 25.9%, min 0.2%, max 99.9%, three cores idle, one saturated |
+| Host busy | 14.2% |
+| nginx worker / receiver CPU | 51.9% / 34.6% of one core |
+| Receiver socket drops | **390 737** across 10 listener sockets |
+| Sender feed drops, destination drops, blocked sends | 0 / 577 / 0 |
+
+One core saturated and three idle is not a distribution accident: with a
+small isolated CPU set, the loopback receive softirq is funnelled to one CPU,
+so the benchmark's own receiver sockets overflow while the sender has three
+cores to spare.  The same signature appears in the phase-2 replication below
+(38 448 receiver drops at its 160-destination failure, host 10% busy), which
+means that boundary is a **receiver-topology limit, not a sender limit** -
+exactly the case the method says to answer by changing the topology rather
+than by optimising the sender.  The 384-destination failure on the wider
+topology is the opposite case: no kernel drops anywhere, the sender's pinned
+CPUs busy, destination queues backing up - a sender CPU budget.
+
+The follow-up has since been run and confirms it: with the receivers on CPUs
+the sender does not use, the drops disappear and the ladder passes 256
+destinations (see "The receiver-topology follow-up" below).
+
+### The receiver-topology follow-up: the 160-destination failure was the placement
+
+The 160-destination rung failed with the sender and the receivers sharing the
+same four isolated cores, and its bundle showed why: cpu0 at 99.86% while
+cpu2/4/6 sat at 2.35/0.19/1.32%, the host 14% busy, and 390 737 datagrams
+dropped by the *receiver's* sockets.  The follow-up moves the receivers to
+cores the sender does not use (sender 0,2,4,6; receivers 8,10,12,13) and
+re-runs the ladder:
+
+| Destinations | Shared cores (sender + receivers on 0,2,4,6) | Separated (receivers on 8,10,12,13) |
+|---|---|---|
+| 128 | pass, 1.1430 Gbit/s | pass, 1.1480 Gbit/s |
+| 160 | **quality failure**, 390 737 receiver socket drops, cpu0 99.9% | not run |
+| 192 | pass, 1.7132 | pass, 1.7225 |
+| 256 | not run in that shape | pass, 2.2972, **zero** socket drops |
+
+With the receivers off the sender's CPUs the drops disappear entirely and 256
+destinations pass with a minimum ratio of 0.99985.  So the shared-core
+boundary was the benchmark's own placement, exactly as the method predicts
+for receiver-side exhaustion - and the sender, given cores of its own, does
+not stop at 160.  Sender CPU per delivered Gbit/s is 36.9 at 128 and 32.4 at
+256, the same range as every other configuration measured here.
+
+### Sampled stacks at the first bottleneck
+
+`perf record --cpu=0,2,4,6 -g` for 15 s during the 160-destination rung that
+fails on four isolated cores, run under the same `omarchy-benchmark
+--isolate` scope as the benchmark itself, so only the benchmark's own CPUs
+are sampled and the desktop session on the other cores cannot dilute the
+profile:
+
+| Process | Share | What it was doing |
+|---|---|---|
+| `curl` | 20.9% | the harness polling the control API and the samplers |
+| `swapper` (idle) | 15.8% | |
+| `srt-egress-00` | 11.0% | `pthread_mutex_lock` first, then `ngx_media_srt_out_thread` |
+| `bash` | 7.8% | the harness itself |
+| `nginx` (worker) | 3.8% | spread thin, nothing above 2% |
+| `SRT:RcvQ:w1,3,6,7,10` | 1.7-3.6% each | libsrt receive: `CRcvQueue::worker`, `worker_RetrieveUnit`, `CChannel::recvfrom` |
+| `srt-egress-01` | 1.8% | the second application sender |
+
+Two findings, and neither is the transport:
+
+1. **The measurement harness is the largest consumer on the benchmark's own
+   cores** - curl plus bash is roughly a third of the samples, more than the
+   software under test.  On a four-core budget shared by sender and
+   receivers, the sampler competes with the thing it is measuring, which is
+   part of why this rung fails while the host reads 14% busy.
+2. **The application sender is not blocked in the transport**: its hottest
+   symbol is `pthread_mutex_lock`, not `srt_sendmsg` or a libsrt send queue
+   call.  With the lane multiplexer already in place, what is left of the
+   sender's cost is its own loop and its lock, which is where a future
+   scheduling change would have to look - and it needs a rung whose cores are
+   not also running the harness before that profile can be trusted.
+
+### Replicating the published 2026-09-25 numbers
+
+The published phase-2 matrix came from a 4-vCPU Xeon container at 2.10 GHz,
+unpinned.  The same shape here is four physical P-cores shared by the sender,
+the receivers and the publisher, with their SMT siblings offlined and the
+CPUs isolated from other work - on this host with the local helper
+`omarchy-benchmark --cpu 0,2,4,6 --isolate --turbo on`, whose portable
+equivalent is `taskset` on the same CPUs plus
+`CAPACITY_NGINX_CPUS`/`CAPACITY_RECEIVER_CPUS` for the harness - so the
+comparison is four whole cores against four vCPUs:
+
+| Destinations | Published (new-adaptive) | Local (4 P-cores, no SMT) | Per-destination Mbit/s (published / local) |
+|---|---|---|---|
+| 1 | pass, 0.0088 Gbit/s, ratio 1.0 | pass, 0.0088, 1.0 | 8.80 / 8.80 |
+| 32 | pass, 0.2799, 0.9983 | pass, 0.2810, 0.99698 | 8.75 / 8.78 |
+| 64 | pass, 0.5589, 0.99618 | pass, 0.5567, 0.99622 | 8.73 / 8.70 |
+| 96 | pass, 0.8391, 0.99227 | pass, 0.8235, 0.99234 | 8.74 / 8.58 |
+| 128 | **quality failure**, 1.0873, 0.94043 | **pass**, 0.9844, 0.98730 | 8.49 / 7.69 |
+| 160 | quality failure, 0.9550, 0.62979 | quality failure, —, 0.86446 | 5.97 / — |
+
+What replicates is the delivery itself: within 1.6% of the published
+per-destination rate at 32, 64 and 96 destinations, on the same 8 Mbit/s
+source and the same 20 s windows, with the same minimum-ratio trend
+(0.9983 → 0.9923 published, 0.9970 → 0.9923 local).  The boundary lands one
+rung higher here (128 passing, 160 failing; 96 passing, 128 failing there).
+At 128 the two runs diverge in an instructive way: the published host
+delivered more per destination (8.49 vs 7.69 Mbit/s) but not to all of them,
+so it failed at 0.940; the local run delivered less but evenly, and passed at
+0.987.
+
+CPU per delivered Gbit/s does not replicate, and should not: 49-70% of a core
+per Gbit/s here against 126-238% there, because an i9 P-core at 5 GHz does
+roughly three times the work of a 2.1 GHz Xeon vCPU.  That is why the repo
+compares this ratio only within a host class.
+
+The first attempt at this comparison used the tree's existing local nginx
+binary, built 2026-09-25 04:58 - before the HLS interoperability merge.  It
+produced the same SRT delivery rates but a different *unprepared* egress
+behaviour, so it was rebuilt from the current source and every number above
+comes from that build.
+
+## Engineering report, 2026-09-26
+
+### 1. Changes, commits and pull requests
+
+| PR | What it fixes | Root cause | State |
+|---|---|---|---|
+| #5 | AMF fuzz generator | the nesting depth came from the iteration count, so `NGX_MEDIA_FUZZ_SCALE=25` wrote 6400 bytes into a 512-byte buffer; the parser's recursion bound was implicit | merged |
+| #6 | capacity reporting | the HLS reader benchmark printed its configured gate in the field the pipeline read as the measured ratio, and HLS origin was missing from the efficiency sum | merged |
+| #8 | per-lane service rate | lanes were keyed by shard number across workers, so a busy lane could report 0 | merged |
+| #9 | receiver topologies, preflight, infrastructure-limited, fanout isolation, parallel bench tiers | the harness could only measure with its receivers on loopback, and an environment that could not carry the load was indistinguishable from a software limit | open, green except the container jobs re-running after the test fixes below |
+
+Two test defects found while running the fanout isolation locally rather
+than only in CI: a destination's first connection attempt can be retried
+while the sink is still setting up (the health check is now a delta across
+the measured window), and a lane is assigned when a destination connects, so
+the churn check has to restart the sink and the publisher before comparing
+placement.  A third: a local nginx binary older than the merged tree broke
+the *unprepared* egress path, which made every integration run look broken
+and every capacity run look healthy; CI always builds fresh.
+
+### 2. CI
+
+Regular CI green on `main`; the nightly sanitizer job passed on `main` with
+the extended fuzz at `NGX_MEDIA_FUZZ_SCALE=25`.  Nightly and branch bench
+tiers now run their configurations as parallel jobs instead of one after
+another.
+
+### 3. Reporting pipeline
+
+Observed reader ratios (min/p5/p50/p95), aggregate receiver bytes, the
+receiver's own measurement interval and delivered Gbit/s for HLS origin;
+thresholds reported as thresholds; `delivery_ratio_basis`; a sender-only byte
+counter refuses to become an efficiency; the completeness gate distinguishes
+a ladder that stopped at its capacity boundary from one that was aborted or
+killed; and the SRT report now publishes a strict full-rate verdict beside
+the 0.95 gate.
+
+### 4. Where SRT saturates
+
+Per-rung bundles on this host (8 Mbit/s source, 30 s rungs, sender and
+receivers pinned apart) are in the tables above.  Two distinct limits
+appeared, and the per-CPU accounting separates them:
+
+* **Sender CPU budget** - 384 destinations with the sender on three physical
+  P-cores: no kernel drops anywhere, the sender's pinned CPUs busy, the
+  destination queues backing up to 7 s; the same rung passes with all six
+  P-cores.
+* **Receiver topology** - 160 destinations on four isolated cores shared by
+  sender and receivers: the host 14% busy, cpu0 at 99.9% with three cores
+  idle (loopback receive softirq funnelled onto one CPU), and 390 737
+  receiver socket drops.  The method's answer is to change the topology, not
+  the sender, and that is what the follow-up should do.
+
+### Mixed SRT session options in one lane: a capability gap, not a test gap
+
+The brief asks for mixed SRT connection settings - different latency and
+encryption - sharing one lane, "where supported".  They are not supported
+per destination, and that is worth stating precisely rather than papering
+over:
+
+| Setting | Where it is configured | Per destination? |
+|---|---|---|
+| passphrase, key length, crypto mode | `media_srt_crypto` (the listener and its outgoing sessions), `media_srt_crypto_stream <application/stream>` (per stream) | no |
+| stream id | the destination document's `streamid` | **yes** |
+| HLS push path, `segment_duration_ms`, `playlist_window`, `ca_file` | the destination document | **yes** |
+| latency, `SRTO_LATENCY`/`SRTO_RCVLATENCY` | nowhere in the configuration | no |
+
+A lane belongs to one stream, so two destinations of the same program cannot
+differ in encryption or latency today: the crypto directives are
+listener- and stream-scoped, and latency is not exposed at all.  What the
+fanout isolation test does exercise is the per-destination part of that
+contract - distinct stream ids and paths for every destination sharing a
+lane - and `make srt-crypto` covers encryption at the listener.  A
+per-destination SRT option set would be a feature, not a test, and is
+recorded in the remaining limits rather than implemented here.
+
+### HLS push isolation: a failing destination does not delay a healthy one
+
+`make hls-push-faults` puts one program's two HLS PUT destinations in the
+same worker: `d-ok` against a healthy sink, `d-bad` against a sink that
+refuses every third upload, closes the connection after every seventh and
+answers 15 ms late.  Measured over 30 s:
+
+| | |
+|---|---|
+| Faulty sink | uploads refused and connections closed, both counted by the sink |
+| Healthy sink | 0 HTTP errors |
+| Healthy destination | every segment received once, longest gap between uploads 2.03 s, still receiving after 28.0 s, queue lag 0 ms |
+| Worker | no alert, no emergency, no sanitizer report |
+
+The two failure modes the brief names - intermittent HTTP errors and
+connection closure - are injected at the sink; the retry behaviour they
+provoke is visible in the healthy destination's clean cadence and in the
+worker's own counters, and the failing destination never stalls its
+lane-mate.  The capacity sink gained the switches for this
+(`--fail-every`, `--close-after`, `--latency-ms`, all zero by default, with
+counters in its snapshot), and the smoke test drives four PUTs against
+`--fail-every 2` and sees 201, 500, 201, 500.
+
+### The boundary above 256, and what fails at 512
+
+The receiver-topology fix removes the shared-core artifact, so the ladder was
+extended past the old top with the receivers on their own CPUs (sender
+0,2,4,6; receivers 8,10,12,13; 30 s rungs):
+
+| Destinations | Outcome | Delivered | Sender %core/Gbit/s | Receiver %core/Gbit/s | Kernel drops | Min average ratio | Strict full rate |
+|---|---|---|---|---|---|---|---|
+| 256 | pass | 2.296 Gbit/s | 31.4 | 36.0 | 0 | 0.99994 | yes |
+| 384 | pass | 3.445 | 31.5 | 43.2 | 0 | 0.99971 | **yes** |
+| 512 | **quality failure** | 4.686 | 32.0 | 44.8 | 4 292 (receiver) | 0.99993 | no |
+
+**Highest passing rung: 384. First quality failure: 512.**  Two runs of the
+512 rung agree on where it breaks and disagree on how, which is the point of
+keeping both:
+
+| Run | Delivered | Min average ratio | Worst one-second interval | MPEG-TS errors | Failed on |
+| --- | --- | --- | --- | --- | --- |
+| 30 s ladder rung | 4.69 Gbit/s | 0.99993 | 0.9332 | 355 | corruption: the gate counts a TS error as a failure, and the strict verdict requires none |
+| 120 s repeat | 4.85 Gbit/s | 1.00227 | 0.2163 | 785 | a genuinely short second (0.216 against the 0.90 strict floor) and corruption |
+
+The average-rate gate passes in both runs - the media mostly arrives - and
+the rung still fails: at this size a fraction of a percent of the datagrams
+is lost, and MPEG-TS turns that into corrupt packets and, in the longer
+window, a second that delivers a fifth of the reference.  The sender's CPU
+per delivered Gbit/s stays flat at 31-32% across 256, 384 and 512, so nothing
+about the sender changed between the last pass and the first failure; what
+changes is that the receiver's sockets start dropping at the margin.
+
+The 120-second repeats of 384 and 512 and the sustained run are reported
+below.
+
+### The 120-second repeat at the boundary
+
+The highest passing rung, re-measured with a 120-second window instead of 30
+(receivers on their own CPUs, sender on 0,2,4,6):
+
+| Destinations | Window | Outcome | Delivered | Sender %core/Gbit/s | Kernel drops | Min average ratio | Interval floor | Strict full rate |
+|---|---|---|---|---|---|---|---|---|
+| 384 | 120.2 s | pass | 3.444 Gbit/s | 31.8 | 0 | 0.99991 | 0.9258 | **yes** |
+
+The rung holds up at four times the window: same delivered rate and the same
+sender cost per delivered Gbit/s as the 30-second run (3.445 Gbit/s at 31.5),
+no kernel drops anywhere, and the strict verdict passes.  The 512 rung's
+repeat is in the table above: it fails harder than the 30-second rung did,
+with a worst second at 0.2163 against the 0.90 floor and 785 MPEG-TS errors,
+so the boundary at 512 is not a window artifact.
+
+### The sustained run: half an hour at 384 destinations
+
+The configuration a production claim would rest on, measured for 1800 seconds
+(sender on four P-cores, receivers on four E-cores, SMT siblings offlined,
+reference 8.965 Mbit/s taken from the 120-second run):
+
+| | |
+|---|---|
+| Outcome | **pass**, strict full rate **yes** |
+| Window | 1800 s (the harness's rung cap had to be raised from 600 s for this) |
+| Delivered | 3.4425 Gbit/s (8.96 Mbit/s per destination) |
+| Sender CPU | 33.7 %core per delivered Gbit/s |
+| Minimum average ratio | 0.99995 |
+| Worst one-second interval | 0.9097 of reference |
+| MPEG-TS errors, feed drops, output drops, kernel drops | 0 / 0 / 0 / 0 |
+| Sender's pinned cores | mean 42.1% busy, min 39.5%, max 44.5%, **none idle, none saturated** |
+| Run-queue pressure | 29.9% of the window with a task waiting for a CPU (538 s), never fully stalled |
+
+The per-core and pressure numbers are the ones the audit had found missing.
+Over half an hour the sender's four cores stayed evenly loaded (39.5-44.5%
+each, no core idle), the run queue was non-empty for a third of the time
+without ever stalling everything, and delivery did not move: the same rate
+and the same sender cost as the 30-second and 120-second runs of the same
+rung.
+
+### Multi-program admission under the preflight (2026-09-28)
+
+The saturation case is four programs of 6 Mbit/s each fanned out to 250 SRT
+destinations apiece - 1 000 destinations, one shared receiver per case.  It
+ran once beside another benchmark on this host and behaved: program-frame
+fairness **1.0000** (Jain, equal progress across the four programs), **no
+stalled destinations**, the receiver's shard workers at 272.6% of a core in
+total.  Those are behavioral facts, and they are recorded as such, because
+the run shared the host with a competing benchmark.
+
+With the preflight now guarding every capacity case - not only the quality
+ladder - the same case refuses to measure while a pinned CPU is busy with
+something else:
+
+```
+preflight_verdict=infrastructure-limited
+preflight_limit=host/cpu measured=['cpu0'] required=<= 0.50 busy per benchmark CPU
+capacity_case_result case=saturated-multiprogram result=infrastructure-limited
+```
+
+That is the intended outcome: the host is shared, so the number would be the
+host's, and the harness says so in twelve seconds instead of ten minutes.  A
+clean multi-program number needs the machine to itself.
+
+### Mixed-protocol contention (2026-09-28)
+
+Half SRT, a quarter RTMP, a quarter HLS push, one program, one sender pinned to
+four P-cores with the receivers on a P-core pair and two E-cores:
+
+| Destinations | Delivered | Sender | SRT interval floor | SRT ratio | RTMP ratio | HLS push ratio | Outcome |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 4 (2 SRT + 1 RTMP + 1 push) | 0.03 Gbit/s | 194 %c/Gb | 0.931 | 1.000 | 1.000 | 1.000 | pass |
+| 32 (16 + 8 + 8) | 0.27 Gbit/s | 56 %c/Gb | 0.915 | 1.000 | 0.999 | 1.000 | pass |
+| 64 (32 + 16 + 16) | 0.54 Gbit/s | 35 %c/Gb | 0.726 | 1.000 | 0.998 | 1.000 | pass |
+| 128 (64 + 32 + 32) | 1.08 Gbit/s | 26 %c/Gb | 0.929 | 0.999 | 1.000 | 1.000 | pass |
+
+Every protocol clears its gate at every rung, and the HLS push destinations
+miss no segments.  The SRT streams miss the stricter full-rate classification
+at 64 and 128 destinations because their 100 ms interval floor dips to 0.73 and
+0.93 against a 0.90 floor - the mixer's window jitter under mixed load, not
+loss: the end-to-end ratio stays at 0.999.
+
+The first rung of a mix that carries RTMP must carry exactly one RTMP
+destination, because the RTMP analyzer calibrates its reference from a single
+destination and refuses to guess from many; a ladder that starts with several
+fails as a setup error rather than a quality failure.  `capacity_mix_minimum_rung`
+now derives that rung from the shares.
+
+### Correction: the earlier contention failures were an invocation artifact
+
+The first contention attempts ran the harness as **root**, and the repository
+documents what that means: nginx's workers drop to `nobody`, which cannot
+create HLS directories under a user-owned build tree.  The module's own log
+says so plainly:
+
+```
+media: hls could not write seg-000015.ts into .../hls/live/cc3-1;
+16 segment(s) dropped so far (13: Permission denied)
+```
+
+With no segments written there is nothing for the HLS push destinations to
+upload, so their first-segment readiness times out (`received=0/14`,
+`active_uploaders=1`, nothing queued) and the rung ends as a setup failure
+while the SRT and RTMP sides of the same rung deliver normally.  The published
+mix failed identically under the same invocation and passes unprivileged - as
+the table above shows for the SRT-heavy mix.  Contention runs must be started
+the way the published tiers run them.
+
+### SRT library comparison (2026-09-26)
+
+Same source, same rungs, same placement (sender on four P-cores, receivers on
+four E-cores, SMT siblings offlined), two binaries: one linked against the
+system libsrt 1.5.3, one against **robotweax/srt v0.2.6** (tag published
+2026-09-26, commit `50cba37b`), built from source with the project's own
+`ROBOTWEAX_SRT_WARNINGS_AS_ERRORS=OFF` because GCC 16 warns about two null
+dereferences in its compat layer that the project's older CI toolchain does
+not.
+
+| Destinations | libsrt 1.5.3 | robotweax v0.2.6 | Sender CPU per delivered Gbit/s |
+|---|---|---|---|
+| 1 | pass, 0.0089 Gbit/s | pass, 0.0089 Gbit/s | 1048.7 vs 1020.3 %core |
+| 128 | pass, 1.1430 | pass, 1.1413 | 37.4 vs **33.4** |
+| 192 | pass, 1.7132 | pass, 1.7120 | 40.6 vs **30.9** |
+| 256 | pass, 2.2860 | pass, 2.2810 | 33.0 vs **29.6** |
+
+The delivered rate is the same at every rung; the sender's CPU per delivered
+Gbit/s is 10-24% lower with robotweax/srt, and its 256-destination rung
+passes the strict full-rate qualification (minimum ratio 0.99903, worst
+interval 0.9355).  That is the same direction the 2026-09-25 comparison
+found, with a wider margin on this host.
+
+Two things to note.  The weekly tier pins robotweax/srt at `b6687f51`
+(a v0.2.5-era commit) on purpose - "moving the pin is a deliberate change
+here" - so this measurement is a reason to move it, not a reason it moved.
+And the diagnostics cannot attribute robotweax's send queue: its threads are
+not named `SRT:SndQ`, so `cpu.workers[*].libsrt_sndq` is absent for that
+build.  The comparison above therefore rests on delivered bytes and total
+sender CPU, both of which are measured the same way for both libraries.
+
+### 5. Concurrency configurations
+
+Fixed 1, 2, 4, 8 and 16 SRT senders against adaptive at 128 and 192
+destinations, 30 s rungs, sender on four P-cores and receivers on four
+E-cores:
+
+| Senders | 128 dest: delivered | sender %core/Gbit/s | lane `SndQ` %core | app senders %core | 192 dest: delivered | sender %core/Gbit/s |
+|---|---|---|---|---|---|---|
+| 1 | 1.1426 Gbit/s | 49.50 | 29.71 | 10.49 | 1.7134 Gbit/s | 40.58 |
+| 2 | 1.1433 | 46.16 | 26.47 | 10.02 | 1.7139 | 38.08 |
+| 4 | 1.1431 | 39.63 | 22.08 | 8.56 | 1.7138 | 35.62 |
+| 8 | 1.1426 | 38.68 | 21.05 | 8.36 | 1.7150 | 35.85 |
+| 16 | 1.1426 | 39.62 | 21.22 | 8.29 | 1.7141 | 32.97 |
+| adaptive | 1.1430 | 37.37 | 20.79 | 7.73 | 1.7132 | 40.61 |
+
+Three repetitions of the same six configurations, in the same window
+(`capacity-evidence/runs-2026-09-28/`, driver `/tmp/repeats3-driver.log`
+transcript in the same directory), give the spread the single measurements
+could not:
+
+| Senders | Delivered range (Gbit/s) | Sender %core per Gbit/s | Minimum ratio |
+|---|---|---|---|
+| 1 | 1.1425-1.1426 | 40.38-40.93 | 0.9954-0.9956 |
+| 2 | 1.1426-1.1427 | 36.69-39.31 | 0.9952-0.9956 |
+| 4 | 1.1421-1.1426 | 36.30-37.90 | 0.9950-0.9956 |
+| 8 | 1.1424-1.1426 | 36.84-40.14 | 0.9943-0.9956 |
+| 16 | 1.1423-1.1426 | 39.00-40.41 | 0.9943-0.9956 |
+| adaptive | 1.1423-1.1426 | 36.69-39.31 | 0.9942-0.9956 |
+
+Every configuration passes every repetition, and the delivered rate moves by
+0.05% across all eighteen runs - the run-to-run variation is smaller than the
+CPU differences the comparison is about, so the CPU column is the one to read
+and the 1-2 %core/Gbit/s differences between four or more senders are inside
+the spread.
+
+The delivered rate is identical to four significant figures in every
+configuration, so the sender count is not what sets it.  CPU per delivered
+Gbit/s falls from 49.5 with one sender to 37-40 with four or more, and the
+adaptive policy is at the best fixed count's level at 128 destinations and
+within run-to-run variation at 192.  No scheduling optimisation is justified
+by this profile: the lane multiplexer is not the limit, more senders do not
+buy more delivery, and what is left of the sender's cost is its own loop and
+lock (see the sampled stacks).
+
+### 6. Seven-workload matrix
+
+Four P-cores for the sender and four E-cores for the receivers, SMT siblings
+offlined, 30 s rungs, 8 Mbit/s source, unprivileged (nginx's workers drop to
+`nobody`, so a root-run harness cannot create HLS directories - a setup
+failure the harness records as such, never as a quality failure).  The table
+is assembled from several runs: the September 26 record
+(`capacity-evidence/2026-09-26-seven-workloads.json`) is marked
+`complete: false` and has no rungs for `rtmp-95-srt-5`, so that row - and
+every row's strict column - comes from the September 28 transcripts under
+`capacity-evidence/runs-2026-09-28/`, which carry the whole ladder per
+workload.
+
+| Workload | Highest pass | First failure | Delivered at the top | Strict full rate | Published (4 vCPU) |
+|---|---|---|---|---|---|
+| Pure SRT | **256** (ladder top) | none | 2.286 Gbit/s | **yes** | 96 / 128 |
+| Pure RTMP | **256** (ladder top) | none | 2.214 Gbit/s | not reported | 128 / 192 |
+| Pure HLS origin (readers) | **256** (ladder top) | none | 2.207 Gbit/s | not reported | 256 (top) |
+| Pure HLS push | **256** (ladder top) | none | 1.855 Gbit/s | not reported | 256 (top) |
+| RTMP 95% / SRT 5% | **256** (ladder top) | none | — | not reported | 192 / 256 |
+| HLS push 95% / SRT 5% | **256** (ladder top) | none | 2.018 Gbit/s | **no** | 256 (top) |
+| RTMP 50% / HLS push 45% / SRT 5% | **256** (ladder top) | none | 2.118 Gbit/s | **yes** | 256 (top) |
+
+Every workload reaches the ladder's top rung on this host, including the two
+HLS directions the root-run attempt could not set up and both mixes the
+published host bounded.  The ladder's top is 256; a larger host is needed to
+find where any of them actually stops.
+
+The strict column is the separate qualification the method asks for beside
+the 0.95 gate, and it earns its place: the HLS-push/SRT mix passes the gate
+at 256 with an average ratio of 0.99935 and no drops, TS errors or missing
+segments, and still fails the strict test because its worst one-second
+interval delivered 0.839 of the reference - a sub-second dip the average
+hides.  The other two rungs whose bundles carry the verdict pass it.  The
+workloads marked "not reported" ran before the verdict existed in the
+harness; their bundles are unchanged and their strict result is unknown, not
+assumed.
+
+### 7. 1000 destinations
+
+Not reachable on this host, and now reported as such: the preflight at 768
+destinations returns `infrastructure-limited` with the limit that produced it
+- `sender/cpu measured=8cores required=89.75cores`, the sender's CPU budget
+priced from the last rung that passed - and the ladder stops there, lists the
+rung as `infrastructure_limited` in the matrix and as a gate notice, and
+records the higher rungs as unmeasured rather than failed.
+
+The same preflight also reported `probe/receiver-socket-drops`: the probe's
+own receiver counted 2.30 Gbit/s and dropped 83 825 datagrams against 2.54
+offered, below the 7.37 Gbit/s the rung needs.  That is deliberately *not* a
+limit - a probe that drops its own datagrams stops being a valid instrument,
+so it says nothing about whether the path could carry more - which is why the
+verdict rests on the CPU number above and the probe result is filed as
+insufficient evidence.
+
+### 8. Fairness and shared-lane impairment
+
+The fanout isolation test above: two impaired destinations sharing lane 0
+with two healthy ones, lane 1 as control, 64 destinations in total.  The
+healthy lane-mates delivered 100.0% of the control lane, the impaired lane's
+shared `SndQ` carried 3809 retransmissions against 0 in the control lane, and
+no destination outside the impaired lane moved.  Churn (delete, re-add,
+reload) leaves the shards' destination count and the lane placement
+identical.  SRT-driven contention against RTMP and HLS in one program is measured
+in the mixed-protocol contention section above: half the destinations SRT, a
+quarter each RTMP and HLS push, every protocol clearing its gate through 128
+destinations.  What is not yet measured is mixed SRT session options
+(different latency or encryption) sharing one lane.
+
+### 9. Remaining production limits
+
+1. **The 1,000-destination claim is unverified.**  It needs a sender with
+   more CPU and a receiver host on a wider path; the harness, the preflight
+   and the classification are ready, and the exact commands are in
+   `docs/capacity-evidence/runs-2026-09-28/README.md` and in the workflow
+   tiers.
+2. **The receiver topology can bind before the software does.**  A small
+   isolated CPU set funnels loopback softirq onto one core; the receivers
+   must be placed on CPUs the sender does not use before any boundary is
+   read as a software limit.
+3. **Admission is permissive at the boundary** (see above): the 512th
+   destination is admitted, the averages stay at reference and the media
+   degrades - 785 MPEG-TS errors and a worst second at 0.216 of reference.
+4. **A competing job on a pinned CPU is now a stop, not a footnote.**  The
+   preflight samples the CPUs the run is pinned to, names them and the
+   processes using them, and returns `infrastructure-limited` above half a
+   CPU; every capacity case and every quality rung runs it.  A desktop's own
+   spread stays below the threshold.  On a shared host this is what keeps a
+   host number out of the capacity tables.
+5. **Contention runs must start the way the published tiers do** - through
+   the unprivileged helper, not as root.  As root the workers drop to
+   `nobody`, cannot write the HLS directory, and every HLS push destination
+   times out its readiness; the module's log says `Permission denied` and the
+   failure looks like a quality problem but is an invocation one.
+6. **Per-destination SRT options do not exist.**  Encryption is listener- and
+   stream-scoped and latency is not exposed, so mixed session settings within
+   one lane cannot be tested today; the per-destination fields that do exist
+   (stream id, path, segment duration, playlist window, CA file) are exercised
+   by the fanout isolation test.
+7. **HLS push against a lossy, failing sink** is covered by the conformance
+   fixtures; loss, latency, closure and intermittent HTTP errors are not
+   injected yet.
+8. **The two-host (ssh) receiver path** is implemented and documented but
+   has never run against a second machine; only the namespace topology it
+   shares code with has been validated.  Its SRT path passes the sink's bind
+   address to the remote process and its preflight writes to a directory the
+   receiver actually has; a mix with RTMP destinations is refused there
+   rather than measured, because the RTMP sink's configuration and PID file
+   live on the sender while its nginx would run on the receiver.
+9. **The local binary caveat**: any capacity number taken with a stale build
+   is meaningless for the unprepared path; every number in this report comes
+   from a build of the current source.
+
 ## Where this leaves the roadmap
 
 | Deliverable | Status |
 |---|---|
 | Root cause with profiles and before/after | SRT: libsrt's per-destination multiplexer (a socket and a `SndQ`/`RcvQ` pair per stream) - its cost, by sampled stacks, is thread wakeups and context switches, not sending - fixed by lane multiplexer groups; sender CPU/Gbit/s 342–389% → 126–164%, highest pass 32 → 96 on this host, `SndQ` wakeup CPU 61.7% → 19.1% of a core at 64 destinations. |
 | Reproducible command and a diagnostic bundle per run | `make bench-capacity-quality` / `scripts/bench-ci.sh <tier>`; `diagnostics.json` per rung, `capacity-matrix.json` per run |
-| Capacity matrix, seven workloads | above, and `capacity-evidence/` |
+| Capacity matrix, seven workloads | above, `capacity-evidence/`, and the run transcripts in `capacity-evidence/runs-2026-09-28/` |
 | Fixed vs adaptive SRT senders | Phase 2: fixed 1, 2, 4 and adaptive pass the same rungs; one sender carries 96 destinations at 29% of a core.  CPU per Gbit/s falls to a floor at one sender per CPU; adaptive now runs one per lane in use up to granted CPUs and matches fixed 4 (104–109% vs 107%, was 122–127%) |
 | Corrected RTMP timing, sustained HLS push | Phase 4; HLS push on identified segments |
 | Unit, sanitizer, integration | pass; the two integration failures that reproduced on the baseline are fixed by the CI repair this is stacked on |

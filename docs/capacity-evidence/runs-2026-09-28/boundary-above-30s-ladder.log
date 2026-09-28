@@ -1,0 +1,847 @@
+CPU topology: P-cores=0,1,2,3,4,5,6,7,8,9,10,11 E-cores=12,13,14,15,16,17,18,19
+benchmark CPUs: 0,2,4,6,8,10,12,13,14,15
+sibling isolation: offline 1,3,5,7,9,11
+turbo mode: on (enabled before run; restored on exit)
+benchmark mode: performance governor (20 CPU policies)
+benchmark run: selected CPUs (CPUs=0,2,4,6,8,10,12,13,14,15)
+== host
+   Linux 7.2.5-3-omarchy x86_64, 10 cpus
+   net.core.rmem_max 4194304
+   nginx nginx built 2026-09-26 18:37:25
+
+
+== selected 8 Mbit/s delivery-quality ladders
+   selected mixes: pure-srt
+   each rung uses one program; per-protocol one-destination baselines calibrate before scaling.
+
+== pure-srt 8M receiver-quality ladder
+   duration=30s per rung; reference=one destination per protocol
+   SRT counts use nearest-integer share rounding; actual counts shown per rung.
+   pass: per-destination delivery >=0.95 of its protocol reference
+   SRT quality also requires interval floor=0.80,
+   lag limit=2s, queue pressure limit=
+   0.90 for 3 samples,
+   and zero MPEG-TS errors/application drops.
+quality_rung_start mix=pure-srt destinations=1 srt=1 rtmp=0 hls=0 hls_push=0 actual_shares_srt=100.00%_rtmp=0.00%_hls_push=0.00%
+   source 8M: 32663 KiB over 30s (8.9 Mbit/s)
+
+== capacity srt quality-pure-srt-1: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=1 total_destinations=1
+   per_program_outputs: SRT=1 RTMP=0 HLS_readers=0 HLS_push=0
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   srt_hls_preparation=yes
+   offered_egress=8.0Mbit/s window=30s
+   srt_receiver_listeners=1 (<= 16 destinations each)
+   measurement_s=30.19 requested_window_s=30 media_measurement_window_s=30.19 cpu_window_s=30.008469 cpu_sampling_before_ms=4.029 cpu_sampling_after_ms=3.045
+   cc1-4 owner=w0 source_frames=762
+      program_frames=762
+      progress_fps=25.2 fanout_samples=762
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:762,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10823487B
+      feed_high_water=263u/11805105B
+      feed_evictions_delta=525
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+   per-destination rates, MPEG-TS counters, and queue quality:
+quality_pass=yes
+quality_reference_payload_bps=8968736.88
+quality_reference_payload_mbps=8.9687
+quality_prepared_source_payload_bps=8919271.47
+quality_reference_vs_prepared_ratio=1.00555
+quality_measurement_s=30.160
+quality_total_receiver_bytes=33811988
+quality_average_delivery_ratio_min=1.00000
+quality_interval_delivery_ratio_min=0.93877
+quality_destination_fairness_jain=1.00000 (supplementary)
+quality_sender_feed_drops=0
+quality_strict_full_rate=yes
+quality_strict_ratio_min=1.00000
+quality_strict_ratio_tolerance=0.99900
+quality_strict_interval_floor=0.90000
+quality_strict_interval_min=0.93877
+quality_strict_ts_errors=0
+quality_sender_output_drops=0
+quality_stream_feed_overruns=0
+quality_stream_feed_retention_evictions=525
+quality_peak_feed_queue_utilization=0.0000
+quality_peak_output_queue_utilization=0.0000
+quality_complete_queue_samples=29
+quality_failure_count=0
+   destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-1/destination-quality.csv
+   interval_throughput_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-1/interval-throughput.csv
+   calibrated_quality_reference_bps=8968736.88
+   SRT sender-shard counters and queue snapshots:
+srt_active_senders_before=1
+srt_active_senders_after=1
+shard worker=0 shard=0 destinations=1 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=34002056 sent_bursts_delta=758 blocked_sends_delta=0 retransmitted_packets_delta=0 feed_drops_delta=0 output_drops_delta=0
+shard_sent_bytes_spread=34002056..34002056 range=0 jain=1.0000
+   sender shard CPU from /proc thread comm srt-egress-*:
+      worker=w0 thread=srt-egress-00 cpu=1.6%
+      worker=w1 thread=srt-egress-00 cpu=0.5%
+      worker=w2 thread=srt-egress-00 cpu=0.4%
+      worker=w3 thread=srt-egress-00 cpu=0.4%
+      worker=w0 thread=srt-egress-01 cpu=0.0%
+      worker=w1 thread=srt-egress-01 cpu=0.0%
+      worker=w2 thread=srt-egress-01 cpu=0.0%
+      worker=w3 thread=srt-egress-01 cpu=0.0%
+      worker=w0 thread=srt-egress-02 cpu=0.0%
+      worker=w1 thread=srt-egress-02 cpu=0.0%
+      worker=w2 thread=srt-egress-02 cpu=0.0%
+      worker=w3 thread=srt-egress-02 cpu=0.0%
+      worker=w0 thread=srt-egress-03 cpu=0.0%
+      worker=w1 thread=srt-egress-03 cpu=0.0%
+      worker=w2 thread=srt-egress-03 cpu=0.0%
+      worker=w3 thread=srt-egress-03 cpu=0.0%
+      worker=w0 thread=srt-egress-04 cpu=0.0%
+      worker=w1 thread=srt-egress-04 cpu=0.0%
+      worker=w2 thread=srt-egress-04 cpu=0.0%
+      worker=w3 thread=srt-egress-04 cpu=0.0%
+      worker=w0 thread=srt-egress-05 cpu=0.0%
+      worker=w1 thread=srt-egress-05 cpu=0.0%
+      worker=w2 thread=srt-egress-05 cpu=0.0%
+      worker=w3 thread=srt-egress-05 cpu=0.0%
+      worker=w0 thread=srt-egress-06 cpu=0.0%
+      worker=w1 thread=srt-egress-06 cpu=0.0%
+      worker=w2 thread=srt-egress-06 cpu=0.0%
+      worker=w3 thread=srt-egress-06 cpu=0.0%
+      worker=w0 thread=srt-egress-07 cpu=0.0%
+      worker=w1 thread=srt-egress-07 cpu=0.0%
+      worker=w2 thread=srt-egress-07 cpu=0.0%
+      worker=w3 thread=srt-egress-07 cpu=0.0%
+      worker=w0 thread=srt-egress-08 cpu=0.0%
+      worker=w1 thread=srt-egress-08 cpu=0.0%
+      worker=w2 thread=srt-egress-08 cpu=0.0%
+      worker=w3 thread=srt-egress-08 cpu=0.0%
+      worker=w0 thread=srt-egress-09 cpu=0.0%
+      worker=w1 thread=srt-egress-09 cpu=0.0%
+      worker=w2 thread=srt-egress-09 cpu=0.0%
+      worker=w3 thread=srt-egress-09 cpu=0.0%
+      worker=w0 thread=srt-egress-10 cpu=0.0%
+      worker=w1 thread=srt-egress-10 cpu=0.0%
+      worker=w2 thread=srt-egress-10 cpu=0.0%
+      worker=w3 thread=srt-egress-10 cpu=0.0%
+      worker=w0 thread=srt-egress-11 cpu=0.0%
+      worker=w1 thread=srt-egress-11 cpu=0.0%
+      worker=w2 thread=srt-egress-11 cpu=0.0%
+      worker=w3 thread=srt-egress-11 cpu=0.0%
+      worker=w0 thread=srt-egress-12 cpu=0.0%
+      worker=w1 thread=srt-egress-12 cpu=0.0%
+      worker=w2 thread=srt-egress-12 cpu=0.0%
+      worker=w3 thread=srt-egress-12 cpu=0.0%
+      worker=w0 thread=srt-egress-13 cpu=0.0%
+      worker=w1 thread=srt-egress-13 cpu=0.0%
+      worker=w2 thread=srt-egress-13 cpu=0.0%
+      worker=w3 thread=srt-egress-13 cpu=0.0%
+      worker=w0 thread=srt-egress-14 cpu=0.0%
+      worker=w1 thread=srt-egress-14 cpu=0.0%
+      worker=w2 thread=srt-egress-14 cpu=0.0%
+      worker=w3 thread=srt-egress-14 cpu=0.0%
+      worker=w0 thread=srt-egress-15 cpu=0.0%
+      worker=w1 thread=srt-egress-15 cpu=0.0%
+      worker=w2 thread=srt-egress-15 cpu=0.0%
+      worker=w3 thread=srt-egress-15 cpu=0.0%
+      worker=w2 aggregate_egress_shard_cpu=0.6%
+      worker=w3 aggregate_egress_shard_cpu=0.6%
+      worker=w0 aggregate_egress_shard_cpu=2.1%
+      worker=w1 aggregate_egress_shard_cpu=1.0%
+      aggregate_egress_shard_cpu=4.2%
+   libsrt SRT:SndQ CPU:
+      worker=w0 cpu=0.2%
+      worker=w1 cpu=0.0%
+      worker=w2 cpu=0.0%
+      worker=w3 cpu=0.0%
+      worker=pid1334509 cpu=0.0%
+      worker=pid1334576 cpu=0.3%
+      worker=w2 aggregate_libsrt_sndq_cpu=0.0%
+      worker=w3 aggregate_libsrt_sndq_cpu=0.0%
+      worker=pid1334509 aggregate_libsrt_sndq_cpu=0.0%
+      worker=pid1334576 aggregate_libsrt_sndq_cpu=0.3%
+      worker=w0 aggregate_libsrt_sndq_cpu=0.2%
+      worker=w1 aggregate_libsrt_sndq_cpu=0.0%
+      aggregate_libsrt_sndq_cpu=0.6%
+   shared SRT receiver thread CPU:
+      pid=pid1334509 thread=srt_fanout_sink cpu=0.4%
+      pid=pid1334509 thread=SRT:GC cpu=0.0%
+      pid=pid1334509 thread=SRT:RcvQ cpu=1.6%
+      pid=pid1334509 thread=SRT:SndQ cpu=0.0%
+      pid=pid1334509 thread=SRT:TsbPd cpu=0.1%
+      aggregate_receiver_cpu=2.0%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1334168 rss_kb=28708->44488 delta_kb=+15780 pss_kb=21387->37201 delta_kb=+15814
+      pid=1334169 rss_kb=23452->23452 delta_kb=+0 pss_kb=16249->16283 delta_kb=+34
+      pid=1334170 rss_kb=23444->23444 delta_kb=+0 pss_kb=16244->16277 delta_kb=+33
+      pid=1334172 rss_kb=23452->23452 delta_kb=+0 pss_kb=16252->16285 delta_kb=+33
+   worker visit and scheduling metrics:
+      w0 pid=1334168 cpu=4.8%
+         visit_max=0ms event_loop_max_delay=101ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1334169 cpu=2.1%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1334170 cpu=1.8%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1334172 cpu=1.9%
+         visit_max=0ms event_loop_max_delay=101ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=10.6% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=6 skmem_bytes=8192 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=634->1044
+      UDP mem_pages=1215->421
+      TCP inuse=28->26
+      UDP inuse=14->13
+   diag: host CPU busy 3.4% of all online CPUs
+   diag: sender 11% vs receivers 2% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-1/diagnostics.json
+quality_rung_result mix=pure-srt destinations=1 srt=1 rtmp=0 hls=0 hls_push=0 result=pass
+quality_rung_start mix=pure-srt destinations=256 srt=256 rtmp=0 hls=0 hls_push=0 actual_shares_srt=100.00%_rtmp=0.00%_hls_push=0.00%
+
+== capacity srt quality-pure-srt-256: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=256 total_destinations=256
+   per_program_outputs: SRT=256 RTMP=0 HLS_readers=0 HLS_push=0
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   srt_hls_preparation=yes
+   offered_egress=2048.0Mbit/s window=30s
+   srt_receiver_listeners=16 (<= 16 destinations each)
+   measurement_s=30.23 requested_window_s=30 media_measurement_window_s=30.23 cpu_window_s=30.029769 cpu_sampling_before_ms=15.012 cpu_sampling_after_ms=21.934
+   cc2-3 owner=w0 source_frames=763
+      program_frames=763
+      progress_fps=25.2 fanout_samples=763
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:763,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10841772B
+      feed_high_water=262u/11732489B
+      feed_evictions_delta=528
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+   per-destination rates, MPEG-TS counters, and queue quality:
+quality_pass=yes
+quality_reference_payload_bps=8968736.88
+quality_reference_payload_mbps=8.9687
+quality_prepared_source_payload_bps=8919271.47
+quality_reference_vs_prepared_ratio=1.00555
+quality_measurement_s=30.200
+quality_total_receiver_bytes=8667275264
+quality_average_delivery_ratio_min=0.99994
+quality_interval_delivery_ratio_min=0.92372
+quality_destination_fairness_jain=1.00000 (supplementary)
+quality_sender_feed_drops=0
+quality_strict_full_rate=yes
+quality_strict_ratio_min=0.99994
+quality_strict_ratio_tolerance=0.99900
+quality_strict_interval_floor=0.90000
+quality_strict_interval_min=0.92372
+quality_strict_ts_errors=0
+quality_sender_output_drops=0
+quality_stream_feed_overruns=0
+quality_stream_feed_retention_evictions=528
+quality_peak_feed_queue_utilization=0.0156
+quality_peak_output_queue_utilization=0.0064
+quality_complete_queue_samples=28
+quality_failure_count=0
+   destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-256/destination-quality.csv
+   interval_throughput_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-256/interval-throughput.csv
+   SRT sender-shard counters and queue snapshots:
+srt_active_senders_before=4
+srt_active_senders_after=4
+shard worker=0 shard=0 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=0 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=1 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=1418 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=10 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=0 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=11 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=1423 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=12 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=870 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=13 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=1100 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=14 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=1572 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=15 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=933 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=2 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=785 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=3 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=2495 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=4 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=289 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=5 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=855 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=6 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=576 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=7 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=1095 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=8 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=0 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=9 destinations=16 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=544814976 sent_bursts_delta=12144 blocked_sends_delta=0 retransmitted_packets_delta=1832 feed_drops_delta=0 output_drops_delta=0
+shard_sent_bytes_spread=544814976..544814976 range=0 jain=1.0000
+   sender shard CPU from /proc thread comm srt-egress-*:
+      worker=w0 thread=srt-egress-00 cpu=3.1%
+      worker=w1 thread=srt-egress-00 cpu=0.4%
+      worker=w2 thread=srt-egress-00 cpu=0.4%
+      worker=w3 thread=srt-egress-00 cpu=0.4%
+      worker=w0 thread=srt-egress-01 cpu=3.1%
+      worker=w1 thread=srt-egress-01 cpu=0.0%
+      worker=w2 thread=srt-egress-01 cpu=0.1%
+      worker=w3 thread=srt-egress-01 cpu=0.1%
+      worker=w0 thread=srt-egress-02 cpu=3.1%
+      worker=w1 thread=srt-egress-02 cpu=0.1%
+      worker=w2 thread=srt-egress-02 cpu=0.1%
+      worker=w3 thread=srt-egress-02 cpu=0.1%
+      worker=w0 thread=srt-egress-03 cpu=3.1%
+      worker=w1 thread=srt-egress-03 cpu=0.1%
+      worker=w2 thread=srt-egress-03 cpu=0.0%
+      worker=w3 thread=srt-egress-03 cpu=0.1%
+      worker=w0 thread=srt-egress-04 cpu=0.1%
+      worker=w1 thread=srt-egress-04 cpu=0.1%
+      worker=w2 thread=srt-egress-04 cpu=0.1%
+      worker=w3 thread=srt-egress-04 cpu=0.1%
+      worker=w0 thread=srt-egress-05 cpu=0.1%
+      worker=w1 thread=srt-egress-05 cpu=0.0%
+      worker=w2 thread=srt-egress-05 cpu=0.1%
+      worker=w3 thread=srt-egress-05 cpu=0.0%
+      worker=w0 thread=srt-egress-06 cpu=0.0%
+      worker=w1 thread=srt-egress-06 cpu=0.1%
+      worker=w2 thread=srt-egress-06 cpu=0.0%
+      worker=w3 thread=srt-egress-06 cpu=0.1%
+      worker=w0 thread=srt-egress-07 cpu=0.0%
+      worker=w1 thread=srt-egress-07 cpu=0.0%
+      worker=w2 thread=srt-egress-07 cpu=0.0%
+      worker=w3 thread=srt-egress-07 cpu=0.1%
+      worker=w0 thread=srt-egress-08 cpu=0.0%
+      worker=w1 thread=srt-egress-08 cpu=0.1%
+      worker=w2 thread=srt-egress-08 cpu=0.1%
+      worker=w3 thread=srt-egress-08 cpu=0.1%
+      worker=w0 thread=srt-egress-09 cpu=0.1%
+      worker=w1 thread=srt-egress-09 cpu=0.0%
+      worker=w2 thread=srt-egress-09 cpu=0.1%
+      worker=w3 thread=srt-egress-09 cpu=0.0%
+      worker=w0 thread=srt-egress-10 cpu=0.1%
+      worker=w1 thread=srt-egress-10 cpu=0.0%
+      worker=w2 thread=srt-egress-10 cpu=0.1%
+      worker=w3 thread=srt-egress-10 cpu=0.0%
+      worker=w0 thread=srt-egress-11 cpu=0.1%
+      worker=w1 thread=srt-egress-11 cpu=0.0%
+      worker=w2 thread=srt-egress-11 cpu=0.1%
+      worker=w3 thread=srt-egress-11 cpu=0.1%
+      worker=w0 thread=srt-egress-12 cpu=0.1%
+      worker=w1 thread=srt-egress-12 cpu=0.0%
+      worker=w2 thread=srt-egress-12 cpu=0.1%
+      worker=w3 thread=srt-egress-12 cpu=0.1%
+      worker=w0 thread=srt-egress-13 cpu=0.1%
+      worker=w1 thread=srt-egress-13 cpu=0.1%
+      worker=w2 thread=srt-egress-13 cpu=0.1%
+      worker=w3 thread=srt-egress-13 cpu=0.1%
+      worker=w0 thread=srt-egress-14 cpu=0.1%
+      worker=w1 thread=srt-egress-14 cpu=0.1%
+      worker=w2 thread=srt-egress-14 cpu=0.0%
+      worker=w3 thread=srt-egress-14 cpu=0.1%
+      worker=w0 thread=srt-egress-15 cpu=0.1%
+      worker=w1 thread=srt-egress-15 cpu=0.1%
+      worker=w2 thread=srt-egress-15 cpu=0.1%
+      worker=w3 thread=srt-egress-15 cpu=0.1%
+      worker=w2 aggregate_egress_shard_cpu=1.4%
+      worker=w3 aggregate_egress_shard_cpu=1.3%
+      worker=w0 aggregate_egress_shard_cpu=13.2%
+      worker=w1 aggregate_egress_shard_cpu=1.2%
+      aggregate_egress_shard_cpu=17.0%
+   libsrt SRT:SndQ CPU:
+      worker=w0 cpu=42.9%
+      worker=w1 cpu=0.0%
+      worker=w2 cpu=0.0%
+      worker=w3 cpu=0.0%
+      worker=pid1336933 cpu=0.0%
+      worker=pid1343933 cpu=0.4%
+      worker=w2 aggregate_libsrt_sndq_cpu=0.0%
+      worker=pid1343933 aggregate_libsrt_sndq_cpu=0.4%
+      worker=pid1336933 aggregate_libsrt_sndq_cpu=0.0%
+      worker=w3 aggregate_libsrt_sndq_cpu=0.0%
+      worker=w0 aggregate_libsrt_sndq_cpu=42.9%
+      worker=w1 aggregate_libsrt_sndq_cpu=0.0%
+      aggregate_libsrt_sndq_cpu=43.3%
+   shared SRT receiver thread CPU:
+      pid=pid1336933 thread=srt_fanout_sink cpu=18.9%
+      pid=pid1336933 thread=SRT:GC cpu=0.0%
+      pid=pid1336933 thread=SRT:RcvQ cpu=53.3%
+      pid=pid1336933 thread=SRT:SndQ cpu=0.0%
+      pid=pid1336933 thread=SRT:TsbPd cpu=0.9%
+      pid=pid1336933 thread=(unattributed) cpu=9.6%
+      aggregate_receiver_cpu=82.7%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1336592 rss_kb=333148->350560 delta_kb=+17412 pss_kb=327584->345028 delta_kb=+17444
+      pid=1336593 rss_kb=21164->21164 delta_kb=+0 pss_kb=15790->15818 delta_kb=+28
+      pid=1336594 rss_kb=21340->21340 delta_kb=+0 pss_kb=15816->15849 delta_kb=+33
+      pid=1336596 rss_kb=21340->21340 delta_kb=+0 pss_kb=15816->15849 delta_kb=+33
+   worker visit and scheduling metrics:
+      w0 pid=1336592 cpu=66.7%
+         visit_max=2ms event_loop_max_delay=134ms
+         periodic_visits_delta=303
+         budget_reposts_delta=1
+         late_ticks_delta=0
+      w1 pid=1336593 cpu=1.7%
+         visit_max=1ms event_loop_max_delay=107ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1336594 cpu=1.9%
+         visit_max=1ms event_loop_max_delay=107ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1336596 cpu=1.8%
+         visit_max=1ms event_loop_max_delay=120ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=72.1% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=21 skmem_bytes=69632 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=780->677
+      UDP mem_pages=780->0
+      TCP inuse=17->18
+      UDP inuse=44->43
+   diag: host CPU busy 14.4% of all online CPUs
+   diag: sender 72% vs receivers 83% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-256/diagnostics.json
+quality_rung_result mix=pure-srt destinations=256 srt=256 rtmp=0 hls=0 hls_push=0 result=pass
+quality_rung_start mix=pure-srt destinations=384 srt=384 rtmp=0 hls=0 hls_push=0 actual_shares_srt=100.00%_rtmp=0.00%_hls_push=0.00%
+
+== capacity srt quality-pure-srt-384: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=384 total_destinations=384
+   per_program_outputs: SRT=384 RTMP=0 HLS_readers=0 HLS_push=0
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   srt_hls_preparation=yes
+   offered_egress=3072.0Mbit/s window=30s
+   srt_receiver_listeners=24 (<= 16 destinations each)
+   measurement_s=30.27 requested_window_s=30 media_measurement_window_s=30.27 cpu_window_s=30.037146 cpu_sampling_before_ms=20.673 cpu_sampling_after_ms=20.996
+   cc3-2 owner=w0 source_frames=769
+      program_frames=769
+      progress_fps=25.4 fanout_samples=769
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:769,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10889201B
+      feed_high_water=263u/11805105B
+      feed_evictions_delta=540
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+   per-destination rates, MPEG-TS counters, and queue quality:
+quality_pass=yes
+quality_reference_payload_bps=8968736.88
+quality_reference_payload_mbps=8.9687
+quality_prepared_source_payload_bps=8919271.47
+quality_reference_vs_prepared_ratio=1.00555
+quality_measurement_s=30.239
+quality_total_receiver_bytes=13020034188
+quality_average_delivery_ratio_min=0.99971
+quality_interval_delivery_ratio_min=0.93512
+quality_destination_fairness_jain=1.00000 (supplementary)
+quality_sender_feed_drops=0
+quality_strict_full_rate=yes
+quality_strict_ratio_min=0.99971
+quality_strict_ratio_tolerance=0.99900
+quality_strict_interval_floor=0.90000
+quality_strict_interval_min=0.93512
+quality_strict_ts_errors=0
+quality_sender_output_drops=0
+quality_stream_feed_overruns=0
+quality_stream_feed_retention_evictions=540
+quality_peak_feed_queue_utilization=0.0000
+quality_peak_output_queue_utilization=0.0052
+quality_complete_queue_samples=28
+quality_failure_count=0
+   destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-384/destination-quality.csv
+   interval_throughput_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-384/interval-throughput.csv
+   SRT sender-shard counters and queue snapshots:
+srt_active_senders_before=4
+srt_active_senders_after=4
+shard worker=0 shard=0 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=824179968 sent_bursts_delta=18360 blocked_sends_delta=0 retransmitted_packets_delta=3024 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=1 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=825136512 sent_bursts_delta=18384 blocked_sends_delta=0 retransmitted_packets_delta=3919 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=10 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=824179968 sent_bursts_delta=18360 blocked_sends_delta=0 retransmitted_packets_delta=3080 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=11 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=825073344 sent_bursts_delta=18384 blocked_sends_delta=0 retransmitted_packets_delta=2682 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=12 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=824188992 sent_bursts_delta=18384 blocked_sends_delta=0 retransmitted_packets_delta=3669 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=13 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=825152304 sent_bursts_delta=18384 blocked_sends_delta=0 retransmitted_packets_delta=3840 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=14 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=824179968 sent_bursts_delta=18360 blocked_sends_delta=0 retransmitted_packets_delta=2795 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=15 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=825073344 sent_bursts_delta=18384 blocked_sends_delta=0 retransmitted_packets_delta=2934 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=2 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=824179968 sent_bursts_delta=18360 blocked_sends_delta=0 retransmitted_packets_delta=3208 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=3 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=825041760 sent_bursts_delta=18384 blocked_sends_delta=0 retransmitted_packets_delta=3258 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=4 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=824183352 sent_bursts_delta=18369 blocked_sends_delta=0 retransmitted_packets_delta=3894 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=5 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=825136512 sent_bursts_delta=18384 blocked_sends_delta=0 retransmitted_packets_delta=4931 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=6 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=824179968 sent_bursts_delta=18360 blocked_sends_delta=0 retransmitted_packets_delta=3114 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=7 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=825062816 sent_bursts_delta=18384 blocked_sends_delta=0 retransmitted_packets_delta=3158 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=8 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=824188992 sent_bursts_delta=18384 blocked_sends_delta=0 retransmitted_packets_delta=3287 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=9 destinations=24 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=825136512 sent_bursts_delta=18384 blocked_sends_delta=0 retransmitted_packets_delta=4943 feed_drops_delta=0 output_drops_delta=0
+shard_sent_bytes_spread=824179968..825152304 range=972336 jain=1.0000
+   sender shard CPU from /proc thread comm srt-egress-*:
+      worker=w0 thread=srt-egress-00 cpu=4.7%
+      worker=w1 thread=srt-egress-00 cpu=0.3%
+      worker=w2 thread=srt-egress-00 cpu=0.4%
+      worker=w3 thread=srt-egress-00 cpu=0.4%
+      worker=w0 thread=srt-egress-01 cpu=4.7%
+      worker=w1 thread=srt-egress-01 cpu=0.0%
+      worker=w2 thread=srt-egress-01 cpu=0.0%
+      worker=w3 thread=srt-egress-01 cpu=0.1%
+      worker=w0 thread=srt-egress-02 cpu=4.6%
+      worker=w1 thread=srt-egress-02 cpu=0.1%
+      worker=w2 thread=srt-egress-02 cpu=0.0%
+      worker=w3 thread=srt-egress-02 cpu=0.1%
+      worker=w0 thread=srt-egress-03 cpu=4.7%
+      worker=w1 thread=srt-egress-03 cpu=0.1%
+      worker=w2 thread=srt-egress-03 cpu=0.1%
+      worker=w3 thread=srt-egress-03 cpu=0.1%
+      worker=w0 thread=srt-egress-04 cpu=0.0%
+      worker=w1 thread=srt-egress-04 cpu=0.0%
+      worker=w2 thread=srt-egress-04 cpu=0.0%
+      worker=w3 thread=srt-egress-04 cpu=0.1%
+      worker=w0 thread=srt-egress-05 cpu=0.0%
+      worker=w1 thread=srt-egress-05 cpu=0.0%
+      worker=w2 thread=srt-egress-05 cpu=0.1%
+      worker=w3 thread=srt-egress-05 cpu=0.0%
+      worker=w0 thread=srt-egress-06 cpu=0.1%
+      worker=w1 thread=srt-egress-06 cpu=0.0%
+      worker=w2 thread=srt-egress-06 cpu=0.1%
+      worker=w3 thread=srt-egress-06 cpu=0.1%
+      worker=w0 thread=srt-egress-07 cpu=0.1%
+      worker=w1 thread=srt-egress-07 cpu=0.0%
+      worker=w2 thread=srt-egress-07 cpu=0.1%
+      worker=w3 thread=srt-egress-07 cpu=0.0%
+      worker=w0 thread=srt-egress-08 cpu=0.0%
+      worker=w1 thread=srt-egress-08 cpu=0.0%
+      worker=w2 thread=srt-egress-08 cpu=0.1%
+      worker=w3 thread=srt-egress-08 cpu=0.1%
+      worker=w0 thread=srt-egress-09 cpu=0.0%
+      worker=w1 thread=srt-egress-09 cpu=0.1%
+      worker=w2 thread=srt-egress-09 cpu=0.1%
+      worker=w3 thread=srt-egress-09 cpu=0.1%
+      worker=w0 thread=srt-egress-10 cpu=0.0%
+      worker=w1 thread=srt-egress-10 cpu=0.1%
+      worker=w2 thread=srt-egress-10 cpu=0.0%
+      worker=w3 thread=srt-egress-10 cpu=0.1%
+      worker=w0 thread=srt-egress-11 cpu=0.0%
+      worker=w1 thread=srt-egress-11 cpu=0.1%
+      worker=w2 thread=srt-egress-11 cpu=0.1%
+      worker=w3 thread=srt-egress-11 cpu=0.1%
+      worker=w0 thread=srt-egress-12 cpu=0.0%
+      worker=w1 thread=srt-egress-12 cpu=0.0%
+      worker=w2 thread=srt-egress-12 cpu=0.0%
+      worker=w3 thread=srt-egress-12 cpu=0.1%
+      worker=w0 thread=srt-egress-13 cpu=0.0%
+      worker=w1 thread=srt-egress-13 cpu=0.1%
+      worker=w2 thread=srt-egress-13 cpu=0.0%
+      worker=w3 thread=srt-egress-13 cpu=0.1%
+      worker=w0 thread=srt-egress-14 cpu=0.1%
+      worker=w1 thread=srt-egress-14 cpu=0.1%
+      worker=w2 thread=srt-egress-14 cpu=0.0%
+      worker=w3 thread=srt-egress-14 cpu=0.0%
+      worker=w0 thread=srt-egress-15 cpu=0.1%
+      worker=w1 thread=srt-egress-15 cpu=0.1%
+      worker=w2 thread=srt-egress-15 cpu=0.1%
+      worker=w3 thread=srt-egress-15 cpu=0.1%
+      worker=w2 aggregate_egress_shard_cpu=1.2%
+      worker=w3 aggregate_egress_shard_cpu=1.4%
+      worker=w0 aggregate_egress_shard_cpu=19.2%
+      worker=w1 aggregate_egress_shard_cpu=1.2%
+      aggregate_egress_shard_cpu=23.0%
+   libsrt SRT:SndQ CPU:
+      worker=w0 cpu=67.7%
+      worker=w1 cpu=0.0%
+      worker=w2 cpu=0.0%
+      worker=w3 cpu=0.0%
+      worker=pid1346520 cpu=0.0%
+      worker=pid1357812 cpu=0.5%
+      worker=w2 aggregate_libsrt_sndq_cpu=0.0%
+      worker=w3 aggregate_libsrt_sndq_cpu=0.0%
+      worker=pid1346520 aggregate_libsrt_sndq_cpu=0.0%
+      worker=pid1357812 aggregate_libsrt_sndq_cpu=0.5%
+      worker=w0 aggregate_libsrt_sndq_cpu=67.7%
+      worker=w1 aggregate_libsrt_sndq_cpu=0.0%
+      aggregate_libsrt_sndq_cpu=68.1%
+   shared SRT receiver thread CPU:
+      pid=pid1346520 thread=srt_fanout_sink cpu=32.8%
+      pid=pid1346520 thread=SRT:GC cpu=0.0%
+      pid=pid1346520 thread=SRT:RcvQ cpu=93.5%
+      pid=pid1346520 thread=SRT:SndQ cpu=0.0%
+      pid=pid1346520 thread=SRT:TsbPd cpu=9.3%
+      pid=pid1346520 thread=(unattributed) cpu=13.4%
+      aggregate_receiver_cpu=148.9%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1346185 rss_kb=563060->582704 delta_kb=+19644 pss_kb=557369->577053 delta_kb=+19684
+      pid=1346186 rss_kb=21340->21340 delta_kb=+0 pss_kb=15810->15839 delta_kb=+29
+      pid=1346188 rss_kb=21344->21344 delta_kb=+0 pss_kb=15816->15846 delta_kb=+30
+      pid=1346189 rss_kb=21344->21344 delta_kb=+0 pss_kb=15817->15846 delta_kb=+29
+   worker visit and scheduling metrics:
+      w0 pid=1346185 cpu=103.4%
+         visit_max=2ms event_loop_max_delay=111ms
+         periodic_visits_delta=306
+         budget_reposts_delta=1
+         late_ticks_delta=0
+      w1 pid=1346186 cpu=1.6%
+         visit_max=1ms event_loop_max_delay=125ms
+         periodic_visits_delta=306
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1346188 cpu=1.7%
+         visit_max=1ms event_loop_max_delay=127ms
+         periodic_visits_delta=306
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1346189 cpu=1.8%
+         visit_max=1ms event_loop_max_delay=132ms
+         periodic_visits_delta=304
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=108.5% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=21 skmem_bytes=69632 delta_bytes=-3264
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=854->1055
+      UDP mem_pages=20948->967
+      TCP inuse=17->16
+      UDP inuse=52->51
+   diag: host CPU busy 23.2% of all online CPUs
+   diag: sender 108% vs receivers 149% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-384/diagnostics.json
+quality_rung_result mix=pure-srt destinations=384 srt=384 rtmp=0 hls=0 hls_push=0 result=pass
+quality_rung_start mix=pure-srt destinations=512 srt=512 rtmp=0 hls=0 hls_push=0 actual_shares_srt=100.00%_rtmp=0.00%_hls_push=0.00%
+
+== capacity srt quality-pure-srt-512: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=512 total_destinations=512
+   per_program_outputs: SRT=512 RTMP=0 HLS_readers=0 HLS_push=0
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   srt_hls_preparation=yes
+   offered_egress=4096.0Mbit/s window=30s
+   srt_receiver_listeners=32 (<= 16 destinations each)
+   measurement_s=30.46 requested_window_s=30 media_measurement_window_s=30.46 cpu_window_s=30.098562 cpu_sampling_before_ms=46.328 cpu_sampling_after_ms=73.576
+   cc4-1 owner=w0 source_frames=777
+      program_frames=777
+      progress_fps=25.5 fanout_samples=777
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:777,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10923181B
+      feed_high_water=262u/11736353B
+      feed_evictions_delta=545
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+   per-destination rates, MPEG-TS counters, and queue quality:
+quality_pass=no
+quality_reference_payload_bps=8968736.88
+quality_reference_payload_mbps=8.9687
+quality_prepared_source_payload_bps=8919271.47
+quality_reference_vs_prepared_ratio=1.00555
+quality_measurement_s=30.381
+quality_total_receiver_bytes=17796492848
+quality_average_delivery_ratio_min=0.99993
+quality_interval_delivery_ratio_min=0.93320
+quality_destination_fairness_jain=0.99993 (supplementary)
+quality_sender_feed_drops=0
+quality_strict_full_rate=no
+quality_strict_ratio_min=0.99993
+quality_strict_ratio_tolerance=0.99900
+quality_strict_interval_floor=0.90000
+quality_strict_interval_min=0.93320
+quality_strict_ts_errors=355
+quality_sender_output_drops=0
+quality_stream_feed_overruns=0
+quality_stream_feed_retention_evictions=545
+quality_peak_feed_queue_utilization=0.0000
+quality_peak_output_queue_utilization=0.0058
+quality_complete_queue_samples=28
+quality_failure_count=149
+quality_failure=d0006: MPEG-TS continuity/sync/TEI errors 0/3/0
+quality_failure=d0010: MPEG-TS continuity/sync/TEI errors 0/3/0
+quality_failure=d0020: MPEG-TS continuity/sync/TEI errors 0/1/0
+quality_failure=d0021: MPEG-TS continuity/sync/TEI errors 0/3/0
+quality_failure=d0022: MPEG-TS continuity/sync/TEI errors 0/2/0
+quality_failure=d0025: MPEG-TS continuity/sync/TEI errors 0/1/0
+quality_failure=d0028: MPEG-TS continuity/sync/TEI errors 0/6/0
+quality_failure=d0029: MPEG-TS continuity/sync/TEI errors 0/1/0
+quality_failure=d0030: MPEG-TS continuity/sync/TEI errors 0/5/0
+quality_failure=d0036: MPEG-TS continuity/sync/TEI errors 0/1/0
+quality_failure=d0037: MPEG-TS continuity/sync/TEI errors 0/1/0
+quality_failure=d0038: MPEG-TS continuity/sync/TEI errors 0/3/0
+quality_failure=d0040: MPEG-TS continuity/sync/TEI errors 0/1/0
+quality_failure=d0053: MPEG-TS continuity/sync/TEI errors 0/3/0
+quality_failure=d0054: MPEG-TS continuity/sync/TEI errors 0/1/0
+quality_failure=d0057: MPEG-TS continuity/sync/TEI errors 0/4/0
+quality_failure=d0060: MPEG-TS continuity/sync/TEI errors 0/3/0
+quality_failure=d0062: MPEG-TS continuity/sync/TEI errors 0/3/0
+quality_failure=d0065: MPEG-TS continuity/sync/TEI errors 0/1/0
+quality_failure=d0068: MPEG-TS continuity/sync/TEI errors 0/1/0
+quality_failure=d0072: MPEG-TS continuity/sync/TEI errors 0/3/0
+quality_failure=d0074: MPEG-TS continuity/sync/TEI errors 0/3/0
+quality_failure=d0080: MPEG-TS continuity/sync/TEI errors 0/1/0
+quality_failure=d0084: MPEG-TS continuity/sync/TEI errors 0/3/0
+quality_failure=d0085: MPEG-TS continuity/sync/TEI errors 0/2/0
+quality_failure_more=124
+   destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-512/destination-quality.csv
+   interval_throughput_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-512/interval-throughput.csv
+   SRT sender-shard counters and queue snapshots:
+srt_active_senders_before=4
+srt_active_senders_after=4
+shard worker=0 shard=0 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1105611456 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=21560 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=1 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1106264192 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=18801 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=10 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1109623564 sent_bursts_delta=24736 blocked_sends_delta=0 retransmitted_packets_delta=8254 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=11 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1106390528 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=15804 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=12 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1105632512 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=16390 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=13 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1106306304 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=19447 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=14 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1109651200 sent_bursts_delta=24736 blocked_sends_delta=0 retransmitted_packets_delta=18604 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=15 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1106416848 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=20038 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=2 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1109609088 sent_bursts_delta=24736 blocked_sends_delta=0 retransmitted_packets_delta=6589 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=3 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1106390528 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=16916 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=4 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1105632512 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=31429 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=5 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1106264192 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=29229 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=6 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1109609088 sent_bursts_delta=24736 blocked_sends_delta=0 retransmitted_packets_delta=18075 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=7 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1106390528 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=9035 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=8 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1105632512 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=23371 feed_drops_delta=0 output_drops_delta=0
+shard worker=0 shard=9 destinations=32 feed_queue_units=0 feed_queue_bytes=0 output_queue_units=0 output_queue_bytes=0 sent_bytes_delta=1106276036 sent_bursts_delta=24640 blocked_sends_delta=0 retransmitted_packets_delta=14114 feed_drops_delta=0 output_drops_delta=0
+shard_sent_bytes_spread=1105611456..1109651200 range=4039744 jain=1.0000
+   sender shard CPU from /proc thread comm srt-egress-*:
+      worker=w0 thread=srt-egress-00 cpu=6.8%
+      worker=w1 thread=srt-egress-00 cpu=0.4%
+      worker=w2 thread=srt-egress-00 cpu=0.4%
+      worker=w3 thread=srt-egress-00 cpu=0.4%
+      worker=w0 thread=srt-egress-01 cpu=6.8%
+      worker=w1 thread=srt-egress-01 cpu=0.0%
+      worker=w2 thread=srt-egress-01 cpu=0.1%
+      worker=w3 thread=srt-egress-01 cpu=0.1%
+      worker=w0 thread=srt-egress-02 cpu=6.6%
+      worker=w1 thread=srt-egress-02 cpu=0.0%
+      worker=w2 thread=srt-egress-02 cpu=0.0%
+      worker=w3 thread=srt-egress-02 cpu=0.1%
+      worker=w0 thread=srt-egress-03 cpu=6.8%
+      worker=w1 thread=srt-egress-03 cpu=0.0%
+      worker=w2 thread=srt-egress-03 cpu=0.1%
+      worker=w3 thread=srt-egress-03 cpu=0.1%
+      worker=w0 thread=srt-egress-04 cpu=0.0%
+      worker=w1 thread=srt-egress-04 cpu=0.0%
+      worker=w2 thread=srt-egress-04 cpu=0.0%
+      worker=w3 thread=srt-egress-04 cpu=0.0%
+      worker=w0 thread=srt-egress-05 cpu=0.0%
+      worker=w1 thread=srt-egress-05 cpu=0.1%
+      worker=w2 thread=srt-egress-05 cpu=0.1%
+      worker=w3 thread=srt-egress-05 cpu=0.0%
+      worker=w0 thread=srt-egress-06 cpu=0.1%
+      worker=w1 thread=srt-egress-06 cpu=0.0%
+      worker=w2 thread=srt-egress-06 cpu=0.0%
+      worker=w3 thread=srt-egress-06 cpu=0.1%
+      worker=w0 thread=srt-egress-07 cpu=0.1%
+      worker=w1 thread=srt-egress-07 cpu=0.1%
+      worker=w2 thread=srt-egress-07 cpu=0.0%
+      worker=w3 thread=srt-egress-07 cpu=0.1%
+      worker=w0 thread=srt-egress-08 cpu=0.0%
+      worker=w1 thread=srt-egress-08 cpu=0.1%
+      worker=w2 thread=srt-egress-08 cpu=0.1%
+      worker=w3 thread=srt-egress-08 cpu=0.1%
+      worker=w0 thread=srt-egress-09 cpu=0.0%
+      worker=w1 thread=srt-egress-09 cpu=0.1%
+      worker=w2 thread=srt-egress-09 cpu=0.1%
+      worker=w3 thread=srt-egress-09 cpu=0.1%
+      worker=w0 thread=srt-egress-10 cpu=0.0%
+      worker=w1 thread=srt-egress-10 cpu=0.1%
+      worker=w2 thread=srt-egress-10 cpu=0.1%
+      worker=w3 thread=srt-egress-10 cpu=0.1%
+      worker=w0 thread=srt-egress-11 cpu=0.1%
+      worker=w1 thread=srt-egress-11 cpu=0.1%
+      worker=w2 thread=srt-egress-11 cpu=0.1%
+      worker=w3 thread=srt-egress-11 cpu=0.0%
+      worker=w0 thread=srt-egress-12 cpu=0.1%
+      worker=w1 thread=srt-egress-12 cpu=0.0%
+      worker=w2 thread=srt-egress-12 cpu=0.1%
+      worker=w3 thread=srt-egress-12 cpu=0.1%
+      worker=w0 thread=srt-egress-13 cpu=0.0%
+      worker=w1 thread=srt-egress-13 cpu=0.0%
+      worker=w2 thread=srt-egress-13 cpu=0.1%
+      worker=w3 thread=srt-egress-13 cpu=0.1%
+      worker=w0 thread=srt-egress-14 cpu=0.1%
+      worker=w1 thread=srt-egress-14 cpu=0.0%
+      worker=w2 thread=srt-egress-14 cpu=0.0%
+      worker=w3 thread=srt-egress-14 cpu=0.1%
+      worker=w0 thread=srt-egress-15 cpu=0.0%
+      worker=w1 thread=srt-egress-15 cpu=0.0%
+      worker=w2 thread=srt-egress-15 cpu=0.0%
+      worker=w3 thread=srt-egress-15 cpu=0.0%
+      worker=w2 aggregate_egress_shard_cpu=1.2%
+      worker=w3 aggregate_egress_shard_cpu=1.3%
+      worker=w0 aggregate_egress_shard_cpu=27.6%
+      worker=w1 aggregate_egress_shard_cpu=1.1%
+      aggregate_egress_shard_cpu=31.1%
+   libsrt SRT:SndQ CPU:
+      worker=w0 cpu=96.2%
+      worker=w1 cpu=0.0%
+      worker=w2 cpu=0.0%
+      worker=w3 cpu=0.0%
+      worker=pid1360572 cpu=0.0%
+      worker=pid1374024 cpu=0.5%
+      worker=w2 aggregate_libsrt_sndq_cpu=0.0%
+      worker=w3 aggregate_libsrt_sndq_cpu=0.0%
+      worker=pid1360572 aggregate_libsrt_sndq_cpu=0.0%
+      worker=pid1374024 aggregate_libsrt_sndq_cpu=0.5%
+      worker=w0 aggregate_libsrt_sndq_cpu=96.2%
+      worker=w1 aggregate_libsrt_sndq_cpu=0.0%
+      aggregate_libsrt_sndq_cpu=96.6%
+   shared SRT receiver thread CPU:
+      pid=pid1360572 thread=srt_fanout_sink cpu=49.9%
+      pid=pid1360572 thread=SRT:GC cpu=0.0%
+      pid=pid1360572 thread=SRT:RcvQ cpu=123.1%
+      pid=pid1360572 thread=SRT:SndQ cpu=0.0%
+      pid=pid1360572 thread=SRT:TsbPd cpu=20.7%
+      pid=pid1360572 thread=(unattributed) cpu=16.3%
+      aggregate_receiver_cpu=210.1%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1360172 rss_kb=757364->906436 delta_kb=+149072 pss_kb=751680->900783 delta_kb=+149103
+      pid=1360173 rss_kb=21384->21384 delta_kb=+0 pss_kb=15818->15849 delta_kb=+31
+      pid=1360174 rss_kb=21384->21384 delta_kb=+0 pss_kb=15821->15852 delta_kb=+31
+      pid=1360176 rss_kb=21380->21380 delta_kb=+0 pss_kb=15817->15848 delta_kb=+31
+   worker visit and scheduling metrics:
+      w0 pid=1360172 cpu=145.1%
+         visit_max=1ms event_loop_max_delay=114ms
+         periodic_visits_delta=307
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1360173 cpu=1.5%
+         visit_max=1ms event_loop_max_delay=128ms
+         periodic_visits_delta=309
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1360174 cpu=1.6%
+         visit_max=1ms event_loop_max_delay=109ms
+         periodic_visits_delta=310
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1360176 cpu=1.7%
+         visit_max=1ms event_loop_max_delay=105ms
+         periodic_visits_delta=311
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=149.9% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=21 skmem_bytes=69632 delta_bytes=-15104
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=702->1262
+      UDP mem_pages=58119->634
+      TCP inuse=17->16
+      UDP inuse=60->59
+   diag: host CPU busy 30.2% of all online CPUs
+   diag: UDP socket drops in srt-receiver:1360572 (srt-receiver): 4292 across 32 sockets
+   diag: sender 150% vs receivers 210% of one core
+   diag: w0 libsrt_sndq at 96% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-srt-512/diagnostics.json
+quality_rung_result mix=pure-srt destinations=512 srt=512 rtmp=0 hls=0 hls_push=0 result=fail
+mix=pure-srt first_failing_destination_rung=512
+mix=pure-srt quality_failed_rungs=512
+capacity_matrix_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity-matrix.json
+matrix mix=pure-srt highest_passing=384 first_quality_failure=512 setup_limited=none infrastructure_limited=none
+quality_ladders_with_failures=pure-srt

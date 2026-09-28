@@ -277,7 +277,67 @@ def proc_stat_cpu():
     return None
 
 
+def proc_stat_per_cpu():
+    """Per-CPU counters from /proc/stat, keyed cpu0, cpu1, ...
+
+    The aggregate line cannot say whether the CPUs a benchmark was pinned to
+    were busy or idle, and that distinction decides what a short delivery
+    means: idle pinned cores with a short delivery is a bottleneck somewhere
+    else - a blocked sender, a full socket, a lock - while saturated ones are
+    simply not enough CPU."""
+    text = read_text("/proc/stat")
+    if text is None:
+        return {}
+    names = ("user", "nice", "system", "idle", "iowait", "irq", "softirq",
+             "steal", "guest", "guest_nice")
+    per_cpu = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or not parts[0].startswith("cpu") or parts[0] == "cpu":
+            continue
+        try:
+            per_cpu[parts[0]] = dict(zip(names, (int(v) for v in parts[1:])))
+        except ValueError:
+            continue
+    return per_cpu
+
+
+def cpu_pressure():
+    """CPU pressure from /proc/pressure/cpu: the "some" total is the time
+    tasks were stalled waiting for a CPU, in microseconds.  Two snapshots give
+    the share of the window the run queue was not empty - the pressure the
+    brief asks for beside the busy percentage."""
+    text = read_text("/proc/pressure/cpu")
+    if not text:
+        return None
+    values = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        for field in parts[1:]:
+            key, _, value = field.partition("=")
+            try:
+                values[f"{parts[0]}_{key}"] = float(value)
+            except ValueError:
+                continue
+    return values or None
+
+
+def procs_running():
+    """How many tasks are runnable right now, from /proc/stat."""
+    text = read_text("/proc/stat")
+    if not text:
+        return None
+    for line in text.splitlines():
+        if line.startswith("procs_running"):
+            parts = line.split()
+            return int(parts[1]) if len(parts) > 1 else None
+    return None
+
+
 def snmp(path):
+
     text = read_text(path)
     result = {}
     if text is None:
@@ -421,6 +481,9 @@ def extended_snapshot(pids, affinity, started_ns):
         "host": {
             "nproc_online": os.cpu_count(),
             "sampler_affinity": sorted(os.sched_getaffinity(0)),
+            "cpu_per_cpu": proc_stat_per_cpu(),
+            "cpu_pressure": cpu_pressure(),
+            "procs_running": procs_running(),
             "loadavg": read_first_line("/proc/loadavg"),
             "proc_stat_cpu": proc_stat_cpu(),
             "cpu_freq_khz": cpu_frequencies(),

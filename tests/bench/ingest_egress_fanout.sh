@@ -176,6 +176,64 @@ CAPACITY_CURRENT_MIX=""
 CAPACITY_NGINX_CPUS="${CAPACITY_NGINX_CPUS:-}"
 CAPACITY_RECEIVER_CPUS="${CAPACITY_RECEIVER_CPUS:-}"
 CAPACITY_PUBLISHER_CPUS="${CAPACITY_PUBLISHER_CPUS:-}"
+
+# Where the measuring receivers are, and how to start them there.  Unset
+# keeps them on this host's loopback, which is the default for every tier
+# that runs on a shared runner.  Two other topologies are supported:
+#
+#   CAPACITY_RECEIVER_EXEC="ip netns exec nmrecv"
+#   CAPACITY_RECEIVER_ADDR="10.200.0.2"
+#       the receivers run in their own network namespace and their own
+#       address, so the traffic crosses a veth pair - a real device path,
+#       MTU and kernel UDP stack - instead of loopback.  Sender and receiver
+#       still share the CPU, so the CPU attribution stays valid but a
+#       capacity number from this topology is a number about the software,
+#       not about a NIC.
+#
+#   CAPACITY_RECEIVER_EXEC="ssh -o BatchMode=yes receiver"
+#   CAPACITY_RECEIVER_ADDR="10.10.0.2"
+#       the receivers run on another machine, reached by rsyncing this
+#       repository to the same absolute path there first (see
+#       tests/bench/capacity_distributed.sh).  Receiver-side files are read
+#       back from that mirror, and receiver CPU attribution comes from the
+#       receiver host's own /proc, which the distributed script collects.
+CAPACITY_RECEIVER_EXEC="${CAPACITY_RECEIVER_EXEC:-}"
+CAPACITY_RECEIVER_ADDR="${CAPACITY_RECEIVER_ADDR:-127.0.0.1}"
+
+# The preflight.  auto (the default) fingerprints the hosts and measures the
+# path before a rung at or above CAPACITY_PREFLIGHT_MIN_DESTINATIONS; yes
+# does it for every rung; no skips it.  A rung the environment cannot carry
+# is recorded as infrastructure-limited instead of being measured, so a
+# small runner never reports a host limit as a software limit.  The optional
+# CPU-per-Gbit/s figures come from a measured rung (diagnostics.json
+# "efficiency"), and without them CPU is reported as unknown rather than
+# guessed.
+CAPACITY_PREFLIGHT="${CAPACITY_PREFLIGHT:-auto}"
+CAPACITY_PREFLIGHT_MIN_DESTINATIONS="${CAPACITY_PREFLIGHT_MIN_DESTINATIONS:-128}"
+CAPACITY_PREFLIGHT_SECONDS="${CAPACITY_PREFLIGHT_SECONDS:-5}"
+CAPACITY_PREFLIGHT_THREADS="${CAPACITY_PREFLIGHT_THREADS:-4}"
+CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS="${CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS:-}"
+CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS="${CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS:-}"
+# a command that copies receiver-side artifacts back from a remote receiver
+# host; unset when the receivers share this filesystem
+CAPACITY_RECEIVER_COLLECT="${CAPACITY_RECEIVER_COLLECT:-}"
+CAPACITY_RECEIVER_KILL="${CAPACITY_RECEIVER_KILL:-}"
+# a shell snippet that tests a receiver-written file where the receivers run,
+# and one that copies one back; both receive the path as $1.  Unset means the
+# receivers share this filesystem.
+CAPACITY_RECEIVER_FILE_TEST="${CAPACITY_RECEIVER_FILE_TEST:-}"
+CAPACITY_RECEIVER_FETCH="${CAPACITY_RECEIVER_FETCH:-}"
+CAPACITY_RECEIVER_MKDIR="${CAPACITY_RECEIVER_MKDIR:-}"
+# How many programs the quality ladder runs, each owned by a different
+# worker: 1 for every published tier, more for the contention repeats where
+# the question is whether one program's SRT load starves another program's
+# RTMP or HLS work.  The harness prints the placement it achieved, and the
+# bundle records it.
+# One program for a quality ladder, by construction: each rung's reference is
+# a single program's rate, so a multi-program rung has nothing to be compared
+# against and capacity_case refuses it rather than reporting a ratio that
+# means nothing.  Multi-program behaviour is measured by the saturated case.
+CAPACITY_QUALITY_PROGRAMS="${CAPACITY_QUALITY_PROGRAMS:-1}"
 CAPACITY_QUALITY_REFERENCE_RTMP_BPS="${CAPACITY_QUALITY_REFERENCE_RTMP_BPS:-0}"
 CAPACITY_QUALITY_REFERENCE_HLS_BPS="${CAPACITY_QUALITY_REFERENCE_HLS_BPS:-0}"
 CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS="${CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS:-0}"
@@ -296,6 +354,37 @@ pin() {   # <cpu list>
     fi
 }
 
+# The prefix that starts a receiver program where the receivers live: empty
+# on loopback, `ip netns exec <ns>` (or `nsenter --net=... --no-fork`) for a
+# namespace, `ssh <host>` for another machine.  It prints nothing when unset,
+# so the default command line is exactly what it was.
+receiver_exec() {
+    [ -n "$CAPACITY_RECEIVER_EXEC" ] && printf '%s' "$CAPACITY_RECEIVER_EXEC"
+    return 0
+}
+
+# A receiver's PID means different things depending on the prefix: a direct
+# child of this shell, a process in a namespace (still a PID this host can
+# signal), or a process on another machine, which only its own host can
+# signal.  CAPACITY_RECEIVER_KILL carries the command that delivers a signal
+# there - "ssh -o BatchMode=yes receiver kill" for the split topology.
+receiver_kill() {   # [-s SIG] PID
+    if [ -n "$CAPACITY_RECEIVER_KILL" ]; then
+        $CAPACITY_RECEIVER_KILL "$@"
+    else
+        kill "$@"
+    fi
+}
+
+# Whether a receiver is still alive, asked where it runs.
+receiver_alive() {   # PID
+    if [ -n "$CAPACITY_RECEIVER_KILL" ]; then
+        $CAPACITY_RECEIVER_KILL -0 "$1" 2>/dev/null
+    else
+        kill -0 "$1" 2>/dev/null
+    fi
+}
+
 slot_name() {   # <pid>
     if [ -n "${SLOT[$1]:-}" ]; then
         printf 'w%s' "${SLOT[$1]}"
@@ -359,6 +448,17 @@ start_rtmp_sink_instance() {   # [count]
     stop_rtmp_sink_instance
     [ "$count" -ge 1 ] && [ "$count" -le 64 ] \
         || { echo "RTMP sink count must be 1..64" >&2; return 1; }
+    # The RTMP sink's configuration is written here and its nginx runs where
+    # the receivers live; on another host that host would need the
+    # configuration pushed and the PID file fetched back, and its PID is not
+    # this host's PID.  Until that exists, a mix with RTMP destinations is
+    # refused over ssh rather than measured against a sink that never started.
+    case "${CAPACITY_RECEIVER_EXEC:-}" in
+        ssh*|*" ssh "*)
+            echo "RTMP destinations are not supported with a receiver on another host" >&2
+            return 1
+            ;;
+    esac
     RTMP_SINK_COUNT="$count"
 
     for (( k = 0; k < count; k++ )); do
@@ -373,11 +473,11 @@ pid logs/nginx.pid;
 
 events { worker_connections 8192; }
 
-media_rtmp_listen 127.0.0.1:$(rtmp_sink_port "$k");
+media_rtmp_listen $CAPACITY_RECEIVER_ADDR:$(rtmp_sink_port "$k");
 
 http {
     server {
-        listen 127.0.0.1:$(rtmp_sink_http_port "$k");
+        listen $CAPACITY_RECEIVER_ADDR:$(rtmp_sink_http_port "$k");
         location /media/api/ { media_api; }
     }
 }
@@ -385,7 +485,8 @@ EOF
         "$NGINX" -p "$dir" -c conf/nginx.conf -t >"$dir/conf.log" 2>&1 \
             || { cat "$dir/conf.log" >&2
                  echo "RTMP sink configuration rejected" >&2; return 1; }
-        $(pin "$CAPACITY_RECEIVER_CPUS" | tr '\n' ' ') "$NGINX" -p "$dir" -c conf/nginx.conf \
+        $(receiver_exec) $(pin "$CAPACITY_RECEIVER_CPUS" | tr '\n' ' ') \
+            "$NGINX" -p "$dir" -c conf/nginx.conf \
             || { echo "could not start RTMP sink $k" >&2; return 1; }
     done
 
@@ -549,7 +650,8 @@ cpu_total() {   # <before> <after> <seconds>
 api() { printf 'http://127.0.0.1:%s/media/api/v1' "$HTTP_PORT"; }
 
 rtmp_sink_api() {   # [sink index]
-    printf 'http://127.0.0.1:%s/media/api/v1' "$(rtmp_sink_http_port "${1:-0}")"
+    printf 'http://%s:%s/media/api/v1' "$CAPACITY_RECEIVER_ADDR" \
+           "$(rtmp_sink_http_port "${1:-0}")"
 }
 
 # every sink's metrics URL, comma separated, for the RTMP quality tools
@@ -1749,6 +1851,38 @@ PY
 }
 
 
+# The smallest rung a mix can form: one destination for a pure workload or a
+# mix whose SRT share rounds to nothing at one, more when every protocol needs
+# a destination of its own.  The rounding is the ladder's own.
+capacity_mix_minimum_rung() {   # <protocol> <srt share> <hls push share>
+    local protocol="$1" srt_share="${2:-0}" hls_push_share="${3:-0}"
+    local n srt_count primary hls_push_count
+
+    for (( n = 1; n <= 1000; n++ )); do
+        if [ "$protocol" = srt ]; then
+            srt_count="$n"
+        else
+            srt_count=$(( (n * srt_share + 50) / 100 ))
+        fi
+        primary=$(( n - srt_count ))
+        [ "$primary" -ge 1 ] || continue
+        case "$protocol" in
+            rtmp|hls|hls-push) printf '%d' "$n"; return 0 ;;
+            rtmp-hls-push)
+                # The first rung that carries RTMP destinations must carry
+                # exactly one: the RTMP analyzer calibrates its reference from
+                # a single destination and refuses to guess from many, so a
+                # ladder that starts with several RTMP destinations and no
+                # reference fails as a setup error.
+                hls_push_count=$(( (n * hls_push_share + 50) / 100 ))
+                [ "$(( primary - hls_push_count ))" -ge 1 ] \
+                    && { printf '%d' "$n"; return 0; }
+                ;;
+        esac
+    done
+    printf '1'
+}
+
 capacity_destination_id() {   # <program index> <destination index> <program count>
     if [ "$3" -eq 1 ]; then
         printf 'd%04d' "$2"
@@ -2059,14 +2193,15 @@ capacity_srt_receiver_snapshot() {   # <receiver PID> <snapshot path> <copy path
     local pid="$1" snapshot="$2" output="$3" attempt
 
     rm -f "$snapshot" "$output" || return 1
-    kill -USR1 "$pid" 2>/dev/null \
+    receiver_kill -USR1 "$pid" 2>/dev/null \
         || { echo "could not request SRT receiver snapshot" >&2; return 1; }
     for attempt in $(seq 1 100); do
         [ -s "$snapshot" ] && break
-        kill -0 "$pid" 2>/dev/null \
+        receiver_alive "$pid" \
             || { echo "SRT receiver exited before writing a snapshot" >&2; return 1; }
         sleep 0.01
     done
+    receiver_fetch "$snapshot" || return 1
     [ -s "$snapshot" ] \
         || { echo "SRT receiver snapshot was not written" >&2; return 1; }
     cp "$snapshot" "$output"
@@ -2076,14 +2211,15 @@ capacity_srt_measurement_snapshot() {   # <receiver PID> <snapshot> <copy> <star
     local pid="$1" snapshot="$2" output="$3" action="$4" attempt
 
     rm -f "$snapshot" "$output" || return 1
-    kill -USR2 "$pid" 2>/dev/null \
+    receiver_kill -USR2 "$pid" 2>/dev/null \
         || { echo "could not toggle SRT receiver measurement $action" >&2; return 1; }
     for attempt in $(seq 1 1000); do
         [ -s "$snapshot" ] && break
-        kill -0 "$pid" 2>/dev/null \
+        receiver_alive "$pid" \
             || { echo "SRT receiver exited before $action snapshot" >&2; return 1; }
         sleep 0.01
     done
+    receiver_fetch "$snapshot" || return 1
     [ -s "$snapshot" ] \
         || { echo "SRT receiver $action snapshot was not written" >&2; return 1; }
     cp "$snapshot" "$output"
@@ -2326,6 +2462,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     local rtmp_report_file hls_report_file
     local receiver_sampler_pid queue_sampler_pid
     local workers="$CAPACITY_WORKERS" case_id source rate_bps offered_in offered_out
+    local preflight_note="" preflight_status=0
     local primary_destinations=0 srt_destinations=0 rtmp_destinations=0
     local hls_readers=0 hls_push_destinations=0 hls_enabled=yes
     local total_dest total_srt_dest total_rtmp_dest total_hls_push_dest
@@ -2429,8 +2566,12 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
         echo "only pure SRT cases support a stalled destination" >&2
         return 1
     fi
-    [ "$seconds" -le 600 ] \
-        || { echo "capacity window must be at most 600 seconds" \
+    # A rung's window is bounded so a typo cannot start a run that never
+    # ends; the sustained qualification the method asks for is half an hour
+    # at the configuration a production claim rests on, so the bound is an
+    # hour and the samplers are the thing to watch at that length.
+    [ "$seconds" -le 3600 ] \
+        || { echo "capacity window must be at most 3600 seconds" \
                  >&2; return 1; }
     [ "$workers" -le 16 ] && [ "$programs" -le 32 ] \
         && [ "$destinations" -le 1000 ] \
@@ -2469,6 +2610,42 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     local case_dir="$RUN/capacity/$label"
     rm -rf "$case_dir"
     mkdir -p "$case_dir"
+    receiver_mkdir "$case_dir" || return 1
+
+    # A capacity case is a claim about the software, so it refuses to measure
+    # beside a competing job on its own CPUs: the same preflight the quality
+    # ladder runs, with the same env rules.
+    local preflight_status=0
+    capacity_preflight_rung "$case_dir" "$total_dest" "$rate" \
+        || preflight_status="$?"
+    case "$preflight_status" in
+        0) ;;
+        2)
+            # Not measured, and not a failure either: the host could not carry
+            # the offer.  Status 4 says so to the caller - 2 is a quality
+            # failure here.
+            capacity_write_diagnostics "$case_dir" infrastructure-limited \
+                destinations="$total_dest" programs="$programs"
+            echo "capacity_case_result case=$label result=infrastructure-limited"
+            return 4
+            ;;
+        3)
+            # The preflight reached no environmental verdict: the run is still
+            # the best evidence available, but the bundle says so rather than
+            # implying the host was judged fit.
+            preflight_note=insufficient-evidence
+            ;;
+        *)
+            # The preflight itself failed.  Measuring without it would publish
+            # a number with no environmental verdict at all, so this is a
+            # setup failure, not a result.
+            capacity_write_diagnostics "$case_dir" setup-failure \
+                destinations="$total_dest" programs="$programs" \
+                preflight_status="$preflight_status"
+            echo "capacity_case_result case=$label result=setup-error status=$preflight_status"
+            return 3
+            ;;
+    esac
 
     for (( slot = 0; slot < workers; slot++ )); do
         mapfile -t one_owner < <(
@@ -2545,15 +2722,15 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
         rm -f "$sink_ready" "$sink_csv" "$sink_csv.snapshot" \
             "$sink_snapshot_before" "$sink_snapshot_after"
         if [ "$quality_mode" = yes ]; then
-            $(pin "$CAPACITY_RECEIVER_CPUS" | tr '\n' ' ') "$RUN/srt_fanout_sink" "$sink_port:$sink_listeners" "$total_srt_dest" \
+            $(receiver_exec) env SRT_SINK_BIND="$CAPACITY_RECEIVER_ADDR" $(pin "$CAPACITY_RECEIVER_CPUS" | tr '\n' ' ') "$RUN/srt_fanout_sink" "$sink_port:$sink_listeners" "$total_srt_dest" \
                 "$sink_ready" "$sink_csv" quality \
                 >"$case_dir/srt-receiver.log" 2>&1 &
         elif [ -n "$stall_id" ]; then
-            $(pin "$CAPACITY_RECEIVER_CPUS" | tr '\n' ' ') "$RUN/srt_fanout_sink" "$sink_port:$sink_listeners" "$total_srt_dest" \
+            $(receiver_exec) env SRT_SINK_BIND="$CAPACITY_RECEIVER_ADDR" $(pin "$CAPACITY_RECEIVER_CPUS" | tr '\n' ' ') "$RUN/srt_fanout_sink" "$sink_port:$sink_listeners" "$total_srt_dest" \
                 "$sink_ready" "$sink_csv" "$stall_id" \
                 >"$case_dir/srt-receiver.log" 2>&1 &
         else
-            $(pin "$CAPACITY_RECEIVER_CPUS" | tr '\n' ' ') "$RUN/srt_fanout_sink" "$sink_port:$sink_listeners" "$total_srt_dest" \
+            $(receiver_exec) env SRT_SINK_BIND="$CAPACITY_RECEIVER_ADDR" $(pin "$CAPACITY_RECEIVER_CPUS" | tr '\n' ' ') "$RUN/srt_fanout_sink" "$sink_port:$sink_listeners" "$total_srt_dest" \
                 "$sink_ready" "$sink_csv" \
                 >"$case_dir/srt-receiver.log" 2>&1 &
         fi
@@ -2562,19 +2739,21 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     fi
     if [ "$hls_push_destinations" -gt 0 ]; then
         hls_push_sink_port=$(( BASE + 30 ))
-        $(pin "$CAPACITY_RECEIVER_CPUS" | tr '\n' ' ') python3 "$ROOT/tests/bench/hls_push_capacity.py" serve \
-            --port "$hls_push_sink_port" >"$case_dir/hls-push-sink.log" 2>&1 &
+        $(receiver_exec) $(pin "$CAPACITY_RECEIVER_CPUS" | tr '\n' ' ') \
+            python3 "$ROOT/tests/bench/hls_push_capacity.py" serve \
+            --port "$hls_push_sink_port" --bind "$CAPACITY_RECEIVER_ADDR" \
+            >"$case_dir/hls-push-sink.log" 2>&1 &
         hls_push_sink_pid="$!"
         SINKS+=( "$hls_push_sink_pid" )
         hls_push_ready=0
         for attempt in $(seq 1 100); do
-            if curl -fsS "http://127.0.0.1:$hls_push_sink_port/__health" \
+            if curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__health" \
                 >/dev/null 2>&1
             then
                 hls_push_ready=1
                 break
             fi
-            kill -0 "$hls_push_sink_pid" 2>/dev/null \
+            receiver_alive "$hls_push_sink_pid" \
                 || { cat "$case_dir/hls-push-sink.log" >&2
                      echo "HLS push sink exited during startup" >&2; return 1; }
             sleep 0.1
@@ -2603,7 +2782,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
         for (( attempt = 0; attempt < srt_destinations; attempt++ )); do
             sink_id="$(capacity_destination_id "$index" "$attempt" "$programs")"
             post_owner "/streams/live/$name/destinations" \
-                "{\"id\":\"$sink_id\",\"type\":\"srt\",\"host\":\"127.0.0.1\",\"port\":$(( sink_port + (index * srt_destinations + attempt) % sink_listeners )),\"streamid\":\"#!::r=live/$name,m=publish,s=$sink_id\"}" \
+                "{\"id\":\"$sink_id\",\"type\":\"srt\",\"host\":\"$CAPACITY_RECEIVER_ADDR\",\"port\":$(( sink_port + (index * srt_destinations + attempt) % sink_listeners )),\"streamid\":\"#!::r=live/$name,m=publish,s=$sink_id\"}" \
                 || return 1
             [ "$sink_id" = "$stall_id" ] && stall_seen=1
         done
@@ -2613,7 +2792,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
                   attempt++ )); do
                 output_id="$(capacity_destination_id "$index" "$attempt" "$programs")"
                 post_owner "/streams/live/$name/destinations" \
-                    "{\"id\":\"$output_id\",\"type\":\"rtmp\",\"host\":\"127.0.0.1\",\"port\":$(rtmp_sink_port $(( (index * rtmp_destinations + attempt - srt_destinations) % RTMP_SINK_COUNT ))),\"streamid\":\"$output_id\"}" \
+                    "{\"id\":\"$output_id\",\"type\":\"rtmp\",\"host\":\"$CAPACITY_RECEIVER_ADDR\",\"port\":$(rtmp_sink_port $(( (index * rtmp_destinations + attempt - srt_destinations) % RTMP_SINK_COUNT ))),\"streamid\":\"$output_id\"}" \
                     || return 1
             done
         fi
@@ -2623,7 +2802,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
                   attempt++ )); do
                 output_id="$(capacity_destination_id "$index" "$attempt" "$programs")"
                 post_owner "/streams/live/$name/destinations" \
-                    "{\"id\":\"$output_id\",\"type\":\"hls_push\",\"host\":\"http://127.0.0.1:$hls_push_sink_port/$output_id/\",\"path\":\"$RUN/hls/live/$name\"}" \
+                    "{\"id\":\"$output_id\",\"type\":\"hls_push\",\"host\":\"http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/$output_id/\",\"path\":\"$RUN/hls/live/$name\"}" \
                     || return 1
             done
         fi
@@ -2657,7 +2836,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     # Start media while nonblocking SRT handshakes settle; send errors trigger the
     # output's normal retry path for a connection that did not establish.
     if [ "$hls_push_destinations" -gt 0 ]; then
-        curl -fsS "http://127.0.0.1:$hls_push_sink_port/__mark" \
+        curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__mark" \
             >"$case_dir/hls-push.mark.json" \
             || { echo "could not mark HLS push first-segment timing" >&2; return 1; }
     fi
@@ -2667,13 +2846,13 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     done
     if [ "$srt_destinations" -gt 0 ]; then
         for attempt in $(seq 1 "$connect_attempts"); do
-            [ -f "$sink_ready" ] && break
-            kill -0 "$sink_pid" 2>/dev/null \
+            receiver_file_ready "$sink_ready" && break
+            receiver_alive "$sink_pid" \
                 || { echo "shared SRT receiver exited before accepting all peers" \
                      >&2; return 1; }
             sleep 0.1
         done
-        if [ ! -f "$sink_ready" ]; then
+        if ! receiver_file_ready "$sink_ready"; then
             if capacity_srt_receiver_snapshot "$sink_pid" \
                 "$sink_csv.snapshot" "$case_dir/srt.incomplete.csv"; then
                 capacity_srt_incomplete_report "$case_dir/srt.incomplete.csv" \
@@ -2751,12 +2930,12 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
         hls_pid="$!"
         QUALITY_MONITORS+=( "$hls_pid" )
         for attempt in $(seq 1 "$connect_attempts"); do
-            [ -f "$hls_ready" ] && break
-            kill -0 "$hls_pid" 2>/dev/null \
+            receiver_file_ready "$hls_ready" && break
+            receiver_alive "$hls_pid" \
                 || { cat "$hls_log" >&2; echo "HLS readers exited during warmup" >&2; return 1; }
             sleep 0.1
         done
-        [ -f "$hls_ready" ] \
+        receiver_file_ready "$hls_ready" \
             || { cat "$hls_log" >&2; echo "HLS readers did not become ready" >&2; return 1; }
     fi
     if [ "$hls_push_destinations" -gt 0 ]; then
@@ -2767,11 +2946,11 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
             > "$case_dir/hls-push-readiness.csv"
         for attempt in $(seq 1 "$connect_attempts"); do
             ready_status="$(curl -sS -o /dev/null -w '%{http_code}' \
-                "http://127.0.0.1:$hls_push_sink_port/__ready?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
+                "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__ready?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                 2>/dev/null || true)"
             if [ $(( attempt % 10 )) -eq 0 ] || [ "$ready_status" = 200 ]; then
                 curl -fsS \
-                    "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
+                    "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                     > "$hls_push_progress_file" \
                     || { echo "could not query HLS push readiness progress" \
                              >&2; return 1; }
@@ -2804,7 +2983,7 @@ PY
                 hls_push_ready=1
                 break
             fi
-            kill -0 "$hls_push_sink_pid" 2>/dev/null \
+            receiver_alive "$hls_push_sink_pid" \
                 || { cat "$case_dir/hls-push-sink.log" >&2
                      echo "HLS push sink exited before all destinations received a segment" \
                          >&2; return 1; }
@@ -2812,7 +2991,7 @@ PY
         done
         if [ "$hls_push_ready" -ne 1 ]; then
             curl -fsS \
-                "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
+                "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                 > "$hls_push_progress_file" || true
             python3 - "$hls_push_progress_file" <<'PY'
 import json
@@ -2829,15 +3008,16 @@ PY
             if cpu_window 3 "$hls_push_sink_pid"; then
                 capacity_worker_metrics "$case_dir/workers.readiness" || true
                 curl -fsS \
-                    "http://127.0.0.1:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
+                    "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                     > "$hls_push_progress_file" || true
-                curl -fsS "http://127.0.0.1:$hls_push_sink_port/__snapshot" \
+                curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__snapshot" \
                     > "$case_dir/hls-push.readiness.json" || true
                 python3 "$ROOT/tests/bench/hls_push_capacity.py" \
                     readiness-report \
                     --metrics-prefix "$case_dir/workers.readiness" \
                     --stream "${names[0]}" \
                     --destinations "$hls_push_destinations" \
+                    --programs "$programs" \
                     --destination-offset "$((srt_destinations + rtmp_destinations))" \
                     --sink-snapshot "$case_dir/hls-push.readiness.json" \
                     --progress "$hls_push_progress_file" \
@@ -2918,13 +3098,13 @@ PY
         fi
     fi
     if [ "$hls_push_destinations" -gt 0 ]; then
-        curl -fsS "http://127.0.0.1:$hls_push_sink_port/__snapshot" \
+        curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__snapshot" \
             >"$case_dir/hls-push.before.json" \
             || { echo "could not capture HLS push receiver baseline" >&2; return 1; }
     fi
     measure_start="$(date +%s.%N)"
     if [ -n "$hls_pid" ]; then
-        kill -USR1 "$hls_pid" \
+        receiver_kill -USR1 "$hls_pid" \
             || { echo "could not start HLS reader measurement" >&2; return 1; }
     fi
     capacity_write_processes "$case_dir/processes.tsv" "$sink_pid" \
@@ -2937,7 +3117,7 @@ PY
     # stop and before any other bookkeeping stretches the last interval
     capacity_rtmp_sink_metrics "$case_dir/rtmp-receiver.after" || return 1
     if [ "$hls_push_destinations" -gt 0 ]; then
-        curl -fsS "http://127.0.0.1:$hls_push_sink_port/__snapshot" \
+        curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__snapshot" \
             >"$case_dir/hls-push.after.json" \
             || { echo "could not capture HLS push receiver final snapshot" >&2; return 1; }
     fi
@@ -3108,8 +3288,8 @@ PY
 )"
     echo "   program_frame_fairness_jain=$fairness (1.0 is equal progress)"
     if [ "$srt_destinations" -gt 0 ]; then
-        if kill -0 "$sink_pid" 2>/dev/null; then
-            kill -TERM "$sink_pid" 2>/dev/null || true
+        if receiver_alive "$sink_pid"; then
+            receiver_kill -TERM "$sink_pid" 2>/dev/null || true
         fi
         if ! wait "$sink_pid"; then
             echo "shared SRT receiver did not stop cleanly" >&2
@@ -3128,6 +3308,7 @@ PY
             echo "   receiver-delivered SRT payload bytes in measured window, per destination:"
             cat "$case_dir/receiver-report.txt"
         fi
+        receiver_collect "$case_dir" || return 1
         if [ "$quality_mode" = yes ]; then
             quality_report_file="$case_dir/quality-report.txt"
             quality_reference_bps="${CAPACITY_QUALITY_REFERENCE_BPS:-0}"
@@ -3256,6 +3437,7 @@ PY
             --stream "${names[0]}" \
             --destination-offset "$((srt_destinations + rtmp_destinations))" \
             --destinations "$hls_push_destinations" \
+            --programs "$programs" \
             --sink-before "$case_dir/hls-push.before.json" \
             --sink-after "$case_dir/hls-push.after.json" \
             --reference-bps "$hls_push_reference_bps" \
@@ -3455,13 +3637,16 @@ PY
         outcome=pass
         [ "$quality_failed" -eq 0 ] || outcome=quality-failure
     fi
+    local -a preflight_meta=()
+    [ -z "$preflight_note" ] \
+        || preflight_meta+=( preflight_verdict="$preflight_note" )
     capacity_write_diagnostics "$case_dir" "$outcome" \
         destinations="$destinations" programs="$programs" rate="$rate" \
         protocol="$protocol" srt="$srt_destinations" \
         rtmp="$rtmp_destinations" hls_readers="$hls_readers" \
         hls_push="$hls_push_destinations" hls="$hls_enabled" \
         workers="$workers" measurement_s="$measure_seconds" \
-        requested_s="$seconds"
+        requested_s="$seconds" ${preflight_meta[@]+"${preflight_meta[@]}"}
 
     kill_pubs
     for receiver_pid in "${SINKS[@]}"; do kill_one "$receiver_pid"; done
@@ -3473,14 +3658,208 @@ PY
     fi
 }
 
+# Fetch receiver-side artifacts back when the receivers run on another host.
+# The receivers write into the case directory; over a shared filesystem (the
+# default, and the namespace topology) they are already here.  For a split
+# run, CAPACITY_RECEIVER_COLLECT is a command that copies them back, run
+# after the path probe and before the quality reports are read.
+receiver_collect() {   # <case dir>
+    [ -n "$CAPACITY_RECEIVER_COLLECT" ] || return 0
+    sh -c "$CAPACITY_RECEIVER_COLLECT" _ "$1" \
+        || { echo "could not collect receiver artifacts for $1" >&2; return 1; }
+}
+
+# Whether a file the receivers write exists yet.  Over a shared filesystem
+# it is already here; with the receivers on another host,
+# CAPACITY_RECEIVER_FILE_TEST is a shell snippet that tests it there, e.g.
+#   CAPACITY_RECEIVER_FILE_TEST='ssh -o BatchMode=yes receiver test -f "$1"'
+# The receivers publish a ready file by creating it, and an empty one is
+# still a ready receiver: existence, never size.
+receiver_file_ready() {   # <path>
+    [ -n "$CAPACITY_RECEIVER_FILE_TEST" ] \
+        || { [ -f "$1" ]; return $?; }
+    sh -c "$CAPACITY_RECEIVER_FILE_TEST" _ "$1" 2>/dev/null
+}
+
+# Create a directory where the receivers run.  A shared filesystem has it
+# already; with the receivers on another host, CAPACITY_RECEIVER_MKDIR is a
+# shell snippet that creates the path it is given as $1.
+receiver_mkdir() {   # <path>
+    [ -n "$CAPACITY_RECEIVER_MKDIR" ] || return 0
+    sh -c "$CAPACITY_RECEIVER_MKDIR" _ "$1" \
+        || { echo "could not create $1 on the receiver host" >&2; return 1; }
+}
+
+# Fetch one receiver-written file back.  Unset means it is already here, so
+# the local and namespace topologies pay nothing for this.
+receiver_fetch() {   # <path>
+    [ -n "$CAPACITY_RECEIVER_FETCH" ] || return 0
+    sh -c "$CAPACITY_RECEIVER_FETCH" _ "$1" \
+        || { echo "could not fetch $1 from the receiver host" >&2; return 1; }
+}
+
+# What a rung costs per delivered Gbit/s, measured by the rungs that ran
+# before it.  A core count cannot say how much CPU a Gbit/s needs, so the
+# CPU half of the judgement is calibrated from the last rung that passed
+# with a delivery number - never from a model, and never silently: the
+# figure is written next to the preflight it was used for.
+capacity_preflight_calibration() {   # <case dir>
+    local case_dir="$1" bundle
+
+    [ -n "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
+        && [ -n "$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS" ] && return 0
+    # A CPU per delivered Gbit/s is a property of the workload, so the
+    # calibration only reads bundles from the same mix: carrying pure SRT's
+    # cost into a pure RTMP ladder would judge one workload by another's.
+    local mix_label="${case_dir##*/}"
+    mix_label="${mix_label#quality-}"
+    mix_label="${mix_label%-*}"
+    bundle="$(ls -1t "$RUN"/capacity/quality-$mix_label-*/diagnostics.json \
+              2>/dev/null | while read -r candidate; do
+                    [ "$candidate" = "$case_dir/diagnostics.json" ] && continue
+                    grep -q '"outcome": "pass"' "$candidate" && { echo "$candidate"; break; }
+                done)"
+    [ -n "$bundle" ] || return 0
+    local values
+    values="$(python3 - "$bundle" <<'PY'
+import json, sys
+bundle = json.load(open(sys.argv[1]))
+eff = bundle.get("efficiency") or {}
+def value(name):
+    field = eff.get(name) or {}
+    return field.get("value") if field.get("status") == "ok" else None
+print(value("sender_cpu_per_gbps") or "", value("receiver_cpu_per_gbps") or "")
+PY
+)"
+    set -- $values
+    [ -n "${1:-}" ] && [ -z "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
+        && CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS="$1"
+    [ -n "${2:-}" ] && [ -z "$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS" ] \
+        && CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS="$2"
+    [ -z "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
+        || echo "   preflight: calibrated from $(basename "$(dirname "$bundle")")" \
+                "(sender ${CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS}%core/Gbit/s," \
+                "receiver ${CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS:-?}%core/Gbit/s)"
+    return 0
+}
+
+# Preflight: fingerprint the sender, the receivers and the path between
+# them, and decide whether this rung can be measured at all before spending
+# its window on it.  A host or a path that cannot carry the offered load is
+# recorded as infrastructure-limited with the measurement that says so -
+# never as a capacity result about nginx, and never as a sender failure.
+capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s>
+    local case_dir="$1" destinations="$2" rate="$3"
+    local seconds="$CAPACITY_PREFLIGHT_SECONDS"
+    local threads="$CAPACITY_PREFLIGHT_THREADS"
+    local probe_port=$(( BASE + 40 ))
+    local rate_bps
+    local -a judge_args=()
+
+    case "$CAPACITY_PREFLIGHT" in
+        no) return 0 ;;
+        auto)
+            [ "$destinations" -ge "$CAPACITY_PREFLIGHT_MIN_DESTINATIONS" ] \
+                || return 0
+            ;;
+        yes) ;;
+        *) echo "CAPACITY_PREFLIGHT must be auto, yes or no" >&2; return 1 ;;
+    esac
+
+    command -v python3 >/dev/null \
+        || { echo "python3 is required for the preflight" >&2; return 1; }
+    mkdir -p "$case_dir"
+    echo "   preflight: sender, receiver and path fingerprint for $destinations destinations"
+    # Each fingerprint runs where its role runs, so `permitted_cpus` is that
+    # role's affinity - nginx's, the receivers', not this shell's.  The judge
+    # is told the configured sets as well, since a fingerprint taken through
+    # ssh sees the ssh session's affinity.
+    $(pin "$CAPACITY_NGINX_CPUS") \
+        python3 "$ROOT/tests/bench/capacity_preflight.py" host --role sender \
+        --binary "$NGINX" --json "$case_dir/preflight.sender.json" \
+        >"$case_dir/preflight.sender.log" 2>&1 \
+        || echo "   preflight: sender fingerprint failed" >&2
+    $(receiver_exec) python3 "$ROOT/tests/bench/capacity_preflight.py" \
+        host --role receiver --json "$case_dir/preflight.receiver.json" \
+        >"$case_dir/preflight.receiver.log" 2>&1 \
+        || echo "   preflight: receiver fingerprint failed" >&2
+    rm -f "$case_dir/preflight.rx.json" "$case_dir/preflight.tx.json"
+    $(receiver_exec) python3 "$ROOT/tests/bench/capacity_preflight.py" probe \
+        --listen --port "$probe_port" --seconds "$seconds" --threads "$threads" \
+        --json "$case_dir/preflight.rx.json" \
+        >"$case_dir/preflight.rx.log" 2>&1 &
+    local rx_pid=$!
+    sleep 0.5
+    python3 "$ROOT/tests/bench/capacity_preflight.py" probe \
+        --peer "$CAPACITY_RECEIVER_ADDR" --port "$probe_port" \
+        --seconds "$(( seconds - 1 ))" --threads "$threads" \
+        --json "$case_dir/preflight.tx.json" \
+        >"$case_dir/preflight.tx.log" 2>&1 || true
+    wait "$rx_pid" 2>/dev/null || true
+    receiver_collect "$case_dir" || return 1
+    rate_bps="$(awk -v m="$rate" 'BEGIN { printf "%.0f", m * 1000000 }')"
+    judge_args=( --destinations "$destinations" --bitrate-bps "$rate_bps"
+                 --sender "$case_dir/preflight.sender.json"
+                 --network "$case_dir/preflight.rx.json"
+                 --probe-sender "$case_dir/preflight.tx.json"
+                 --json "$case_dir/preflight.json" )
+    [ -s "$case_dir/preflight.receiver.json" ] \
+        && judge_args+=( --receiver "$case_dir/preflight.receiver.json" )
+    [ -z "$CAPACITY_NGINX_CPUS" ] \
+        || judge_args+=( --sender-cpus "$CAPACITY_NGINX_CPUS" )
+    [ -z "$CAPACITY_RECEIVER_CPUS" ] \
+        || judge_args+=( --receiver-cpus "$CAPACITY_RECEIVER_CPUS" )
+    capacity_preflight_calibration "$case_dir"
+    # The CPUs the run is pinned to: foreign work on those is the run's
+    # limit, foreign work elsewhere is not.
+    judge_cpus="${CAPACITY_NGINX_CPUS:-}"
+    # A receiver host's CPU numbers are its own, so they are only checked
+    # against this host's /proc/stat when the receivers run on this host -
+    # which a namespace receiver does, whatever address it answers on, and an
+    # ssh receiver does not.
+    case "${CAPACITY_RECEIVER_EXEC:-}" in
+        ssh*|*" ssh "*) ;;
+        *)
+            [ -z "$CAPACITY_RECEIVER_CPUS" ] \
+                || judge_cpus="${judge_cpus:+$judge_cpus,}$CAPACITY_RECEIVER_CPUS"
+            ;;
+    esac
+    [ -z "$judge_cpus" ] || judge_args+=( --benchmark-cpus "$judge_cpus" )
+    # Test seam: the per-CPU busy sample can be injected so the ladder's
+    # response to a foreign load is verifiable without waiting for one.
+    [ -z "${CAPACITY_PREFLIGHT_BUSY_JSON:-}" ] \
+        || judge_args+=( --benchmark-cpu-busy-json "$CAPACITY_PREFLIGHT_BUSY_JSON" )
+    [ -z "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
+        || judge_args+=( --sender-cpu-per-gbps \
+                         "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" )
+    [ -z "$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS" ] \
+        || judge_args+=( --receiver-cpu-per-gbps \
+                         "$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS" )
+    python3 "$ROOT/tests/bench/capacity_preflight.py" judge "${judge_args[@]}" \
+        | sed 's/^/   /'
+    return $?
+}
+
 # diagnostics.json for one rung; outcome is pass, quality-failure,
-# setup-failure (quality never measured) or measured (no quality gate)
+# setup-failure (quality never measured), infrastructure-limited (the host,
+# the path or the receivers could not carry the offered load) or measured
+# (no quality gate)
 capacity_write_diagnostics() {   # <case dir> <outcome> [key=value ...]
     local case_dir="$1" outcome="$2"
     local -a meta=()
 
     shift 2
     for kv in "$@"; do meta+=( --meta "$kv" ); done
+    # The host's fingerprint travels with every rung, not only with the rungs
+    # the preflight judged: a capacity number is unreadable without the CPU,
+    # the cgroup, the NIC and the transport library it was taken on.  Half a
+    # second, best effort, never a reason to fail a rung.
+    [ -s "$case_dir/host-fingerprint.json" ] \
+        || python3 "$ROOT/tests/bench/capacity_preflight.py" host \
+               --role sender --binary "$NGINX" \
+               --json "$case_dir/host-fingerprint.json" \
+               >"$case_dir/host-fingerprint.log" 2>&1 \
+        || echo "   host fingerprint could not be taken for $case_dir" >&2
     python3 "$ROOT/tests/bench/capacity_diagnostics.py" build "$case_dir" \
         --meta outcome="$outcome" --meta mix="$CAPACITY_CURRENT_MIX" \
         --meta srt_senders="$CAPACITY_FIXED_SRT_WORKERS" \
@@ -3515,7 +3894,11 @@ phase_capacity() {
     for programs in $CAPACITY_PROGRAM_STEPS; do
         capacity_case "programs-$programs" "$programs" \
             "$CAPACITY_PROGRAM_RATE" "$CAPACITY_PROGRAM_DESTS" \
-            "$CAPACITY_WINDOW" || return 1
+            "$CAPACITY_WINDOW"
+        case "$?" in
+            0|4) ;;
+            *) return 1 ;;
+        esac
     done
 
     for rate in $CAPACITY_BITRATE_STEPS; do
@@ -3534,9 +3917,11 @@ phase_capacity() {
 
     echo "   slow-reader: rate=$CAPACITY_SLOW_RATE window=${CAPACITY_SLOW_SECONDS}s"
     capacity_case "slow-reader-isolation" 1 "$CAPACITY_SLOW_RATE" 4 \
-        "$CAPACITY_SLOW_SECONDS" srt d0000 || return 1
+        "$CAPACITY_SLOW_SECONDS" srt d0000
+    case "$?" in 0|4) ;; *) return 1 ;; esac
     capacity_case "saturated-multiprogram" 4 6M 250 \
-        "$CAPACITY_SATURATED_SECONDS" srt || return 1
+        "$CAPACITY_SATURATED_SECONDS" srt
+    case "$?" in 0|4) ;; *) return 1 ;; esac
     capacity_case "sustained" "$CAPACITY_SUSTAINED_PROGRAMS" \
         "$CAPACITY_SUSTAINED_RATE" "$CAPACITY_SUSTAINED_DESTS" \
         "$CAPACITY_SUSTAINED_SECONDS"
@@ -3610,9 +3995,17 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
             && [ "$destinations" -gt "$previous" ] \
             || { echo "quality ladder must be strictly increasing within 1..1000" \
                      >&2; return 1; }
-        if [ "$previous" -eq 0 ] && [ "$destinations" -ne 1 ]; then
-            echo "quality ladder must begin with one destination for calibration" >&2
-            return 1
+        # The ladder begins at the smallest rung at which every protocol in
+        # the mix has a destination: one for a pure workload and for the
+        # published mixes (whose 5% SRT share rounds to zero there), four for
+        # a 50/25/25 mix, where one destination would leave no room for RTMP
+        # or HLS push at all.  The per-protocol baselines come from that rung.
+        if [ "$previous" -eq 0 ]; then
+            minimum="$(capacity_mix_minimum_rung "$protocol" "$srt_share" "$hls_push_share")"
+            if [ "$destinations" -lt "$minimum" ]; then
+                echo "quality ladder must begin at or above the smallest rung this mix can form: $minimum" >&2
+                return 1
+            fi
         fi
         previous="$destinations"
         if [ "$CAPACITY_QUALITY_STOP_AFTER_FAILURES" -gt 0 ] \
@@ -3645,7 +4038,12 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
         actual_hls_push_share="$(awk -v s="$hls_push_count" -v d="$destinations" \
             'BEGIN { printf "%.2f", 100 * s / d }')"
         echo "quality_rung_start mix=$mix destinations=$destinations srt=$srt_count rtmp=$rtmp_count hls=$hls_count hls_push=$hls_push_count actual_shares_srt=${actual_srt_share}%_rtmp=${actual_rtmp_share}%_hls_push=${actual_hls_push_share}%"
-        if capacity_case "quality-$mix-$destinations" 1 \
+        # The case itself runs the preflight (on the whole offer, programs
+        # included) and returns 4 when the host cannot carry it; the CPU cost
+        # it judges against is calibrated from the rung that ran before.
+        capacity_preflight_calibration \
+            "$RUN/capacity/quality-$mix-$destinations"
+        if capacity_case "quality-$mix-$destinations" "$CAPACITY_QUALITY_PROGRAMS" \
             "$CAPACITY_QUALITY_RATE" "$destinations" \
             "$CAPACITY_QUALITY_SECONDS" "$protocol" "" yes \
             "$srt_share" "$hls_push_share"
@@ -3654,6 +4052,19 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
             consecutive=0
         else
             status="$?"
+            if [ "$status" -eq 4 ]; then
+                # The host could not carry the offer: not a result about
+                # nginx, so the ladder stops and the higher rungs are
+                # reported as unmeasured rather than as failures.
+                echo "quality_rung_result mix=$mix destinations=$destinations result=infrastructure-limited"
+                echo "mix=$mix infrastructure_limited_rung=$destinations"
+                skipped+="${skipped:+ }$destinations"
+                for remaining in $CAPACITY_QUALITY_STEPS; do
+                    [ "$remaining" -gt "$destinations" ] \
+                        && skipped+=" $remaining"
+                done
+                break
+            fi
             if [ "$status" -ne 2 ]; then
                 mkdir -p "$RUN/capacity/quality-$mix-$destinations"
                 capacity_write_diagnostics \
@@ -3704,6 +4115,14 @@ phase_capacity_quality_ladder() {
         rtmp-95-srt-5:rtmp:5
         hls-push-95-srt-5:hls-push:5
         rtmp-50-hls-push-45-srt-5:rtmp-hls-push:5:45
+        # contention: SRT at half the destinations, with RTMP and HLS push
+        # beside it, which the published mixes never exercise (their SRT
+        # share is 5%)
+        srt-50-rtmp-25-hls-push-25:rtmp-hls-push:50:25
+        # the same contention shape with a quarter of the destinations on
+        # SRT: between the published 5% share (where HLS push works) and the
+        # 50% share (where it does not), to find where it stops
+        srt-25-rtmp-25-hls-push-50:rtmp-hls-push:25:50
     )
     local -a requested_mixes=() selected_mix_specs=()
 
@@ -3715,7 +4134,7 @@ phase_capacity_quality_ladder() {
             || { echo "CAPACITY_QUALITY_MIXES must not be empty" >&2; return 1; }
         for requested in "${requested_mixes[@]}"; do
             case "$requested" in
-                pure-srt|pure-rtmp|pure-hls|pure-hls-push|rtmp-95-srt-5|hls-push-95-srt-5|rtmp-50-hls-push-45-srt-5)
+                pure-srt|pure-rtmp|pure-hls|pure-hls-push|rtmp-95-srt-5|hls-push-95-srt-5|rtmp-50-hls-push-45-srt-5|srt-50-rtmp-25-hls-push-25|srt-25-rtmp-25-hls-push-50)
                     ;;
                 *)
                     echo "unknown capacity quality mix: $requested" >&2

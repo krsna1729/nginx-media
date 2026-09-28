@@ -266,11 +266,22 @@ def jain(values):
     return total * total / (len(values) * squares) if values and squares else 0.0
 
 
+def expected_ids(programs, destinations):
+    """The destination IDs a rung creates: one program numbers them d0000..,
+    several programs prefix each with its own p0000- (the harness's
+    capacity_destination_id)."""
+    if programs <= 1:
+        return {f"d{index:04d}" for index in range(destinations)}
+    return {f"p{program:04d}-d{index:04d}"
+            for program in range(programs)
+            for index in range(destinations)}
+
+
 def quality_report(args):
     failures = []
     baseline_ns, baseline = read_receiver_snapshot(args.baseline)
     final_ns, final = read_receiver_snapshot(args.final)
-    expected = {f"d{i:04d}" for i in range(args.destinations)}
+    expected = expected_ids(args.programs, args.destinations)
     if set(baseline) != expected or set(final) != expected:
         raise ValueError("receiver snapshot IDs do not match the quality rung")
     if final_ns <= baseline_ns:
@@ -563,6 +574,29 @@ def quality_report(args):
     print(f"quality_interval_delivery_ratio_min={min(row[4] for row in rows):.5f}")
     print(f"quality_destination_fairness_jain={jain(all_rates):.5f} (supplementary)")
     print(f"quality_sender_feed_drops={queue_drops['nginx_media_srt_egress_shard_feed_queue_dropped_total']:g}")
+    # A strict qualification, separate from the 0.95 compatibility gate the
+    # ladder uses: every destination at full rate within a documented
+    # tolerance, with nothing dropped, nothing corrupted and no short-interval
+    # interruption.  A run can pass the gate and fail this - that is the point
+    # of publishing both.
+    strict_ratio_min = min(row[3] for row in rows)
+    strict_interval_min = min(row[4] for row in rows)
+    # TEI is corruption wherever it is counted: the gate treats a nonzero
+    # count as an MPEG-TS error, so the strict verdict must not clear it.
+    ts_errors = sum(ts["ts_sync_errors"] + ts["ts_continuity_errors"]
+                    + ts.get("ts_tei_errors", 0)
+                    for _, _, _, _, _, _, ts in rows)
+    strict_ok = (strict_ratio_min >= args.strict_ratio
+                 and strict_interval_min >= args.strict_interval_floor
+                 and ts_errors == 0
+                 and queue_drops['nginx_media_srt_egress_shard_feed_queue_dropped_total'] == 0
+                 and queue_drops['nginx_media_srt_egress_shard_output_dropped_total'] == 0)
+    print(f"quality_strict_full_rate={'yes' if strict_ok else 'no'}")
+    print(f"quality_strict_ratio_min={strict_ratio_min:.5f}")
+    print(f"quality_strict_ratio_tolerance={args.strict_ratio:.5f}")
+    print(f"quality_strict_interval_floor={args.strict_interval_floor:.5f}")
+    print(f"quality_strict_interval_min={strict_interval_min:.5f}")
+    print(f"quality_strict_ts_errors={ts_errors}")
     print(f"quality_sender_output_drops={queue_drops['nginx_media_srt_egress_shard_output_dropped_total']:g}")
     print(f"quality_stream_feed_overruns={stream_overruns:g}")
     print(f"quality_stream_feed_retention_evictions={stream_evictions:g}")
@@ -607,10 +641,17 @@ def main():
     report.add_argument("--destination-report", required=True)
     report.add_argument("--interval-report", required=True)
     report.add_argument("--destinations", type=int, required=True)
+    report.add_argument("--programs", type=int, default=1,
+                        help="programs the rung ran; each owns its own set of "
+                             "destinations, numbered pNNNN-dNNNN")
     report.add_argument("--prepared-source", required=True)
     report.add_argument("--source-duration-s", type=float, default=30.0)
     report.add_argument("--reference-bps", type=float, default=0.0)
     report.add_argument("--min-delivery-ratio", type=float, default=0.95)
+    # the strict qualification's documented tolerance: full rate means within
+    # 0.1% of the reference, and no interval below 90% of it
+    report.add_argument("--strict-ratio", type=float, default=0.999)
+    report.add_argument("--strict-interval-floor", type=float, default=0.90)
     report.add_argument("--interval-floor", type=float, default=0.80)
     report.add_argument("--max-low-s", type=float, default=2.0)
     report.add_argument("--max-interval-s", type=float, default=2.0)

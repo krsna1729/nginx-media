@@ -82,6 +82,9 @@ jobs:
     uses: ./.github/workflows/bench.yml
     with:
       tier: nightly
+      # one job per workload group: the seven ladders run in parallel rather
+      # than one after another, and publish merges their results
+      configs: '["srt-rtmp","hls","mix-srt-share","mix-all-protocols"]'
       timeout-minutes: 240
     permissions:
       contents: read

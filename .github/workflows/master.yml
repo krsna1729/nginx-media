@@ -103,6 +103,8 @@ jobs:
     uses: ./.github/workflows/bench.yml
     with:
       tier: branch
+      # the three configurations run as parallel jobs; publish merges them
+      configs: '["srt","rtmp","rtmp-srt"]'
       timeout-minutes: 60
     permissions:
       contents: read
