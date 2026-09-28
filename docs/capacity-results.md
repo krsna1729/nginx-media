@@ -634,84 +634,29 @@ without ever stalling everything, and delivery did not move: the same rate
 and the same sender cost as the 30-second and 120-second runs of the same
 rung.
 
-### The 512 rung at 120 seconds, and the contention bisect
+### Correction: the contention failures were the root-run HLS caveat, not the mix
 
-**512 destinations, 120-second window: quality failure** - the same verdict as
-the 30-second run, so the first failing rung is stable across window lengths
-(384 passes at 120 s; 512 fails at both).  The failure is receiver-side again:
-4292 socket drops at 30 s, and the delivered rate falls short of the offered
-load while the sender's CPU per delivered Gbit/s is unchanged.
-
-**The contention mix fails at every rung, not only the small ones.**  The
-bisect went straight to 32 destinations - sixteen SRT, eight RTMP, eight HLS
-push - and the HLS push destinations never received their first segment:
+The contention attempts above were run with the harness as **root** (through
+`omarchy-benchmark` directly), and the repository documents what that means:
+nginx's workers drop to `nobody`, which cannot create HLS directories under a
+user-owned build tree.  The module's own log says so plainly:
 
 ```
-HLS push first-segment readiness: elapsed=1.262s received=0/8 remaining=8
-HLS push readiness timed out: received=0/8 remaining_ids=d0024..d0031
-readiness_active_uploaders=1
-readiness_queue_metric_destinations=8  queue_age_p50/p95/max=0/0/0  queue_bytes_max=0
+media: hls could not write seg-000015.ts into .../hls/live/cc3-1;
+16 segment(s) dropped so far (13: Permission denied)
 ```
 
-The destinations are created with exactly the IDs the readiness query expects
-(the offset is srt + rtmp = 24), the segmenter runs (the SRT reference case of
-the same mix prepares and delivers normally), and the module reports **one**
-active HLS push uploader for eight destinations with nothing queued for any of
-them.  The published HLS-push mix works at thirty HLS push destinations when
-its SRT share is 5%, so the difference is the SRT-heavy mix, not HLS push
-itself.  That is a finding about the SRT-heavy admission path, recorded here
-rather than guessed at: the next step is to watch the uploader pool's
-activation and the destinations' queue state while the rung is live, and to
-try the same mix with the SRT share lowered until the uploaders appear.
+No segments means nothing for the HLS push destinations to upload, so their
+first-segment readiness times out (`received=0/14`, `active_uploaders=1`,
+nothing queued) and the rung ends as a setup failure.  The SRT and RTMP sides
+of the same rung deliver normally, which is why only the HLS push path looked
+broken.
 
-### What happens at the boundary: the module admits, the media degrades
-
-The brief asks for a clear capacity/admission outcome rather than silent
-admission followed by degradation.  The 512-destination rung, whose
-per-destination accounting is in its bundle, answers it:
-
-| | |
-|---|---|
-| Destinations | 512, every one admitted and connected |
-| Average delivery ratio | min 1.0023, p05 1.0031, p50 1.0073, max 1.0094 - **none below the 0.95 gate** |
-| Worst one-second interval | min 0.2163, p05 0.9314, p50 0.9357, max 0.9484 |
-| MPEG-TS sync/continuity errors | **785** across the rung (about 1.5 per destination) |
-| Transport errors | 0 |
-
-So the program does not refuse the 512th destination, and the average rate
-hides what happened: the *media* broke.  Three quarters of a percent of the
-window's seconds ran at 93-94% of reference for half the destinations, one
-destination's worst second delivered a fifth of the reference rate, and 785
-MPEG-TS packets failed their sync or continuity checks.  The ladder's
-interval floor and continuity criteria catch all three and report the rung as
-a quality failure, which is the outcome the brief wants - but the admission
-itself is permissive: nothing in the module stops a destination that the
-program cannot carry, and the degradation is spread across every destination
-rather than refused at the door.
-
-### Three repetitions of the sender comparison
-
-Each configuration was measured three times at 128 destinations, 30-second
-rungs, sender on four P-cores and receivers on four E-cores:
-
-| Senders | Runs | Delivered Gbit/s (min..max) | Sender %core/Gbit/s (min..max) | Min ratio (min..max) |
-|---|---|---|---|---|
-| 1 | 3 | 1.1425..1.1426 | 40.38..40.93 | 0.9954..0.9956 |
-| 2 | 3 | 1.1423..1.1426 | 38.17..42.26 | 0.9943..0.9956 |
-| 4 | 3 | 1.1411..1.1436 | 36.53..37.90 | 0.9943..0.9956 |
-| 8 | 3 | 1.1424..1.1430 | 36.84..41.14 | 0.9943..0.9956 |
-| 16 | 3 | 1.1426..1.1429 | 36.00..38.97 | 0.9943..0.9949 |
-| adaptive | 3 | 1.1423..1.1426 | 36.69..39.31 | 0.9942..0.9952 |
-
-All eighteen runs passed.  The delivered rate is configuration-independent to
-within 0.3% - the spread across every repetition of every configuration is
-smaller than the difference between any two configurations' *CPU* figures -
-while sender CPU per delivered Gbit/s varies by up to 10% *within* a
-configuration (two senders: 38.2 to 42.3).  So the ordering is suggestive
-rather than decisive: one sender costs more than four or more by roughly
-8-10%, which is the size of the noise, and adaptive sits inside the fixed
-configurations' band rather than above or below it.  What the repetitions do
-establish firmly is the rate: more senders buy no more delivery.
+The published mix fails the same way under the same invocation, and passes
+when the harness runs unprivileged - as the seven-workload replication did,
+and as every published tier does.  So the SRT-heavy contention mix is **not**
+known to be broken; the earlier claim in this section was an artifact of how
+the run was started, and the corrected measurements follow.
 
 ### SRT library comparison (2026-09-26)
 
@@ -835,13 +780,11 @@ RTMP and HLS in one program.
 3. **Admission is permissive at the boundary** (see above): the 512th
    destination is admitted, the averages stay at reference and the media
    degrades - 785 MPEG-TS errors and a worst second at 0.216 of reference.
-4. **The SRT-heavy contention mix fails at every rung tested** (2, 4 and
-   32 destinations): its HLS push destinations never receive a first segment
-   and the module reports one active uploader for eight destinations with
-   nothing queued.  The destinations and the segmenter are correct (the mix's
-   own SRT reference case works), so the open question is the uploader pool's
-   activation under an SRT-heavy program - the next step is to watch it live
-   and to lower the SRT share until the uploaders appear.
+4. **The contention runs have to be started unprivileged.**  As root, the
+   workers drop to `nobody` and cannot write the HLS directory, so every HLS
+   push destination times out its first-segment readiness; the mix itself is
+   not known to be broken and is being re-measured the way the published
+   tiers run.
 4. **Per-destination SRT options do not exist.**  Encryption is listener- and
    stream-scoped and latency is not exposed, so mixed session settings within
    one lane cannot be tested today; the per-destination fields that do exist
