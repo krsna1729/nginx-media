@@ -3741,6 +3741,12 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s>
                  --probe-sender "$case_dir/preflight.tx.json"
                  --json "$case_dir/preflight.json" )
     capacity_preflight_calibration "$case_dir"
+    # The CPUs the run is pinned to: foreign work on those is the run's
+    # limit, foreign work elsewhere is not.
+    judge_cpus="${CAPACITY_NGINX_CPUS:-}"
+    [ -z "$CAPACITY_RECEIVER_CPUS" ] \
+        || judge_cpus="${judge_cpus:+$judge_cpus,}$CAPACITY_RECEIVER_CPUS"
+    [ -z "$judge_cpus" ] || judge_args+=( --benchmark-cpus "$judge_cpus" )
     [ -z "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
         || judge_args+=( --sender-cpu-per-gbps \
                          "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" )

@@ -86,6 +86,43 @@ def preflight(*args):
     return run([sys.executable, PREFLIGHT] + list(args))
 
 
+def test_preflight_names_a_foreign_load_on_the_pinned_cpus(work):
+    """A run pinned to a CPU that something else is using is the host's
+    number, not the software's, and the preflight has to say so before the
+    rungs are read as a capacity - naming the CPU and the process."""
+    case = os.path.join(work, "preflight-foreign")
+    sender = os.path.join(case, "sender.json")
+    write_json(sender, {"role": "sender", "permitted_cpus": [0, 1],
+                        "cpu_model": "test"})
+    busy = os.path.join(case, "busy.json")
+    write_json(busy, {"busy": {"cpu0": 1.0, "cpu1": 0.02},
+                      "consumers": [{"pid": 4242, "cpu_seconds": 1.0,
+                                     "command": "bessd -k"}]})
+
+    result = preflight("judge", "--destinations", "64", "--bitrate-bps",
+                       "8000000", "--sender", sender,
+                       "--benchmark-cpus", "0,1",
+                       "--benchmark-cpu-busy-json", busy,
+                       "--json", os.path.join(case, "judge.json"))
+    check(result.returncode == 2,
+          f"a busy pinned CPU is an infrastructure limit: {result.stdout}")
+    check("preflight_limit=host/cpu" in result.stdout,
+          f"the host must be the named side: {result.stdout}")
+    check("cpu0" in result.stdout and "bessd" in result.stdout,
+          f"the CPU and the consumer must be named: {result.stdout}")
+
+    # a desktop's own spread is not a competing job: below half a CPU the
+    # measurement stands
+    write_json(busy, {"busy": {"cpu0": 0.2, "cpu1": 0.1}, "consumers": []})
+    result = preflight("judge", "--destinations", "64", "--bitrate-bps",
+                       "8000000", "--sender", sender,
+                       "--benchmark-cpus", "0,1",
+                       "--benchmark-cpu-busy-json", busy,
+                       "--json", os.path.join(case, "judge2.json"))
+    check("preflight_limit=host/cpu" not in result.stdout,
+          f"a busy desktop is not a competing job: {result.stdout}")
+
+
 def test_preflight_classifies_a_short_environment(work):
     """The preflight's whole job: say which side is short, and never turn an
     environment that cannot carry the load into a result about the sender."""

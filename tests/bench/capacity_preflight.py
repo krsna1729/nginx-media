@@ -458,6 +458,88 @@ def probe_send(peer, port, seconds, packet_bytes, threads=1):
     }
 
 
+def parse_cpu_list(spec):
+    """`0,2,4-6` or `0 2 4-6` into a set of CPU numbers."""
+    cpus = set()
+    for part in (spec or "").replace(",", " ").split():
+        if "-" in part:
+            first, _, last = part.partition("-")
+            try:
+                cpus.update(range(int(first), int(last) + 1))
+            except ValueError:
+                continue
+        else:
+            try:
+                cpus.add(int(part))
+            except ValueError:
+                continue
+    return cpus
+
+
+def per_cpu_busy(window_s=0.5):
+    """Busy fraction per CPU over a short window, from /proc/stat.
+
+    The aggregate line cannot say which CPU was busy, and that is the whole
+    question when a run is pinned: work on a CPU the run does not use costs
+    the measurement nothing, work on one it does use contaminates it."""
+    before = proc_cpu_sampler.proc_stat_per_cpu() or {}
+    time.sleep(window_s)
+    after = proc_cpu_sampler.proc_stat_per_cpu() or {}
+    busy = {}
+    for name, first in before.items():
+        second = after.get(name)
+        if not second:
+            continue
+        total = sum(second.values()) - sum(first.values())
+        idle = (second["idle"] + second.get("iowait", 0)
+                - first["idle"] - first.get("iowait", 0))
+        if total > 0:
+            busy[name] = round(1.0 - idle / total, 4)
+    return busy
+
+
+def foreign_cpu_consumers(window_s=0.5, limit=5):
+    """Processes that used CPU during the window, by pid, biggest first.
+
+    The benchmark's own programs are named by their command lines; anything
+    else that is running is foreign to the measurement and is worth naming
+    before an hour of rungs is read as a capacity result."""
+    own = ("ingest_egress_fanout", "capacity_preflight", "srt_fanout_sink",
+           "hls_push_capacity", "hls_capacity_readers", "proc_cpu_sampler",
+           "nginx", "omarchy-benchmark", "taskset")
+    first = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", encoding="utf-8") as source:
+                fields = source.read().rsplit(")", 1)[1].split()
+            first[entry] = int(fields[11]) + int(fields[12])
+        except (OSError, IndexError, ValueError):
+            continue
+    time.sleep(window_s)
+    consumers = []
+    for pid, used in first.items():
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as source:
+                fields = source.read().rsplit(")", 1)[1].split()
+            after = int(fields[11]) + int(fields[12])
+            with open(f"/proc/{pid}/cmdline", encoding="utf-8",
+                      errors="replace") as source:
+                cmdline = source.read().replace("\0", " ").strip()
+        except (OSError, IndexError, ValueError):
+            continue
+        seconds = (after - used) / os.sysconf("SC_CLK_TCK")
+        if seconds <= 0.01:
+            continue
+        if any(marker in cmdline for marker in own):
+            continue
+        consumers.append({"pid": int(pid), "cpu_seconds": round(seconds, 3),
+                          "command": cmdline[:120] or f"pid {pid}"})
+    consumers.sort(key=lambda item: item["cpu_seconds"], reverse=True)
+    return consumers[:limit]
+
+
 def judge(args):
     sender = load(args.sender)
     network = load(args.network)
@@ -607,6 +689,51 @@ def judge(args):
                     "reason": f"{available / 1024:.0f} MiB available, "
                               f"{args.required_memory_mb} MiB requested"})
 
+    # --- the CPUs the run is pinned to: a foreign load there is the run's
+    #     limit, and it must be named before the rungs are believed
+    # Only an explicitly stated set is checked: without it the preflight
+    # would sample whatever CPUs the caller happened to allow, which on a
+    # desktop is every CPU and every CPU is a little busy.
+    benchmark_cpus = parse_cpu_list(args.benchmark_cpus)
+    if benchmark_cpus:
+        injected = None
+        if args.benchmark_cpu_busy_json:
+            injected = load(args.benchmark_cpu_busy_json) or {}
+        if injected is not None:
+            busy = injected.get("busy") or {}
+            consumers = injected.get("consumers") or []
+        else:
+            # Two windows, and the second is the measurement: the first still
+            # carries this process's own start-up, which would otherwise be
+            # read as foreign work on whichever CPU the interpreter ran on.
+            per_cpu_busy(1.0)
+            busy = per_cpu_busy(1.0)
+            consumers = foreign_cpu_consumers()
+        busy_names = [f"cpu{cpu}" for cpu in sorted(benchmark_cpus)
+                      if busy.get(f"cpu{cpu}", 0.0) > args.max_foreign_cpu_busy]
+        details["benchmark_cpus"] = sorted(benchmark_cpus)
+        details["benchmark_cpu_busy"] = {name: busy.get(name)
+                                         for name in sorted(busy)
+                                         if name in
+                                         {f"cpu{c}" for c in benchmark_cpus}}
+        if busy_names:
+            details["foreign_cpu_consumers"] = consumers
+            limits.append({
+                "side": "host", "resource": "cpu",
+                "measured": busy_names,
+                "required": f"<= {args.max_foreign_cpu_busy:.2f} busy per "
+                            f"benchmark CPU",
+                "unit": "cpu",
+                "reason": f"{', '.join(busy_names)} of the pinned set "
+                          f"{details['benchmark_cpus']} "
+                          + ("is" if len(busy_names) == 1 else "are")
+                          + " busy with work that is not this run"
+                          + (": " + "; ".join(
+                              f"pid {item['pid']} {item['command']}"
+                              for item in consumers) if consumers else "")
+                          + ".  A capacity measured beside a foreign load is "
+                            "the host's number, not the software's."})
+
     verdict = "infrastructure-limited" if limits else (
         "insufficient-evidence" if unknown else "ok")
     result = {
@@ -682,6 +809,21 @@ def main():
     j.add_argument("--sender-cpu-per-gbps", type=float)
     j.add_argument("--receiver-cpu-per-gbps", type=float)
     j.add_argument("--required-memory-mb", type=float)
+    j.add_argument("--benchmark-cpus",
+                   help="the CPUs the run is pinned to (a list or a range "
+                        "expression, as taskset takes); a busy CPU in this set "
+                        "is a foreign load, not a capacity")
+    j.add_argument("--benchmark-cpu-busy-json",
+                   help="read the per-CPU busy sample (and, if present, its "
+                        "\"consumers\") from this file instead of measuring "
+                        "the live host: the classification is testable, the "
+                        "sampling is not")
+    j.add_argument("--max-foreign-cpu-busy", type=float, default=0.5,
+                   help="fraction of one benchmark CPU that may be busy with "
+                        "foreign work before the verdict is "
+                        "infrastructure-limited (default 0.5: half a CPU's "
+                        "worth, which separates a competing job from a "
+                        "desktop's own spread)")
     j.add_argument("--sender")
     j.add_argument("--network")
     j.add_argument("--probe-sender",
