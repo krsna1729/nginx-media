@@ -365,7 +365,7 @@ snapshot() {   # <output>
         [ -s "$RUN/sink.csv.snapshot" ] && break
         sleep 0.05
     done
-    tail -n +2 "$RUN/sink.csv.snapshot" | cut -d, -f1,2 | sort > "$1"
+    tail -n +2 "$RUN/sink.csv.snapshot" | sort > "$1"
 }
 
 sleep 5
@@ -378,10 +378,11 @@ kill -USR1 "$RELAY_PID"
 kill -USR1 "$FLAP_PID"
 sleep 0.3
 
-declare -A LAG RECONNECT DROPPED TRANSPORT
+declare -A LAG QUEUE RECONNECT DROPPED TRANSPORT
 for i in 0 16 32 48 1 17 33 49; do
     id="$(printf 'd%02d' "$i")"
     LAG[$i]="$(metric nginx_media_egress_queue_lag_ms "$id")"
+    QUEUE[$i]="$(metric nginx_media_egress_queue_bytes "$id")"
     RECONNECT[$i]="$(metric nginx_media_egress_reconnects_total "$id")"
     DROPPED[$i]="$(metric nginx_media_egress_dropped_units_total "$id")"
     TRANSPORT[$i]="$(metric nginx_media_egress_transport_errors_total "$id")"
@@ -392,6 +393,7 @@ RETRANS_CONTROL="$(shard_metric nginx_media_srt_egress_shard_retransmitted_packe
 python3 - "$RUN/a.csv" "$RUN/b.csv" "$RUN/relay.json" "$RUN/relay-flap.json" \
     "$WINDOW" "$RETRANS_LANE" "$RETRANS_CONTROL" \
     "${LAG[32]:-}" "${LAG[48]:-}" "${LAG[0]:-}" "${LAG[16]:-}" \
+    "${QUEUE[32]:-}" "${QUEUE[48]:-}" "${QUEUE[0]:-}" \
     "${RECONNECT[32]:-}" "${DROPPED[32]:-}" "${TRANSPORT[32]:-}" \
     "${RECONNECT[48]:-}" "${DROPPED[48]:-}" "${TRANSPORT[48]:-}" \
     "${RECONNECT_before_32:-}" "${DROPPED_before_32:-}" "${TRANSPORT_before_32:-}" \
@@ -404,10 +406,11 @@ import json, statistics, sys
 (a_path, b_path, relay_path, flap_path, window, retrans_lane, retrans_control,
  lag32, lag48, lag0, lag16, reconnects32, dropped32, transport32,
  reconnects48, dropped48, transport48,
+ queue32, queue48, queue0,
  reconnects32_before, dropped32_before, transport32_before,
  reconnects48_before, dropped48_before, transport48_before,
  reconnects32_after, dropped32_after, transport32_after,
- reconnects48_after, dropped48_after, transport48_after) = sys.argv[1:31]
+ reconnects48_after, dropped48_after, transport48_after) = sys.argv[1:34]
 window = float(window)
 
 def load(path):
@@ -417,8 +420,21 @@ def load(path):
         rows[name.split("s=")[-1]] = int(value)
     return rows
 
+def load_rows(path):
+    rows = {}
+    with open(path) as source:
+        header = source.readline().strip().split(",")
+        for line in source:
+            fields = line.strip().split(",")
+            if len(fields) != len(header):
+                continue
+            row = dict(zip(header, fields))
+            rows[row["destination_id"].split("s=")[-1]] = row
+    return rows
+
 a, b = load(a_path), load(b_path)
 rate = {k: (b[k] - a.get(k, 0)) * 8 / window for k in b}
+final = load_rows(b_path)
 control = [rate["d%02d" % i] for i in (1, 17, 33, 49) if "d%02d" % i in rate]
 others = [rate[k] for k in sorted(rate)
           if k not in ("d00", "d16", "d32", "d48", "d01", "d17", "d33", "d49")]
@@ -479,6 +495,22 @@ for label, lag in (("d32", lag32), ("d48", lag48)):
     if lag not in ("", None):
         check(float(lag) <= 1000,
               "%s queue lag %s ms stays bounded (<= 1000)" % (label, lag))
+# Media continuity and queue occupancy for the healthy lane-mates: the
+# sink's own MPEG-TS accounting and the module's output queue, not just the
+# delivered rate.
+for label in ("d32", "d48"):
+    row = final.get(label, {})
+    for column, want in (("ts_sync_errors", 0), ("ts_continuity_errors", 0),
+                         ("ts_tei_errors", 0), ("transport_error", 0),
+                         ("stalled", 0)):
+        if column in row:
+            check(int(row[column]) == want,
+                  "%s %s is %s (%s)" % (label, column, want, row[column]))
+for label, value in (("d32", queue32), ("d48", queue48)):
+    if value not in ("", None):
+        check(float(value) <= 1_000_000,
+              "%s output queue stays bounded (%s bytes)" % (label, value))
+
 for label, before, after in (("reconnects", reconnects32_before, reconnects32),
                              ("drops", dropped32_before, dropped32),
                              ("transport errors", transport32_before, transport32),
