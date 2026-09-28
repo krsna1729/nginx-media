@@ -229,6 +229,10 @@ CAPACITY_RECEIVER_MKDIR="${CAPACITY_RECEIVER_MKDIR:-}"
 # the question is whether one program's SRT load starves another program's
 # RTMP or HLS work.  The harness prints the placement it achieved, and the
 # bundle records it.
+# One program for a quality ladder, by construction: each rung's reference is
+# a single program's rate, so a multi-program rung has nothing to be compared
+# against and capacity_case refuses it rather than reporting a ratio that
+# means nothing.  Multi-program behaviour is measured by the saturated case.
 CAPACITY_QUALITY_PROGRAMS="${CAPACITY_QUALITY_PROGRAMS:-1}"
 CAPACITY_QUALITY_REFERENCE_RTMP_BPS="${CAPACITY_QUALITY_REFERENCE_RTMP_BPS:-0}"
 CAPACITY_QUALITY_REFERENCE_HLS_BPS="${CAPACITY_QUALITY_REFERENCE_HLS_BPS:-0}"
