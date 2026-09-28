@@ -609,6 +609,31 @@ no kernel drops anywhere, and the strict verdict passes.  The 512 rung's
 repeat was cut short when the machine window ended, so the first-failure
 repeat is still outstanding.
 
+### The sustained run: half an hour at 384 destinations
+
+The configuration a production claim would rest on, measured for 1800 seconds
+(sender on four P-cores, receivers on four E-cores, SMT siblings offlined,
+reference 8.965 Mbit/s taken from the 120-second run):
+
+| | |
+|---|---|
+| Outcome | **pass**, strict full rate **yes** |
+| Window | 1800 s (the harness's rung cap had to be raised from 600 s for this) |
+| Delivered | 3.4425 Gbit/s (8.96 Mbit/s per destination) |
+| Sender CPU | 33.7 %core per delivered Gbit/s |
+| Minimum average ratio | 0.99995 |
+| Worst one-second interval | 0.9097 of reference |
+| MPEG-TS errors, feed drops, output drops, kernel drops | 0 / 0 / 0 / 0 |
+| Sender's pinned cores | mean 42.1% busy, min 39.5%, max 44.5%, **none idle, none saturated** |
+| Run-queue pressure | 29.9% of the window with a task waiting for a CPU (538 s), never fully stalled |
+
+The per-core and pressure numbers are the ones the audit had found missing.
+Over half an hour the sender's four cores stayed evenly loaded (39.5-44.5%
+each, no core idle), the run queue was non-empty for a third of the time
+without ever stalling everything, and delivery did not move: the same rate
+and the same sender cost as the 30-second and 120-second runs of the same
+rung.
+
 ### SRT library comparison (2026-09-26)
 
 Same source, same rungs, same placement (sender on four P-cores, receivers on
