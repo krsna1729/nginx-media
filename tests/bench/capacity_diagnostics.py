@@ -700,6 +700,40 @@ def parse_cpu_list(text):
     return cpus
 
 
+def run_queue_pressure(host_before, host_after, window_s):
+    """What the run queue did over the window.
+
+    The CPU counters say how busy the CPUs were; the PSI "some" total says how
+    long tasks waited for one, and procs_running says how deep the queue was
+    at the edges.  A rung that is short on delivery with idle CPUs and high
+    pressure is waiting on something else, which is the distinction the brief
+    asks for."""
+    before = ((host_before or {}).get("host") or {})
+    after = ((host_after or {}).get("host") or {})
+    result = {}
+    pressure_before = (before.get("cpu_pressure") or {}).get("some_total")
+    pressure_after = (after.get("cpu_pressure") or {}).get("some_total")
+    if pressure_before is not None and pressure_after is not None and window_s:
+        stalled_us = pressure_after - pressure_before
+        if stalled_us >= 0:
+            result["some_stalled_pct"] = round(
+                100.0 * stalled_us / (window_s * 1e6), 4)
+            result["some_stalled_s"] = round(stalled_us / 1e6, 3)
+    full_before = (before.get("cpu_pressure") or {}).get("full_total")
+    full_after = (after.get("cpu_pressure") or {}).get("full_total")
+    if full_before is not None and full_after is not None and window_s:
+        stalled_us = full_after - full_before
+        if stalled_us >= 0:
+            result["full_stalled_pct"] = round(
+                100.0 * stalled_us / (window_s * 1e6), 4)
+    for key in ("procs_running",):
+        if before.get(key) is not None:
+            result[f"{key}_before"] = before[key]
+        if after.get(key) is not None:
+            result[f"{key}_after"] = after[key]
+    return result
+
+
 def pinned_headroom(busy, placement, label):
     """What the CPUs a role was pinned to did over the window."""
     cpus = [f"cpu{n}" for n in parse_cpu_list(placement)]
@@ -853,6 +887,13 @@ def build(args):
                                                     "host-fingerprint.json"))
                              or missing("mixed", "no host fingerprint")),
     }
+    window_s = (meta.get("measurement_s")
+                if isinstance(meta.get("measurement_s"), (int, float))
+                else None)
+    pressure = run_queue_pressure(host_before, host_after, window_s)
+    if pressure:
+        env["run_queue_pressure"] = ok(
+            pressure, "share of the window and queue depth")
     busy = per_cpu_busy(host_before, host_after)
     if busy:
         env["per_cpu_busy_pct"] = ok(busy, "% of one core over the window")

@@ -916,6 +916,28 @@ def test_gate_rejects_a_setup_failure(work):
     check(result.returncode == 1, "a setup failure must fail the gate")
 
 
+def test_run_queue_pressure_is_recorded(work):
+    """Busy CPUs are not the whole story: the bundle must also say how long
+    tasks waited for one and how deep the queue was."""
+    module = load_module(DIAGNOSTICS, "capacity_diagnostics_pressure")
+    before = {"host": {"cpu_pressure": {"some_total": 1_000_000.0,
+                                        "full_total": 500_000.0},
+                       "procs_running": 3}}
+    after = {"host": {"cpu_pressure": {"some_total": 1_500_000.0,
+                                       "full_total": 700_000.0},
+                      "procs_running": 9}}
+    pressure = module.run_queue_pressure(before, after, 2.0)
+    check_close(pressure["some_stalled_pct"], 25.0,
+                "a quarter of the window stalled on CPU")
+    check_close(pressure["some_stalled_s"], 0.5, "stalled seconds")
+    check_close(pressure["full_stalled_pct"], 10.0, "fully stalled share")
+    check(pressure["procs_running_before"] == 3
+          and pressure["procs_running_after"] == 9,
+          f"queue depth at both edges: {pressure}")
+    check(module.run_queue_pressure({}, {}, 2.0) == {},
+          "a host without PSI reports nothing, never zero")
+
+
 def test_per_lane_rate_keeps_workers_apart(work):
     """Two workers number their shards from zero: the per-lane rate must not
     merge them, and must not report zero for a lane that was serving."""
@@ -1036,6 +1058,7 @@ def main():
         test_gate_rejects_a_run_with_no_status_file(work)
         test_gate_rejects_absent_diagnostics(work)
         test_gate_rejects_a_setup_failure(work)
+        test_run_queue_pressure_is_recorded(work)
         test_per_lane_rate_keeps_workers_apart(work)
         test_per_cpu_busy_separates_idle_from_saturated(work)
         test_matrix_separates_observed_from_threshold(work)
