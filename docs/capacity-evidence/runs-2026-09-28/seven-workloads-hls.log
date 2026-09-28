@@ -1,0 +1,1387 @@
+== host
+   Linux 7.2.5-3-omarchy x86_64, 8 cpus
+   net.core.rmem_max 4194304
+   nginx nginx built 2026-09-26 18:37:25
+
+
+== selected 8 Mbit/s delivery-quality ladders
+   selected mixes: pure-hls pure-hls-push
+   each rung uses one program; per-protocol one-destination baselines calibrate before scaling.
+
+== pure-hls 8M receiver-quality ladder
+   duration=30s per rung; reference=one destination per protocol
+   SRT counts use nearest-integer share rounding; actual counts shown per rung.
+   pass: per-destination delivery >=0.95 of its protocol reference
+quality_rung_start mix=pure-hls destinations=1 srt=0 rtmp=0 hls=1 hls_push=0 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=0.00%
+   source 8M: 32507 KiB over 30s (8.9 Mbit/s)
+
+== capacity hls quality-pure-hls-1: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=1 total_destinations=1
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=1 HLS_push=0
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=8.0Mbit/s window=30s
+   waiting for first completed HLS segment
+   measurement_s=30.11 requested_window_s=30 media_measurement_window_s=30.11 cpu_window_s=30.006892 cpu_sampling_before_ms=3.179 cpu_sampling_after_ms=2.710
+   cc1-4 owner=w0 source_frames=758
+      program_frames=758
+      progress_fps=25.2 fanout_samples=758
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:758,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10852076B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=545
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+readers=1
+duration_s=30.087521
+reference_bps=8410747.11
+delivery_ratio_threshold=0.950000
+min_delivery_ratio=0.950000
+observed_min_delivery_ratio=1.000000
+observed_min_reader_id=0
+observed_p5_delivery_ratio=1.000000
+observed_p50_delivery_ratio=1.000000
+observed_p95_delivery_ratio=1.000000
+observed_ratio_basis=reader-counted-bytes
+receiver_bytes_total=31632316
+receiver_measurement_s=30.087521
+delivered_gbps=0.008411
+total_bytes=31632316
+total_segments=14
+playlist_errors=0
+segment_errors=0
+sequence_gaps=0
+ts_sync_errors=0
+segment_concurrency_limit=32
+segment_concurrency_max=1
+   hls_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-1/hls-readers.csv
+   calibrated_hls_quality_reference_bps=8410747.11
+   HLS reader process CPU:
+      pid=pid1236601 thread=python3 cpu=0.1%
+      aggregate_hls_reader_cpu=0.1%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1236112 rss_kb=25720->41364 delta_kb=+15644 pss_kb=20529->36223 delta_kb=+15694
+      pid=1236113 rss_kb=20904->20904 delta_kb=+0 pss_kb=15823->15872 delta_kb=+49
+      pid=1236114 rss_kb=20908->20908 delta_kb=+0 pss_kb=15830->15879 delta_kb=+49
+      pid=1236116 rss_kb=20904->20904 delta_kb=+0 pss_kb=15826->15875 delta_kb=+49
+   worker visit and scheduling metrics:
+      w0 pid=1236112 cpu=2.4%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1236113 cpu=1.7%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=301
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1236114 cpu=1.5%
+         visit_max=1ms event_loop_max_delay=115ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1236116 cpu=1.4%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=301
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=7.0% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=138->129
+      UDP mem_pages=136->136
+      TCP inuse=26->22
+      UDP inuse=14->13
+   diag: host CPU busy 2.1% of all online CPUs
+   diag: sender 7% vs receivers 0% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-1/diagnostics.json
+quality_rung_result mix=pure-hls destinations=1 srt=0 rtmp=0 hls=1 hls_push=0 result=pass
+quality_rung_start mix=pure-hls destinations=32 srt=0 rtmp=0 hls=32 hls_push=0 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=0.00%
+
+== capacity hls quality-pure-hls-32: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=32 total_destinations=32
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=32 HLS_push=0
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=256.0Mbit/s window=30s
+   waiting for first completed HLS segment
+   measurement_s=30.11 requested_window_s=30 media_measurement_window_s=30.11 cpu_window_s=30.007806 cpu_sampling_before_ms=3.886 cpu_sampling_after_ms=2.751
+   cc2-3 owner=w0 source_frames=757
+      program_frames=757
+      progress_fps=25.1 fanout_samples=757
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:757,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=250u/10810937B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=546
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+readers=32
+duration_s=30.087376
+reference_bps=8410747.11
+delivery_ratio_threshold=0.950000
+min_delivery_ratio=0.950000
+observed_min_delivery_ratio=1.000005
+observed_min_reader_id=0
+observed_p5_delivery_ratio=1.000005
+observed_p50_delivery_ratio=1.000005
+observed_p95_delivery_ratio=1.000005
+observed_ratio_basis=reader-counted-bytes
+receiver_bytes_total=1012234112
+receiver_measurement_s=30.087376
+delivered_gbps=0.269145
+total_bytes=1012234112
+total_segments=448
+playlist_errors=0
+segment_errors=0
+sequence_gaps=0
+ts_sync_errors=0
+segment_concurrency_limit=32
+segment_concurrency_max=32
+   hls_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-32/hls-readers.csv
+   HLS reader process CPU:
+      pid=pid1238284 thread=python3 cpu=3.1%
+      aggregate_hls_reader_cpu=3.1%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1237740 rss_kb=27824->44032 delta_kb=+16208 pss_kb=21038->37294 delta_kb=+16256
+      pid=1237741 rss_kb=22900->23728 delta_kb=+828 pss_kb=16228->17102 delta_kb=+874
+      pid=1237742 rss_kb=22900->23360 delta_kb=+460 pss_kb=16230->16737 delta_kb=+507
+      pid=1237744 rss_kb=22928->23052 delta_kb=+124 pss_kb=16258->16429 delta_kb=+171
+   worker visit and scheduling metrics:
+      w0 pid=1237740 cpu=2.4%
+         visit_max=1ms event_loop_max_delay=102ms
+         periodic_visits_delta=301
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1237741 cpu=2.3%
+         visit_max=0ms event_loop_max_delay=101ms
+         periodic_visits_delta=301
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1237742 cpu=1.7%
+         visit_max=1ms event_loop_max_delay=108ms
+         periodic_visits_delta=301
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1237744 cpu=1.6%
+         visit_max=1ms event_loop_max_delay=118ms
+         periodic_visits_delta=301
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=8.0% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=33->198
+      UDP mem_pages=136->136
+      TCP inuse=86->22
+      UDP inuse=14->13
+   diag: host CPU busy 2.4% of all online CPUs
+   diag: sender 8% vs receivers 3% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-32/diagnostics.json
+quality_rung_result mix=pure-hls destinations=32 srt=0 rtmp=0 hls=32 hls_push=0 result=pass
+quality_rung_start mix=pure-hls destinations=64 srt=0 rtmp=0 hls=64 hls_push=0 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=0.00%
+
+== capacity hls quality-pure-hls-64: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=64 total_destinations=64
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=64 HLS_push=0
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=512.0Mbit/s window=30s
+   waiting for first completed HLS segment
+   measurement_s=30.12 requested_window_s=30 media_measurement_window_s=30.12 cpu_window_s=30.008284 cpu_sampling_before_ms=3.682 cpu_sampling_after_ms=2.788
+   cc3-2 owner=w0 source_frames=757
+      program_frames=757
+      progress_fps=25.1 fanout_samples=757
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:757,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10852076B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=545
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+readers=64
+duration_s=30.081755
+reference_bps=8410747.11
+delivery_ratio_threshold=0.950000
+min_delivery_ratio=0.950000
+observed_min_delivery_ratio=1.000192
+observed_min_reader_id=0
+observed_p5_delivery_ratio=1.000192
+observed_p50_delivery_ratio=1.000192
+observed_p95_delivery_ratio=1.000192
+observed_ratio_basis=reader-counted-bytes
+receiver_bytes_total=2024468224
+receiver_measurement_s=30.081755
+delivered_gbps=0.538391
+total_bytes=2024468224
+total_segments=896
+playlist_errors=0
+segment_errors=0
+sequence_gaps=0
+ts_sync_errors=0
+segment_concurrency_limit=32
+segment_concurrency_max=32
+   hls_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-64/hls-readers.csv
+   HLS reader process CPU:
+      pid=pid1239903 thread=python3 cpu=5.7%
+      aggregate_hls_reader_cpu=5.7%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1239445 rss_kb=27676->43760 delta_kb=+16084 pss_kb=22528->38693 delta_kb=+16165
+      pid=1239446 rss_kb=22860->23544 delta_kb=+684 pss_kb=17850->18581 delta_kb=+731
+      pid=1239447 rss_kb=22872->22960 delta_kb=+88 pss_kb=17853->17988 delta_kb=+135
+      pid=1239448 rss_kb=22900->23708 delta_kb=+808 pss_kb=17881->18736 delta_kb=+855
+   worker visit and scheduling metrics:
+      w0 pid=1239445 cpu=3.2%
+         visit_max=1ms event_loop_max_delay=104ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1239446 cpu=2.2%
+         visit_max=1ms event_loop_max_delay=113ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1239447 cpu=1.9%
+         visit_max=1ms event_loop_max_delay=133ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1239448 cpu=2.3%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=301
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=9.6% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=0->166
+      UDP mem_pages=136->392
+      TCP inuse=150->22
+      UDP inuse=14->13
+   diag: host CPU busy 2.5% of all online CPUs
+   diag: sender 10% vs receivers 6% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-64/diagnostics.json
+quality_rung_result mix=pure-hls destinations=64 srt=0 rtmp=0 hls=64 hls_push=0 result=pass
+quality_rung_start mix=pure-hls destinations=96 srt=0 rtmp=0 hls=96 hls_push=0 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=0.00%
+
+== capacity hls quality-pure-hls-96: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=96 total_destinations=96
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=96 HLS_push=0
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=768.0Mbit/s window=30s
+   waiting for first completed HLS segment
+   measurement_s=30.11 requested_window_s=30 media_measurement_window_s=30.11 cpu_window_s=30.007641 cpu_sampling_before_ms=3.130 cpu_sampling_after_ms=2.699
+   cc4-1 owner=w0 source_frames=758
+      program_frames=758
+      progress_fps=25.2 fanout_samples=758
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:758,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10875605B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=550
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+readers=96
+duration_s=30.074797
+reference_bps=8410747.11
+delivery_ratio_threshold=0.950000
+min_delivery_ratio=0.950000
+observed_min_delivery_ratio=1.000423
+observed_min_reader_id=0
+observed_p5_delivery_ratio=1.000423
+observed_p50_delivery_ratio=1.000423
+observed_p95_delivery_ratio=1.000423
+observed_ratio_basis=reader-counted-bytes
+receiver_bytes_total=3036702336
+receiver_measurement_s=30.074797
+delivered_gbps=0.807773
+total_bytes=3036702336
+total_segments=1344
+playlist_errors=0
+segment_errors=0
+sequence_gaps=0
+ts_sync_errors=0
+segment_concurrency_limit=32
+segment_concurrency_max=32
+   hls_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-96/hls-readers.csv
+   HLS reader process CPU:
+      pid=pid1241501 thread=python3 cpu=9.0%
+      aggregate_hls_reader_cpu=9.0%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1241020 rss_kb=26200->42776 delta_kb=+16576 pss_kb=21003->37628 delta_kb=+16625
+      pid=1241021 rss_kb=20948->21072 delta_kb=+124 pss_kb=15865->16036 delta_kb=+171
+      pid=1241022 rss_kb=20928->21400 delta_kb=+472 pss_kb=15847->16366 delta_kb=+519
+      pid=1241024 rss_kb=20932->21328 delta_kb=+396 pss_kb=15851->16294 delta_kb=+443
+   worker visit and scheduling metrics:
+      w0 pid=1241020 cpu=3.3%
+         visit_max=1ms event_loop_max_delay=110ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1241021 cpu=2.3%
+         visit_max=1ms event_loop_max_delay=118ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1241022 cpu=2.7%
+         visit_max=1ms event_loop_max_delay=124ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1241024 cpu=2.4%
+         visit_max=1ms event_loop_max_delay=137ms
+         periodic_visits_delta=301
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=10.7% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=0->116
+      UDP mem_pages=392->129
+      TCP inuse=214->22
+      UDP inuse=14->13
+   diag: host CPU busy 2.8% of all online CPUs
+   diag: sender 11% vs receivers 9% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-96/diagnostics.json
+quality_rung_result mix=pure-hls destinations=96 srt=0 rtmp=0 hls=96 hls_push=0 result=pass
+quality_rung_start mix=pure-hls destinations=128 srt=0 rtmp=0 hls=128 hls_push=0 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=0.00%
+
+== capacity hls quality-pure-hls-128: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=128 total_destinations=128
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=128 HLS_push=0
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=1024.0Mbit/s window=30s
+   waiting for first completed HLS segment
+   measurement_s=30.17 requested_window_s=30 media_measurement_window_s=30.17 cpu_window_s=30.008455 cpu_sampling_before_ms=3.201 cpu_sampling_after_ms=3.078
+   cc5-4 owner=w0 source_frames=760
+      program_frames=760
+      progress_fps=25.2 fanout_samples=760
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:760,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10885981B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=553
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+readers=128
+duration_s=30.077783
+reference_bps=8410747.11
+delivery_ratio_threshold=0.950000
+min_delivery_ratio=0.950000
+observed_min_delivery_ratio=1.000324
+observed_min_reader_id=0
+observed_p5_delivery_ratio=1.000324
+observed_p50_delivery_ratio=1.000324
+observed_p95_delivery_ratio=1.000324
+observed_ratio_basis=reader-counted-bytes
+receiver_bytes_total=4048936448
+receiver_measurement_s=30.077783
+delivered_gbps=1.076924
+total_bytes=4048936448
+total_segments=1792
+playlist_errors=0
+segment_errors=0
+sequence_gaps=0
+ts_sync_errors=0
+segment_concurrency_limit=32
+segment_concurrency_max=32
+   hls_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-128/hls-readers.csv
+   HLS reader process CPU:
+      pid=pid1243154 thread=python3 cpu=12.0%
+      aggregate_hls_reader_cpu=12.0%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1242684 rss_kb=28312->43984 delta_kb=+15672 pss_kb=21489->37212 delta_kb=+15723
+      pid=1242685 rss_kb=22956->22960 delta_kb=+4 pss_kb=16246->16300 delta_kb=+54
+      pid=1242686 rss_kb=22952->22956 delta_kb=+4 pss_kb=16245->16299 delta_kb=+54
+      pid=1242688 rss_kb=22956->22960 delta_kb=+4 pss_kb=16249->16303 delta_kb=+54
+   worker visit and scheduling metrics:
+      w0 pid=1242684 cpu=2.9%
+         visit_max=1ms event_loop_max_delay=127ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1242685 cpu=2.4%
+         visit_max=1ms event_loop_max_delay=106ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1242686 cpu=2.3%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1242688 cpu=2.4%
+         visit_max=0ms event_loop_max_delay=102ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=10.0% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=393->0
+      UDP mem_pages=129->384
+      TCP inuse=278->25
+      UDP inuse=14->13
+   diag: host CPU busy 3.1% of all online CPUs
+   diag: sender 10% vs receivers 12% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-128/diagnostics.json
+quality_rung_result mix=pure-hls destinations=128 srt=0 rtmp=0 hls=128 hls_push=0 result=pass
+quality_rung_start mix=pure-hls destinations=192 srt=0 rtmp=0 hls=192 hls_push=0 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=0.00%
+
+== capacity hls quality-pure-hls-192: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=192 total_destinations=192
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=192 HLS_push=0
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=1536.0Mbit/s window=30s
+   waiting for first completed HLS segment
+   measurement_s=30.15 requested_window_s=30 media_measurement_window_s=30.15 cpu_window_s=30.008172 cpu_sampling_before_ms=3.177 cpu_sampling_after_ms=2.683
+   cc6-3 owner=w0 source_frames=761
+      program_frames=761
+      progress_fps=25.2 fanout_samples=761
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:761,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=250u/10861566B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=557
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+readers=192
+duration_s=30.073933
+reference_bps=8410747.11
+delivery_ratio_threshold=0.950000
+min_delivery_ratio=0.950000
+observed_min_delivery_ratio=1.000452
+observed_min_reader_id=0
+observed_p5_delivery_ratio=1.000452
+observed_p50_delivery_ratio=1.000452
+observed_p95_delivery_ratio=1.000452
+observed_ratio_basis=reader-counted-bytes
+receiver_bytes_total=6073404672
+receiver_measurement_s=30.073933
+delivered_gbps=1.615593
+total_bytes=6073404672
+total_segments=2688
+playlist_errors=0
+segment_errors=0
+sequence_gaps=0
+ts_sync_errors=0
+segment_concurrency_limit=32
+segment_concurrency_max=32
+   hls_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-192/hls-readers.csv
+   HLS reader process CPU:
+      pid=pid1244806 thread=python3 cpu=17.7%
+      aggregate_hls_reader_cpu=17.7%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1244292 rss_kb=26440->41064 delta_kb=+14624 pss_kb=21284->35959 delta_kb=+14675
+      pid=1244293 rss_kb=20892->20896 delta_kb=+4 pss_kb=15849->15903 delta_kb=+54
+      pid=1244295 rss_kb=20880->20888 delta_kb=+8 pss_kb=15840->15898 delta_kb=+58
+      pid=1244296 rss_kb=20876->20884 delta_kb=+8 pss_kb=15836->15894 delta_kb=+58
+   worker visit and scheduling metrics:
+      w0 pid=1244292 cpu=3.7%
+         visit_max=2ms event_loop_max_delay=102ms
+         periodic_visits_delta=302
+         budget_reposts_delta=1
+         late_ticks_delta=0
+      w1 pid=1244293 cpu=2.5%
+         visit_max=1ms event_loop_max_delay=104ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1244295 cpu=3.1%
+         visit_max=0ms event_loop_max_delay=109ms
+         periodic_visits_delta=301
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1244296 cpu=2.8%
+         visit_max=1ms event_loop_max_delay=125ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=12.1% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=0->166
+      UDP mem_pages=384->127
+      TCP inuse=409->26
+      UDP inuse=14->13
+   diag: host CPU busy 3.7% of all online CPUs
+   diag: sender 12% vs receivers 18% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-192/diagnostics.json
+quality_rung_result mix=pure-hls destinations=192 srt=0 rtmp=0 hls=192 hls_push=0 result=pass
+quality_rung_start mix=pure-hls destinations=256 srt=0 rtmp=0 hls=256 hls_push=0 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=0.00%
+
+== capacity hls quality-pure-hls-256: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=256 total_destinations=256
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=256 HLS_push=0
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=2048.0Mbit/s window=30s
+   waiting for first completed HLS segment
+   measurement_s=30.15 requested_window_s=30 media_measurement_window_s=30.15 cpu_window_s=30.008949 cpu_sampling_before_ms=3.720 cpu_sampling_after_ms=2.886
+   cc7-2 owner=w0 source_frames=759
+      program_frames=759
+      progress_fps=25.2 fanout_samples=759
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:759,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10909105B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=558
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+readers=256
+duration_s=30.056358
+reference_bps=8410747.11
+delivery_ratio_threshold=0.950000
+min_delivery_ratio=0.950000
+observed_min_delivery_ratio=1.001037
+observed_min_reader_id=0
+observed_p5_delivery_ratio=1.001037
+observed_p50_delivery_ratio=1.001037
+observed_p95_delivery_ratio=1.078076
+observed_ratio_basis=reader-counted-bytes
+receiver_bytes_total=8290191444
+receiver_measurement_s=30.056358
+delivered_gbps=2.206572
+total_bytes=8290191444
+total_segments=3663
+playlist_errors=0
+segment_errors=0
+sequence_gaps=0
+ts_sync_errors=0
+segment_concurrency_limit=32
+segment_concurrency_max=32
+   hls_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-256/hls-readers.csv
+   HLS reader process CPU:
+      pid=pid1246579 thread=python3 cpu=24.3%
+      aggregate_hls_reader_cpu=24.3%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1246069 rss_kb=27004->42244 delta_kb=+15240 pss_kb=21794->37088 delta_kb=+15294
+      pid=1246070 rss_kb=20980->20984 delta_kb=+4 pss_kb=15883->15939 delta_kb=+56
+      pid=1246071 rss_kb=20960->20968 delta_kb=+8 pss_kb=15866->15926 delta_kb=+60
+      pid=1246073 rss_kb=20956->20964 delta_kb=+8 pss_kb=15862->15922 delta_kb=+60
+   worker visit and scheduling metrics:
+      w0 pid=1246069 cpu=3.7%
+         visit_max=2ms event_loop_max_delay=120ms
+         periodic_visits_delta=302
+         budget_reposts_delta=2
+         late_ticks_delta=0
+      w1 pid=1246070 cpu=3.4%
+         visit_max=1ms event_loop_max_delay=104ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1246071 cpu=3.0%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1246073 cpu=2.9%
+         visit_max=1ms event_loop_max_delay=103ms
+         periodic_visits_delta=301
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=13.0% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=241->644
+      UDP mem_pages=383->382
+      TCP inuse=538->25
+      UDP inuse=14->13
+   diag: host CPU busy 4.1% of all online CPUs
+   diag: sender 13% vs receivers 24% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-256/diagnostics.json
+quality_rung_result mix=pure-hls destinations=256 srt=0 rtmp=0 hls=256 hls_push=0 result=pass
+mix=pure-hls first_failing_destination_rung=none
+mix=pure-hls quality_failed_rungs=none
+
+== pure-hls-push 8M receiver-quality ladder
+   duration=30s per rung; reference=one destination per protocol
+   SRT counts use nearest-integer share rounding; actual counts shown per rung.
+   pass: per-destination delivery >=0.95 of its protocol reference
+quality_rung_start mix=pure-hls-push destinations=1 srt=0 rtmp=0 hls=0 hls_push=1 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=100.00%
+
+== capacity hls-push quality-pure-hls-push-1: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=1 total_destinations=1
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=0 HLS_push=1
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=8.0Mbit/s window=30s
+   HLS push first-segment readiness: elapsed=1.064s received=1/1 remaining=0
+   HLS push all-destination first-segment latency=1.064s (1/1)
+   HLS push readiness progress=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-1/hls-push-readiness.csv
+   measurement_s=30.11 requested_window_s=30 media_measurement_window_s=30.11 cpu_window_s=30.007073 cpu_sampling_before_ms=3.275 cpu_sampling_after_ms=2.701
+   cc8-1 owner=w0 source_frames=758
+      program_frames=758
+      progress_fps=25.2 fanout_samples=758
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:758,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10842029B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=543
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+quality_destinations=1
+quality_measurement_s=30.100
+quality_reference_payload_bps=8407216.18
+quality_average_delivery_ratio_min=1.00000
+quality_ratio_basis=identified-segments
+quality_window_byte_ratio_min=1.00000
+quality_window_segments=12
+quality_window_segment_bytes=27272596
+quality_segment_interval_s=2.008
+quality_segment_lag_limit_s=4.016
+quality_segment_lag_p95_s=0.000
+quality_segment_lag_max_s=0.000
+quality_missing_segments=0
+quality_duplicate_segments=0
+quality_playlist_violations=0
+quality_total_bytes=27272596
+quality_total_segments=14
+quality_dropped_units=0
+quality_transport_errors=0
+quality_sink_http_errors=0
+quality_active_uploaders_before=1
+quality_active_uploaders_after=1
+quality_first_segment_latency_p50_ms=972.247
+quality_first_segment_latency_p95_ms=972.247
+quality_first_segment_latency_p99_ms=972.247
+quality_all_destinations_ready_s=0.972
+quality_upload_duration_p50_ms=0.700
+quality_upload_duration_p95_ms=0.772
+quality_upload_duration_p99_ms=0.772
+quality_upload_duration_max_ms=1.055
+quality_queue_lag_p50_ms=0
+quality_queue_lag_p95_ms=0
+quality_queue_lag_p99_ms=0
+quality_max_queue_lag_ms=0
+quality_failure_count=0
+   hls_push_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-1/hls-push-quality.csv
+   calibrated_hls_push_quality_reference_bps=8407216.18
+   HLS push sink process CPU:
+      pid=pid1248128 thread=python3 cpu=0.0%
+      pid=pid1248128 thread=(unattributed) cpu=0.1%
+      aggregate_hls_push_sink_cpu=0.1%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1247792 rss_kb=25580->41660 delta_kb=+16080 pss_kb=20245->36371 delta_kb=+16126
+      pid=1247793 rss_kb=20848->20848 delta_kb=+0 pss_kb=15812->15856 delta_kb=+44
+      pid=1247795 rss_kb=20844->20844 delta_kb=+0 pss_kb=15811->15855 delta_kb=+44
+      pid=1247796 rss_kb=20848->20848 delta_kb=+0 pss_kb=15815->15859 delta_kb=+44
+   worker visit and scheduling metrics:
+      w0 pid=1247792 cpu=2.3%
+         visit_max=1ms event_loop_max_delay=105ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1247793 cpu=2.0%
+         visit_max=1ms event_loop_max_delay=112ms
+         periodic_visits_delta=301
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1247795 cpu=1.5%
+         visit_max=1ms event_loop_max_delay=135ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1247796 cpu=2.0%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=7.8% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=641->291
+      UDP mem_pages=382->636
+      TCP inuse=28->26
+      UDP inuse=14->13
+   diag: host CPU busy 2.1% of all online CPUs
+   diag: sender 8% vs receivers 0% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-1/diagnostics.json
+quality_rung_result mix=pure-hls-push destinations=1 srt=0 rtmp=0 hls=0 hls_push=1 result=pass
+quality_rung_start mix=pure-hls-push destinations=32 srt=0 rtmp=0 hls=0 hls_push=32 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=100.00%
+
+== capacity hls-push quality-pure-hls-push-32: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=32 total_destinations=32
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=0 HLS_push=32
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=256.0Mbit/s window=30s
+   HLS push first-segment readiness: elapsed=1.085s received=32/32 remaining=0
+   HLS push all-destination first-segment latency=1.085s (32/32)
+   HLS push readiness progress=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-32/hls-push-readiness.csv
+   measurement_s=30.13 requested_window_s=30 media_measurement_window_s=30.13 cpu_window_s=30.007633 cpu_sampling_before_ms=3.565 cpu_sampling_after_ms=2.674
+   cc9-4 owner=w0 source_frames=759
+      program_frames=759
+      progress_fps=25.2 fanout_samples=759
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:759,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10852076B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=545
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+quality_destinations=32
+quality_measurement_s=30.100
+quality_reference_payload_bps=8407216.18
+quality_average_delivery_ratio_min=1.00000
+quality_ratio_basis=identified-segments
+quality_window_byte_ratio_min=1.00002
+quality_window_segments=12
+quality_window_segment_bytes=27272596
+quality_segment_interval_s=2.001
+quality_segment_lag_limit_s=4.002
+quality_segment_lag_p95_s=0.031
+quality_segment_lag_max_s=0.037
+quality_missing_segments=0
+quality_duplicate_segments=0
+quality_playlist_violations=0
+quality_total_bytes=872723072
+quality_total_segments=448
+quality_dropped_units=0
+quality_transport_errors=0
+quality_sink_http_errors=0
+quality_active_uploaders_before=1
+quality_active_uploaders_after=1
+quality_first_segment_latency_p50_ms=978.210
+quality_first_segment_latency_p95_ms=990.908
+quality_first_segment_latency_p99_ms=991.518
+quality_all_destinations_ready_s=0.992
+quality_upload_duration_p50_ms=0.563
+quality_upload_duration_p95_ms=0.751
+quality_upload_duration_p99_ms=0.778
+quality_upload_duration_max_ms=0.937
+quality_queue_lag_p50_ms=0
+quality_queue_lag_p95_ms=0
+quality_queue_lag_p99_ms=0
+quality_max_queue_lag_ms=0
+quality_failure_count=0
+   hls_push_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-32/hls-push-quality.csv
+   HLS push sink process CPU:
+      pid=pid1250028 thread=python3 cpu=0.2%
+      pid=pid1250028 thread=(unattributed) cpu=1.2%
+      aggregate_hls_push_sink_cpu=1.4%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1249638 rss_kb=26208->41988 delta_kb=+15780 pss_kb=20748->36576 delta_kb=+15828
+      pid=1249639 rss_kb=21016->21016 delta_kb=+0 pss_kb=15855->15901 delta_kb=+46
+      pid=1249640 rss_kb=21016->21016 delta_kb=+0 pss_kb=15857->15903 delta_kb=+46
+      pid=1249641 rss_kb=21016->21016 delta_kb=+0 pss_kb=15857->15903 delta_kb=+46
+   worker visit and scheduling metrics:
+      w0 pid=1249638 cpu=2.2%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1249639 cpu=1.4%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1249640 cpu=1.4%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1249641 cpu=1.4%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=304
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=6.4% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=817->700
+      UDP mem_pages=375->119
+      TCP inuse=27->26
+      UDP inuse=14->13
+   diag: host CPU busy 2.1% of all online CPUs
+   diag: sender 6% vs receivers 1% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-32/diagnostics.json
+quality_rung_result mix=pure-hls-push destinations=32 srt=0 rtmp=0 hls=0 hls_push=32 result=pass
+quality_rung_start mix=pure-hls-push destinations=64 srt=0 rtmp=0 hls=0 hls_push=64 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=100.00%
+
+== capacity hls-push quality-pure-hls-push-64: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=64 total_destinations=64
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=0 HLS_push=64
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=512.0Mbit/s window=30s
+   HLS push first-segment readiness: elapsed=1.082s received=64/64 remaining=0
+   HLS push all-destination first-segment latency=1.082s (64/64)
+   HLS push readiness progress=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-64/hls-push-readiness.csv
+   measurement_s=30.13 requested_window_s=30 media_measurement_window_s=30.13 cpu_window_s=30.008108 cpu_sampling_before_ms=4.210 cpu_sampling_after_ms=2.720
+   cc10-2 owner=w0 source_frames=759
+      program_frames=759
+      progress_fps=25.2 fanout_samples=759
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:759,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10855686B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=546
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+quality_destinations=64
+quality_measurement_s=30.106
+quality_reference_payload_bps=8407216.18
+quality_average_delivery_ratio_min=1.00000
+quality_ratio_basis=identified-segments
+quality_window_byte_ratio_min=0.99982
+quality_window_segments=12
+quality_window_segment_bytes=27272596
+quality_segment_interval_s=1.995
+quality_segment_lag_limit_s=3.991
+quality_segment_lag_p95_s=0.075
+quality_segment_lag_max_s=0.105
+quality_missing_segments=0
+quality_duplicate_segments=0
+quality_playlist_violations=0
+quality_total_bytes=1745446144
+quality_total_segments=896
+quality_dropped_units=0
+quality_transport_errors=0
+quality_sink_http_errors=0
+quality_active_uploaders_before=1
+quality_active_uploaders_after=1
+quality_first_segment_latency_p50_ms=985.276
+quality_first_segment_latency_p95_ms=1009.463
+quality_first_segment_latency_p99_ms=1011.481
+quality_all_destinations_ready_s=1.012
+quality_upload_duration_p50_ms=0.547
+quality_upload_duration_p95_ms=0.832
+quality_upload_duration_p99_ms=0.972
+quality_upload_duration_max_ms=40.499
+quality_queue_lag_p50_ms=0
+quality_queue_lag_p95_ms=0
+quality_queue_lag_p99_ms=0
+quality_max_queue_lag_ms=0
+quality_failure_count=0
+   hls_push_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-64/hls-push-quality.csv
+   HLS push sink process CPU:
+      pid=pid1253432 thread=python3 cpu=0.4%
+      pid=pid1253432 thread=(unattributed) cpu=2.4%
+      aggregate_hls_push_sink_cpu=2.8%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1253095 rss_kb=27896->41756 delta_kb=+13860 pss_kb=22544->36468 delta_kb=+13924
+      pid=1253096 rss_kb=21044->21044 delta_kb=+0 pss_kb=15863->15913 delta_kb=+50
+      pid=1253097 rss_kb=21060->21060 delta_kb=+0 pss_kb=15873->15929 delta_kb=+56
+      pid=1253099 rss_kb=20892->20892 delta_kb=+0 pss_kb=15848->15897 delta_kb=+49
+   worker visit and scheduling metrics:
+      w0 pid=1253095 cpu=2.3%
+         visit_max=1ms event_loop_max_delay=105ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1253096 cpu=1.4%
+         visit_max=1ms event_loop_max_delay=117ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1253097 cpu=2.1%
+         visit_max=1ms event_loop_max_delay=129ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1253099 cpu=1.5%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=7.3% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=982->544
+      UDP mem_pages=112->0
+      TCP inuse=27->25
+      UDP inuse=14->13
+   diag: host CPU busy 2.3% of all online CPUs
+   diag: sender 7% vs receivers 3% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-64/diagnostics.json
+quality_rung_result mix=pure-hls-push destinations=64 srt=0 rtmp=0 hls=0 hls_push=64 result=pass
+quality_rung_start mix=pure-hls-push destinations=96 srt=0 rtmp=0 hls=0 hls_push=96 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=100.00%
+
+== capacity hls-push quality-pure-hls-push-96: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=96 total_destinations=96
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=0 HLS_push=96
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=768.0Mbit/s window=30s
+   HLS push first-segment readiness: elapsed=1.125s received=96/96 remaining=0
+   HLS push all-destination first-segment latency=1.125s (96/96)
+   HLS push readiness progress=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-96/hls-push-readiness.csv
+   measurement_s=30.12 requested_window_s=30 media_measurement_window_s=30.12 cpu_window_s=30.007283 cpu_sampling_before_ms=3.168 cpu_sampling_after_ms=2.699
+   cc11-3 owner=w0 source_frames=761
+      program_frames=761
+      progress_fps=25.3 fanout_samples=761
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:761,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10865295B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=548
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+quality_destinations=96
+quality_measurement_s=30.099
+quality_reference_payload_bps=8407216.18
+quality_average_delivery_ratio_min=1.00000
+quality_ratio_basis=identified-segments
+quality_window_byte_ratio_min=1.00002
+quality_window_segments=12
+quality_window_segment_bytes=27272596
+quality_segment_interval_s=2.003
+quality_segment_lag_limit_s=4.007
+quality_segment_lag_p95_s=0.092
+quality_segment_lag_max_s=0.114
+quality_missing_segments=0
+quality_duplicate_segments=0
+quality_playlist_violations=0
+quality_total_bytes=2618169216
+quality_total_segments=1344
+quality_dropped_units=0
+quality_transport_errors=0
+quality_sink_http_errors=0
+quality_active_uploaders_before=1
+quality_active_uploaders_after=1
+quality_first_segment_latency_p50_ms=1004.440
+quality_first_segment_latency_p95_ms=1041.600
+quality_first_segment_latency_p99_ms=1044.191
+quality_all_destinations_ready_s=1.045
+quality_upload_duration_p50_ms=0.522
+quality_upload_duration_p95_ms=0.736
+quality_upload_duration_p99_ms=0.781
+quality_upload_duration_max_ms=0.964
+quality_queue_lag_p50_ms=0
+quality_queue_lag_p95_ms=0
+quality_queue_lag_p99_ms=0
+quality_max_queue_lag_ms=0
+quality_failure_count=0
+   hls_push_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-96/hls-push-quality.csv
+   HLS push sink process CPU:
+      pid=pid1258397 thread=python3 cpu=0.5%
+      pid=pid1258397 thread=(unattributed) cpu=3.5%
+      aggregate_hls_push_sink_cpu=4.0%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1258060 rss_kb=28408->43052 delta_kb=+14644 pss_kb=23032->37721 delta_kb=+14689
+      pid=1258061 rss_kb=20900->20900 delta_kb=+0 pss_kb=15822->15865 delta_kb=+43
+      pid=1258063 rss_kb=20908->20908 delta_kb=+0 pss_kb=15832->15876 delta_kb=+44
+      pid=1258064 rss_kb=20908->20908 delta_kb=+0 pss_kb=15832->15876 delta_kb=+44
+   worker visit and scheduling metrics:
+      w0 pid=1258060 cpu=2.6%
+         visit_max=1ms event_loop_max_delay=119ms
+         periodic_visits_delta=304
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1258061 cpu=1.5%
+         visit_max=1ms event_loop_max_delay=125ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1258063 cpu=1.6%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1258064 cpu=1.7%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=7.4% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=457->1424
+      UDP mem_pages=0->621
+      TCP inuse=23->26
+      UDP inuse=14->13
+   diag: host CPU busy 2.3% of all online CPUs
+   diag: sender 8% vs receivers 4% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-96/diagnostics.json
+quality_rung_result mix=pure-hls-push destinations=96 srt=0 rtmp=0 hls=0 hls_push=96 result=pass
+quality_rung_start mix=pure-hls-push destinations=128 srt=0 rtmp=0 hls=0 hls_push=128 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=100.00%
+
+== capacity hls-push quality-pure-hls-push-128: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=128 total_destinations=128
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=0 HLS_push=128
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=1024.0Mbit/s window=30s
+   HLS push first-segment readiness: elapsed=1.158s received=128/128 remaining=0
+   HLS push all-destination first-segment latency=1.158s (128/128)
+   HLS push readiness progress=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-128/hls-push-readiness.csv
+   measurement_s=30.15 requested_window_s=30 media_measurement_window_s=30.15 cpu_window_s=30.008407 cpu_sampling_before_ms=3.533 cpu_sampling_after_ms=3.006
+   cc12-4 owner=w0 source_frames=760
+      program_frames=760
+      progress_fps=25.2 fanout_samples=760
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:760,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10865295B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=548
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+quality_destinations=128
+quality_measurement_s=30.108
+quality_reference_payload_bps=8407216.18
+quality_average_delivery_ratio_min=1.00000
+quality_ratio_basis=identified-segments
+quality_window_byte_ratio_min=0.99975
+quality_window_segments=12
+quality_window_segment_bytes=27272596
+quality_segment_interval_s=2.005
+quality_segment_lag_limit_s=4.009
+quality_segment_lag_p95_s=0.136
+quality_segment_lag_max_s=0.173
+quality_missing_segments=0
+quality_duplicate_segments=0
+quality_playlist_violations=0
+quality_total_bytes=3490892288
+quality_total_segments=1792
+quality_dropped_units=0
+quality_transport_errors=0
+quality_sink_http_errors=0
+quality_active_uploaders_before=1
+quality_active_uploaders_after=1
+quality_first_segment_latency_p50_ms=1019.485
+quality_first_segment_latency_p95_ms=1073.907
+quality_first_segment_latency_p99_ms=1078.798
+quality_all_destinations_ready_s=1.080
+quality_upload_duration_p50_ms=0.562
+quality_upload_duration_p95_ms=0.868
+quality_upload_duration_p99_ms=1.030
+quality_upload_duration_max_ms=1.483
+quality_queue_lag_p50_ms=0
+quality_queue_lag_p95_ms=0
+quality_queue_lag_p99_ms=0
+quality_max_queue_lag_ms=0
+quality_failure_count=0
+   hls_push_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-128/hls-push-quality.csv
+   HLS push sink process CPU:
+      pid=pid1265249 thread=python3 cpu=0.8%
+      pid=pid1265249 thread=(unattributed) cpu=5.1%
+      aggregate_hls_push_sink_cpu=5.9%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1264911 rss_kb=29072->43396 delta_kb=+14324 pss_kb=23680->38086 delta_kb=+14406
+      pid=1264912 rss_kb=20888->20888 delta_kb=+0 pss_kb=15827->15875 delta_kb=+48
+      pid=1264913 rss_kb=20884->20884 delta_kb=+0 pss_kb=15826->15874 delta_kb=+48
+      pid=1264915 rss_kb=20888->20888 delta_kb=+0 pss_kb=15830->15878 delta_kb=+48
+   worker visit and scheduling metrics:
+      w0 pid=1264911 cpu=3.8%
+         visit_max=2ms event_loop_max_delay=127ms
+         periodic_visits_delta=302
+         budget_reposts_delta=1
+         late_ticks_delta=0
+      w1 pid=1264912 cpu=2.0%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=302
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1264913 cpu=1.7%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1264915 cpu=1.8%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=9.3% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=1090->965
+      UDP mem_pages=877->108
+      TCP inuse=24->25
+      UDP inuse=14->13
+   diag: host CPU busy 3.2% of all online CPUs
+   diag: sender 9% vs receivers 6% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-128/diagnostics.json
+quality_rung_result mix=pure-hls-push destinations=128 srt=0 rtmp=0 hls=0 hls_push=128 result=pass
+quality_rung_start mix=pure-hls-push destinations=192 srt=0 rtmp=0 hls=0 hls_push=192 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=100.00%
+
+== capacity hls-push quality-pure-hls-push-192: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=192 total_destinations=192
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=0 HLS_push=192
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=1536.0Mbit/s window=30s
+   HLS push first-segment readiness: elapsed=1.182s received=192/192 remaining=0
+   HLS push all-destination first-segment latency=1.182s (192/192)
+   HLS push readiness progress=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-192/hls-push-readiness.csv
+   measurement_s=30.19 requested_window_s=30 media_measurement_window_s=30.19 cpu_window_s=30.009799 cpu_sampling_before_ms=5.052 cpu_sampling_after_ms=2.785
+   cc13-1 owner=w0 source_frames=764
+      program_frames=764
+      progress_fps=25.3 fanout_samples=764
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:764,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10885981B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=553
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+quality_destinations=192
+quality_measurement_s=30.116
+quality_reference_payload_bps=8407216.18
+quality_average_delivery_ratio_min=1.00000
+quality_ratio_basis=identified-segments
+quality_window_byte_ratio_min=0.99946
+quality_window_segments=13
+quality_window_segment_bytes=29485920
+quality_segment_interval_s=1.998
+quality_segment_lag_limit_s=3.997
+quality_segment_lag_p95_s=0.202
+quality_segment_lag_max_s=0.261
+quality_missing_segments=0
+quality_duplicate_segments=0
+quality_playlist_violations=0
+quality_total_bytes=5661296640
+quality_total_segments=2736
+quality_dropped_units=0
+quality_transport_errors=0
+quality_sink_http_errors=0
+quality_active_uploaders_before=1
+quality_active_uploaders_after=1
+quality_first_segment_latency_p50_ms=1045.572
+quality_first_segment_latency_p95_ms=1123.860
+quality_first_segment_latency_p99_ms=1130.380
+quality_all_destinations_ready_s=1.132
+quality_upload_duration_p50_ms=0.545
+quality_upload_duration_p95_ms=0.868
+quality_upload_duration_p99_ms=1.062
+quality_upload_duration_max_ms=1.433
+quality_queue_lag_p50_ms=0
+quality_queue_lag_p95_ms=0
+quality_queue_lag_p99_ms=0
+quality_max_queue_lag_ms=0
+quality_failure_count=0
+   hls_push_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-192/hls-push-quality.csv
+   HLS push sink process CPU:
+      pid=pid1273610 thread=python3 cpu=1.2%
+      pid=pid1273610 thread=(unattributed) cpu=7.7%
+      aggregate_hls_push_sink_cpu=8.9%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1273274 rss_kb=29892->44172 delta_kb=+14280 pss_kb=24560->38888 delta_kb=+14328
+      pid=1273275 rss_kb=20936->20936 delta_kb=+0 pss_kb=15854->15901 delta_kb=+47
+      pid=1273276 rss_kb=20956->20956 delta_kb=+0 pss_kb=15858->15905 delta_kb=+47
+      pid=1273277 rss_kb=20952->20952 delta_kb=+0 pss_kb=15854->15901 delta_kb=+47
+   worker visit and scheduling metrics:
+      w0 pid=1273274 cpu=4.2%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=305
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1273275 cpu=1.8%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1273276 cpu=1.7%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=305
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1273277 cpu=1.8%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=304
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=9.5% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=747->1198
+      UDP mem_pages=364->363
+      TCP inuse=25->24
+      UDP inuse=14->13
+   diag: host CPU busy 3.5% of all online CPUs
+   diag: sender 9% vs receivers 9% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-192/diagnostics.json
+quality_rung_result mix=pure-hls-push destinations=192 srt=0 rtmp=0 hls=0 hls_push=192 result=pass
+quality_rung_start mix=pure-hls-push destinations=256 srt=0 rtmp=0 hls=0 hls_push=256 actual_shares_srt=0.00%_rtmp=0.00%_hls_push=100.00%
+
+== capacity hls-push quality-pure-hls-push-256: workers=4 programs=1
+   video_rate=8M offered_ingress=8.0Mbit/s
+   destinations_per_program=256 total_destinations=256
+   per_program_outputs: SRT=0 RTMP=0 HLS_readers=0 HLS_push=256
+   egress_workers: SRT=adaptive HLS_push=adaptive
+   offered_egress=2048.0Mbit/s window=30s
+   HLS push first-segment readiness: elapsed=1.195s received=256/256 remaining=0
+   HLS push all-destination first-segment latency=1.195s (256/256)
+   HLS push readiness progress=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-256/hls-push-readiness.csv
+   measurement_s=30.16 requested_window_s=30 media_measurement_window_s=30.16 cpu_window_s=30.008601 cpu_sampling_before_ms=3.799 cpu_sampling_after_ms=2.970
+   cc14-2 owner=w0 source_frames=761
+      program_frames=761
+      progress_fps=25.2 fanout_samples=761
+      fanout_p50/p95/p99/p99.9=1/1/1/1ms
+      fanout.max=0 ms buckets_ms=[0-1:761,2:0,3-4:0,5-8:0,9-16:0,17-32:0,33-64:0,65-128:0,129-256:0,257-512:0,513-1024:0,1025-2048:0,2049-4096:0,4097-8192:0,8193-16384:0,16385-60000:0]
+      feed_retained=251u/10875605B
+      feed_high_water=263u/11687641B
+      feed_evictions_delta=550
+      feed_overruns_delta=0
+   program_frame_fairness_jain=1.0000 (1.0 is equal progress)
+quality_pass=yes
+quality_destinations=256
+quality_measurement_s=30.115
+quality_reference_payload_bps=8407216.18
+quality_average_delivery_ratio_min=1.00000
+quality_ratio_basis=identified-segments
+quality_window_byte_ratio_min=0.99951
+quality_window_segments=12
+quality_window_segment_bytes=27272596
+quality_segment_interval_s=2.005
+quality_segment_lag_limit_s=4.009
+quality_segment_lag_p95_s=0.272
+quality_segment_lag_max_s=0.346
+quality_missing_segments=0
+quality_duplicate_segments=0
+quality_playlist_violations=0
+quality_total_bytes=6981784576
+quality_total_segments=3584
+quality_dropped_units=0
+quality_transport_errors=0
+quality_sink_http_errors=0
+quality_active_uploaders_before=1
+quality_active_uploaders_after=1
+quality_first_segment_latency_p50_ms=1068.650
+quality_first_segment_latency_p95_ms=1172.026
+quality_first_segment_latency_p99_ms=1179.691
+quality_all_destinations_ready_s=1.181
+quality_upload_duration_p50_ms=0.553
+quality_upload_duration_p95_ms=0.881
+quality_upload_duration_p99_ms=1.048
+quality_upload_duration_max_ms=1.446
+quality_queue_lag_p50_ms=0
+quality_queue_lag_p95_ms=0
+quality_queue_lag_p99_ms=0
+quality_max_queue_lag_ms=0
+quality_failure_count=0
+   hls_push_destination_quality_csv=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-256/hls-push-quality.csv
+   HLS push sink process CPU:
+      pid=pid1285641 thread=python3 cpu=1.6%
+      pid=pid1285641 thread=(unattributed) cpu=10.1%
+      aggregate_hls_push_sink_cpu=11.7%
+   worker process RSS/PSS from smaps_rollup:
+      pid=1285305 rss_kb=30676->45504 delta_kb=+14828 pss_kb=25362->40267 delta_kb=+14905
+      pid=1285306 rss_kb=20780->20780 delta_kb=+0 pss_kb=15829->15871 delta_kb=+42
+      pid=1285307 rss_kb=20924->20924 delta_kb=+0 pss_kb=15854->15901 delta_kb=+47
+      pid=1285308 rss_kb=20920->20920 delta_kb=+0 pss_kb=15850->15897 delta_kb=+47
+   worker visit and scheduling metrics:
+      w0 pid=1285305 cpu=4.0%
+         visit_max=1ms event_loop_max_delay=129ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w1 pid=1285306 cpu=1.8%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=304
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w2 pid=1285307 cpu=1.8%
+         visit_max=1ms event_loop_max_delay=101ms
+         periodic_visits_delta=303
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      w3 pid=1285308 cpu=1.8%
+         visit_max=1ms event_loop_max_delay=129ms
+         periodic_visits_delta=304
+         budget_reposts_delta=0
+         late_ticks_delta=0
+      aggregate_worker_cpu=9.4% of one core
+   NGINX socket skmem (ss -m):
+      w0 sockets=5 skmem_bytes=4096 delta_bytes=0
+      w1 sockets=5 skmem_bytes=0 delta_bytes=0
+      w2 sockets=5 skmem_bytes=0 delta_bytes=0
+      w3 sockets=5 skmem_bytes=0 delta_bytes=0
+   host /proc/net/sockstat (global, not process-attributed):
+      TCP mem_pages=1213->963
+      UDP mem_pages=619->617
+      TCP inuse=24->25
+      UDP inuse=14->13
+   diag: host CPU busy 3.8% of all online CPUs
+   diag: sender 9% vs receivers 12% of one core
+   diagnostics_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity/quality-pure-hls-push-256/diagnostics.json
+quality_rung_result mix=pure-hls-push destinations=256 srt=0 rtmp=0 hls=0 hls_push=256 result=pass
+mix=pure-hls-push first_failing_destination_rung=none
+mix=pure-hls-push quality_failed_rungs=none
+capacity_matrix_json=/home/krsna1729/Projects/nginx-media/.build/ingest-egress-fanout/capacity-matrix.json
+matrix mix=pure-hls highest_passing=256 first_quality_failure=None setup_limited=none infrastructure_limited=none
+matrix mix=pure-hls-push highest_passing=256 first_quality_failure=None setup_limited=none infrastructure_limited=none
+quality_ladders_with_failures=none
+
+== conditions
+   source:     pre-encoded 720p25 mpegts, publishers use -c copy
+   endpoints:  one media_srt_listen per worker, worker i binds entry i
+   api:        listen ... reuseport; mutations retried until the owner
+               answers, metrics read on the owner's own connection
+   throughput: chunks/s and bytes/s are the workers' own drained totals
+   cpu:        per thread, percent of one core, over the measured window
+   receivers:  separate SRT/RTMP sinks, HLS readers and HLS PUT sink
+   receiver CPU: sampled for external SRT, RTMP and HLS sink workers
+   labels:     SRT:* from comm; this module's threads from a stack backtrace (attached and labelled)
+   host:       single host, no netem, 8 cpus
+== ingest/egress fanout done

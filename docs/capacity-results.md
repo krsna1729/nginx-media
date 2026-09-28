@@ -769,8 +769,9 @@ destinations.  What is not yet measured is mixed SRT session options
 
 1. **The 1,000-destination claim is unverified.**  It needs a sender with
    more CPU and a receiver host on a wider path; the harness, the preflight
-   and the classification are ready, and the exact commands are in the
-   handover notes.
+   and the classification are ready, and the exact commands are in
+   `docs/capacity-evidence/runs-2026-09-28/README.md` and in the workflow
+   tiers.
 2. **The receiver topology can bind before the software does.**  A small
    isolated CPU set funnels loopback softirq onto one core; the receivers
    must be placed on CPUs the sender does not use before any boundary is
@@ -804,7 +805,7 @@ destinations.  What is not yet measured is mixed SRT session options
 |---|---|
 | Root cause with profiles and before/after | SRT: libsrt's per-destination multiplexer (a socket and a `SndQ`/`RcvQ` pair per stream) - its cost, by sampled stacks, is thread wakeups and context switches, not sending - fixed by lane multiplexer groups; sender CPU/Gbit/s 342–389% → 126–164%, highest pass 32 → 96 on this host, `SndQ` wakeup CPU 61.7% → 19.1% of a core at 64 destinations. |
 | Reproducible command and a diagnostic bundle per run | `make bench-capacity-quality` / `scripts/bench-ci.sh <tier>`; `diagnostics.json` per rung, `capacity-matrix.json` per run |
-| Capacity matrix, seven workloads | above, and `capacity-evidence/` |
+| Capacity matrix, seven workloads | above, `capacity-evidence/`, and the run transcripts in `capacity-evidence/runs-2026-09-28/` |
 | Fixed vs adaptive SRT senders | Phase 2: fixed 1, 2, 4 and adaptive pass the same rungs; one sender carries 96 destinations at 29% of a core.  CPU per Gbit/s falls to a floor at one sender per CPU; adaptive now runs one per lane in use up to granted CPUs and matches fixed 4 (104–109% vs 107%, was 122–127%) |
 | Corrected RTMP timing, sustained HLS push | Phase 4; HLS push on identified segments |
 | Unit, sanitizer, integration | pass; the two integration failures that reproduced on the baseline are fixed by the CI repair this is stacked on |
