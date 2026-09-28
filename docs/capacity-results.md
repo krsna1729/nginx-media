@@ -12,6 +12,15 @@ IRQ/NIC topology all move it, so it is compared within one host class.  Every ro
 comes from a rung's `diagnostics.json`; the method is in
 `development.md` ("Per-rung diagnostics and outcomes").
 
+## What landed, and why
+
+| Pull request | Root cause | Fix |
+| --- | --- | --- |
+| [#5](https://github.com/krsna1729/nginx-media/pull/5) | The fuzz test's AMF nesting generator wrote a fixed number of levels (64 x 1025 bytes) into a 512-byte buffer: a harness overflow, not a parser bug, and the reason the nightly fuzz run died | The generator is bounded by the destination buffer's capacity, and the parser now refuses nesting beyond a stated depth instead of recursing until the stack runs out |
+| [#6](https://github.com/krsna1729/nginx-media/pull/6) | The HLS reader benchmark published its acceptance threshold in the field the diagnostics and history layers read as the observed ratio, so every HLS-origin record carried 0.95 as a result | `observed_delivery_ratio` is reported separately from the threshold, with a `delivery_ratio_basis` that says which it is; history schema `bench-history/2` |
+| [#8](https://github.com/krsna1729/nginx-media/pull/8) | A lane is a shard of one worker, so two workers' shard 0 are two lanes; the report compared shard numbers across workers and merged unrelated queues | The lane key is the worker plus the shard, and the report's lane totals are per worker |
+| [#9](https://github.com/krsna1729/nginx-media/pull/9) | Loopback softirq collapses onto one CPU when the receiver CPUs are too few, so a boundary read from that topology is the host's, not the software's; and the SRT-heavy contention mix failed its first rung for want of an RTMP reference | Receiver topologies are named and recorded per rung, a preflight classifies the host before a run, `capacity_mix_minimum_rung` derives the first rung a mix can actually calibrate from, and a two-host orchestrator exists for the runs this host cannot carry |
+
 ## Reporting corrections (2026-09-26)
 
 Two reporting defects were fixed in the pipeline that produces these tables.
