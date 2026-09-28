@@ -3747,6 +3747,10 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s>
     [ -z "$CAPACITY_RECEIVER_CPUS" ] \
         || judge_cpus="${judge_cpus:+$judge_cpus,}$CAPACITY_RECEIVER_CPUS"
     [ -z "$judge_cpus" ] || judge_args+=( --benchmark-cpus "$judge_cpus" )
+    # Test seam: the per-CPU busy sample can be injected so the ladder's
+    # response to a foreign load is verifiable without waiting for one.
+    [ -z "${CAPACITY_PREFLIGHT_BUSY_JSON:-}" ] \
+        || judge_args+=( --benchmark-cpu-busy-json "$CAPACITY_PREFLIGHT_BUSY_JSON" )
     [ -z "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
         || judge_args+=( --sender-cpu-per-gbps \
                          "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" )
