@@ -634,29 +634,49 @@ without ever stalling everything, and delivery did not move: the same rate
 and the same sender cost as the 30-second and 120-second runs of the same
 rung.
 
-### Correction: the contention failures were the root-run HLS caveat, not the mix
+### Mixed-protocol contention (2026-09-28)
 
-The contention attempts above were run with the harness as **root** (through
-`omarchy-benchmark` directly), and the repository documents what that means:
-nginx's workers drop to `nobody`, which cannot create HLS directories under a
-user-owned build tree.  The module's own log says so plainly:
+Half SRT, a quarter RTMP, a quarter HLS push, one program, one sender pinned to
+four P-cores with the receivers on a P-core pair and two E-cores:
+
+| Destinations | Delivered | Sender | SRT interval floor | SRT ratio | RTMP ratio | HLS push ratio | Outcome |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 4 (2 SRT + 1 RTMP + 1 push) | 0.03 Gbit/s | 194 %c/Gb | 0.931 | 1.000 | 1.000 | 1.000 | pass |
+| 32 (16 + 8 + 8) | 0.27 Gbit/s | 56 %c/Gb | 0.915 | 1.000 | 0.999 | 1.000 | pass |
+| 64 (32 + 16 + 16) | 0.54 Gbit/s | 35 %c/Gb | 0.726 | 1.000 | 0.998 | 1.000 | pass |
+| 128 (64 + 32 + 32) | 1.08 Gbit/s | 26 %c/Gb | 0.929 | 0.999 | 1.000 | 1.000 | pass |
+
+Every protocol clears its gate at every rung, and the HLS push destinations
+miss no segments.  The SRT streams miss the stricter full-rate classification
+at 64 and 128 destinations because their 100 ms interval floor dips to 0.73 and
+0.93 against a 0.90 floor - the mixer's window jitter under mixed load, not
+loss: the end-to-end ratio stays at 0.999.
+
+The first rung of a mix that carries RTMP must carry exactly one RTMP
+destination, because the RTMP analyzer calibrates its reference from a single
+destination and refuses to guess from many; a ladder that starts with several
+fails as a setup error rather than a quality failure.  `capacity_mix_minimum_rung`
+now derives that rung from the shares.
+
+### Correction: the earlier contention failures were an invocation artifact
+
+The first contention attempts ran the harness as **root**, and the repository
+documents what that means: nginx's workers drop to `nobody`, which cannot
+create HLS directories under a user-owned build tree.  The module's own log
+says so plainly:
 
 ```
 media: hls could not write seg-000015.ts into .../hls/live/cc3-1;
 16 segment(s) dropped so far (13: Permission denied)
 ```
 
-No segments means nothing for the HLS push destinations to upload, so their
-first-segment readiness times out (`received=0/14`, `active_uploaders=1`,
-nothing queued) and the rung ends as a setup failure.  The SRT and RTMP sides
-of the same rung deliver normally, which is why only the HLS push path looked
-broken.
-
-The published mix fails the same way under the same invocation, and passes
-when the harness runs unprivileged - as the seven-workload replication did,
-and as every published tier does.  So the SRT-heavy contention mix is **not**
-known to be broken; the earlier claim in this section was an artifact of how
-the run was started, and the corrected measurements follow.
+With no segments written there is nothing for the HLS push destinations to
+upload, so their first-segment readiness times out (`received=0/14`,
+`active_uploaders=1`, nothing queued) and the rung ends as a setup failure
+while the SRT and RTMP sides of the same rung deliver normally.  The published
+mix failed identically under the same invocation and passes unprivileged - as
+the table above shows for the SRT-heavy mix.  Contention runs must be started
+the way the published tiers run them.
 
 ### SRT library comparison (2026-09-26)
 

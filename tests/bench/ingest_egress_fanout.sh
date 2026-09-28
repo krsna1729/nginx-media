@@ -1854,8 +1854,13 @@ capacity_mix_minimum_rung() {   # <protocol> <srt share> <hls push share>
         case "$protocol" in
             rtmp|hls|hls-push) printf '%d' "$n"; return 0 ;;
             rtmp-hls-push)
+                # The first rung that carries RTMP destinations must carry
+                # exactly one: the RTMP analyzer calibrates its reference from
+                # a single destination and refuses to guess from many, so a
+                # ladder that starts with several RTMP destinations and no
+                # reference fails as a setup error.
                 hls_push_count=$(( (n * hls_push_share + 50) / 100 ))
-                [ "$(( primary - hls_push_count + hls_push_count ))" -ge 1 ] \
+                [ "$(( primary - hls_push_count ))" -ge 1 ] \
                     && { printf '%d' "$n"; return 0; }
                 ;;
         esac
