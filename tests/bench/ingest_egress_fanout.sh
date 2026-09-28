@@ -2596,6 +2596,19 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     mkdir -p "$case_dir"
     receiver_mkdir "$case_dir" || return 1
 
+    # A capacity case is a claim about the software, so it refuses to measure
+    # beside a competing job on its own CPUs: the same preflight the quality
+    # ladder runs, with the same env rules.
+    local preflight_status=0
+    capacity_preflight_rung "$case_dir" "$total_dest" "$rate" \
+        || preflight_status="$?"
+    if [ "$preflight_status" -eq 2 ]; then
+        capacity_write_diagnostics "$case_dir" infrastructure-limited \
+            destinations="$total_dest" programs="$programs"
+        echo "capacity_case_result case=$label result=infrastructure-limited"
+        return 0
+    fi
+
     for (( slot = 0; slot < workers; slot++ )); do
         mapfile -t one_owner < <(
             owner_names "$slot" "$workers" "$programs" "cc${case_id}-"
