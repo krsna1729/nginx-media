@@ -570,30 +570,6 @@ between the last pass and the first failure.
 The 120-second repeats of 384 and 512 and the sustained run are the next
 steps; the machine window ended before them.
 
-### Contention: the mix exists, its first rung does not pass readiness
-
-The brief asks for supplementary contention - SRT near its sustainable
-capacity while RTMP and HLS push stay active - and the harness now supports
-it: `srt-50-rtmp-25-hls-push-25` (half the destinations SRT, a quarter each
-RTMP and HLS push), `CAPACITY_QUALITY_PROGRAMS` for several programs on
-different workers, program-aware quality analyzers, and a first-rung rule
-that lets a mix begin at the smallest rung it can form rather than insisting
-on one destination.
-
-The run does not yet complete, and the failure is precise: at the first rung
-(two destinations, then four) the HLS push destination never delivers its
-first segment, so the sink's readiness endpoint reports it missing
-(`readiness_missing_ids=d0001`, `d0003`) and the rung ends as a setup
-failure.  The published mixes never exercise HLS push at their first rung
-either - their 45% share rounds to zero there - so this is the first time
-the combination has been asked for, and it needs a dedicated look rather
-than a guess: the next step is to run the same mix with its first rung above
-the smallest (32, where all three protocols have several destinations) and,
-if that passes, bisect downward.
-
-What is *not* in question: the mix is accepted, the ladder computes the
-shares as intended, the destinations are created with the right IDs, and the
-SRT reference calibration for the mix passes.
 ### The 120-second repeat at the boundary
 
 The highest passing rung, re-measured with a 120-second window instead of 30
@@ -783,9 +759,11 @@ healthy lane-mates delivered 100.0% of the control lane, the impaired lane's
 shared `SndQ` carried 3809 retransmissions against 0 in the control lane, and
 no destination outside the impaired lane moved.  Churn (delete, re-add,
 reload) leaves the shards' destination count and the lane placement
-identical.  What is not yet measured is mixed SRT session options (different
-latency or encryption) sharing one lane, and SRT-driven contention against
-RTMP and HLS in one program.
+identical.  SRT-driven contention against RTMP and HLS in one program is measured
+in the mixed-protocol contention section above: half the destinations SRT, a
+quarter each RTMP and HLS push, every protocol clearing its gate through 128
+destinations.  What is not yet measured is mixed SRT session options
+(different latency or encryption) sharing one lane.
 
 ### 9. Remaining production limits
 
@@ -800,23 +778,23 @@ RTMP and HLS in one program.
 3. **Admission is permissive at the boundary** (see above): the 512th
    destination is admitted, the averages stay at reference and the media
    degrades - 785 MPEG-TS errors and a worst second at 0.216 of reference.
-4. **The contention runs have to be started unprivileged.**  As root, the
-   workers drop to `nobody` and cannot write the HLS directory, so every HLS
-   push destination times out its first-segment readiness; the mix itself is
-   not known to be broken and is being re-measured the way the published
-   tiers run.
-4. **Per-destination SRT options do not exist.**  Encryption is listener- and
+4. **Contention runs must start the way the published tiers do** - through
+   the unprivileged helper, not as root.  As root the workers drop to
+   `nobody`, cannot write the HLS directory, and every HLS push destination
+   times out its readiness; the module's log says `Permission denied` and the
+   failure looks like a quality problem but is an invocation one.
+5. **Per-destination SRT options do not exist.**  Encryption is listener- and
    stream-scoped and latency is not exposed, so mixed session settings within
    one lane cannot be tested today; the per-destination fields that do exist
    (stream id, path, segment duration, playlist window, CA file) are exercised
-   by the fanout isolation test.  Cross-protocol contention is still open.
-4. **HLS push against a lossy, failing sink** is covered by the conformance
+   by the fanout isolation test.
+6. **HLS push against a lossy, failing sink** is covered by the conformance
    fixtures; loss, latency, closure and intermittent HTTP errors are not
    injected yet.
-5. **The two-host (ssh) receiver path** is implemented and documented but
+7. **The two-host (ssh) receiver path** is implemented and documented but
    has never run against a second machine; only the namespace topology it
    shares code with has been validated.
-6. **The local binary caveat**: any capacity number taken with a stale build
+8. **The local binary caveat**: any capacity number taken with a stale build
    is meaningless for the unprepared path; every number in this report comes
    from a build of the current source.
 
