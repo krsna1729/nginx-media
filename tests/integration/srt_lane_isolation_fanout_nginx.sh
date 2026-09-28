@@ -219,6 +219,8 @@ pid logs/nginx.pid;
 events { worker_connections 2048; }
 
 media_srt_listen 127.0.0.1:$SRT_PORT;
+media_srt_source_priority encoder-a 100;
+media_srt_source_priority encoder-b 50;
 
 http {
     access_log off;
@@ -632,6 +634,71 @@ delivered="$(curl -fsS "$API/metrics" \
 [ "${delivered%.*}" -gt 0 ] 2>/dev/null \
     || fail "the re-established destinations delivered nothing"
 echo "   the re-established lane sent $(python3 -c "print(f'{float('$delivered')/1e6:.1f}')") MB after the reload"
+
+# Source failover with the impaired lane still in place: the higher-priority
+# publisher goes away and a lower-priority one takes over, and the healthy
+# destinations have to keep delivering through it.
+echo "== source failover while the impaired lane is active"
+kill -KILL "$PUB_PID" 2>/dev/null
+wait "$PUB_PID" 2>/dev/null
+timeout 300 ffmpeg -hide_banner -loglevel error -re \
+    -f lavfi -i "testsrc2=size=640x360:rate=25" -t 120 \
+    -c:v libx264 -preset ultrafast -b:v 1200k -maxrate 1200k -bufsize 600k \
+    -g 25 -pix_fmt yuv420p -f mpegts \
+    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/fan,m=publish,s=encoder-b" \
+    >"$RUN/pub-b.log" 2>&1 &
+PUB_PID=$!
+for _ in $(seq 1 300); do
+    grep -q 'srt source open app=live stream=fan source=encoder-b' \
+        "$RUN/logs/error.log" && break
+    sleep 0.1
+done
+grep -q 'srt source open app=live stream=fan source=encoder-b' \
+    "$RUN/logs/error.log" || fail "the lower-priority source never took over"
+sleep 5
+snapshot "$RUN/e.csv"
+sleep 10
+snapshot "$RUN/f.csv"
+python3 - "$RUN/e.csv" "$RUN/f.csv" <<'PYFAIL' || fail "delivery did not survive the failover"
+import statistics, sys
+
+def load(path):
+    rows = {}
+    for line in open(path):
+        name, value = line.strip().split(",")[:2]
+        rows[name.split("s=")[-1]] = int(value)
+    return rows
+
+e, f = load(sys.argv[1]), load(sys.argv[2])
+rate = {k: (f[k] - e.get(k, 0)) * 8 / 10.0 for k in f}
+control = [rate["d%02d" % i] for i in (1, 17, 33, 49) if rate.get("d%02d" % i, 0) > 0]
+if not control:
+    print("   FAIL no control destination delivered after the failover")
+    sys.exit(1)
+median = statistics.median(control)
+ok = True
+for i in (32, 48):
+    name = "d%02d" % i
+    good = rate.get(name, 0) >= 0.9 * median
+    ok = ok and good
+    print(("   ok   " if good else "   FAIL ")
+          + "%s delivered %.1f%% of the control median after the failover"
+          % (name, 100 * rate.get(name, 0) / median))
+sys.exit(0 if ok else 1)
+PYFAIL
+
+# Stream deletion with the impaired lane still in place: everything the
+# program held must be released.
+echo "== stream deletion"
+curl -fsS -X DELETE "$API/streams/live/fan" >/dev/null \
+    || fail "the stream could not be deleted"
+for _ in $(seq 1 200); do
+    [ "$(destination_count)" -eq 0 ] && break
+    sleep 0.1
+done
+[ "$(destination_count)" -eq 0 ] \
+    || fail "the deleted stream left $(destination_count) destinations behind"
+echo "   deleting the stream released every destination"
 
 WORKER_PID="$(pgrep -P "$(cat "$RUN/logs/nginx.pid")" | head -1)"
 RSS_AFTER="$(awk '/^VmRSS/ { print $2 }' /proc/"$WORKER_PID"/status)"
