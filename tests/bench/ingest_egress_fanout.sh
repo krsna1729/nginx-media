@@ -2603,10 +2603,12 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     capacity_preflight_rung "$case_dir" "$total_dest" "$rate" \
         || preflight_status="$?"
     if [ "$preflight_status" -eq 2 ]; then
+        # Not measured, and not a failure either: the host could not carry the
+        # offer.  Status 4 says so to the caller - 2 is a quality failure here.
         capacity_write_diagnostics "$case_dir" infrastructure-limited \
             destinations="$total_dest" programs="$programs"
         echo "capacity_case_result case=$label result=infrastructure-limited"
-        return 0
+        return 4
     fi
 
     for (( slot = 0; slot < workers; slot++ )); do
@@ -3757,8 +3759,14 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s>
     # The CPUs the run is pinned to: foreign work on those is the run's
     # limit, foreign work elsewhere is not.
     judge_cpus="${CAPACITY_NGINX_CPUS:-}"
-    [ -z "$CAPACITY_RECEIVER_CPUS" ] \
-        || judge_cpus="${judge_cpus:+$judge_cpus,}$CAPACITY_RECEIVER_CPUS"
+    # A receiver host's CPU numbers are its own: checking them against this
+    # host's /proc/stat would be reading the wrong machine.
+    case "$CAPACITY_RECEIVER_ADDR" in
+        ""|127.0.0.1|localhost)
+            [ -z "$CAPACITY_RECEIVER_CPUS" ] \
+                || judge_cpus="${judge_cpus:+$judge_cpus,}$CAPACITY_RECEIVER_CPUS"
+            ;;
+    esac
     [ -z "$judge_cpus" ] || judge_args+=( --benchmark-cpus "$judge_cpus" )
     # Test seam: the per-CPU busy sample can be injected so the ladder's
     # response to a foreign load is verifiable without waiting for one.
@@ -3967,30 +3975,11 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
         actual_hls_push_share="$(awk -v s="$hls_push_count" -v d="$destinations" \
             'BEGIN { printf "%.2f", 100 * s / d }')"
         echo "quality_rung_start mix=$mix destinations=$destinations srt=$srt_count rtmp=$rtmp_count hls=$hls_count hls_push=$hls_push_count actual_shares_srt=${actual_srt_share}%_rtmp=${actual_rtmp_share}%_hls_push=${actual_hls_push_share}%"
-        capacity_preflight_rung \
-            "$RUN/capacity/quality-$mix-$destinations" "$destinations" \
-            "$CAPACITY_QUALITY_RATE"
-        preflight_status="$?"
-        if [ "$preflight_status" -eq 2 ]; then
-            # The environment cannot carry the offered load: that is not a
-            # result about nginx, so the ladder stops here and the rungs
-            # above are reported as unmeasured, not as failures.
-            capacity_write_diagnostics \
-                "$RUN/capacity/quality-$mix-$destinations" \
-                infrastructure-limited destinations="$destinations" \
-                srt="$srt_count" rtmp="$rtmp_count" \
-                hls_readers="$hls_count" hls_push="$hls_push_count"
-            echo "quality_rung_result mix=$mix destinations=$destinations result=infrastructure-limited"
-            echo "mix=$mix infrastructure_limited_rung=$destinations"
-            skipped+="${skipped:+ }$destinations"
-            for remaining in $CAPACITY_QUALITY_STEPS; do
-                [ "$remaining" -gt "$destinations" ] \
-                    && skipped+=" $remaining"
-            done
-            break
-        fi
-        [ "$preflight_status" -eq 0 ] \
-            || echo "   preflight did not complete (status $preflight_status); measuring anyway"
+        # The case itself runs the preflight (on the whole offer, programs
+        # included) and returns 4 when the host cannot carry it; the CPU cost
+        # it judges against is calibrated from the rung that ran before.
+        capacity_preflight_calibration \
+            "$RUN/capacity/quality-$mix-$destinations"
         if capacity_case "quality-$mix-$destinations" "$CAPACITY_QUALITY_PROGRAMS" \
             "$CAPACITY_QUALITY_RATE" "$destinations" \
             "$CAPACITY_QUALITY_SECONDS" "$protocol" "" yes \
@@ -4000,6 +3989,19 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
             consecutive=0
         else
             status="$?"
+            if [ "$status" -eq 4 ]; then
+                # The host could not carry the offer: not a result about
+                # nginx, so the ladder stops and the higher rungs are
+                # reported as unmeasured rather than as failures.
+                echo "quality_rung_result mix=$mix destinations=$destinations result=infrastructure-limited"
+                echo "mix=$mix infrastructure_limited_rung=$destinations"
+                skipped+="${skipped:+ }$destinations"
+                for remaining in $CAPACITY_QUALITY_STEPS; do
+                    [ "$remaining" -gt "$destinations" ] \
+                        && skipped+=" $remaining"
+                done
+                break
+            fi
             if [ "$status" -ne 2 ]; then
                 mkdir -p "$RUN/capacity/quality-$mix-$destinations"
                 capacity_write_diagnostics \

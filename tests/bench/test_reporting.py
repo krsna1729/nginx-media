@@ -108,8 +108,15 @@ def test_preflight_names_a_foreign_load_on_the_pinned_cpus(work):
           f"a busy pinned CPU is an infrastructure limit: {result.stdout}")
     check("preflight_limit=host/cpu" in result.stdout,
           f"the host must be the named side: {result.stdout}")
-    check("cpu0" in result.stdout and "bessd" in result.stdout,
-          f"the CPU and the consumer must be named: {result.stdout}")
+    with open(os.path.join(case, "judge.json"), encoding="utf-8") as source:
+        judged = json.load(source)
+    host_limits = [limit for limit in judged["limits"]
+                   if limit["side"] == "host"]
+    check(len(host_limits) == 1,
+          f"the host must carry one limit: {judged.get('limits')}")
+    reason = host_limits[0]["reason"] if host_limits else ""
+    check("cpu0" in reason and "bessd" in reason,
+          f"the CPU and the consumer must be named: {reason}")
 
     # a desktop's own spread is not a competing job: below half a CPU the
     # measurement stands
@@ -1074,6 +1081,7 @@ def main():
     work = tempfile.mkdtemp(prefix="nginx-media-reporting-")
     try:
         test_preflight_classifies_a_short_environment(work)
+        test_preflight_names_a_foreign_load_on_the_pinned_cpus(work)
         test_preflight_probe_is_measured_at_both_ends(work)
         test_reader_percentile_helpers()
         test_reader_reports_observed_not_threshold(os.path.join(work, "readers"))
