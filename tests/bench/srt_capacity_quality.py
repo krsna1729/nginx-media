@@ -581,7 +581,10 @@ def quality_report(args):
     # of publishing both.
     strict_ratio_min = min(row[3] for row in rows)
     strict_interval_min = min(row[4] for row in rows)
+    # TEI is corruption wherever it is counted: the gate treats a nonzero
+    # count as an MPEG-TS error, so the strict verdict must not clear it.
     ts_errors = sum(ts["ts_sync_errors"] + ts["ts_continuity_errors"]
+                    + ts.get("ts_tei_errors", 0)
                     for _, _, _, _, _, _, ts in rows)
     strict_ok = (strict_ratio_min >= args.strict_ratio
                  and strict_interval_min >= args.strict_interval_floor

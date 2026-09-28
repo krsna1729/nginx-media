@@ -678,7 +678,12 @@ def per_cpu_busy(host_before, host_after):
 
 
 def parse_cpu_list(text):
-    """[0, 2, 4, 5] from "0,2,4-5"; the harness's placement format."""
+    """[0, 2, 4, 5] from "0,2,4-5"; the harness's placement format.
+
+    `--meta nginx_cpus=0` arrives as the integer 0 - a one-CPU placement, not
+    an absent one - so a bare integer is a list of one."""
+    if isinstance(text, int):
+        return [text]
     if not isinstance(text, str) or not text.strip():
         return []
     cpus = []

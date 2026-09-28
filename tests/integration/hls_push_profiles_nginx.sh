@@ -203,10 +203,10 @@ check(short_dest.get("playlist_puts", 0) > 0
 short_entries = short_dest.get("playlist_entries", 0)
 long_entries = long_dest.get("playlist_entries", 0)
 print(f"   playlist entries: d-short {short_entries}, d-long {long_entries}")
-check(0 < short_entries <= 4,
+check(0 < short_entries <= 3,
       f"the short profile's playlist stays within its 3-segment window "
       f"({short_entries})")
-check(0 < long_entries <= 9,
+check(0 < long_entries <= 8,
       f"the long profile's playlist stays within its 8-segment window "
       f"({long_entries})")
 check(long_entries > short_entries,

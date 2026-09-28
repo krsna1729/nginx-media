@@ -567,14 +567,22 @@ extended past the old top with the receivers on their own CPUs (sender
 | 384 | pass | 3.445 | 31.5 | 43.2 | 0 | 0.99971 | **yes** |
 | 512 | **quality failure** | 4.686 | 32.0 | 44.8 | 4 292 (receiver) | 0.99993 | no |
 
-**Highest passing rung: 384. First quality failure: 512.**  The 512 rung is
-the interesting one: it delivered 4.69 Gbit/s with a minimum *average* ratio
-of 0.99993 - the average gate passed - and failed on the short-interval floor
-(0.933) and the strict verdict, with 4 292 datagrams dropped by the
-receiver's sockets and none by the sender.  So the boundary is again
-receiver-side at the margin, and the sender's CPU per delivered Gbit/s stays
-flat at 31-32% across 256, 384 and 512: nothing about the sender changed
-between the last pass and the first failure.
+**Highest passing rung: 384. First quality failure: 512.**  Two runs of the
+512 rung agree on where it breaks and disagree on how, which is the point of
+keeping both:
+
+| Run | Delivered | Min average ratio | Worst one-second interval | MPEG-TS errors | Failed on |
+| --- | --- | --- | --- | --- | --- |
+| 30 s ladder rung | 4.69 Gbit/s | 0.99993 | 0.9332 | 355 | corruption: the gate counts a TS error as a failure, and the strict verdict requires none |
+| 120 s repeat | 4.85 Gbit/s | 1.00227 | 0.2163 | 785 | a genuinely short second (0.216 against the 0.90 strict floor) and corruption |
+
+The average-rate gate passes in both runs - the media mostly arrives - and
+the rung still fails: at this size a fraction of a percent of the datagrams
+is lost, and MPEG-TS turns that into corrupt packets and, in the longer
+window, a second that delivers a fifth of the reference.  The sender's CPU
+per delivered Gbit/s stays flat at 31-32% across 256, 384 and 512, so nothing
+about the sender changed between the last pass and the first failure; what
+changes is that the receiver's sockets start dropping at the margin.
 
 The 120-second repeats of 384 and 512 and the sustained run are reported
 below.
@@ -591,8 +599,9 @@ The highest passing rung, re-measured with a 120-second window instead of 30
 The rung holds up at four times the window: same delivered rate and the same
 sender cost per delivered Gbit/s as the 30-second run (3.445 Gbit/s at 31.5),
 no kernel drops anywhere, and the strict verdict passes.  The 512 rung's
-repeat was cut short when the machine window ended, so the first-failure
-repeat is still outstanding.
+repeat is in the table above: it fails harder than the 30-second rung did,
+with a worst second at 0.2163 against the 0.90 floor and 785 MPEG-TS errors,
+so the boundary at 512 is not a window artifact.
 
 ### The sustained run: half an hour at 384 destinations
 
@@ -767,8 +776,13 @@ lock (see the sampled stacks).
 Four P-cores for the sender and four E-cores for the receivers, SMT siblings
 offlined, 30 s rungs, 8 Mbit/s source, unprivileged (nginx's workers drop to
 `nobody`, so a root-run harness cannot create HLS directories - a setup
-failure the harness records as such, never as a quality failure).  The whole
-run is recorded in `capacity-evidence/2026-09-26-seven-workloads.json`.
+failure the harness records as such, never as a quality failure).  The table
+is assembled from several runs: the September 26 record
+(`capacity-evidence/2026-09-26-seven-workloads.json`) is marked
+`complete: false` and has no rungs for `rtmp-95-srt-5`, so that row - and
+every row's strict column - comes from the September 28 transcripts under
+`capacity-evidence/runs-2026-09-28/`, which carry the whole ladder per
+workload.
 
 | Workload | Highest pass | First failure | Delivered at the top | Strict full rate | Published (4 vCPU) |
 |---|---|---|---|---|---|
@@ -798,11 +812,19 @@ assumed.
 ### 7. 1000 destinations
 
 Not reachable on this host, and now reported as such: the preflight at 768
-destinations returns `infrastructure-limited` (the probe's own receiver
-counted 2.30 Gbit/s and dropped 83 825 datagrams against 2.54 offered, below
-the 7.37 Gbit/s the rung needs), the ladder stops there, the rung is listed
-as `infrastructure_limited` in the matrix and as a gate notice, and the
-higher rungs are recorded as unmeasured rather than failed.
+destinations returns `infrastructure-limited` with the limit that produced it
+- `sender/cpu measured=8cores required=89.75cores`, the sender's CPU budget
+priced from the last rung that passed - and the ladder stops there, lists the
+rung as `infrastructure_limited` in the matrix and as a gate notice, and
+records the higher rungs as unmeasured rather than failed.
+
+The same preflight also reported `probe/receiver-socket-drops`: the probe's
+own receiver counted 2.30 Gbit/s and dropped 83 825 datagrams against 2.54
+offered, below the 7.37 Gbit/s the rung needs.  That is deliberately *not* a
+limit - a probe that drops its own datagrams stops being a valid instrument,
+so it says nothing about whether the path could carry more - which is why the
+verdict rests on the CPU number above and the probe result is filed as
+insufficient evidence.
 
 ### 8. Fairness and shared-lane impairment
 
@@ -853,7 +875,11 @@ destinations.  What is not yet measured is mixed SRT session options
    injected yet.
 8. **The two-host (ssh) receiver path** is implemented and documented but
    has never run against a second machine; only the namespace topology it
-   shares code with has been validated.
+   shares code with has been validated.  Its SRT path passes the sink's bind
+   address to the remote process and its preflight writes to a directory the
+   receiver actually has; a mix with RTMP destinations is refused there
+   rather than measured, because the RTMP sink's configuration and PID file
+   live on the sender while its nginx would run on the receiver.
 9. **The local binary caveat**: any capacity number taken with a stale build
    is meaningless for the unprepared path; every number in this report comes
    from a build of the current source.

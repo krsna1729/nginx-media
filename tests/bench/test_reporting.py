@@ -17,6 +17,7 @@ Run it with plain python3 - no pytest, no network, no nginx:
     python3 tests/bench/test_reporting.py
 """
 
+import argparse
 import csv
 import importlib.util
 import io
@@ -179,10 +180,25 @@ def test_preflight_classifies_a_short_environment(work):
     check("preflight_limit=sender/cpu" in result.stdout,
           f"the short side must be the sender: {result.stdout}")
 
-    # the same measurements for a request the environment can carry
+    # a measured cost with no fingerprint to spend it on is not a verdict:
+    # the receiver's CPU cannot be judged without the receiver's host
     result = preflight("judge", "--destinations", "64", "--bitrate-bps",
                        "8000000", "--sender", sender, "--network", rx,
                        "--probe-sender", tx, "--sender-cpu-per-gbps", "140",
+                       "--receiver-cpu-per-gbps", "30")
+    check(result.returncode == 3,
+          f"a cost without a host is insufficient evidence: {result.stdout}")
+    check("preflight_unknown=receiver/cpu" in result.stdout,
+          f"the missing side must be named: {result.stdout}")
+
+    # the same measurements, with both hosts, for a request that fits
+    receiver = os.path.join(case, "receiver.json")
+    write_json(receiver, {"role": "receiver", "permitted_cpus": [2, 3],
+                          "cpu_model": "test"})
+    result = preflight("judge", "--destinations", "64", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--receiver", receiver,
+                       "--network", rx, "--probe-sender", tx,
+                       "--sender-cpu-per-gbps", "140",
                        "--receiver-cpu-per-gbps", "30")
     check(result.returncode == 0, f"a load that fits must pass: {result.stdout}")
 
@@ -565,25 +581,44 @@ def test_absent_and_malformed_inputs(work):
 
 def test_bundle_carries_the_host_fingerprint(work):
     """A rung's numbers are unreadable without the host they were taken on:
-    CPU, cgroup, affinity, interfaces, transport library."""
+    CPU, cgroup, affinity, interfaces, transport library.  The assertion is on
+    the built bundle, not on the file this test wrote."""
     case = os.path.join(work, "fingerprint")
     os.makedirs(case, exist_ok=True)
+    srt_case(case)
     module = load_module(DIAGNOSTICS, "capacity_diagnostics_fingerprint")
-    bare = module.build  # the CLI path reads the file; check the fields here
-    check(bare is not None, "build exists")
-    # the bundle's shape, without running the whole build: the fingerprint is
-    # read from the case directory and reported missing when absent
-    fingerprint = module.load_json(os.path.join(case, "host-fingerprint.json"))
-    check(fingerprint is None, "no fingerprint file means no fingerprint")
-    write_json(os.path.join(case, "host-fingerprint.json"), {
+    fingerprint = {
         "role": "sender", "cpu_model": "test-cpu", "permitted_cpus": [0, 1],
         "cgroup": {"cpu_max": "max 100000"}, "transport": "libsrt.so.1",
         "interfaces": {"eth0": {"speed_mbps": "25000"}},
-    })
-    fingerprint = module.load_json(os.path.join(case, "host-fingerprint.json"))
-    check(fingerprint["cpu_model"] == "test-cpu"
-          and fingerprint["transport"] == "libsrt.so.1",
-          f"the fingerprint must carry the CPU and the transport: {fingerprint}")
+    }
+    write_json(os.path.join(case, "host-fingerprint.json"), fingerprint)
+
+    bundle_path = os.path.join(case, "diagnostics.json")
+    args = argparse.Namespace(case_dir=case, meta=[], command="build",
+                              out=bundle_path, run_dir=None,
+                              print_summary=False)
+    module.build(args)
+    with open(bundle_path, encoding="utf-8") as source:
+        built = json.load(source)
+    check(built["host_fingerprint"] == fingerprint,
+          f"the bundle must carry the fingerprint it was given: "
+          f"{built.get('host_fingerprint')}")
+
+    # and a case without one reports absence rather than inventing a host
+    bare = os.path.join(work, "fingerprint-bare")
+    os.makedirs(bare, exist_ok=True)
+    srt_case(bare)
+    bare_path = os.path.join(bare, "diagnostics.json")
+    args.case_dir = bare
+    args.out = bare_path
+    module.build(args)
+    with open(bare_path, encoding="utf-8") as source:
+        built = json.load(source)
+    check(built["host_fingerprint"]["status"] == "unavailable"
+          and built["host_fingerprint"]["value"] is None,
+          f"no fingerprint file means no fingerprint: "
+          f"{built.get('host_fingerprint')}")
 
 
 def test_efficiency_uses_receiver_bytes_for_every_protocol(work):

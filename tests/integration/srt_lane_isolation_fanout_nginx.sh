@@ -409,9 +409,9 @@ python3 - "$RUN/a.csv" "$RUN/b.csv" "$RUN/relay.json" "$RUN/relay-flap.json" \
 import json, statistics, sys
 
 (a_path, b_path, relay_path, flap_path, window, retrans_lane, retrans_control,
- lag32, lag48, lag0, lag16, reconnects32, dropped32, transport32,
+ lag32, lag48, lag0, lag16, queue32, queue48, queue0,
+ reconnects32, dropped32, transport32,
  reconnects48, dropped48, transport48,
- queue32, queue48, queue0,
  reconnects32_before, dropped32_before, transport32_before,
  reconnects48_before, dropped48_before, transport48_before,
  reconnects32_after, dropped32_after, transport32_after,

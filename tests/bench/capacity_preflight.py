@@ -643,12 +643,22 @@ def judge(args):
                           f"the rate the request needs"})
 
     # --- the sender and receiver CPUs, against a measured cost per Gbit/s
-    for role, report, cost in (("sender", sender, args.sender_cpu_per_gbps),
-                               ("receiver", receivers[0] if receivers else None,
-                                args.receiver_cpu_per_gbps)):
+    for role, report, cost, stated in (
+            ("sender", sender, args.sender_cpu_per_gbps, args.sender_cpus),
+            ("receiver", receivers[0] if receivers else None,
+             args.receiver_cpu_per_gbps, args.receiver_cpus)):
         if not report:
+            if cost is not None:
+                # A cost without a host to spend it on is not a verdict: the
+                # receiver's report was required and did not arrive.
+                unknown.append({
+                    "side": role, "resource": "cpu",
+                    "reason": f"a measured CPU per delivered Gbit/s for the "
+                              f"{role} but no {role} fingerprint to judge it "
+                              f"against"})
             continue
-        permitted = len(report.get("permitted_cpus") or [])
+        permitted = (len(parse_cpu_list(stated)) if stated
+                     else len(report.get("permitted_cpus") or []))
         details[f"{role}_permitted_cpus"] = permitted
         if cost is None:
             unknown.append({
@@ -808,6 +818,12 @@ def main():
     j.add_argument("--max-probe-loss", type=float, default=0.01)
     j.add_argument("--sender-cpu-per-gbps", type=float)
     j.add_argument("--receiver-cpu-per-gbps", type=float)
+    j.add_argument("--sender-cpus",
+                   help="the CPUs the sender is actually pinned to; without "
+                        "it the fingerprint's own affinity is counted, which "
+                        "is the harness's, not nginx's")
+    j.add_argument("--receiver-cpus",
+                   help="the CPUs the receivers are actually pinned to")
     j.add_argument("--required-memory-mb", type=float)
     j.add_argument("--benchmark-cpus",
                    help="the CPUs the run is pinned to (a list or a range "

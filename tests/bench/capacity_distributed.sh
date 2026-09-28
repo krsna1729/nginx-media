@@ -103,6 +103,9 @@ if [ "$DRY_RUN" = no ]; then
         || die "could not mirror $ROOT to $RECEIVER:$ROOT"
 fi
 mkdir -p "$OUT/preflight"
+# The mirror deliberately leaves the run directory behind, so the receiver
+# needs its own copy of the directory the fingerprints and the probe write to.
+ssh_run mkdir -p "$OUT/preflight"
 
 # 3. the preflight: both hosts, and the path between them
 say "preflight: sender, receiver and path"
@@ -130,12 +133,26 @@ if [ "$DRY_RUN" = no ]; then
 fi
 first_step="${STEPS%% *}"
 first_step="${first_step:-1}"
-python3 "$ROOT/tests/bench/capacity_preflight.py" judge \
-    --destinations "$first_step" --bitrate-bps "$(( ${CAPACITY_QUALITY_RATE_MBPS:-8} * 1000000 ))" \
-    --sender "$OUT/preflight/sender.json" \
-    --network "$OUT/preflight/rx.json" \
-    --probe-sender "$OUT/preflight/tx.json" \
-    --json "$OUT/preflight/judge.json" | sed 's/^/   /'
+# The same media rate the harness is driven with, so the preliminary verdict
+# prices the load that will actually be offered.
+rate="${CAPACITY_QUALITY_RATE:-8M}"
+rate_mbps="${rate%[Mm]}"
+case "$rate" in
+    *[Gg]*) rate_mbps="$(awk -v v="${rate%[Gg]}" 'BEGIN { printf "%.0f", v * 1000 }')" ;;
+esac
+judge_args=( --destinations "$first_step"
+             --bitrate-bps "$(awk -v v="$rate_mbps" 'BEGIN { printf "%.0f", v * 1000000 }')"
+             --sender "$OUT/preflight/sender.json"
+             --receiver "$OUT/preflight/receiver.json"
+             --network "$OUT/preflight/rx.json"
+             --probe-sender "$OUT/preflight/tx.json"
+             --json "$OUT/preflight/judge.json" )
+[ -z "${CAPACITY_NGINX_CPUS:-}" ] \
+    || judge_args+=( --sender-cpus "$CAPACITY_NGINX_CPUS" )
+[ -z "${CAPACITY_RECEIVER_CPUS:-}" ] \
+    || judge_args+=( --receiver-cpus "$CAPACITY_RECEIVER_CPUS" )
+python3 "$ROOT/tests/bench/capacity_preflight.py" judge "${judge_args[@]}" \
+    | sed 's/^/   /' 
 judge_status="${PIPESTATUS[0]}"
 if [ "$judge_status" -eq 2 ]; then
     say "the environment cannot carry the offered load; see $OUT/preflight/judge.json"
