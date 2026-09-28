@@ -576,8 +576,8 @@ receiver-side at the margin, and the sender's CPU per delivered Gbit/s stays
 flat at 31-32% across 256, 384 and 512: nothing about the sender changed
 between the last pass and the first failure.
 
-The 120-second repeats of 384 and 512 and the sustained run are the next
-steps; the machine window ended before them.
+The 120-second repeats of 384 and 512 and the sustained run are reported
+below.
 
 ### The 120-second repeat at the boundary
 
@@ -708,6 +708,26 @@ E-cores:
 | 8 | 1.1426 | 38.68 | 21.05 | 8.36 | 1.7150 | 35.85 |
 | 16 | 1.1426 | 39.62 | 21.22 | 8.29 | 1.7141 | 32.97 |
 | adaptive | 1.1430 | 37.37 | 20.79 | 7.73 | 1.7132 | 40.61 |
+
+Three repetitions of the same six configurations, in the same window
+(`capacity-evidence/runs-2026-09-28/`, driver `/tmp/repeats3-driver.log`
+transcript in the same directory), give the spread the single measurements
+could not:
+
+| Senders | Delivered range (Gbit/s) | Sender %core per Gbit/s | Minimum ratio |
+|---|---|---|---|
+| 1 | 1.1425-1.1426 | 40.38-40.93 | 0.9954-0.9956 |
+| 2 | 1.1426-1.1427 | 36.69-39.31 | 0.9952-0.9956 |
+| 4 | 1.1421-1.1426 | 36.30-37.90 | 0.9950-0.9956 |
+| 8 | 1.1424-1.1426 | 36.84-40.14 | 0.9943-0.9956 |
+| 16 | 1.1423-1.1426 | 39.00-40.41 | 0.9943-0.9956 |
+| adaptive | 1.1423-1.1426 | 36.69-39.31 | 0.9942-0.9956 |
+
+Every configuration passes every repetition, and the delivered rate moves by
+0.05% across all eighteen runs - the run-to-run variation is smaller than the
+CPU differences the comparison is about, so the CPU column is the one to read
+and the 1-2 %core/Gbit/s differences between four or more senders are inside
+the spread.
 
 The delivered rate is identical to four significant figures in every
 configuration, so the sender count is not what sets it.  CPU per delivered
