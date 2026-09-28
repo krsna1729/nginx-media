@@ -619,6 +619,30 @@ without ever stalling everything, and delivery did not move: the same rate
 and the same sender cost as the 30-second and 120-second runs of the same
 rung.
 
+### Multi-program admission under the preflight (2026-09-28)
+
+The saturation case is four programs of 6 Mbit/s each fanned out to 250 SRT
+destinations apiece - 1 000 destinations, one shared receiver per case.  It
+ran once beside another benchmark on this host and behaved: program-frame
+fairness **1.0000** (Jain, equal progress across the four programs), **no
+stalled destinations**, the receiver's shard workers at 272.6% of a core in
+total.  Those are behavioral facts, and they are recorded as such, because
+the run shared the host with a competing benchmark.
+
+With the preflight now guarding every capacity case - not only the quality
+ladder - the same case refuses to measure while a pinned CPU is busy with
+something else:
+
+```
+preflight_verdict=infrastructure-limited
+preflight_limit=host/cpu measured=['cpu0'] required=<= 0.50 busy per benchmark CPU
+capacity_case_result case=saturated-multiprogram result=infrastructure-limited
+```
+
+That is the intended outcome: the host is shared, so the number would be the
+host's, and the harness says so in twelve seconds instead of ten minutes.  A
+clean multi-program number needs the machine to itself.
+
 ### Mixed-protocol contention (2026-09-28)
 
 Half SRT, a quarter RTMP, a quarter HLS push, one program, one sender pinned to
@@ -808,23 +832,29 @@ destinations.  What is not yet measured is mixed SRT session options
 3. **Admission is permissive at the boundary** (see above): the 512th
    destination is admitted, the averages stay at reference and the media
    degrades - 785 MPEG-TS errors and a worst second at 0.216 of reference.
-4. **Contention runs must start the way the published tiers do** - through
+4. **A competing job on a pinned CPU is now a stop, not a footnote.**  The
+   preflight samples the CPUs the run is pinned to, names them and the
+   processes using them, and returns `infrastructure-limited` above half a
+   CPU; every capacity case and every quality rung runs it.  A desktop's own
+   spread stays below the threshold.  On a shared host this is what keeps a
+   host number out of the capacity tables.
+5. **Contention runs must start the way the published tiers do** - through
    the unprivileged helper, not as root.  As root the workers drop to
    `nobody`, cannot write the HLS directory, and every HLS push destination
    times out its readiness; the module's log says `Permission denied` and the
    failure looks like a quality problem but is an invocation one.
-5. **Per-destination SRT options do not exist.**  Encryption is listener- and
+6. **Per-destination SRT options do not exist.**  Encryption is listener- and
    stream-scoped and latency is not exposed, so mixed session settings within
    one lane cannot be tested today; the per-destination fields that do exist
    (stream id, path, segment duration, playlist window, CA file) are exercised
    by the fanout isolation test.
-6. **HLS push against a lossy, failing sink** is covered by the conformance
+7. **HLS push against a lossy, failing sink** is covered by the conformance
    fixtures; loss, latency, closure and intermittent HTTP errors are not
    injected yet.
-7. **The two-host (ssh) receiver path** is implemented and documented but
+8. **The two-host (ssh) receiver path** is implemented and documented but
    has never run against a second machine; only the namespace topology it
    shares code with has been validated.
-8. **The local binary caveat**: any capacity number taken with a stale build
+9. **The local binary caveat**: any capacity number taken with a stale build
    is meaningless for the unprepared path; every number in this report comes
    from a build of the current source.
 
