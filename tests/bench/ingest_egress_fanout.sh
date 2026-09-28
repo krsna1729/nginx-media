@@ -4026,6 +4026,10 @@ phase_capacity_quality_ladder() {
         # beside it, which the published mixes never exercise (their SRT
         # share is 5%)
         srt-50-rtmp-25-hls-push-25:rtmp-hls-push:50:25
+        # the same contention shape with a quarter of the destinations on
+        # SRT: between the published 5% share (where HLS push works) and the
+        # 50% share (where it does not), to find where it stops
+        srt-25-rtmp-25-hls-push-50:rtmp-hls-push:25:50
     )
     local -a requested_mixes=() selected_mix_specs=()
 
@@ -4037,7 +4041,7 @@ phase_capacity_quality_ladder() {
             || { echo "CAPACITY_QUALITY_MIXES must not be empty" >&2; return 1; }
         for requested in "${requested_mixes[@]}"; do
             case "$requested" in
-                pure-srt|pure-rtmp|pure-hls|pure-hls-push|rtmp-95-srt-5|hls-push-95-srt-5|rtmp-50-hls-push-45-srt-5|srt-50-rtmp-25-hls-push-25)
+                pure-srt|pure-rtmp|pure-hls|pure-hls-push|rtmp-95-srt-5|hls-push-95-srt-5|rtmp-50-hls-push-45-srt-5|srt-50-rtmp-25-hls-push-25|srt-25-rtmp-25-hls-push-50)
                     ;;
                 *)
                     echo "unknown capacity quality mix: $requested" >&2

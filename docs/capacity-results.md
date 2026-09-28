@@ -689,6 +689,30 @@ itself is permissive: nothing in the module stops a destination that the
 program cannot carry, and the degradation is spread across every destination
 rather than refused at the door.
 
+### Three repetitions of the sender comparison
+
+Each configuration was measured three times at 128 destinations, 30-second
+rungs, sender on four P-cores and receivers on four E-cores:
+
+| Senders | Runs | Delivered Gbit/s (min..max) | Sender %core/Gbit/s (min..max) | Min ratio (min..max) |
+|---|---|---|---|---|
+| 1 | 3 | 1.1425..1.1426 | 40.38..40.93 | 0.9954..0.9956 |
+| 2 | 3 | 1.1423..1.1426 | 38.17..42.26 | 0.9943..0.9956 |
+| 4 | 3 | 1.1411..1.1436 | 36.53..37.90 | 0.9943..0.9956 |
+| 8 | 3 | 1.1424..1.1430 | 36.84..41.14 | 0.9943..0.9956 |
+| 16 | 3 | 1.1426..1.1429 | 36.00..38.97 | 0.9943..0.9949 |
+| adaptive | 3 | 1.1423..1.1426 | 36.69..39.31 | 0.9942..0.9952 |
+
+All eighteen runs passed.  The delivered rate is configuration-independent to
+within 0.3% - the spread across every repetition of every configuration is
+smaller than the difference between any two configurations' *CPU* figures -
+while sender CPU per delivered Gbit/s varies by up to 10% *within* a
+configuration (two senders: 38.2 to 42.3).  So the ordering is suggestive
+rather than decisive: one sender costs more than four or more by roughly
+8-10%, which is the size of the noise, and adaptive sits inside the fixed
+configurations' band rather than above or below it.  What the repetitions do
+establish firmly is the rate: more senders buy no more delivery.
+
 ### SRT library comparison (2026-09-26)
 
 Same source, same rungs, same placement (sender on four P-cores, receivers on
