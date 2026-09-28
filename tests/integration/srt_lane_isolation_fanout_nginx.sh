@@ -647,8 +647,16 @@ done
 [ "$stable" -eq 1 ] \
     || fail "lane placement is not stable across a worker reload"
 echo "   lane placement is identical for all $COUNT destinations after the reload"
-delivered="$(curl -fsS "$API/metrics" \
-    | awk '/^nginx_media_srt_egress_shard_sent_bytes_total\{/ { s += $NF } END { print s + 0 }')"
+# The sink reporting ready means it has the destinations, not that the
+# publisher's first frame has reached the egress counters yet: poll for the
+# bytes rather than reading once and calling a slow runner a failure.
+delivered=0
+for _ in $(seq 1 300); do
+    delivered="$(curl -fsS "$API/metrics" \
+        | awk '/^nginx_media_srt_egress_shard_sent_bytes_total\{/ { s += $NF } END { print s + 0 }')"
+    [ "${delivered%.*}" -gt 0 ] 2>/dev/null && break
+    sleep 0.1
+done
 [ "${delivered%.*}" -gt 0 ] 2>/dev/null \
     || fail "the re-established destinations delivered nothing"
 echo "   the re-established lane sent $(python3 -c "print(f'{float('$delivered')/1e6:.1f}')") MB after the reload"
