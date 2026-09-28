@@ -634,6 +634,36 @@ without ever stalling everything, and delivery did not move: the same rate
 and the same sender cost as the 30-second and 120-second runs of the same
 rung.
 
+### The 512 rung at 120 seconds, and the contention bisect
+
+**512 destinations, 120-second window: quality failure** - the same verdict as
+the 30-second run, so the first failing rung is stable across window lengths
+(384 passes at 120 s; 512 fails at both).  The failure is receiver-side again:
+4292 socket drops at 30 s, and the delivered rate falls short of the offered
+load while the sender's CPU per delivered Gbit/s is unchanged.
+
+**The contention mix fails at every rung, not only the small ones.**  The
+bisect went straight to 32 destinations - sixteen SRT, eight RTMP, eight HLS
+push - and the HLS push destinations never received their first segment:
+
+```
+HLS push first-segment readiness: elapsed=1.262s received=0/8 remaining=8
+HLS push readiness timed out: received=0/8 remaining_ids=d0024..d0031
+readiness_active_uploaders=1
+readiness_queue_metric_destinations=8  queue_age_p50/p95/max=0/0/0  queue_bytes_max=0
+```
+
+The destinations are created with exactly the IDs the readiness query expects
+(the offset is srt + rtmp = 24), the segmenter runs (the SRT reference case of
+the same mix prepares and delivers normally), and the module reports **one**
+active HLS push uploader for eight destinations with nothing queued for any of
+them.  The published HLS-push mix works at thirty HLS push destinations when
+its SRT share is 5%, so the difference is the SRT-heavy mix, not HLS push
+itself.  That is a finding about the SRT-heavy admission path, recorded here
+rather than guessed at: the next step is to watch the uploader pool's
+activation and the destinations' queue state while the rung is live, and to
+try the same mix with the SRT share lowered until the uploaders appear.
+
 ### SRT library comparison (2026-09-26)
 
 Same source, same rungs, same placement (sender on four P-cores, receivers on
@@ -753,11 +783,13 @@ RTMP and HLS in one program.
    isolated CPU set funnels loopback softirq onto one core; the receivers
    must be placed on CPUs the sender does not use before any boundary is
    read as a software limit.
-3. **The SRT-heavy contention mix does not pass its first rung yet** (see
-   above): the HLS push destination never delivers its first segment at two
-   or four destinations, so the rung ends as a setup failure.  Everything
-   else about the mix works, and the bisect downward from 32 is the next
-   step.
+3. **The SRT-heavy contention mix fails at every rung tested** (2, 4 and
+   32 destinations): its HLS push destinations never receive a first segment
+   and the module reports one active uploader for eight destinations with
+   nothing queued.  The destinations and the segmenter are correct (the mix's
+   own SRT reference case works), so the open question is the uploader pool's
+   activation under an SRT-heavy program - the next step is to watch it live
+   and to lower the SRT share until the uploaders appear.
 4. **Per-destination SRT options do not exist.**  Encryption is listener- and
    stream-scoped and latency is not exposed, so mixed session settings within
    one lane cannot be tested today; the per-destination fields that do exist
