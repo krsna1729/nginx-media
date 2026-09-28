@@ -275,17 +275,60 @@ write_snapshot(const char *path, const peer_t *peers, size_t count,
         free(temporary);
         return -1;
     }
-    if (fprintf(file, "destination_id,bytes_received,snapshot_ns\n") < 0) {
-        goto failed;
-    }
-    for (i = 0; i < count; i++) {
-        if (fprintf(file, "%s,%llu,%llu\n", peers[i].destination,
-                    (unsigned long long) peers[i].bytes_received,
-                    (unsigned long long) snapshot_ns) < 0)
+    /* The snapshot carries the same accounting as the final result, so a
+     * measurement taken during a run can say whether the media was continuous
+     * and whether the peer stalled, not only how many bytes had arrived. */
+    {
+        const struct timespec *first = NULL;
+
+        for (i = 0; i < count; i++) {
+            if (peers[i].has_first_byte
+                && (first == NULL
+                    || peers[i].first_byte_at.tv_sec < first->tv_sec
+                    || (peers[i].first_byte_at.tv_sec == first->tv_sec
+                        && peers[i].first_byte_at.tv_nsec < first->tv_nsec)))
+            {
+                first = &peers[i].first_byte_at;
+            }
+        }
+
+        if (fprintf(file,
+                    "destination_id,bytes_received,first_ms,stalled,"
+                    "transport_error,ts_packets,ts_sync_errors,"
+                    "ts_continuity_errors,ts_tei_errors,snapshot_ns\n") < 0)
         {
             goto failed;
         }
+
+        for (i = 0; i < count; i++) {
+            if (fprintf(file, "%s,%llu,", peers[i].destination,
+                        (unsigned long long) peers[i].bytes_received) < 0)
+            {
+                goto failed;
+            }
+            if (peers[i].has_first_byte && first != NULL) {
+                double  first_ms = (peers[i].first_byte_at.tv_sec
+                                    - first->tv_sec) * 1000.0
+                                   + (peers[i].first_byte_at.tv_nsec
+                                      - first->tv_nsec) / 1000000.0;
+
+                if (fprintf(file, "%.3f", first_ms) < 0) {
+                    goto failed;
+                }
+            }
+            if (fprintf(file, ",%d,%d,%llu,%llu,%llu,%llu,%llu\n",
+                        peers[i].stalled, peers[i].transport_error,
+                        (unsigned long long) peers[i].ts_packets,
+                        (unsigned long long) peers[i].ts_sync_errors,
+                        (unsigned long long) peers[i].ts_continuity_errors,
+                        (unsigned long long) peers[i].ts_tei_errors,
+                        (unsigned long long) snapshot_ns) < 0)
+            {
+                goto failed;
+            }
+        }
     }
+
     if (fclose(file) != 0) {
         file = NULL;
         goto failed;

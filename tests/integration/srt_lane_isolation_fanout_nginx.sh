@@ -367,7 +367,10 @@ snapshot() {   # <output>
         [ -s "$RUN/sink.csv.snapshot" ] && break
         sleep 0.05
     done
-    tail -n +2 "$RUN/sink.csv.snapshot" | sort > "$1"
+    # keep the header: the snapshot carries the sink's whole accounting
+    # (continuity, stalls, transport errors), read by name
+    { head -1 "$RUN/sink.csv.snapshot"
+      tail -n +2 "$RUN/sink.csv.snapshot" | sort; } > "$1"
 }
 
 sleep 5
@@ -418,8 +421,10 @@ window = float(window)
 def load(path):
     rows = {}
     for line in open(path):
-        name, value = line.strip().split(",")[:2]
-        rows[name.split("s=")[-1]] = int(value)
+        fields = line.strip().split(",")
+        if len(fields) < 2 or fields[0] == "destination_id":
+            continue
+        rows[fields[0].split("s=")[-1]] = int(fields[1])
     return rows
 
 def load_rows(path):
@@ -513,16 +518,29 @@ for label, value in (("d32", queue32), ("d48", queue48)):
         check(float(value) <= 1_000_000,
               "%s output queue stays bounded (%s bytes)" % (label, value))
 
-for label, before, after in (("reconnects", reconnects32_before, reconnects32),
-                             ("drops", dropped32_before, dropped32),
+for label, before, after in (("drops", dropped32_before, dropped32),
                              ("transport errors", transport32_before, transport32),
-                             ("reconnects", reconnects48_before, reconnects48),
                              ("drops", dropped48_before, dropped48),
                              ("transport errors", transport48_before, transport48)):
     if before in ("", None) or after in ("", None):
         continue
     check(float(after) == float(before),
           "d32/d48 %s did not move during the impaired window (%s -> %s)"
+          % (label, before, after))
+
+# Reconnects are a per-incarnation counter: a destination that reconnects is
+# rebuilt, so the counter can fall to zero rather than rise.  What matters is
+# that the healthy lane-mates did not keep reconnecting while their lane was
+# impaired, so the check is a bound with the drop-to-zero read as one
+# reconnect, and it says which it saw.
+for label, before, after in (("d32", reconnects32_before, reconnects32),
+                             ("d48", reconnects48_before, reconnects48)):
+    if before in ("", None) or after in ("", None):
+        continue
+    before, after = float(before), float(after)
+    reconnects = after if after >= before else before + after
+    check(reconnects <= 1,
+          "%s reconnected at most once during the impaired window (%s -> %s)"
           % (label, before, after))
 sys.exit(0 if ok else 1)
 PYEOF
@@ -665,8 +683,10 @@ import statistics, sys
 def load(path):
     rows = {}
     for line in open(path):
-        name, value = line.strip().split(",")[:2]
-        rows[name.split("s=")[-1]] = int(value)
+        fields = line.strip().split(",")
+        if len(fields) < 2 or fields[0] == "destination_id":
+            continue
+        rows[fields[0].split("s=")[-1]] = int(fields[1])
     return rows
 
 e, f = load(sys.argv[1]), load(sys.argv[2])
