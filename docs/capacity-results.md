@@ -664,6 +664,31 @@ rather than guessed at: the next step is to watch the uploader pool's
 activation and the destinations' queue state while the rung is live, and to
 try the same mix with the SRT share lowered until the uploaders appear.
 
+### What happens at the boundary: the module admits, the media degrades
+
+The brief asks for a clear capacity/admission outcome rather than silent
+admission followed by degradation.  The 512-destination rung, whose
+per-destination accounting is in its bundle, answers it:
+
+| | |
+|---|---|
+| Destinations | 512, every one admitted and connected |
+| Average delivery ratio | min 1.0023, p05 1.0031, p50 1.0073, max 1.0094 - **none below the 0.95 gate** |
+| Worst one-second interval | min 0.2163, p05 0.9314, p50 0.9357, max 0.9484 |
+| MPEG-TS sync/continuity errors | **785** across the rung (about 1.5 per destination) |
+| Transport errors | 0 |
+
+So the program does not refuse the 512th destination, and the average rate
+hides what happened: the *media* broke.  Three quarters of a percent of the
+window's seconds ran at 93-94% of reference for half the destinations, one
+destination's worst second delivered a fifth of the reference rate, and 785
+MPEG-TS packets failed their sync or continuity checks.  The ladder's
+interval floor and continuity criteria catch all three and report the rung as
+a quality failure, which is the outcome the brief wants - but the admission
+itself is permissive: nothing in the module stops a destination that the
+program cannot carry, and the degradation is spread across every destination
+rather than refused at the door.
+
 ### SRT library comparison (2026-09-26)
 
 Same source, same rungs, same placement (sender on four P-cores, receivers on
@@ -783,7 +808,10 @@ RTMP and HLS in one program.
    isolated CPU set funnels loopback softirq onto one core; the receivers
    must be placed on CPUs the sender does not use before any boundary is
    read as a software limit.
-3. **The SRT-heavy contention mix fails at every rung tested** (2, 4 and
+3. **Admission is permissive at the boundary** (see above): the 512th
+   destination is admitted, the averages stay at reference and the media
+   degrades - 785 MPEG-TS errors and a worst second at 0.216 of reference.
+4. **The SRT-heavy contention mix fails at every rung tested** (2, 4 and
    32 destinations): its HLS push destinations never receive a first segment
    and the module reports one active uploader for eight destinations with
    nothing queued.  The destinations and the segmenter are correct (the mix's
