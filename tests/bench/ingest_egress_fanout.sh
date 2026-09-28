@@ -2545,8 +2545,12 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
         echo "only pure SRT cases support a stalled destination" >&2
         return 1
     fi
-    [ "$seconds" -le 600 ] \
-        || { echo "capacity window must be at most 600 seconds" \
+    # A rung's window is bounded so a typo cannot start a run that never
+    # ends; the sustained qualification the method asks for is half an hour
+    # at the configuration a production claim rests on, so the bound is an
+    # hour and the samplers are the thing to watch at that length.
+    [ "$seconds" -le 3600 ] \
+        || { echo "capacity window must be at most 3600 seconds" \
                  >&2; return 1; }
     [ "$workers" -le 16 ] && [ "$programs" -le 32 ] \
         && [ "$destinations" -le 1000 ] \
