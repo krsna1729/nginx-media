@@ -97,6 +97,13 @@ distribution's security update, so a libsrt or OpenSSL advisory means a new
 artifact rather than a new system package.  That is why it is an *additional*
 release asset, not a replacement for the dynamic build.
 
+The release workflow ships both from the same tag: the dynamic binary against
+the pinned Haivision/srt, and `nginx-<version>-linux-x86_64-static.tar.gz`
+beside it, with the release notes naming the library versions and commits and
+saying that the static artifact's upgrades are re-downloads.  The suite in
+that workflow runs against the pinned binary (`NGINX_BIN` is exported), so the
+artifact that is published is the artifact that was tested.
+
 One product change came out of building it: `config` now names the C++ runtime
 after libsrt (`-lstdc++`), because a static link of a C++ library needs it and
 the module's library order is where it belongs.  With a shared libsrt the flag
