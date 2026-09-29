@@ -28,8 +28,6 @@ print_is_hex(const u_char *print)
 int
 main(void)
 {
-    ngx_str_t   app = { sizeof("live") - 1, (u_char *) "live" };
-    ngx_str_t   name = { sizeof("demo") - 1, (u_char *) "demo" };
     ngx_str_t   id = { sizeof("enc1") - 1, (u_char *) "enc1" };
     u_char      key[NGX_MEDIA_KEY_MAX], other[NGX_MEDIA_KEY_MAX];
     u_char      hash[NGX_MEDIA_KEY_HASH_LEN], hash2[NGX_MEDIA_KEY_HASH_LEN];
@@ -40,19 +38,19 @@ main(void)
 
     TEST_CASE("issue: the key names its source and carries a secret");
 
-    TEST_ASSERT_EQ_INT(ngx_media_key_issue(&app, &name, &id, key, sizeof(key),
-                                           &len, hash, print),
+    TEST_ASSERT_EQ_INT(ngx_media_key_issue(&id, key, sizeof(key), &len, hash,
+                                           print),
                        NGX_OK);
-    TEST_ASSERT_EQ_U64(len, app.len + 1 + name.len + 1 + id.len + 1
-                            + NGX_MEDIA_KEY_SECRET_LEN);
-    TEST_ASSERT(memcmp(key, "live/demo/enc1-", 15) == 0);
+    TEST_ASSERT_EQ_U64(len, id.len + 1 + NGX_MEDIA_KEY_SECRET_LEN);
+    TEST_ASSERT(memcmp(key, "enc1-", 5) == 0);
+    /* one token: nothing a transport might treat specially */
+    TEST_ASSERT(memchr(key, '/', len) == NULL);
     TEST_ASSERT(print_is_hex(print));
 
     TEST_CASE("issue: two keys for one source are different, and both hash");
 
-    TEST_ASSERT_EQ_INT(ngx_media_key_issue(&app, &name, &id, other,
-                                           sizeof(other), &len2, hash2,
-                                           print2),
+    TEST_ASSERT_EQ_INT(ngx_media_key_issue(&id, other, sizeof(other), &len2,
+                                           hash2, print2),
                        NGX_OK);
     TEST_ASSERT_EQ_U64(len, len2);
     TEST_ASSERT(memcmp(key, other, len) != 0);
@@ -75,11 +73,10 @@ main(void)
 
     TEST_CASE("issue: a key that does not fit is refused, not truncated");
 
-    TEST_ASSERT_EQ_INT(ngx_media_key_issue(&app, &name, &id, key, 8, &len,
-                                           hash, print),
+    TEST_ASSERT_EQ_INT(ngx_media_key_issue(&id, key, 8, &len, hash, print),
                        NGX_ERROR);
-    TEST_ASSERT_EQ_INT(ngx_media_key_issue(NULL, &name, &id, key, sizeof(key),
-                                           &len, hash, print),
+    TEST_ASSERT_EQ_INT(ngx_media_key_issue(NULL, key, sizeof(key), &len, hash,
+                                           print),
                        NGX_ERROR);
 
     TEST_CASE("the secret's alphabet has no lookalikes: no I, L, O or U");

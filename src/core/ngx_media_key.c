@@ -37,23 +37,20 @@ ngx_media_key_print(const u_char *hash, u_char *print)
 }
 
 ngx_int_t
-ngx_media_key_issue(const ngx_str_t *application, const ngx_str_t *name,
-    const ngx_str_t *id, u_char *out, size_t cap, size_t *out_len,
-    u_char *hash, u_char *print)
+ngx_media_key_issue(const ngx_str_t *id, u_char *out, size_t cap,
+    size_t *out_len, u_char *hash, u_char *print)
 {
     u_char      secret[NGX_MEDIA_KEY_SECRET_LEN];
     u_char     *p;
     size_t      need, i;
 
-    if (application == NULL || name == NULL || id == NULL || out == NULL
-        || out_len == NULL || hash == NULL || print == NULL
-        || application->len == 0 || name->len == 0 || id->len == 0)
+    if (id == NULL || out == NULL || out_len == NULL || hash == NULL
+        || print == NULL || id->len == 0)
     {
         return NGX_ERROR;
     }
 
-    need = application->len + 1 + name->len + 1 + id->len + 1
-           + NGX_MEDIA_KEY_SECRET_LEN;
+    need = id->len + 1 + NGX_MEDIA_KEY_SECRET_LEN;
 
     if (need > cap) {
         return NGX_ERROR;
@@ -69,14 +66,6 @@ ngx_media_key_issue(const ngx_str_t *application, const ngx_str_t *name,
     }
 
     p = out;
-
-    ngx_memcpy(p, application->data, application->len);
-    p += application->len;
-    *p++ = '/';
-
-    ngx_memcpy(p, name->data, name->len);
-    p += name->len;
-    *p++ = '/';
 
     ngx_memcpy(p, id->data, id->len);
     p += id->len;
