@@ -10,13 +10,17 @@ media_srt_output live/news 127.0.0.1:9100 "#!::r=live/news,m=publish,s=out";
 
 media_hls /var/lib/nginx/media/hls;
 media_record /var/lib/nginx/media/record;
+media_ingest_secret /var/lib/nginx/media/ingest.secret;
 
 http {
     server {
-        listen 8080;
+        listen 127.0.0.1:8080;
         location /hls/ { alias /var/lib/nginx/media/hls/; }
         location /media/api/ { media_api; }
-        location /ingest/ { media_hls_ingest /var/lib/nginx/media/ingest; }
+        location /ingest/ {
+            access_log off; # request URI contains the HLS source key
+            media_hls_ingest /var/lib/nginx/media/ingest;
+        }
     }
 }
 ```
@@ -225,8 +229,9 @@ media_ingest_secret /usr/local/nginx-media/ingest.secret;
 ```
 
 The core generates that file (0600) on first start if it is not there, and
-every worker inherits it before forking.  Without the directive no key can be
-issued or read — the API says so rather than deriving from nothing.
+every worker inherits it before forking. Without the directive, generated
+keys cannot be issued or read and key rotation cannot derive a replacement.
+An operator-supplied key does not use the deployment secret.
 
 `POST .../sources/{id}/rotate` issues a new nonce, so the old key dies at
 once and the new one is derivable forever after.  Every later read of a source
@@ -420,40 +425,44 @@ publisher refused by an RTMPS listener.
 ### `media_api;`
 
 Location-level (`NGX_HTTP_LOC_CONF`, no arguments).  Enables the control API on
-that location; see `api.md` for the endpoints.  Neither the API nor
-`media_hls_ingest` below authenticates anything: the location is the whole
-boundary, so serve it on loopback, behind a proxy that authenticates, or on a
-Unix socket.  `security.md` section 3 is the deployment guidance and lists what
-a caller who reaches it can do; `api.md` has the routes.
+that location; see `api.md` for the endpoints. The control API has no
+built-in authentication: serve it on loopback, behind an authenticated proxy,
+or on a Unix socket. `security.md` section 3 is the deployment guidance.
 
 ### `media_hls_ingest <directory>;`
 
-Location-level (`NGX_HTTP_LOC_CONF`).  Turns that location into an HLS push
-(HTTP ingest) endpoint that speaks the industry's contract - YouTube's HLS
-ingest, and the DASH-IF Live Media Ingest specification's Interface-2: an
-encoder `PUT`s or `POST`s each MPEG-TS segment and then the media playlist
-that names it, and may `DELETE` segments that have left its playlist.  The
-object is stored under `<directory>` at its path relative to the location
-(`/ingest/live/news/index7.ts` -> `<directory>/live/news/index7.ts`), so one
-endpoint serves many streams.  New objects are answered `201`, replaced ones
-`204`, deletes `200` (`404` when absent), container types this build cannot
-carry (fMP4/CMAF, DASH) `415`.  What an encoder must send, with an ffmpeg
-example, is in `hls-push-interop.md`.
+Location-level (`NGX_HTTP_LOC_CONF`). Turns that location into a keyed HLS
+push endpoint. An encoder `PUT`s or `POST`s each MPEG-TS segment and then the
+media playlist that names it, and may `DELETE` segments that have left its
+playlist. The first path segment is the key returned when creating an
+`hls_push` source; the remaining safe relative path is written under that
+source's configured `path`. That source directory must be beneath
+`<directory>`. Unknown keys, non-`hls_push` keys, and paths containing
+traversal, URI encoding, or query strings are rejected. New objects are
+answered `201`, replaced ones `204`, deletes `200` (`404` when absent), and
+container types this build cannot carry (fMP4/CMAF, DASH) `415`. What an
+encoder must send, with an ffmpeg example, is in `hls-push-interop.md`.
+
+Because the key is a bearer credential in the URL, use HTTPS and prevent
+access logs and upstream proxies from recording the request path. Default
+nginx access logs include the URI; disable them for this location or use a
+custom log format that excludes the request URI.
 
 ```nginx
 location /ingest/ {
+    access_log off;
     media_hls_ingest /var/lib/nginx/media/ingest;
 }
 ```
 
-The endpoint deliberately does not know what reads the directory — the two
-halves stay separate, so an upload arriving by any other means works just as
-well.  The usual reader is a source of type `hls_push` created through the
-control API, pointed at one stream's directory.  It reads segments in the
-order the media playlist there gives (by media sequence number) and, with no
-playlist, in the order of the number at the end of their names - as a number,
-so `index10.ts` follows `index9.ts`.  This inbound `hls_push` source is
-separate from the outbound `hls_push` destination described below.
+The endpoint routes each upload to exactly one `hls_push` source. Create that
+source through the control API with a `path` directory beneath the configured
+ingest root, then use its returned key as the first URL segment. The source
+reads segments in the order the media playlist there gives (by media sequence
+number) and, with no playlist, in the order of the number at the end of their
+names - as a number, so `index10.ts` follows `index9.ts`. This inbound
+`hls_push` source is separate from the outbound `hls_push` destination
+described below.
 
 The body is written to a file by nginx's own machinery rather than read into
 memory, and the handler then renames it into place, so a reader either sees a

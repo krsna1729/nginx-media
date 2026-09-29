@@ -105,8 +105,29 @@ STATUS="$(curl -sS -o "$RUN/src.json" -w '%{http_code}' \
     "$API/streams/live/slate/sources")"
 
 cat "$RUN/src.json"; echo
+python3 -c 'import json,sys; assert "key" not in json.load(open(sys.argv[1]))' \
+    "$RUN/src.json" || { echo "file source unexpectedly received a key" >&2; exit 1; }
+KEY_STATUS="$(curl -sS -o "$RUN/key.json" -w '%{http_code}' \
+    "$API/streams/live/slate/sources/slate-file/key")"
+[ "$KEY_STATUS" = "409" ] || { echo "file key read got HTTP $KEY_STATUS" >&2; exit 1; }
+grep -q '"error":"key_not_supported"' "$RUN/key.json" \
+    || { echo "file key read returned the wrong error" >&2; exit 1; }
+ROTATE_STATUS="$(curl -sS -o "$RUN/rotate.json" -w '%{http_code}' \
+    -X POST "$API/streams/live/slate/sources/slate-file/rotate")"
+[ "$ROTATE_STATUS" = "400" ] || { echo "file key rotation got HTTP $ROTATE_STATUS" >&2; exit 1; }
+grep -q '"error":"key_not_supported"' "$RUN/rotate.json" \
+    || { echo "file key rotation returned the wrong error" >&2; exit 1; }
 
 [ "$STATUS" = "201" ] || { echo "expected 201, got $STATUS" >&2; exit 1; }
+UNSUPPORTED_STATUS="$(curl -sS -o "$RUN/empty-key.json" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d "{\"id\":\"empty-key\",\"type\":\"file\",\"path\":\"$RUN/slate.ts\",\"key\":\"\"}" \
+    "$API/streams/live/slate/sources")"
+[ "$UNSUPPORTED_STATUS" = "400" ] \
+    || { echo "file source with a key got HTTP $UNSUPPORTED_STATUS" >&2; exit 1; }
+grep -q '"error":"key_not_supported"' "$RUN/empty-key.json" \
+    || { echo "file source key was not rejected" >&2; exit 1; }
+
 
 curl -fsS "$API/streams/live/slate/sources" | grep -q '"id":"slate-file"' \
     || { echo "the file source is not listed" >&2; exit 1; }

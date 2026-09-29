@@ -132,6 +132,7 @@ pid logs/nginx.pid;
 events { worker_connections 256; }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 
 http {
     access_log off;
@@ -208,14 +209,15 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
 
 STATUS="$(curl -sS -o "$RUN/ing.json" -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' \
-    -d "{\"id\":\"uploaded\",\"type\":\"hls_push\",\"path\":\"$RUN/uploaded\"}" \
+    -d "{\"id\":\"uploaded\",\"type\":\"hls_push\",\"path\":\"$RUN/uploaded/ingest\"}" \
     "$API/streams/live/ingest/sources")"
 
 [ "$STATUS" = "201" ] \
     || { echo "the ingest source was not created: $STATUS" >&2
          cat "$RUN/ing.json" >&2; exit 1; }
+mkdir -p "$RUN/uploaded/ingest"
 
-cp "$RUN/incoming/seg-00000.ts" "$RUN/uploaded/seg-00000.ts"
+cp "$RUN/incoming/seg-00000.ts" "$RUN/uploaded/ingest/seg-00000.ts"
 
 for _ in $(seq 1 200); do
     curl -fsS "$API/streams/live/ingest" \

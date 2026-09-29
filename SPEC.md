@@ -1361,10 +1361,14 @@ HTTP reachability is not media health. A live playlist that reloads but stops ad
 Conceptual surface:
 
 ```text
-PUT/POST /media/ingest/hls/{stream}/{source}/{object}
+PUT/POST/DELETE <location>/<key>/<object>
 ```
 
-It may accept media playlists, master playlists where useful, MPEG-TS segments, fMP4 init/media objects, and later partial segments.
+The first path segment is the bearer key for one `hls_push` source; its
+configured directory is isolated beneath the `media_hls_ingest` root. The
+current endpoint accepts MPEG-TS segments and media playlists. Broader
+container support, including fMP4 and partial segments, remains a future
+capability.
 
 Requirements:
 

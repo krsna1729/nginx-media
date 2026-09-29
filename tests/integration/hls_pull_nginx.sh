@@ -191,6 +191,14 @@ STATUS="$(curl -sS -o "$RUN/pull.json" -w '%{http_code}' \
 cat "$RUN/pull.json"; echo
 
 [ "$STATUS" = "201" ] || { echo "expected 201, got $STATUS" >&2; exit 1; }
+python3 -c 'import json,sys; assert "key" not in json.load(open(sys.argv[1]))' \
+    "$RUN/pull.json" || { echo "hls_pull source unexpectedly received a key" >&2; exit 1; }
+KEY_STATUS="$(curl -sS -o "$RUN/pull-key.json" -w '%{http_code}' \
+    "$API/streams/live/relay/sources/origin-hls/key")"
+[ "$KEY_STATUS" = "409" ] \
+    || { echo "hls_pull key read got HTTP $KEY_STATUS" >&2; exit 1; }
+grep -q '"error":"key_not_supported"' "$RUN/pull-key.json" \
+    || { echo "hls_pull key read returned the wrong error" >&2; exit 1; }
 
 for _ in $(seq 1 400); do
     curl -fsS "$API/streams/live/relay/sources" \

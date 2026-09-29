@@ -384,14 +384,13 @@ publishing side of the source gate or the consuming side of the fanout:
 - An `hls_pull` source fetches a playlist and its segments over HTTP or HTTPS
   on its own thread, demuxes them and publishes them the same way.
 - An uploaded segment arrives through the `media_hls_ingest` endpoint: nginx
-  writes the body to a temp file and the handler renames it into the ingest
-  directory, so a reader sees a whole segment or none of it.  A reader of type
-  `hls_push` then demuxes it like any other source.  The writer and the reader
-  are separate halves on purpose — the ingest endpoint does not know what reads
-  the directory.  An HLS input is MPEG-TS carrying H.264 or H.265 video and/or
-  AAC audio; a container with none of those yields no tracks and no frames, and
-  the reader reports that once instead of producing a source that never goes on
-  air for no stated reason.
+  validates the raw request path, resolves its first component as an HLS source
+  key, and renames the body into that source's configured directory. A reader
+  sees a whole segment or none of it. The key confines each upload to one
+  `hls_push` source; an HLS input is MPEG-TS carrying H.264 or H.265 video
+  and/or AAC audio; a container with none of those yields no tracks and no
+  frames, and the reader reports that once instead of producing a source that
+  never goes on air for no stated reason.
 - An `hls_push` destination receives notifications from the segmenter after a
   program's HLS segment or playlist has been atomically renamed.  It opens the
   sealed inode and queues that snapshot for upload; it does not scan the output

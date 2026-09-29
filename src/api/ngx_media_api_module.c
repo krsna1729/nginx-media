@@ -63,6 +63,10 @@ static char *ngx_media_hls_ingest_set(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static ngx_int_t ngx_media_hls_ingest_handler(ngx_http_request_t *r);
 static void ngx_media_hls_ingest_ready(ngx_http_request_t *r);
+static ngx_int_t ngx_media_hls_ingest_path(ngx_http_request_t *r,
+    ngx_str_t *key, ngx_str_t *rel, ngx_str_t *name);
+static ngx_int_t ngx_media_hls_ingest_source(const ngx_str_t *key,
+    const ngx_str_t *root, ngx_media_source_t **source);
 static ngx_int_t ngx_media_api_init(ngx_conf_t *cf);
 static ngx_int_t ngx_media_api_handler(ngx_http_request_t *r);
 static void ngx_media_api_body_ready(ngx_http_request_t *r);
@@ -128,9 +132,9 @@ static ngx_command_t ngx_media_api_commands[] = {
      * media_hls_ingest <directory>;
      *
      * Accepts HLS segments pushed to us - someone else's encoder PUTs them -
-     * and stores them where a source of type hls_push is watching.  The two
-     * halves stay separate on purpose: this endpoint does not know what reads
-     * the directory, so an upload arriving by any other means works too.
+     * and resolves the key to the hls_push source whose path receives them.
+     * Object paths stay relative to that source directory and cannot escape
+     * it; an upload arriving by another mechanism remains independent.
      */
     { ngx_string("media_hls_ingest"),
       NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
@@ -278,12 +282,12 @@ ngx_media_hls_ingest_suffix(const ngx_str_t *name, const char *suffix)
 }
 
 /*
- * The object's path relative to the endpoint, validated.  NGX_OK, or the
- * HTTP status to answer with.
+ * The first raw URI component is a source key; the remaining object path is
+ * validated before it is joined to that source's configured directory.
  */
 static ngx_int_t
-ngx_media_hls_ingest_path(ngx_http_request_t *r, ngx_str_t *rel,
-    ngx_str_t *name)
+ngx_media_hls_ingest_path(ngx_http_request_t *r, ngx_str_t *key,
+    ngx_str_t *rel, ngx_str_t *name)
 {
     static const char  *unsupported[] = {
         ".m4s", ".mp4", ".m4v", ".m4a", ".cmfv", ".cmfa", ".cmft", ".cmfm",
@@ -296,21 +300,50 @@ ngx_media_hls_ingest_path(ngx_http_request_t *r, ngx_str_t *rel,
 
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
-    p = r->uri.data;
-    last = r->uri.data + r->uri.len;
+    p = r->unparsed_uri.data;
+    last = r->unparsed_uri.data + r->unparsed_uri.len;
 
-    /* a prefix location: what follows it is the object's path */
-    if (clcf->name.len > 0 && clcf->name.len <= r->uri.len
-        && ngx_strncmp(r->uri.data, clcf->name.data, clcf->name.len) == 0
+    /* Query and encoded paths are unnecessary and can hide path separators. */
+    if (ngx_strlchr(p, last, '?') != NULL
+        || ngx_strlchr(p, last, '%') != NULL)
+    {
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    /* a prefix location: what follows it starts with the source key */
+    if (clcf->name.len > 0 && clcf->name.len <= r->unparsed_uri.len
+        && ngx_strncmp(r->unparsed_uri.data, clcf->name.data, clcf->name.len)
+           == 0
         && clcf->name.data[clcf->name.len - 1] == '/')
     {
         p += clcf->name.len;
 
     } else {
-        slash = ngx_media_strrlchr(r->uri.data, last, '/');
-        p = (slash != NULL) ? slash + 1 : r->uri.data;
+        slash = ngx_media_strrlchr(p, last, '/');
+        p = (slash != NULL) ? slash + 1 : p;
     }
 
+    slash = ngx_strlchr(p, last, '/');
+    if (slash == NULL || slash == p || (size_t) (slash - p) >= NGX_MEDIA_KEY_MAX
+        || *p == '.')
+    {
+        return NGX_HTTP_NOT_FOUND;
+    }
+
+    key->data = p;
+    key->len = (size_t) (slash - p);
+    for (p = key->data; p < slash; p++) {
+        u_char  c = *p;
+
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+              || (c >= '0' && c <= '9') || c == '-' || c == '_'
+              || c == '.'))
+        {
+            return NGX_HTTP_NOT_FOUND;
+        }
+    }
+
+    p = slash + 1;
     rel->data = p;
     rel->len = (size_t) (last - p);
 
@@ -318,7 +351,7 @@ ngx_media_hls_ingest_path(ngx_http_request_t *r, ngx_str_t *rel,
         return NGX_HTTP_BAD_REQUEST;
     }
 
-    /* every component: non-empty, no leading dot, safe characters */
+    /* every object component: non-empty, no leading dot, safe characters */
     name->data = p;
     for ( ;; ) {
         u_char  *start = p;
@@ -374,6 +407,79 @@ ngx_media_hls_ingest_path(ngx_http_request_t *r, ngx_str_t *rel,
     return NGX_HTTP_BAD_REQUEST;
 }
 
+/*
+ * Resolve the bearer path component to an HLS-push source, and constrain its
+ * configured directory to this location's ingest root.
+ */
+static ngx_int_t
+ngx_media_hls_ingest_source(const ngx_str_t *key, const ngx_str_t *root,
+    ngx_media_source_t **source)
+{
+    ngx_media_registry_t  *registry;
+    ngx_media_stream_t    *stream;
+    ngx_str_t              path;
+    u_char                 hash[NGX_MEDIA_KEY_HASH_LEN];
+    u_char                *p, *last, *start;
+    size_t                 root_len;
+
+    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+    if (registry == NULL || key == NULL || key->len == 0) {
+        return NGX_HTTP_NOT_FOUND;
+    }
+
+    ngx_media_key_hash(key->data, key->len, hash);
+    *source = ngx_media_graph_source_by_key(registry, hash, &stream);
+
+    if (*source == NULL || (*source)->type != NGX_MEDIA_SOURCE_HLS_PUSH) {
+        return NGX_HTTP_NOT_FOUND;
+    }
+
+    path = (*source)->path;
+    root_len = root->len;
+    while (root_len > 1 && root->data[root_len - 1] == '/') {
+        root_len--;
+    }
+    while (path.len > 1 && path.data[path.len - 1] == '/') {
+        path.len--;
+    }
+
+    if (root_len == 1 && root->data[0] == '/') {
+        if (path.len <= 1 || path.data[0] != '/') {
+            return NGX_HTTP_NOT_FOUND;
+        }
+        p = path.data + 1;
+
+    } else {
+        if (path.len <= root_len + 1
+            || ngx_strncmp(path.data, root->data, root_len) != 0
+            || path.data[root_len] != '/')
+        {
+            return NGX_HTTP_NOT_FOUND;
+        }
+        p = path.data + root_len + 1;
+    }
+
+    last = path.data + path.len;
+
+    /* Do not let an API-configured directory escape its upload root. */
+    for (start = p; ; p++) {
+        if (p != last && *p != '/') {
+            continue;
+        }
+        if (p == start || (p - start == 1 && start[0] == '.')
+            || (p - start == 2 && start[0] == '.' && start[1] == '.'))
+        {
+            return NGX_HTTP_NOT_FOUND;
+        }
+        if (p == last) {
+            break;
+        }
+        start = p + 1;
+    }
+
+    return NGX_OK;
+}
+
 /* the object's absolute path, NUL-terminated, from the pool */
 static u_char *
 ngx_media_hls_ingest_target(ngx_http_request_t *r, const ngx_str_t *dir,
@@ -424,10 +530,12 @@ static void
 ngx_media_hls_ingest_ready(ngx_http_request_t *r)
 {
     ngx_media_api_loc_conf_t  *mlcf;
-    ngx_str_t                  rel, name;
+    ngx_str_t                  key, rel, name, source_dir;
+    ngx_media_source_t        *source;
     u_char                    *target;
     ngx_file_info_t            fi;
     ngx_uint_t                 existed;
+    size_t                     root_len;
     ngx_int_t                  status;
     ngx_int_t                  stored;   /* not `rc`: something in the include
                                           * chain defines that name */
@@ -439,10 +547,25 @@ ngx_media_hls_ingest_ready(ngx_http_request_t *r)
         return;
     }
 
-    status = ngx_media_hls_ingest_path(r, &rel, &name);
+    status = ngx_media_hls_ingest_path(r, &key, &rel, &name);
+    if (status == NGX_OK) {
+        status = ngx_media_hls_ingest_source(&key, &mlcf->ingest_dir, &source);
+    }
     if (status != NGX_OK) {
         ngx_http_finalize_request(r, status);
         return;
+    }
+
+    source_dir = source->path;
+    while (source_dir.len > 1
+           && source_dir.data[source_dir.len - 1] == '/')
+    {
+        source_dir.len--;
+    }
+
+    root_len = mlcf->ingest_dir.len;
+    while (root_len > 1 && mlcf->ingest_dir.data[root_len - 1] == '/') {
+        root_len--;
     }
 
     if (r->request_body == NULL || r->request_body->temp_file == NULL) {
@@ -450,10 +573,9 @@ ngx_media_hls_ingest_ready(ngx_http_request_t *r)
         return;
     }
 
-    target = ngx_media_hls_ingest_target(r, &mlcf->ingest_dir, &rel);
+    target = ngx_media_hls_ingest_target(r, &source_dir, &rel);
     if (target == NULL
-        || ngx_media_hls_ingest_parents(target, mlcf->ingest_dir.len)
-           != NGX_OK)
+        || ngx_media_hls_ingest_parents(target, root_len) != NGX_OK)
     {
         ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
         return;
@@ -479,8 +601,8 @@ ngx_media_hls_ingest_ready(ngx_http_request_t *r)
     }
 
     ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-                  "media: hls ingest stored %V in %V (%O bytes)%s",
-                  &rel, &mlcf->ingest_dir,
+                  "media: hls ingest source=%V stored %V in %V (%O bytes)%s",
+                  &source->id, &rel, &source_dir,
                   r->request_body->temp_file->file.offset,
                   existed ? ", replaced" : "");
 
@@ -493,7 +615,8 @@ static ngx_int_t
 ngx_media_hls_ingest_delete(ngx_http_request_t *r)
 {
     ngx_media_api_loc_conf_t  *mlcf;
-    ngx_str_t                  rel, name;
+    ngx_media_source_t        *source;
+    ngx_str_t                  key, rel, name, source_dir;
     u_char                    *target, *slash;
     ngx_int_t                  status;
 
@@ -503,28 +626,37 @@ ngx_media_hls_ingest_delete(ngx_http_request_t *r)
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    status = ngx_media_hls_ingest_path(r, &rel, &name);
+    status = ngx_media_hls_ingest_path(r, &key, &rel, &name);
+    if (status == NGX_OK) {
+        status = ngx_media_hls_ingest_source(&key, &mlcf->ingest_dir, &source);
+    }
     if (status != NGX_OK) {
         return status;
+    }
+
+    source_dir = source->path;
+    while (source_dir.len > 1
+           && source_dir.data[source_dir.len - 1] == '/')
+    {
+        source_dir.len--;
     }
 
     if (ngx_http_discard_request_body(r) != NGX_OK) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    target = ngx_media_hls_ingest_target(r, &mlcf->ingest_dir, &rel);
+    target = ngx_media_hls_ingest_target(r, &source_dir, &rel);
     if (target == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
-
     if (ngx_delete_file(target) == NGX_FILE_ERROR) {
         return (ngx_errno == NGX_ENOENT) ? NGX_HTTP_NOT_FOUND
                                          : NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    /* an emptied subdirectory goes too, never the ingest root itself */
+    /* Remove empty object subdirectories, never the source's own directory. */
     slash = (u_char *) strrchr((char *) target, '/');
-    if (slash != NULL && (size_t) (slash - target) > mlcf->ingest_dir.len) {
+    if (slash != NULL && (size_t) (slash - target) > source_dir.len) {
         *slash = '\0';
         (void) rmdir((char *) target);
     }
@@ -2921,7 +3053,7 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
     u_char              key_hash[NGX_MEDIA_KEY_HASH_LEN];
     u_char              key_print[NGX_MEDIA_KEY_PRINT_LEN];
     size_t              key_len = 0;
-    ngx_uint_t          type = NGX_MEDIA_SOURCE_SRT, priority = 0;
+    ngx_uint_t          type = NGX_MEDIA_SOURCE_SRT, priority = 0, keyed;
     ngx_int_t           n;
 
     if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
@@ -2945,6 +3077,9 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
             return NGX_HTTP_BAD_REQUEST;
         }
     }
+
+    keyed = type == NGX_MEDIA_SOURCE_SRT || type == NGX_MEDIA_SOURCE_RTMP
+            || type == NGX_MEDIA_SOURCE_HLS_PUSH;
 
     if (ngx_media_api_json_field(&body, "priority", &priority_text)
         == NGX_OK)
@@ -3023,13 +3158,17 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
      * response and never again.
      */
     if (ngx_media_api_json_field(&body, "key", &given_key) == NGX_OK
-        && given_key.len != 0)
+        && (!keyed || given_key.len != 0))
     {
+        if (!keyed) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"key_not_supported\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
         /*
-         * The operator pasted the string a device already sends.  It is not
-         * derived - it is whatever they typed - so it is stored as its hash
-         * and cannot be read back; that is the price of using someone else's
-         * string, and rotation issues a derived key again.
+         * The operator pasted the string a device already sends. It is stored
+         * as a hash and cannot be read back; rotation issues a derived key.
          */
         if (given_key.len >= NGX_MEDIA_KEY_MAX) {
             *last = ngx_snprintf(*last, end - *last,
@@ -3037,12 +3176,35 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
             return NGX_HTTP_BAD_REQUEST;
         }
 
+        if (type == NGX_MEDIA_SOURCE_HLS_PUSH) {
+            ngx_uint_t  i;
+            u_char      c;
+
+            if (given_key.data[0] == '.') {
+                *last = ngx_snprintf(*last, end - *last,
+                                     "{\"error\":\"key_not_path_safe\"}");
+                return NGX_HTTP_BAD_REQUEST;
+            }
+
+            for (i = 0; i < given_key.len; i++) {
+                c = given_key.data[i];
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                      || (c >= '0' && c <= '9') || c == '-' || c == '_'
+                      || c == '.'))
+                {
+                    *last = ngx_snprintf(*last, end - *last,
+                                         "{\"error\":\"key_not_path_safe\"}");
+                    return NGX_HTTP_BAD_REQUEST;
+                }
+            }
+        }
+
         ngx_memcpy(key, given_key.data, given_key.len);
         key_len = given_key.len;
         ngx_media_key_hash(key, key_len, key_hash);
         ngx_media_key_print(key_hash, key_print);
 
-    } else {
+    } else if (keyed) {
         if (ngx_media_key_nonce(key_nonce) != NGX_OK) {
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"key_nonce_failed\"}");
@@ -3057,15 +3219,21 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
      * checked here rather than at connect time: a key that names two sources
      * is a provisioning mistake, and refusing it now says so once.
      */
-    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
-    key_owner = NULL;
+    if (keyed) {
+        /*
+         * A key resolves to exactly one source across the whole graph, so it
+         * is checked here rather than at connect time.
+         */
+        registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+        key_owner = NULL;
 
-    if (ngx_media_graph_source_by_key(registry, key_hash, &key_owner)
-        != NULL)
-    {
-        *last = ngx_snprintf(*last, end - *last,
-                             "{\"error\":\"key_in_use\"}");
-        return NGX_HTTP_BAD_REQUEST;
+        if (ngx_media_graph_source_by_key(registry, key_hash, &key_owner)
+            != NULL)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"key_in_use\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
     }
 
     /*
@@ -3101,19 +3269,21 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    if (nonce_set) {
-        ngx_media_source_key_nonce(source, key_nonce);
+    if (keyed) {
+        if (nonce_set) {
+            ngx_media_source_key_nonce(source, key_nonce);
 
-        if (ngx_media_api_source_key(source, key, sizeof(key), &key_len,
-                                     key_hash, key_print) != NGX_OK)
-        {
-            *last = ngx_snprintf(*last, end - *last,
-                                 "{\"error\":\"key_derive_failed\"}");
-            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+            if (ngx_media_api_source_key(source, key, sizeof(key), &key_len,
+                                         key_hash, key_print) != NGX_OK)
+            {
+                *last = ngx_snprintf(*last, end - *last,
+                                     "{\"error\":\"key_derive_failed\"}");
+                return NGX_HTTP_INTERNAL_SERVER_ERROR;
+            }
         }
-    }
 
-    ngx_media_source_key_set(source, key_hash, key_print);
+        ngx_media_source_key_set(source, key_hash, key_print);
+    }
     ngx_media_source_touch(source);
     ngx_media_stream_touch(stream);
 
@@ -3127,11 +3297,7 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    /*
-     * The plaintext, here and nowhere else: this response is the one place a
-     * key can be read, which is what makes a bearer credential out of it.
-     */
-    {
+    if (keyed) {
         ngx_str_t  issued, print_str;
 
         issued.data = key;
@@ -3140,11 +3306,15 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
         print_str.len = NGX_MEDIA_KEY_PRINT_LEN;
 
         *last = ngx_snprintf(*last, end - *last, ",\"key\":\"%V\"", &issued);
-
         *last = ngx_snprintf(*last, end - *last,
                              ",\"key_print\":\"%V\","
                              "\"revision\":%uL,\"created\":true}",
                              &print_str, source->revision);
+
+    } else {
+        *last = ngx_snprintf(*last, end - *last,
+                             ",\"revision\":%uL,\"created\":true}",
+                             source->revision);
     }
 
     return NGX_HTTP_CREATED;
@@ -3162,6 +3332,12 @@ ngx_media_api_source_key(ngx_media_source_t *source, u_char *out, size_t cap,
     const u_char  *master;
     size_t         master_len = 0;
 
+    if (source->type != NGX_MEDIA_SOURCE_SRT
+        && source->type != NGX_MEDIA_SOURCE_RTMP
+        && source->type != NGX_MEDIA_SOURCE_HLS_PUSH)
+    {
+        return NGX_DECLINED;
+    }
     master = ngx_media_ingest_secret(&master_len);
 
     if (master == NULL) {
@@ -3204,6 +3380,15 @@ ngx_media_api_source_rotate(ngx_media_stream_t *stream, ngx_str_t *source_id,
         *last = ngx_snprintf(*last, end - *last,
                              "{\"error\":\"source_not_found\"}");
         return NGX_HTTP_NOT_FOUND;
+    }
+
+    if (source->type != NGX_MEDIA_SOURCE_SRT
+        && source->type != NGX_MEDIA_SOURCE_RTMP
+        && source->type != NGX_MEDIA_SOURCE_HLS_PUSH)
+    {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"key_not_supported\"}");
+        return NGX_HTTP_BAD_REQUEST;
     }
 
     /*
@@ -3470,14 +3655,22 @@ ngx_media_api_sources(ngx_http_request_t *r, ngx_media_stream_t *stream,
             return NGX_HTTP_NOT_FOUND;
         }
 
+        if (source->type != NGX_MEDIA_SOURCE_SRT
+            && source->type != NGX_MEDIA_SOURCE_RTMP
+            && source->type != NGX_MEDIA_SOURCE_HLS_PUSH)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"key_not_supported\"}");
+            return NGX_HTTP_CONFLICT;
+        }
+
         if (ngx_media_api_source_key(source, key, sizeof(key), &key_len,
                                      key_hash, key_print) != NGX_OK)
         {
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"key_not_readable\","
-                                 "\"reason\":\"this source's key was supplied "
-                                 "by the operator, or no ingest secret is "
-                                 "configured\"}");
+                                 "\"reason\":\"the key was supplied by the "
+                                 "operator, or no ingest secret is configured\"}");
             return NGX_HTTP_CONFLICT;
         }
 
