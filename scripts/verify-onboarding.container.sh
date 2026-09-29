@@ -55,6 +55,7 @@ pid logs/nginx.pid;
 events { worker_connections 256; }
 
 media_hls /var/lib/nginx/media/hls;
+media_ingest_secret /var/lib/nginx/media/ingest.secret;
 media_srt_listen 127.0.0.1:9000;
 
 http {

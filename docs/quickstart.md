@@ -29,6 +29,7 @@ pid logs/nginx.pid;
 events { worker_connections 256; }
 
 media_hls /var/lib/nginx/media/hls;
+media_ingest_secret /var/lib/nginx/media/ingest.secret;
 
 http {
     server {
