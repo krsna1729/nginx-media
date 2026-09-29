@@ -28,56 +28,61 @@ print_is_hex(const u_char *print)
 int
 main(void)
 {
-    u_char      key[NGX_MEDIA_KEY_MAX], other[NGX_MEDIA_KEY_MAX];
+    ngx_str_t   id = { sizeof("enc1") - 1, (u_char *) "enc1" };
+    ngx_str_t   other_id = { sizeof("enc2") - 1, (u_char *) "enc2" };
+    u_char      master[32], nonce[NGX_MEDIA_KEY_NONCE_LEN];
+    u_char      nonce2[NGX_MEDIA_KEY_NONCE_LEN];
+    u_char      key[NGX_MEDIA_KEY_MAX], again[NGX_MEDIA_KEY_MAX];
     u_char      hash[NGX_MEDIA_KEY_HASH_LEN], hash2[NGX_MEDIA_KEY_HASH_LEN];
     u_char      print[NGX_MEDIA_KEY_PRINT_LEN], print2[NGX_MEDIA_KEY_PRINT_LEN];
     size_t      len = 0, len2 = 0;
     ngx_uint_t  i;
 
-    TEST_CASE("issue: the key names its source and carries a secret");
+    memset(master, 0x5a, sizeof(master));
 
-    TEST_ASSERT_EQ_INT(ngx_media_key_issue(key, sizeof(key), &len, hash,
-                                           print),
+    TEST_CASE("nonce: two are different, and none is all zero");
+    TEST_ASSERT_EQ_INT(ngx_media_key_nonce(nonce), NGX_OK);
+    TEST_ASSERT_EQ_INT(ngx_media_key_nonce(nonce2), NGX_OK);
+    TEST_ASSERT(memcmp(nonce, nonce2, sizeof(nonce)) != 0);
+
+    TEST_CASE("derive: the same source and nonce derive the same key");
+    TEST_ASSERT_EQ_INT(ngx_media_key_derive(master, sizeof(master), &id, nonce,
+                                            key, sizeof(key), &len, hash,
+                                            print),
                        NGX_OK);
     TEST_ASSERT_EQ_U64(len, NGX_MEDIA_KEY_SECRET_LEN);
-    /* nothing a transport might treat specially, and nothing from the graph */
-    TEST_ASSERT(memchr(key, '/', len) == NULL);
-    TEST_ASSERT(memchr(key, '-', len) == NULL);
-    TEST_ASSERT(print_is_hex(print));
-
-    TEST_CASE("issue: two keys for one source are different, and both hash");
-
-    TEST_ASSERT_EQ_INT(ngx_media_key_issue(other, sizeof(other), &len2, hash2,
-                                           print2),
+    TEST_ASSERT_EQ_INT(ngx_media_key_derive(master, sizeof(master), &id, nonce,
+                                            again, sizeof(again), &len2,
+                                            hash2, print2),
                        NGX_OK);
     TEST_ASSERT_EQ_U64(len, len2);
-    TEST_ASSERT(memcmp(key, other, len) != 0);
-    TEST_ASSERT(memcmp(hash, hash2, sizeof(hash)) != 0);
-
-    TEST_CASE("hash: the same key hashes the same, a changed byte does not");
-
-    ngx_media_key_hash(key, len, hash2);
+    TEST_ASSERT(memcmp(key, again, len) == 0);
     TEST_ASSERT(memcmp(hash, hash2, sizeof(hash)) == 0);
 
-    other[0] = (u_char) (key[0] == 'l' ? 'm' : 'l');
-    ngx_media_key_hash(other, len, hash2);
-    TEST_ASSERT(memcmp(hash, hash2, sizeof(hash)) != 0);
+    TEST_CASE("derive: a new nonce, another source or another secret differ");
+    TEST_ASSERT_EQ_INT(ngx_media_key_derive(master, sizeof(master), &id,
+                                            nonce2, again, sizeof(again),
+                                            &len2, hash2, print2),
+                       NGX_OK);
+    TEST_ASSERT(memcmp(key, again, len) != 0);
 
-    TEST_CASE("print: the fingerprint is the hash, not the key");
+    TEST_ASSERT_EQ_INT(ngx_media_key_derive(master, sizeof(master), &other_id,
+                                            nonce, again, sizeof(again),
+                                            &len2, hash2, print2),
+                       NGX_OK);
+    TEST_ASSERT(memcmp(key, again, len) != 0);
 
-    ngx_media_key_print(hash2, print2);
-    TEST_ASSERT(print_is_hex(print2));
-    TEST_ASSERT(memcmp(print, print2, NGX_MEDIA_KEY_PRINT_LEN) != 0);
+    master[0] ^= 0xff;
+    TEST_ASSERT_EQ_INT(ngx_media_key_derive(master, sizeof(master), &id, nonce,
+                                            again, sizeof(again), &len2,
+                                            hash2, print2),
+                       NGX_OK);
+    TEST_ASSERT(memcmp(key, again, len) != 0);
+    master[0] ^= 0xff;
 
-    TEST_CASE("issue: a key that does not fit is refused, not truncated");
-
-    TEST_ASSERT_EQ_INT(ngx_media_key_issue(key, 8, &len, hash, print),
-                       NGX_ERROR);
-    TEST_ASSERT_EQ_INT(ngx_media_key_issue(NULL, sizeof(key), &len, hash,
-                                           print),
-                       NGX_ERROR);
-
-    TEST_CASE("the alphabet has no lookalikes: no I, L, O or U");
+    TEST_CASE("the key is path- and name-safe, and has no lookalikes");
+    TEST_ASSERT(memchr(key, '/', len) == NULL);
+    TEST_ASSERT(memchr(key, '-', len) == NULL);
 
     for (i = 0; i < NGX_MEDIA_KEY_SECRET_LEN; i++) {
         u_char c = key[i];
@@ -89,5 +94,24 @@ main(void)
         TEST_ASSERT(c != 'I' && c != 'L' && c != 'O' && c != 'U');
     }
 
+    TEST_CASE("print: the fingerprint is the hash, not the key");
+    ngx_media_key_print(hash, print);
+    ngx_media_key_print(hash2, print2);
+    TEST_ASSERT(print_is_hex(print) && print_is_hex(print2));
+    TEST_ASSERT(memcmp(print, print2, NGX_MEDIA_KEY_PRINT_LEN) != 0);
+
+    TEST_CASE("derive: a key that does not fit is refused, not truncated");
+    TEST_ASSERT_EQ_INT(ngx_media_key_derive(master, sizeof(master), &id, nonce,
+                                            key, 8, &len, hash, print),
+                       NGX_ERROR);
+    TEST_ASSERT_EQ_INT(ngx_media_key_derive(NULL, 0, &id, nonce, key,
+                                            sizeof(key), &len, hash, print),
+                       NGX_ERROR);
+    TEST_ASSERT_EQ_INT(ngx_media_key_derive(master, sizeof(master), NULL, nonce,
+                                            key, sizeof(key), &len, hash,
+                                            print),
+                       NGX_ERROR);
+
     return 0;
 }
+

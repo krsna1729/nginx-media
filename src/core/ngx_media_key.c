@@ -1,5 +1,7 @@
 #include "ngx_media_key.h"
 
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 
@@ -37,39 +39,185 @@ ngx_media_key_print(const u_char *hash, u_char *print)
 }
 
 ngx_int_t
-ngx_media_key_issue(u_char *out, size_t cap, size_t *out_len, u_char *hash,
-    u_char *print)
+ngx_media_key_nonce(u_char *nonce)
 {
-    u_char      secret[NGX_MEDIA_KEY_SECRET_LEN];
+    if (nonce == NULL) {
+        return NGX_ERROR;
+    }
+
+    return RAND_bytes(nonce, NGX_MEDIA_KEY_NONCE_LEN) == 1 ? NGX_OK
+                                                          : NGX_ERROR;
+}
+
+ngx_int_t
+ngx_media_key_derive(const u_char *master, size_t master_len,
+    const ngx_str_t *id, const u_char *nonce, u_char *out, size_t cap,
+    size_t *out_len, u_char *hash, u_char *print)
+{
+    u_char      mac[EVP_MAX_MD_SIZE];
+    unsigned    mac_len = 0;
+    u_char      material[4 + 256 + NGX_MEDIA_KEY_NONCE_LEN];
+    size_t      material_len;
     u_char     *p;
     size_t      i;
 
-    if (out == NULL || out_len == NULL || hash == NULL || print == NULL
+    if (master == NULL || master_len == 0 || id == NULL || nonce == NULL
+        || out == NULL || out_len == NULL || hash == NULL || print == NULL
         || cap < NGX_MEDIA_KEY_SECRET_LEN)
     {
         return NGX_ERROR;
     }
 
+    if (id->len > 256) {
+        return NGX_ERROR;
+    }
+
     /*
-     * The secret comes from the system's CSPRNG.  A key is a credential, and
-     * a guessable one is worse than none: it would be an admission decision
-     * an attacker can make.
+     * The message is the source's id and its nonce, in that order and with
+     * the id's length in front of it: two sources whose ids differ but whose
+     * nonces collide still derive different keys, and an id that contains the
+     * nonce's bytes cannot be confused with a different id.  On the stack:
+     * the material is bounded and small, and a hash of a credential is no
+     * place for an allocation that can fail.
      */
-    if (RAND_bytes(secret, (int) sizeof(secret)) != 1) {
+    material_len = 4 + id->len + NGX_MEDIA_KEY_NONCE_LEN;
+
+    p = material;
+    material[0] = (u_char) (id->len & 0xff);
+    material[1] = (u_char) ((id->len >> 8) & 0xff);
+    material[2] = (u_char) ((id->len >> 16) & 0xff);
+    material[3] = (u_char) ((id->len >> 24) & 0xff);
+    p = material + 4;
+    ngx_memcpy(p, id->data, id->len);
+    p += id->len;
+    ngx_memcpy(p, nonce, NGX_MEDIA_KEY_NONCE_LEN);
+
+    if (HMAC(EVP_sha256(), master, (int) master_len, material, material_len,
+             mac, &mac_len) == NULL)
+    {
         return NGX_ERROR;
     }
 
     p = out;
 
     for (i = 0; i < NGX_MEDIA_KEY_SECRET_LEN; i++) {
-        /* 256 is not a multiple of 32, so take the low five bits */
-        *p++ = ngx_media_key_alphabet[secret[i] & 0x1f];
+        /* the alphabet, indexed by the mac's bytes, wrapping: 26 characters
+         * of 32 values is 130 bits, and the mac has 256 to draw on */
+        *p++ = ngx_media_key_alphabet[mac[i % mac_len] & 0x1f];
     }
 
     *out_len = (size_t) (p - out);
 
     ngx_media_key_hash(out, *out_len, hash);
     ngx_media_key_print(hash, print);
+
+    return NGX_OK;
+}
+
+
+/*
+ * The deployment secret, loaded once before the workers fork.  It lives in
+ * the process rather than in the graph: the graph is replicated to every
+ * worker and written to the shared directory, and a secret there would be a
+ * secret in every dump of it.
+ */
+static u_char   ngx_media_key_master[NGX_MEDIA_KEY_MASTER_LEN];
+static size_t   ngx_media_key_master_len;
+
+const u_char *
+ngx_media_ingest_secret(size_t *len)
+{
+    if (len != NULL) {
+        *len = ngx_media_key_master_len;
+    }
+
+    return ngx_media_key_master_len == 0 ? NULL : ngx_media_key_master;
+}
+
+ngx_int_t
+ngx_media_ingest_secret_load(const ngx_str_t *path, ngx_log_t *log)
+{
+    u_char      buf[NGX_MEDIA_KEY_MASTER_LEN * 4];
+    ngx_fd_t    fd;
+    ssize_t     n;
+    size_t      i;
+
+    if (path == NULL || path->len == 0) {
+        ngx_log_error(NGX_LOG_WARN, log, 0,
+                      "media: no media_ingest_secret configured; ingest keys "
+                      "cannot be issued or read");
+        return NGX_ERROR;
+    }
+
+    fd = ngx_open_file(path->data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+
+    if (fd == NGX_INVALID_FILE) {
+
+        /*
+         * First start: make one.  0600, and it is the one file in a
+         * deployment that must not be readable by anyone else - which is
+         * easier to protect than a key per source scattered through state.
+         */
+        if (RAND_bytes(ngx_media_key_master,
+                       NGX_MEDIA_KEY_MASTER_LEN) != 1)
+        {
+            return NGX_ERROR;
+        }
+
+        fd = ngx_open_file(path->data, NGX_FILE_WRONLY | NGX_FILE_CREATE_OR_OPEN
+                                        | NGX_FILE_TRUNCATE, NGX_FILE_DEFAULT_ACCESS,
+                           0600);
+
+        if (fd == NGX_INVALID_FILE) {
+            ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                          "media: could not create the ingest secret at %V",
+                          path);
+            ngx_media_key_master_len = 0;
+            return NGX_ERROR;
+        }
+
+        n = ngx_write_fd(fd, ngx_media_key_master,
+                         NGX_MEDIA_KEY_MASTER_LEN);
+        ngx_close_file(fd);
+
+        if (n != NGX_MEDIA_KEY_MASTER_LEN) {
+            ngx_media_key_master_len = 0;
+            return NGX_ERROR;
+        }
+
+        ngx_media_key_master_len = NGX_MEDIA_KEY_MASTER_LEN;
+
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: generated the ingest secret at %V", path);
+        return NGX_OK;
+    }
+
+    n = ngx_read_fd(fd, buf, sizeof(buf));
+    ngx_close_file(fd);
+
+    if (n <= 0) {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "media: the ingest secret at %V is empty", path);
+        return NGX_ERROR;
+    }
+
+    /*
+     * The file may hold hex or raw bytes; either way it is used as it is, so
+     * an operator can supply their own secret in whatever form their secret
+     * manager produces.
+     */
+    if ((size_t) n > sizeof(buf)) {
+        n = (ssize_t) sizeof(buf);
+    }
+
+    for (i = 0; i < NGX_MEDIA_KEY_MASTER_LEN; i++) {
+        ngx_media_key_master[i] = buf[(size_t) n > i ? i : i % (size_t) n];
+    }
+
+    ngx_media_key_master_len = NGX_MEDIA_KEY_MASTER_LEN;
+
+    ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                  "media: loaded the ingest secret from %V", path);
 
     return NGX_OK;
 }

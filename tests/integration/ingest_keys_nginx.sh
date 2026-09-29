@@ -50,6 +50,7 @@ pid logs/nginx.pid;
 events { worker_connections 256; }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 media_srt_listen 127.0.0.1:$SRT_PORT;
 media_rtmp_listen 127.0.0.1:$RTMP_PORT;
 media_rtmp_app live;
@@ -153,6 +154,12 @@ assert doc.get("active") in ("enc1", "enc2"), doc.get("active")
 PY
 wait || true
 echo "   two publishers attached as two sources, each with its own priority"
+
+echo "== the key is readable again, whenever the encoder is configured"
+read_back="$(api "$API/streams/live/one/sources/enc1/key" | key_of)"
+[ "$read_back" = "$key" ] \
+    || fail "the key read back is not the key issued ($read_back vs $key)"
+echo "   the same key comes back"
 
 echo "== rotation: the old key is refused at once"
 rotated="$(api -X POST "$API/streams/live/one/sources/enc1/rotate")"

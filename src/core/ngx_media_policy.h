@@ -30,6 +30,7 @@ typedef struct {
     /* static outputs applied to every stream (per-stream configuration
      * arrives with the stream database) */
     ngx_str_t    hls_path;
+    ngx_str_t    ingest_secret_path;   /* media_ingest_secret */
     ngx_str_t    record_program_path;
     ngx_str_t    record_raw_path;
     ngx_str_t    record_iso_path;

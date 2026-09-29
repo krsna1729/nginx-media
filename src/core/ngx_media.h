@@ -57,6 +57,7 @@ typedef struct ngx_media_source_s ngx_media_source_t;
  */
 #define NGX_MEDIA_SOURCE_KEY_HASH   32
 #define NGX_MEDIA_SOURCE_KEY_PRINT  12
+#define NGX_MEDIA_SOURCE_KEY_NONCE  16
 typedef struct ngx_media_source_ops_s ngx_media_source_ops_t;
 
 /* selection policy (goal doc 8) */
@@ -186,6 +187,15 @@ struct ngx_media_source_s {
     u_char                  key_hash[NGX_MEDIA_SOURCE_KEY_HASH];
     u_char                  key_print[NGX_MEDIA_SOURCE_KEY_PRINT];
     unsigned                key_set:1;
+
+    /*
+     * The nonce the key is derived from, not the key: the key is recomputed
+     * from this and the deployment secret whenever an operator asks for it,
+     * which is what lets provisioning and encoder configuration happen days
+     * apart without a plaintext key sitting in the state.
+     */
+    u_char                  key_nonce[NGX_MEDIA_SOURCE_KEY_NONCE];
+    unsigned                key_nonce_set:1;
     ngx_str_t               ca_file;   /* desired HLS pull trust anchor */
     ngx_uint_t              state;     /* activation gate state */
     ngx_msec_t              last_media;

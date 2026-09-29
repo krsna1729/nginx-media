@@ -93,6 +93,10 @@ void ngx_media_source_lease_end(ngx_media_source_t *source);
 void ngx_media_source_key_set(ngx_media_source_t *source,
     const u_char *hash, const u_char *print);
 
+/* the nonce the key is derived from: not a secret, but never derived without */
+void ngx_media_source_key_nonce(ngx_media_source_t *source,
+    const u_char *nonce);
+
 /* constant-time: a key comparison must not leak how far it matched */
 ngx_uint_t ngx_media_source_key_matches(const ngx_media_source_t *source,
     const u_char *hash);

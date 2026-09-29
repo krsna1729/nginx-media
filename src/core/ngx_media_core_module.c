@@ -19,6 +19,7 @@
 #include "ngx_media_route.h"
 #include "ngx_media_policy.h"
 #include "ngx_media_egress_manager.h"
+#include "ngx_media_key.h"
 
 static void *ngx_media_core_create_conf(ngx_cycle_t *cycle);
 static ngx_int_t ngx_media_core_init_module(ngx_cycle_t *cycle);
@@ -124,6 +125,13 @@ static ngx_command_t ngx_media_core_commands[] = {
       ngx_media_switchback_cmd,
       0,
       0,
+      NULL },
+
+    { ngx_string("media_ingest_secret"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      0,
+      offsetof(ngx_media_policy_t, ingest_secret_path),
       NULL },
 
     { ngx_string("media_hls"),
@@ -444,6 +452,22 @@ ngx_media_egress_workers_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 static ngx_int_t
 ngx_media_core_init_module(ngx_cycle_t *cycle)
 {
+    {
+        /*
+         * Before the workers fork: the secret is loaded once and inherited,
+         * so every worker derives the same key for the same source and no
+         * worker reads the file itself.
+         */
+        ngx_media_policy_t  *policy;
+
+        policy = ngx_media_policy_get(cycle);
+
+        if (policy != NULL && policy->ingest_secret_path.len != 0) {
+            (void) ngx_media_ingest_secret_load(&policy->ingest_secret_path,
+                                                cycle->log);
+        }
+    }
+
     ngx_media_policy_t  *policy;
 
     policy = ngx_media_policy_get(cycle);

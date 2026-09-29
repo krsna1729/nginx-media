@@ -46,8 +46,33 @@
 /* room for the secret, and a NUL a caller may want to add */
 #define NGX_MEDIA_KEY_MAX  (NGX_MEDIA_KEY_SECRET_LEN + 8)
 
-ngx_int_t ngx_media_key_issue(u_char *out, size_t cap, size_t *out_len,
-    u_char *hash, u_char *print);
+/*
+ * A key is derived, not stored: HMAC-SHA256 over the source's id and a
+ * per-source nonce, under one deployment secret.  The graph keeps the nonce
+ * and the hash, so the operator can be given the key whenever the encoder is
+ * actually being configured - days after the source was created, by someone
+ * else - while a dump of the graph, of the shared state or of a core file
+ * carries nothing that can publish.  Rotating is a new nonce.
+ */
+#define NGX_MEDIA_KEY_NONCE_LEN   16
+
+ngx_int_t ngx_media_key_derive(const u_char *master, size_t master_len,
+    const ngx_str_t *id, const u_char *nonce, u_char *out, size_t cap,
+    size_t *out_len, u_char *hash, u_char *print);
+
+/* a fresh nonce, from the same entropy source a key used to come from */
+ngx_int_t ngx_media_key_nonce(u_char *nonce);
+
+/*
+ * The deployment secret every key is derived under.  `media_ingest_secret`
+ * names the file; the core loads it before forking, or generates one (0600)
+ * when the file is not there.  NULL until then, which the API reports as a
+ * configuration error rather than deriving a key from nothing.
+ */
+#define NGX_MEDIA_KEY_MASTER_LEN  32
+
+ngx_int_t ngx_media_ingest_secret_load(const ngx_str_t *path, ngx_log_t *log);
+const u_char *ngx_media_ingest_secret(size_t *len);
 
 /* the hash and fingerprint of a key a publisher presented */
 void ngx_media_key_hash(const u_char *key, size_t len, u_char *hash);

@@ -93,6 +93,8 @@ static ngx_int_t ngx_media_api_dispatch(ngx_http_request_t *r,
     ngx_media_registry_t *registry, u_char **last, u_char *end);
 static ngx_int_t ngx_media_api_stream_json(u_char **last, u_char *end,
     ngx_media_stream_t *stream);
+static ngx_int_t ngx_media_api_source_key(ngx_media_source_t *source,
+    u_char *out, size_t cap, size_t *out_len, u_char *hash, u_char *print);
 static ngx_int_t ngx_media_api_sources_json(u_char **last, u_char *end,
     ngx_media_stream_t *stream);
 static ngx_int_t ngx_media_api_not_owner(ngx_media_stream_t *stream,
@@ -2911,6 +2913,8 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
     ngx_str_t           source_path = ngx_null_string;
     ngx_str_t           source_ca = ngx_null_string;
     ngx_str_t           given_key = ngx_null_string;
+    u_char              key_nonce[NGX_MEDIA_SOURCE_KEY_NONCE];
+    ngx_uint_t          nonce_set = 0;
     ngx_media_source_t *source;
     ngx_media_registry_t *registry;
     ngx_media_stream_t  *key_owner;
@@ -3022,6 +3026,12 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
     if (ngx_media_api_json_field(&body, "key", &given_key) == NGX_OK
         && given_key.len != 0)
     {
+        /*
+         * The operator pasted the string a device already sends.  It is not
+         * derived - it is whatever they typed - so it is stored as its hash
+         * and cannot be read back; that is the price of using someone else's
+         * string, and rotation issues a derived key again.
+         */
         if (given_key.len >= NGX_MEDIA_KEY_MAX) {
             *last = ngx_snprintf(*last, end - *last,
                                  "{\"error\":\"key_too_long\"}");
@@ -3030,17 +3040,18 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
 
         ngx_memcpy(key, given_key.data, given_key.len);
         key_len = given_key.len;
+        ngx_media_key_hash(key, key_len, key_hash);
+        ngx_media_key_print(key_hash, key_print);
 
-    } else if (ngx_media_key_issue(key, sizeof(key), &key_len, key_hash,
-                                   key_print) != NGX_OK)
-    {
-        *last = ngx_snprintf(*last, end - *last,
-                             "{\"error\":\"key_issue_failed\"}");
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    } else {
+        if (ngx_media_key_nonce(key_nonce) != NGX_OK) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"key_nonce_failed\"}");
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        nonce_set = 1;
     }
-
-    ngx_media_key_hash(key, key_len, key_hash);
-    ngx_media_key_print(key_hash, key_print);
 
     /*
      * A key resolves to exactly one source across the whole graph, so it is
@@ -3091,6 +3102,18 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
+    if (nonce_set) {
+        ngx_media_source_key_nonce(source, key_nonce);
+
+        if (ngx_media_api_source_key(source, key, sizeof(key), &key_len,
+                                     key_hash, key_print) != NGX_OK)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"key_derive_failed\"}");
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+    }
+
     ngx_media_source_key_set(source, key_hash, key_print);
     ngx_media_source_touch(source);
     ngx_media_stream_touch(stream);
@@ -3129,6 +3152,33 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
 }
 
 /*
+ * The key a source answers to, derived on demand: the graph holds the nonce
+ * and the hash, the deployment holds the secret, and the operator is given
+ * the token whenever the encoder is actually being configured.
+ */
+static ngx_int_t
+ngx_media_api_source_key(ngx_media_source_t *source, u_char *out, size_t cap,
+    size_t *out_len, u_char *hash, u_char *print)
+{
+    const u_char  *master;
+    size_t         master_len = 0;
+
+    master = ngx_media_ingest_secret(&master_len);
+
+    if (master == NULL) {
+        return NGX_DECLINED;
+    }
+
+    if (!source->key_nonce_set) {
+        return NGX_DECLINED;
+    }
+
+    return ngx_media_key_derive(master, master_len, &source->id,
+                                source->key_nonce, out, cap, out_len, hash,
+                                print);
+}
+
+/*
  * POST .../sources/{source}/rotate
  *
  * Issues a new key for a source and invalidates the old one at once: no grace
@@ -3145,6 +3195,7 @@ ngx_media_api_source_rotate(ngx_media_stream_t *stream, ngx_str_t *source_id,
     u_char                key[NGX_MEDIA_KEY_MAX];
     u_char                key_hash[NGX_MEDIA_KEY_HASH_LEN];
     u_char                key_print[NGX_MEDIA_KEY_PRINT_LEN];
+    u_char                nonce[NGX_MEDIA_SOURCE_KEY_NONCE];
     ngx_str_t             issued, print_str;
     size_t                key_len = 0;
 
@@ -3162,11 +3213,19 @@ ngx_media_api_source_rotate(ngx_media_stream_t *stream, ngx_str_t *source_id,
      * a publisher attaching to the wrong source.
      */
     for (;;) {
-        if (ngx_media_key_issue(key, sizeof(key), &key_len, key_hash, key_print)
-            != NGX_OK)
+        if (ngx_media_key_nonce(nonce) != NGX_OK) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"key_nonce_failed\"}");
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        ngx_media_source_key_nonce(source, nonce);
+
+        if (ngx_media_api_source_key(source, key, sizeof(key), &key_len,
+                                     key_hash, key_print) != NGX_OK)
         {
             *last = ngx_snprintf(*last, end - *last,
-                                 "{\"error\":\"key_issue_failed\"}");
+                                 "{\"error\":\"key_derive_failed\"}");
             return NGX_HTTP_INTERNAL_SERVER_ERROR;
         }
 
@@ -3383,6 +3442,62 @@ ngx_media_api_sources(ngx_http_request_t *r, ngx_media_stream_t *stream,
         }
 
         return NGX_DECLINED;
+    }
+
+    /*
+     * GET .../sources/{id}/key
+     *
+     * The key is derived, so an operator can ask for it whenever the encoder
+     * is actually being configured - days after the source was created, by
+     * someone else.  A deliberate read, recorded in the access log, rather
+     * than a credential in every source listing.
+     */
+    if (r->method == NGX_HTTP_GET
+        && verb.len == sizeof("key") - 1
+        && ngx_strncmp(verb.data, "key", sizeof("key") - 1) == 0)
+    {
+        ngx_media_source_t  *source;
+        u_char               key[NGX_MEDIA_KEY_MAX];
+        u_char               key_hash[NGX_MEDIA_KEY_HASH_LEN];
+        u_char               key_print[NGX_MEDIA_KEY_PRINT_LEN];
+        ngx_str_t            issued, print_str;
+        size_t               key_len = 0;
+
+        source = ngx_media_stream_source_find(stream, &source_id);
+
+        if (source == NULL) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"source_not_found\"}");
+            return NGX_HTTP_NOT_FOUND;
+        }
+
+        if (ngx_media_api_source_key(source, key, sizeof(key), &key_len,
+                                     key_hash, key_print) != NGX_OK)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"key_not_readable\","
+                                 "\"reason\":\"this source's key was supplied "
+                                 "by the operator, or no ingest secret is "
+                                 "configured\"}");
+            return NGX_HTTP_CONFLICT;
+        }
+
+        issued.data = key;
+        issued.len = key_len;
+        print_str.data = key_print;
+        print_str.len = NGX_MEDIA_KEY_PRINT_LEN;
+
+        *last = ngx_snprintf(*last, end - *last, "{\"id\":");
+
+        if (ngx_media_api_json_string(last, end, &source->id) != NGX_OK) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        *last = ngx_snprintf(*last, end - *last,
+                             ",\"key\":\"%V\",\"key_print\":\"%V\"}",
+                             &issued, &print_str);
+
+        return NGX_HTTP_OK;
     }
 
     if (r->method != NGX_HTTP_POST) {

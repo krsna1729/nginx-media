@@ -104,6 +104,8 @@ typedef struct {
     uint32_t   key_set;           /* the source answers to a key */
     u_char     key_hash[NGX_MEDIA_SOURCE_KEY_HASH];
     u_char     key_print[NGX_MEDIA_SOURCE_KEY_PRINT];
+    u_char     key_nonce[NGX_MEDIA_SOURCE_KEY_NONCE];
+    uint32_t   key_nonce_set;     /* the nonce the key is derived from */
 } ngx_media_graph_wire_t;
 
 /* a decoded operation; the strings point into the message payload */
@@ -126,6 +128,8 @@ typedef struct {
     ngx_uint_t  key_set;
     u_char      key_hash[NGX_MEDIA_SOURCE_KEY_HASH];
     u_char      key_print[NGX_MEDIA_SOURCE_KEY_PRINT];
+    ngx_uint_t  key_nonce_set;
+    u_char      key_nonce[NGX_MEDIA_SOURCE_KEY_NONCE];
 } ngx_media_graph_op_t;
 
 /*

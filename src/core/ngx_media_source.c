@@ -364,6 +364,17 @@ ngx_media_source_key_set(ngx_media_source_t *source, const u_char *hash,
     source->key_set = 1;
 }
 
+void
+ngx_media_source_key_nonce(ngx_media_source_t *source, const u_char *nonce)
+{
+    if (source == NULL || nonce == NULL) {
+        return;
+    }
+
+    ngx_memcpy(source->key_nonce, nonce, NGX_MEDIA_SOURCE_KEY_NONCE);
+    source->key_nonce_set = 1;
+}
+
 ngx_uint_t
 ngx_media_source_key_matches(const ngx_media_source_t *source,
     const u_char *hash)
