@@ -853,8 +853,6 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
     ngx_uint_t           first = 1;
     ngx_str_t            key_print_str;
 
-    key_print_str.len = NGX_MEDIA_KEY_PRINT_LEN;
-
     *last = ngx_snprintf(*last, end - *last, "[");
 
     for (q = ngx_queue_head(&stream->sources);
@@ -863,6 +861,7 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
     {
         source = ngx_queue_data(q, ngx_media_source_t, queue);
         key_print_str.data = source->key_print;
+        key_print_str.len = source->key_set ? NGX_MEDIA_KEY_PRINT_LEN : 0;
 
         *last = ngx_snprintf(*last, end - *last, "%s{\"id\":",
                              first ? "" : ",");

@@ -25,6 +25,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/hls-push-conformance"
 SRT_PORT=24670
@@ -55,22 +56,6 @@ stop_instance() {
     return 0
 }
 
-# A publisher attaches with a provisioned key, and the key is read back from
-# the API: the source is created first (idempotent), then asked for its key,
-# which is what an operator configuring an encoder does.
-ingest_key() {   # <program> <source id> [srt|rtmp]
-    local program="$1" id="$2" proto="${3:-srt}"
-    # the program first: a source cannot be created before the stream it
-    # belongs to, and both calls are idempotent, so this is safe to repeat
-    curl -fsS -X POST -H 'Content-Type: application/json' \
-        -d "{\"application\":\"live\",\"name\":\"$program\"}" \
-        "$API/streams" >/dev/null 2>&1 || true
-    curl -fsS -X POST -H 'Content-Type: application/json' \
-        -d "{\"id\":\"$id\",\"type\":\"$proto\",\"priority\":100}" \
-        "$API/streams/live/$program/sources" >/dev/null 2>&1 || true
-    curl -fsS "$API/streams/live/$program/sources/$id/key" 2>/dev/null \
-        | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"
-}
 
 cleanup() {
     local pid
@@ -214,7 +199,6 @@ events { worker_connections 256; }
 media_hls $RUN/hls;
 media_ingest_secret $RUN/ingest.secret;
 media_srt_listen 127.0.0.1:$SRT_PORT;
-media_srt_source_priority encoder-a 100;
 
 http {
     access_log off;
@@ -270,7 +254,7 @@ timeout 90 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -t 44 -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "conf" "encoder-a")" \
+    "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live conf encoder-a 100)" \
     >"$RUN/pub.log" 2>&1 &
 PUBLISHER=$!
 PIDS+=($PUBLISHER)

@@ -357,8 +357,8 @@ frames, and feeds the source gate.
 Selection: health is layered evidence (transport up, data flowing, container
 valid, timestamps advancing, media valid, tracks compatible, source eligible) —
 never a blended score.  A source is eligible or it is not; the winner is the
-highest configured priority among eligible sources, and priority comes from
-operator configuration, never from an encoder-supplied stream id field.
+highest-priority eligible source, and priority is assigned by the control plane
+when it creates that source, never from an encoder-supplied stream id field.
 
 Program: the timeline maps the selected source onto program timestamps by
 composition offset, preserving `pts - dts`, and every switch bumps the

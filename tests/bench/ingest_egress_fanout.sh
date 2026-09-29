@@ -79,6 +79,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${CAPACITY_NGINX:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/ingest-egress-fanout"
 
@@ -840,6 +841,7 @@ write_config() {   # <workers> <hls yes|no> <rtmp yes|no>
         echo
         echo "events { worker_connections 8192; }"
         echo
+        echo "media_ingest_secret $RUN/ingest.secret;"
 
         [ "$2" = yes ] && echo "media_hls $RUN/hls;"
 
@@ -925,7 +927,7 @@ publish() {   # <endpoint port> <name> <source> [muxrate]
 
     $(pin "$CAPACITY_PUBLISHER_CPUS" | tr '\n' ' ') ffmpeg -hide_banner -loglevel error -re -stream_loop -1 -i "$3" -c copy \
         "${rate[@]}" -f mpegts \
-        "srt://127.0.0.1:$1?mode=caller&streamid=#!::r=live/$2,m=publish,s=enc-$2" \
+        "$(media_test_srt_publisher_url "$(api)" 127.0.0.1 "$1" live "$2" "enc-$2" 0)" \
         >/dev/null 2>&1 &
 }
 

@@ -72,12 +72,6 @@ extern ngx_media_srt_ops_t  ngx_media_srt_udp_ops
 
 #include <ngx_event.h>
 
-#define NGX_MEDIA_SRT_MAX_PRIORITIES 16
-
-typedef struct {
-    ngx_str_t   id;        /* publisher identity from the stream id */
-    ngx_uint_t  priority;  /* trusted operator configuration */
-} ngx_media_srt_priority_t;
 
 /*
  * SRT encryption (goal doc 11).  The passphrase is stored here and the
@@ -141,8 +135,6 @@ typedef struct {
      */
     ngx_str_t                bond;
     unsigned                 bond_set:1;
-    ngx_media_srt_priority_t priorities[NGX_MEDIA_SRT_MAX_PRIORITIES];
-    ngx_uint_t               npriorities;
 
     /* SRT destinations fed from the shared program preparation */
     ngx_media_srt_output_conf_t  outputs[NGX_MEDIA_SRT_MAX_OUTPUTS];
@@ -192,8 +184,6 @@ static void ngx_media_srt_handler(ngx_event_t *ev);
 static ngx_int_t ngx_media_srt_parse_endpoint(ngx_pool_t *pool,
     const ngx_str_t *endpoint, ngx_str_t *host, ngx_uint_t *port);
 
-static char *ngx_media_srt_priority_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
-    void *conf);
 static char *ngx_media_srt_output_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_media_srt_backend_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
@@ -276,12 +266,6 @@ static ngx_command_t ngx_media_srt_commands[] = {
       0,
       NULL },
 
-    { ngx_string("media_srt_source_priority"),
-      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2,
-      ngx_media_srt_priority_cmd,
-      0,
-      0,
-      NULL },
 
     { ngx_string("media_srt_crypto"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1|NGX_CONF_TAKE2|NGX_CONF_TAKE3
@@ -607,6 +591,24 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
         }
     }
 
+    {
+        ngx_uint_t  j;
+
+        for (j = 0; j < NGX_MEDIA_SRT_MAX_SESSIONS; j++) {
+            if (ngx_media_srt_slots[j].used
+                && &ngx_media_srt_slots[j] != session
+                && ngx_media_srt_slots[j].source == source)
+            {
+                ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                              "media: srt session=%uL detaching superseded "
+                              "session=%uL for source %V",
+                              session->id, ngx_media_srt_slots[j].id,
+                              &source->id);
+                ngx_media_srt_slots[j].source = NULL;
+                ngx_media_srt_slots[j].stream = NULL;
+            }
+        }
+    }
     session->stream = stream;
     session->source = source;
 
@@ -700,9 +702,23 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
     }
 
     if (session->source != NULL) {
-        ngx_media_health_transport(&session->source->health, 0,
-                                   ngx_current_msec);
+        ngx_uint_t  other_attached = 0;
+        ngx_uint_t  j;
 
+        for (j = 0; j < NGX_MEDIA_SRT_MAX_SESSIONS; j++) {
+            if (ngx_media_srt_slots[j].used
+                && &ngx_media_srt_slots[j] != session
+                && ngx_media_srt_slots[j].source == session->source)
+            {
+                other_attached = 1;
+                break;
+            }
+        }
+
+        if (!other_attached) {
+            ngx_media_health_transport(&session->source->health, 0,
+                                       ngx_current_msec);
+        }
         /*
          * The source stays: it is provisioned state with a key the operator
          * configured, and a publisher that disconnects is a publisher that
@@ -1210,32 +1226,6 @@ ngx_media_srt_demux_errors(const ngx_media_ts_demux_stats_t *stats)
            + stats->crc_errors + stats->pes_errors;
 }
 
-static char *
-ngx_media_srt_priority_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
-{
-    ngx_media_srt_main_conf_t  *mcf = conf;
-    ngx_str_t                  *value;
-    ngx_int_t                   priority;
-
-    (void) cmd;
-
-    value = cf->args->elts;
-
-    if (mcf->npriorities >= NGX_MEDIA_SRT_MAX_PRIORITIES) {
-        return "too many media_srt_source_priority directives";
-    }
-
-    priority = ngx_atoi(value[2].data, value[2].len);
-    if (priority == NGX_ERROR || priority < 0 || priority > 65535) {
-        return "invalid priority";
-    }
-
-    mcf->priorities[mcf->npriorities].id = value[1];
-    mcf->priorities[mcf->npriorities].priority = (ngx_uint_t) priority;
-    mcf->npriorities++;
-
-    return NGX_CONF_OK;
-}
 
 static void *
 ngx_media_srt_create_conf(ngx_cycle_t *cycle)

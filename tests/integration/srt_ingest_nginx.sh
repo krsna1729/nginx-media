@@ -36,6 +36,7 @@ events {
     worker_connections 256;
 }
 
+media_ingest_secret $RUN/ingest.secret;
 media_srt_listen 127.0.0.1:$PORT;
 
 http {

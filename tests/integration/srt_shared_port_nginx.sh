@@ -63,6 +63,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 RUN="$ROOT/.build/srt-shared-port"
 SHARED="$RUN/shared"
 CONTROL="$RUN/control"
@@ -197,14 +198,21 @@ PY
 # the run so that "it stopped" can only mean its session ended.  The pid is
 # remembered so the reload measurement can ask the process whether it is still
 # there, and so cleanup can only ever kill what this script started.
-publish() {  # <port> <stream name> <seconds> <tag>
+publish() {  # <port> <stream name> <seconds> <source id>
+    local api="http://127.0.0.1:$(( $1 + 1 ))/media/api/v1" url
+
+    url="$(media_test_srt_publisher_url "$api" 127.0.0.1 "$1" \
+        live "$2" "$4" 0)" || fail "could not provision $2/$4"
+    # Source state replicates to the shared listener's other workers after the
+    # API response; the endpoint can route the publisher to any of them.
+    sleep 2
+
     ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "testsrc2=size=320x240:rate=25" \
         -f lavfi -i "sine=frequency=440:sample_rate=48000" -ac 2 \
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
-        -t "$3" -f mpegts \
-        "srt://127.0.0.1:$1?mode=caller&streamid=#!::r=live/$2,m=publish,s=$4" \
+        -t "$3" -f mpegts "$url" \
         >"$RUN/pub-$4.log" 2>&1 &
 
     PUBS+=( $! )
@@ -355,8 +363,9 @@ pid logs/nginx.pid;
 
 events { worker_connections 256; }
 
-media_srt_listen_shared 127.0.0.1:$SHR_SRT_PORT;
+media_ingest_secret $SHARED/ingest.secret;
 
+media_srt_listen_shared 127.0.0.1:$SHR_SRT_PORT;
 http {
     access_log off;
 
@@ -462,7 +471,7 @@ done
 
 i=0
 while [ "$i" -lt "$STREAMS" ]; do
-    wait_for "$SHR_LOG" "srt source open app=live stream=${NAMES[$i]} " 1 \
+    wait_for "$SHR_LOG" "srt source open live/${NAMES[$i]} source=" 1 \
         || fail "publisher ${NAMES[$i]} was never accepted"
 
     # media reached the program, which lives on the stream's owner
@@ -472,7 +481,7 @@ while [ "$i" -lt "$STREAMS" ]; do
     i=$(( i + 1 ))
 done
 
-ACCEPTED_PIDS="$(pids_of "$SHR_LOG" 'srt source open app=live' | sort -u)"
+ACCEPTED_PIDS="$(pids_of "$SHR_LOG" 'srt source open live/' | sort -u)"
 ACCEPTED_N="$(printf '%s\n' "$ACCEPTED_PIDS" | grep -c . || true)"
 
 [ "$ACCEPTED_N" -ge 2 ] \
@@ -488,7 +497,7 @@ i=0
 while [ "$i" -lt "$STREAMS" ]; do
     OWNER="${OWNERS[$i]}"
     NAME="${NAMES[$i]}"
-    ACC="$(pid_of "$SHR_LOG" "srt source open app=live stream=$NAME ")"
+    ACC="$(pid_of "$SHR_LOG" "srt source open live/$NAME source=")"
     OWNPID="$(worker_pid "$SHR_LOG" "$OWNER")"
 
     REPORTED="$(api_owner "$SHR_API" "$NAME")" \
@@ -574,7 +583,7 @@ wait_for "$SHR_LOG" "srt listener ready on 127.0.0.1:$SHR_SRT_PORT" "$(( WORKERS
 
 SURVIVOR="$(owner_name 0 "$WORKERS" "after")"
 publish "$SHR_SRT_PORT" "$SURVIVOR" 4 "after"
-wait_for "$SHR_LOG" "srt source open app=live stream=$SURVIVOR " 1 \
+wait_for "$SHR_LOG" "srt source open live/$SURVIVOR source=" 1 \
     || fail "a publisher after the reload was not accepted on the shared endpoint"
 
 wait_frames "$SHR_API" "$SURVIVOR" 1 \
@@ -598,8 +607,9 @@ pid logs/nginx.pid;
 
 events { worker_connections 256; }
 
-media_srt_listen 127.0.0.1:$CTL_SRT_PORT;
+media_ingest_secret $CONTROL/ingest.secret;
 
+media_srt_listen 127.0.0.1:$CTL_SRT_PORT;
 http {
     access_log off;
 
@@ -623,7 +633,7 @@ wait_for "$CTL_LOG" "srt listener ready on 127.0.0.1:$CTL_SRT_PORT" 1 \
 CTL_NAME="$(owner_name 1 "$WORKERS" "ctl")"
 publish "$CTL_SRT_PORT" "$CTL_NAME" 90 "ctl"
 
-wait_for "$CTL_LOG" "srt source open app=live stream=$CTL_NAME " 1 \
+wait_for "$CTL_LOG" "srt source open live/$CTL_NAME source=" 1 \
     || fail "the control publisher was never accepted"
 
 wait_frames "$CTL_API" "$CTL_NAME" 1 \
@@ -666,8 +676,9 @@ pid logs/nginx.pid;
 
 events { worker_connections 256; }
 
-media_srt_listen 127.0.0.1:$MIG_SRT_PORT;
+media_ingest_secret $MIGRATE/ingest.secret;
 
+media_srt_listen 127.0.0.1:$MIG_SRT_PORT;
 http {
     access_log off;
 
@@ -733,7 +744,7 @@ MIG_NEW_BOUND="$(comm -13 \
 MIG_NAME="$(owner_name 2 "$WORKERS" "mig")"
 publish "$MIG_SRT_PORT" "$MIG_NAME" 4 "mig"
 
-wait_for "$MIG_LOG" "srt source open app=live stream=$MIG_NAME " 1 \
+wait_for "$MIG_LOG" "srt source open live/$MIG_NAME source=" 1 \
     || fail "a publisher after the mode change was not accepted on the shared endpoint"
 
 wait_frames "http://127.0.0.1:$MIG_HTTP_PORT/media/api/v1" "$MIG_NAME" 1 \
@@ -765,8 +776,9 @@ pid logs/nginx.pid;
 
 events { worker_connections 256; }
 
-media_srt_listen_shared 127.0.0.1:$HOLD_SRT_PORT;
+media_ingest_secret $HOLD/ingest.secret;
 
+media_srt_listen_shared 127.0.0.1:$HOLD_SRT_PORT;
 http {
     access_log off;
 
@@ -830,7 +842,7 @@ wait_for "$HOLD_LOG" "srt listener ready on 127.0.0.1:$HOLD_SRT_PORT" "$WORKERS"
 HOLD_NAME="$(owner_name 3 "$WORKERS" "held")"
 publish "$HOLD_SRT_PORT" "$HOLD_NAME" 4 "held"
 
-wait_for "$HOLD_LOG" "srt source open app=live stream=$HOLD_NAME " 1 \
+wait_for "$HOLD_LOG" "srt source open live/$HOLD_NAME source=" 1 \
     || fail "a publisher was not accepted after the port was taken"
 
 wait_frames "http://127.0.0.1:$HOLD_HTTP_PORT/media/api/v1" "$HOLD_NAME" 1 \

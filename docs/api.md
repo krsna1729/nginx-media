@@ -266,12 +266,13 @@ curl -s http://127.0.0.1:8080/media/api/v1/streams/live/news/sources/enc1/key
 ```
 
 A read is deliberate and lands in the access log; a source listing carries
-only `"key_set":true` and `"key_print":"dcc2de7b5788"`, the first six bytes of
-the hash, which is also what a refusal is logged with.  The graph stores the
-nonce and the hash, never the key, so a dump of it carries nothing that can
-publish.  A source whose key an operator supplied by hand (the `"key"` field
-below) has no nonce and no derivable key: that read answers
-`key_not_readable`, and rotation issues a derived one again.
+`key_set` and `key_print`: when set, the fingerprint is the first six bytes of
+the hash, which is also what a refusal is logged with; when unset,
+`key_print` is empty.  The graph stores the nonce and the hash, never the key,
+so a dump of it carries nothing that can publish.  A source whose key an
+operator supplied by hand (the `"key"` field below) has no nonce and no
+derivable key: that read answers `key_not_readable`, and rotation issues a
+derived one again.
 
 `POST .../sources/{id}/rotate` issues a new key for the source and invalidates
 the old one at once; it answers with the same shape plus `"rotated":true`.

@@ -20,11 +20,12 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/rtmp-hevc"
 RTMP_PORT=1953
 HTTP_PORT=18445
-
+API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
 rm -rf "$RUN"
 mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/hls"
 
@@ -58,22 +59,6 @@ stop_instance() {
     return 0
 }
 
-# A publisher attaches with a provisioned key, and the key is read back from
-# the API: the source is created first (idempotent), then asked for its key,
-# which is what an operator configuring an encoder does.
-ingest_key() {   # <program> <source id> [srt|rtmp]
-    local program="$1" id="$2" proto="${3:-srt}"
-    # the program first: a source cannot be created before the stream it
-    # belongs to, and both calls are idempotent, so this is safe to repeat
-    curl -fsS -X POST -H 'Content-Type: application/json' \
-        -d "{\"application\":\"live\",\"name\":\"$program\"}" \
-        "$API/streams" >/dev/null 2>&1 || true
-    curl -fsS -X POST -H 'Content-Type: application/json' \
-        -d "{\"id\":\"$id\",\"type\":\"$proto\",\"priority\":100}" \
-        "$API/streams/live/$program/sources" >/dev/null 2>&1 || true
-    curl -fsS "$API/streams/live/$program/sources/$id/key" 2>/dev/null \
-        | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"
-}
 
 cleanup() {
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null
@@ -95,7 +80,6 @@ events {
 media_hls $RUN/hls;
 media_ingest_secret $RUN/ingest.secret;
 media_rtmp_listen 127.0.0.1:$RTMP_PORT;
-media_rtmp_source_priority encoder-hevc 100;
 
 http {
     access_log off;
@@ -122,6 +106,10 @@ EOF
 "$NGINX" -p "$RUN" -c conf/nginx.conf
 sleep 0.5
 
+PUBLISHER_URL="$(media_test_rtmp_publisher_url \
+    "$API" rtmp 127.0.0.1 "$RTMP_PORT" live hevc encoder-hevc 100)" \
+    || { echo "the API did not issue an RTMP publisher URL" >&2; exit 1; }
+
 echo "== publishing H.265 over enhanced rtmp"
 timeout 60 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
@@ -129,7 +117,7 @@ timeout 60 ffmpeg -hide_banner -loglevel error -re \
     -c:v libx265 -preset ultrafast -x265-params log-level=none \
     -g 25 -pix_fmt yuv420p \
     -c:a aac -b:a 96k \
-    -t 10 -f flv "rtmp://127.0.0.1:$RTMP_PORT/live/$(ingest_key "live/hevc" "encoder-a" rtmp)" \
+    -t 10 -f flv "$PUBLISHER_URL" \
     >"$RUN/pub.log" 2>&1 &
 PUB=$!
 
@@ -158,7 +146,7 @@ done
 # ends with its only source
 echo "== playing the program back over enhanced rtmp"
 timeout 60 ffmpeg -hide_banner -loglevel error -y \
-    -i "rtmp://127.0.0.1:$RTMP_PORT/live/$(ingest_key "live/hevc" "encoder-a" rtmp)" \
+    -i "rtmp://127.0.0.1:$RTMP_PORT/live/hevc" \
     -t 4 -c copy "$RUN/played.flv" >"$RUN/play.log" 2>&1 &
 PLAY=$!
 

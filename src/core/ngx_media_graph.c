@@ -461,11 +461,6 @@ ngx_media_graph_decode(const ngx_media_ipc_header_t *header,
 
     ngx_memcpy(&wire, ngx_media_buf_data(payload), sizeof(wire));
 
-    op->key_set = wire.key_set ? 1 : 0;
-    ngx_memcpy(op->key_hash, wire.key_hash, NGX_MEDIA_SOURCE_KEY_HASH);
-    ngx_memcpy(op->key_print, wire.key_print, NGX_MEDIA_SOURCE_KEY_PRINT);
-    op->key_nonce_set = wire.key_nonce_set ? 1 : 0;
-    ngx_memcpy(op->key_nonce, wire.key_nonce, NGX_MEDIA_SOURCE_KEY_NONCE);
 
     need = sizeof(wire) + (size_t) wire.application_len + wire.name_len
            + wire.id_len + wire.path_len + wire.ca_file_len;
@@ -501,6 +496,11 @@ ngx_media_graph_decode(const ngx_media_ipc_header_t *header,
     }
 
     ngx_memzero(op, sizeof(*op));
+    op->key_set = wire.key_set ? 1 : 0;
+    ngx_memcpy(op->key_hash, wire.key_hash, NGX_MEDIA_SOURCE_KEY_HASH);
+    ngx_memcpy(op->key_print, wire.key_print, NGX_MEDIA_SOURCE_KEY_PRINT);
+    op->key_nonce_set = wire.key_nonce_set ? 1 : 0;
+    ngx_memcpy(op->key_nonce, wire.key_nonce, NGX_MEDIA_SOURCE_KEY_NONCE);
 
     op->kind = wire.kind;
     op->revision = wire.revision;

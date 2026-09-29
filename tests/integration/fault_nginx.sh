@@ -11,11 +11,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/fault"
 BASE=$(( 19800 + ($$ % 80) * 4 ))
 SRT_PORT="${FAULT_SRT_PORT:-$BASE}"
 HTTP_PORT="${FAULT_HTTP_PORT:-$(( BASE + 1 ))}"
+API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
 PUB_A=0
 PUB_B=0
 PUB_CORRUPT=0
@@ -25,22 +27,6 @@ if [ ! -x "$NGINX" ]; then
     exit 1
 fi
 
-# A publisher attaches with a provisioned key, and the key is read back from
-# the API: the source is created first (idempotent), then asked for its key,
-# which is what an operator configuring an encoder does.
-ingest_key() {   # <program> <source id> [srt|rtmp]
-    local program="$1" id="$2" proto="${3:-srt}"
-    # the program first: a source cannot be created before the stream it
-    # belongs to, and both calls are idempotent, so this is safe to repeat
-    curl -fsS -X POST -H 'Content-Type: application/json' \
-        -d "{\"application\":\"live\",\"name\":\"$program\"}" \
-        "$API/streams" >/dev/null 2>&1 || true
-    curl -fsS -X POST -H 'Content-Type: application/json' \
-        -d "{\"id\":\"$id\",\"type\":\"$proto\",\"priority\":100}" \
-        "$API/streams/live/$program/sources" >/dev/null 2>&1 || true
-    curl -fsS "$API/streams/live/$program/sources/$id/key" 2>/dev/null \
-        | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"
-}
 
 cleanup() {
     [ "$PUB_A" != "0" ] && kill -KILL "$PUB_A" 2>/dev/null || true
@@ -71,8 +57,6 @@ media_hls $RUN/hls;
 media_ingest_secret $RUN/ingest.secret;
 
 media_srt_listen 127.0.0.1:$SRT_PORT;
-media_srt_source_priority encoder-a 100;
-media_srt_source_priority encoder-b 90;
 
 http {
     access_log off;
@@ -88,16 +72,16 @@ http {
 EOF
 
 publish() {
-    local source="$1" seconds="$2"
+    local source="$1" seconds="$2" frequency="$3" priority="$4"
     local pid
 
     ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "testsrc2=size=320x240:rate=25" \
-        -f lavfi -i "sine=frequency=$3:sample_rate=48000" -ac 2 \
+        -f lavfi -i "sine=frequency=$frequency:sample_rate=48000" -ac 2 \
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t "$seconds" -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "fault" "$source")" \
+        "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live fault "$source" "$priority")" \
         >>"$RUN/pub-$source.log" 2>&1 &
 
     pid=$!
@@ -129,7 +113,7 @@ except (BrokenPipeError, ValueError):
 ' \
     | ffmpeg -hide_banner -loglevel error -f mpegts -i pipe:0 -c copy \
         -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "fault" "encoder-a")" \
+        "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live fault encoder-a 100)" \
         >>"$RUN/pub-corrupt.log" 2>&1 &
 }
 
@@ -145,9 +129,9 @@ for _ in $(seq 1 200); do
 done
 
 echo "== two publishers on live/fault"
-PUB_A="$(publish encoder-a 20 440)"
+PUB_A="$(publish encoder-a 20 440 100)"
 sleep 1
-PUB_B="$(publish encoder-b 18 660)"
+PUB_B="$(publish encoder-b 18 660 90)"
 
 for _ in $(seq 1 200); do
     grep -q 'media: srt program stream=live/fault' "$RUN/logs/error.log" \

@@ -10,6 +10,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/rtmp-nginx"
 RTMP_PORT="${RTMP_PORT:-19350}"
@@ -37,9 +38,8 @@ events {
 }
 
 media_hls $RUN/hls;
-
+media_ingest_secret $RUN/ingest.secret;
 media_rtmp_listen 127.0.0.1:$RTMP_PORT;
-media_rtmp_source_priority news 100;
 
 http {
     access_log off;
@@ -73,7 +73,7 @@ start_publisher() {
         -f lavfi -i "sine=frequency=440:sample_rate=48000" -ac 2 \
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
-        -t "$seconds" -f flv "rtmp://127.0.0.1:$RTMP_PORT/live/$RTMP_KEY" \
+        -t "$seconds" -f flv "$RTMP_URL" \
         >"$RUN/pub.log" 2>&1 &
 
     PUB_PID=$!
@@ -93,15 +93,11 @@ done
 grep -q 'rtmp listener ready' "$RUN/logs/error.log" \
     || { echo "rtmp listener not ready" >&2; exit 1; }
 
-# The publisher attaches with a provisioned key: over RTMP the app is the
-# listener's fixed field and the stream name is the key.
-RTMP_KEY="$(curl -fsS -X POST -H 'Content-Type: application/json' \
-    -d '{"application":"live","name":"news"}' "$API/streams" >/dev/null \
-    && curl -fsS -X POST -H 'Content-Type: application/json' \
-    -d '{"id":"encoder-a","type":"rtmp","priority":100}' \
-    "$API/streams/live/news/sources" \
-    | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])")"
-[ -n "$RTMP_KEY" ] || { echo "the API issued no key" >&2; exit 1; }
+# The app is the listener's fixed field; the API-issued source key identifies
+# the stream on the RTMP connection.
+RTMP_URL="$(media_test_rtmp_publisher_url \
+    "$API" rtmp 127.0.0.1 "$RTMP_PORT" live news encoder-a 100)" \
+    || { echo "the API did not issue an RTMP publisher URL" >&2; exit 1; }
 
 echo "== publishing over rtmp for 14s"
 start_publisher 14

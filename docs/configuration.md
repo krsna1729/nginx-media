@@ -6,7 +6,6 @@ unless noted), so they sit beside `events {}` and `http {}`, not inside them.
 
 ```nginx
 media_srt_listen 127.0.0.1:9000;
-media_srt_source_priority encoder-a 100;
 media_srt_output live/news 127.0.0.1:9100 "#!::r=live/news,m=publish,s=out";
 
 media_hls /var/lib/nginx/media/hls;
@@ -236,9 +235,10 @@ fingerprint a refused publisher presented, never the key.  Two sources on one
 program are two keys, two priorities and two independent health states; the
 selector decides which is on air.
 
-Nothing about the `#!::` convention is required or parsed: a device that
-emits `#!::r=live/news,m=publish,s=enc1` can be provisioned with exactly that
-string as its key, and it resolves like any other.
+The API-issued key is the entire SRT stream id.  The module hashes the exact
+bytes presented; it does not parse a `#!::` envelope or extract its `s=`
+field.  Present the key verbatim as `streamid=<key>`; wrapping it in a
+structured stream id produces different bytes and is refused.
 
 ### `media_srt_listen_shared <host:port>;`
 
@@ -314,10 +314,6 @@ attempt(s): the port was released`.  On a platform without `SO_REUSEPORT`,
 that first line is the cue to use `media_srt_listen` and give every worker its
 own endpoint instead.
 
-### `media_srt_source_priority <identity> <number>;`
-
-Higher wins.  The identity is the `s=` field of the stream id.  Priority is
-operator configuration on purpose — an encoder cannot promote itself.
 
 ### `media_srt_output <application/stream> <host:port> [streamid];`
 
@@ -388,9 +384,6 @@ publishers between them instead of the second one failing to start.  That is
 the same tradeoff `listen ... reuseport` makes for nginx's own listeners, and
 the answer is the same - give each instance its own address or port.
 
-### `media_rtmp_source_priority <identity> <number>;`
-
-Same semantics as the SRT form, for RTMP publishers.
 
 ### `media_rtmp_ssl on|off;`
 

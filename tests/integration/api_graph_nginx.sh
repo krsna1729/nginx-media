@@ -10,6 +10,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/api-graph"
 SRT_PORT=24640
@@ -20,22 +21,6 @@ rm -rf "$RUN"
 mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/hls"
 
 PUB=0
-# A publisher attaches with a provisioned key, and the key is read back from
-# the API: the source is created first (idempotent), then asked for its key,
-# which is what an operator configuring an encoder does.
-ingest_key() {   # <program> <source id> [srt|rtmp]
-    local program="$1" id="$2" proto="${3:-srt}"
-    # the program first: a source cannot be created before the stream it
-    # belongs to, and both calls are idempotent, so this is safe to repeat
-    curl -fsS -X POST -H 'Content-Type: application/json' \
-        -d "{\"application\":\"live\",\"name\":\"$program\"}" \
-        "$API/streams" >/dev/null 2>&1 || true
-    curl -fsS -X POST -H 'Content-Type: application/json' \
-        -d "{\"id\":\"$id\",\"type\":\"$proto\",\"priority\":100}" \
-        "$API/streams/live/$program/sources" >/dev/null 2>&1 || true
-    curl -fsS "$API/streams/live/$program/sources/$id/key" 2>/dev/null \
-        | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"
-}
 
 cleanup() {
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null
@@ -84,7 +69,6 @@ events {
 media_hls $RUN/hls;
 media_ingest_secret $RUN/ingest.secret;
 media_srt_listen 127.0.0.1:$SRT_PORT;
-media_srt_source_priority encoder-a 100;
 
 http {
     access_log off;
@@ -223,24 +207,24 @@ echo "   source created, replay idempotent"
 
 echo "== a backup source joins a live program without interrupting it"
 publish() {
-    # $1: identity, $2: seconds
+    # $1: source id, $2: seconds, $3: priority
     timeout "$(( $2 + 20 ))" ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "testsrc2=size=320x240:rate=25" \
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -t "$2" -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "news" "$1")" \
+        "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live news "$1" "$3")" \
         >"$RUN/pub-$1.log" 2>&1 &
     echo $!
 }
 
-P1="$(publish encoder-a 12)"
+P1="$(publish encoder-a 12 100)"
 sleep 2
 
 curl -sS -o /dev/null -X POST -H 'Content-Type: application/json' \
     -d '{"id":"encoder-b","type":"srt","priority":50}' \
     "$API/streams/live/news/sources"
 
-P2="$(publish encoder-b 8)"
+P2="$(publish encoder-b 8 50)"
 sleep 3
 
 SOURCES="$(curl -fsS "$API/streams/live/news/sources")"
@@ -268,7 +252,7 @@ timeout 40 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -t 12 -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "news" "encoder-a")" \
+    "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live news encoder-a 100)" \
     >"$RUN/pub.log" 2>&1 &
 PUB=$!
 
@@ -337,8 +321,8 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
     -d '{"id":"encoder-c","type":"srt","priority":50}' \
     "$API/streams/live/news/sources" >/dev/null
 
-P3="$(publish encoder-c 25)"
-P4="$(publish encoder-a 25)"
+P3="$(publish encoder-c 25 50)"
+P4="$(publish encoder-a 25 100)"
 
 for _ in $(seq 1 100); do
     curl -fsS "$API/streams/live/news/sources" \
@@ -384,6 +368,8 @@ wait "$P1" "$P2" "$P3" "$P4" 2>/dev/null
 
 echo "== a destination is added at runtime and carries the program"
 SINK_PORT=24641
+SINK_HTTP_PORT=18449
+SINK_API="http://127.0.0.1:$SINK_HTTP_PORT/media/api/v1"
 mkdir -p "$RUN/sink/conf" "$RUN/sink/logs" "$RUN/sink/hls"
 
 cat > "$RUN/sink/conf/nginx.conf" <<EOF
@@ -397,11 +383,25 @@ events {
 }
 
 media_hls $RUN/sink/hls;
+media_ingest_secret $RUN/sink/ingest.secret;
 media_srt_listen 127.0.0.1:$SINK_PORT;
-media_srt_source_priority runtime-out 100;
+
+http {
+    server {
+        listen 127.0.0.1:$SINK_HTTP_PORT;
+        location /media/api/ { media_api; }
+    }
+}
 EOF
 
 "$NGINX" -p "$RUN/sink" -c conf/nginx.conf
+
+for _ in $(seq 1 100); do
+    curl -fsS "$SINK_API/streams" >/dev/null 2>&1 && break
+    sleep 0.1
+done
+
+SINK_KEY="$(media_test_ingest_key "$SINK_API" live news runtime-out srt 100)"
 
 for _ in $(seq 1 100); do
     grep -q 'srt listener ready' "$RUN/sink/logs/error.log" 2>/dev/null && break
@@ -409,13 +409,13 @@ for _ in $(seq 1 100); do
 done
 
 # the publisher has to be live for the destination to carry anything
-PD="$(publish encoder-d 20)"
+PD="$(publish encoder-d 20 0)"
 sleep 2
 
 
 STATUS="$(curl -sS -o "$RUN/dest.json" -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' \
-    -d "{\"id\":\"sink1\",\"type\":\"srt\",\"host\":\"127.0.0.1\",\"port\":$SINK_PORT,\"streamid\":\"#!::r=live/news,m=publish,s=runtime-out\"}" \
+    -d "{\"id\":\"sink1\",\"type\":\"srt\",\"host\":\"127.0.0.1\",\"port\":$SINK_PORT,\"streamid\":\"$SINK_KEY\"}" \
     "$API/streams/live/news/destinations")"
 
 cat "$RUN/dest.json"; echo
@@ -540,7 +540,12 @@ for i in $(seq 0 23); do
              cat "$RUN/capacity-$i.json" >&2; exit 1; }
 done
 
-OUTPUTS_FULL="$(outputs)"
+OUTPUTS_FULL=""
+for _ in $(seq 1 50); do
+    OUTPUTS_FULL="$(outputs)"
+    [ "${OUTPUTS_FULL:-0}" -ge $(( ${OUTPUTS_BEFORE:-0} + 24 )) ] && break
+    sleep 0.1
+done
 [ "${OUTPUTS_FULL:-0}" -ge $(( ${OUTPUTS_BEFORE:-0} + 24 )) ] \
     || { echo "24 streams hold $OUTPUTS_FULL outputs (from $OUTPUTS_BEFORE)" >&2
          exit 1; }
@@ -694,7 +699,7 @@ echo "   worker $WORKER_BEFORE -> $WORKER_AFTER ready, graph empty, the doc obje
 # publisher connects to the same port, to a stream created after the reload,
 # and its media has to reach the program.
 echo "== a publisher is accepted after the reload"
-PAFTER="$(publish encoder-after 10)"
+PAFTER="$(publish encoder-after 10 0)"
 
 for _ in $(seq 1 200); do
     grep -q 'srt source open live/news source=encoder-after' \
@@ -751,8 +756,17 @@ CHILDREN="$(grep -o '"children_created":[0-9]*' "$RUN/reconcile.json" | cut -d: 
 curl -fsS "$API/streams" | grep -q '"name":"doc"' \
     || { echo "the document did not restore the stream" >&2; exit 1; }
 
-curl -fsS "$API/streams/live/doc/sources" | grep -q '"id":"doc-src"' \
-    || { echo "the document did not restore the source" >&2; exit 1; }
+curl -fsS "$API/streams/live/doc/sources" | python3 -c '
+import json, sys
+sources = json.load(sys.stdin)["sources"]
+source = next((source for source in sources if source["id"] == "doc-src"), None)
+assert source is not None, "missing source"
+assert source["key_set"] is False, "unexpected key"
+assert source["key_print"] == "", "unset fingerprint must be empty"
+' || {
+    echo "the document did not restore a keyless source as valid JSON" >&2
+    exit 1
+}
 
 # The destination is the assertion for the class of failure this section
 # exists to catch.  A desired document whose destination is applied is the one
@@ -807,7 +821,7 @@ STATUS="$(curl -sS -o /dev/null -w '%{http_code}' "$API/streams/live/news/destin
 echo "   restored exactly: one stream, one source, one destination, nothing else"
 
 echo "== the worker the reload started carries media"
-PLIVE="$(publish encoder-live 12)"
+PLIVE="$(publish encoder-live 12 0)"
 
 for _ in $(seq 1 250); do
     curl -fsS "$API/streams/live/news" 2>/dev/null \
@@ -838,7 +852,7 @@ for i in $(seq 1 10); do
         -d "{\"application\":\"live\",\"name\":\"cycle$i\"}" \
         "$API/streams" >/dev/null
 
-    PX="$(publish encoder-$i 2)"
+    PX="$(publish encoder-$i 2 0)"
     sleep 1
 
     curl -fsS -X DELETE "$API/streams/live/cycle$i" >/dev/null
@@ -851,7 +865,7 @@ done
 echo "   $CYCLE cycles with media completed"
 
 # a stream that carries media now must still get its outputs
-PZ="$(publish encoder-z 12)"
+PZ="$(publish encoder-z 12 0)"
 sleep 4
 
 for _ in $(seq 1 200); do

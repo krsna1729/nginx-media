@@ -80,6 +80,11 @@ ngx_media_health_media(ngx_media_health_t *health, int64_t dts,
     if (dts > health->last_dts) {
         health->last_dts = dts;
         health->last_ts_progress = now;
+
+    } else if (health->last_dts != 0 && health->last_dts - dts > 90000) {
+        /* clock reset, loop, or encoder restart: re-anchor to new timeline */
+        health->last_dts = dts;
+        health->last_ts_progress = now;
     }
 }
 

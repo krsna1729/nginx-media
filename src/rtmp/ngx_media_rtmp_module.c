@@ -54,7 +54,6 @@
  * with the number of SRT ingest sessions.
  */
 #define NGX_MEDIA_RTMP_MAX_SESSIONS      1024
-#define NGX_MEDIA_RTMP_DEFAULT_PRIORITY  50
 #define NGX_MEDIA_RTMP_OUT_CHUNK         4096
 #define NGX_MEDIA_RTMP_MAX_OUT_QUEUE     64
 #define NGX_MEDIA_RTMP_READ_BUFFER       16384
@@ -70,10 +69,6 @@
 #define NGX_MEDIA_RTMP_STATE_PLAYING     4
 #define NGX_MEDIA_RTMP_STATE_CLOSED      5
 
-typedef struct {
-    ngx_str_t   name;
-    ngx_uint_t  priority;
-} ngx_media_rtmp_priority_t;
 
 typedef struct ngx_media_rtmp_session_s  ngx_media_rtmp_session_t;
 
@@ -131,7 +126,6 @@ struct ngx_media_rtmp_session_s {
 typedef struct {
     ngx_str_t                  listen;
     ngx_uint_t                 listen_set;
-    ngx_array_t               *priorities;   /* ngx_media_rtmp_priority_t */
 
     /*
      * The application name a publisher must use.  Hardware encoders usually
@@ -161,8 +155,6 @@ static char *ngx_media_rtmp_ssl_certificate_cmd(ngx_conf_t *cf,
 static ngx_uint_t ngx_media_rtmp_ssl_enabled(void);
 static ngx_int_t ngx_media_rtmp_ssl_start(ngx_media_rtmp_session_t *session);
 static void ngx_media_rtmp_ssl_ready(ngx_connection_t *c);
-static char *ngx_media_rtmp_priority_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
-    void *conf);
 static void ngx_media_rtmp_play_timer(ngx_event_t *ev);
 static void ngx_media_rtmp_close_session(ngx_media_rtmp_session_t *session);
 static ngx_chain_t *ngx_media_rtmp_chain_buf(ngx_media_rtmp_session_t *session,
@@ -233,12 +225,6 @@ static ngx_command_t ngx_media_rtmp_commands[] = {
       0,
       NULL },
 
-    { ngx_string("media_rtmp_source_priority"),
-      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE2,
-      ngx_media_rtmp_priority_cmd,
-      0,
-      0,
-      NULL },
 
       ngx_null_command
 };
@@ -277,12 +263,6 @@ ngx_media_rtmp_create_conf(ngx_cycle_t *cycle)
         return NULL;
     }
 
-    mcf->priorities = ngx_array_create(cycle->pool, 4,
-                                       sizeof(ngx_media_rtmp_priority_t));
-
-    if (mcf->priorities == NULL) {
-        return NULL;
-    }
 
     /*
      * ngx_conf_set_flag_slot refuses a slot that is not UNSET, and pcalloc
@@ -364,37 +344,6 @@ ngx_media_rtmp_listen_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     return NGX_CONF_OK;
 }
 
-static char *
-ngx_media_rtmp_priority_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
-{
-    ngx_media_rtmp_main_conf_t  *mcf = conf;
-    ngx_str_t                   *value = cf->args->elts;
-    ngx_media_rtmp_priority_t   *entry;
-    ngx_int_t                    priority;
-
-    (void) cmd;
-
-    if (value[1].len == 0) {
-        return "source identity must not be empty";
-    }
-
-    priority = ngx_atoi(value[2].data, value[2].len);
-
-    if (priority == NGX_ERROR || priority < 0 || priority > 1000) {
-        return "priority must be a number between 0 and 1000";
-    }
-
-    entry = ngx_array_push(mcf->priorities);
-
-    if (entry == NULL) {
-        return NGX_CONF_ERROR;
-    }
-
-    entry->name = value[1];
-    entry->priority = (ngx_uint_t) priority;
-
-    return NGX_CONF_OK;
-}
 /* --- output queue -------------------------------------------------------- */
 
 static ngx_media_rtmp_session_t *
@@ -476,8 +425,23 @@ ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
     }
 
     if (stream != NULL && session->source != NULL) {
-        ngx_media_health_transport(&session->source->health, 0,
-                                   ngx_current_msec);
+        ngx_uint_t  other_attached = 0;
+        ngx_uint_t  j;
+
+        for (j = 0; j < NGX_MEDIA_RTMP_MAX_SESSIONS; j++) {
+            if (ngx_media_rtmp_sessions[j].used
+                && &ngx_media_rtmp_sessions[j] != session
+                && ngx_media_rtmp_sessions[j].source == session->source)
+            {
+                other_attached = 1;
+                break;
+            }
+        }
+
+        if (!other_attached) {
+            ngx_media_health_transport(&session->source->health, 0,
+                                       ngx_current_msec);
+        }
 
         /* provisioned state, with a key: a disconnect is not a delete */
         session->source = NULL;
@@ -1236,6 +1200,23 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
         }
     }
 
+    {
+        ngx_uint_t  j;
+
+        for (j = 0; j < NGX_MEDIA_RTMP_MAX_SESSIONS; j++) {
+            if (ngx_media_rtmp_sessions[j].used
+                && &ngx_media_rtmp_sessions[j] != session
+                && ngx_media_rtmp_sessions[j].source == source)
+            {
+                ngx_log_error(NGX_LOG_NOTICE, session->log, 0,
+                              "media: rtmp session detaching superseded "
+                              "session for source %V",
+                              &source->id);
+                ngx_media_rtmp_sessions[j].source = NULL;
+                ngx_media_rtmp_sessions[j].stream = NULL;
+            }
+        }
+    }
     session->stream = stream;
     session->source = source;
     session->state = NGX_MEDIA_RTMP_STATE_PUBLISHING;
@@ -1510,7 +1491,20 @@ ngx_media_rtmp_handle_command(ngx_media_rtmp_session_t *session,
             if (ngx_media_rtmp_start_publish(session, &app, &stream_name,
                                              &publish_type) == NGX_OK)
             {
-                session->stream_name = stream_name;
+                if (stream_name.len > 0 && session->connection != NULL) {
+                    session->stream_name.data = ngx_pnalloc(
+                        session->connection->pool, stream_name.len);
+                    if (session->stream_name.data != NULL) {
+                        ngx_memcpy(session->stream_name.data, stream_name.data,
+                                   stream_name.len);
+                        session->stream_name.len = stream_name.len;
+                    } else {
+                        session->stream_name.len = 0;
+                    }
+                } else {
+                    session->stream_name.len = 0;
+                    session->stream_name.data = NULL;
+                }
             }
         }
 

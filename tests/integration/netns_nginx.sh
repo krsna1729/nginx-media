@@ -97,6 +97,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/netns"
 BASE=$(( 20100 + ($$ % 80) * 4 ))
@@ -151,13 +152,10 @@ NETEM_B2_DOWN="delay 45ms loss 1%"
 # the rate above, which the viewer's fetch time is checked against
 V_RATE_BPS=1000000
 
-STREAMID='#!::r=live/netns,m=publish,s='
 API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
 
-# The bonded publisher of phase 5.  Its stream id is handed to libsrt
-# literally: the listener's parser does not decode percent escapes, and only
-# ffmpeg's URL syntax needs them.
-BOND_STREAMID='#!::r=live/bond,m=publish,s=encoder-bond'
+# The API-issued source key is the whole SRT stream id.  The group sender
+# passes it to libsrt verbatim; wrapping it would change the authenticated bytes.
 BOND_API="http://127.0.0.1:$BOND_HTTP_PORT/media/api/v1"
 BOND_PREFIX="${NETNS_BOND_SRT_PREFIX:-$ROOT/.build/srt-bonding}"
 BOND_SENDER_BIN="$RUN/srt_group_send"
@@ -467,10 +465,8 @@ media_failover_recovery_timeout 400;
 media_failover_switchback auto;
 
 media_hls $RUN/hls;
-
+media_ingest_secret $RUN/ingest.secret;
 media_srt_listen 0.0.0.0:$SRT_PORT;
-media_srt_source_priority encoder-a 100;
-media_srt_source_priority encoder-b 90;
 
 http {
     access_log off;
@@ -697,7 +693,11 @@ print(json.load(sys.stdin)["program_frames"])
 # the group caller is fed by ffmpeg on a fifo, so its pid and ffmpeg's are both
 # this script's to stop
 publish_bond() { # <seconds>
-    local fifo="$RUN/bond-in"
+    local fifo="$RUN/bond-in" key
+
+    key="$(media_test_ingest_key "$BOND_API" live bond encoder-bond srt 100)" \
+        || fail "the bonded source key could not be provisioned"
+BOND_STREAMID="$key"
 
     rm -f "$fifo"
     mkfifo "$fifo"
@@ -771,6 +771,17 @@ newest_segment() {
 
 publish() { # <ns> <host-ip> <source> <freq> <seconds>
     local ns="$1" host="$2" source="$3" freq="$4" seconds="$5"
+    local priority publisher_url
+
+    case "$source" in
+        encoder-a) priority=100 ;;
+        encoder-b) priority=90 ;;
+        *) fail "unknown publisher source $source" ;;
+    esac
+
+    publisher_url="$(media_test_srt_publisher_url \
+        "$API" "$host" "$SRT_PORT" live netns "$source" "$priority")" \
+        || fail "the source key for $source could not be provisioned"
 
     priv ip netns exec "$ns" ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "testsrc2=size=320x240:rate=25" \
@@ -778,7 +789,7 @@ publish() { # <ns> <host-ip> <source> <freq> <seconds>
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t "$seconds" -f mpegts \
-        "srt://$host:$SRT_PORT?mode=caller&streamid=$STREAMID$source" \
+        "$publisher_url" \
         >>"$RUN/pub-$source.log" 2>&1 &
 
     echo $!
@@ -1180,12 +1191,12 @@ media_failover_recovery_timeout 400;
 media_failover_switchback auto;
 
 media_hls $RUN/bond/hls;
+media_ingest_secret $RUN/bond/ingest.secret;
 
 # the two local addresses of the bonded listener: the two uplinks of the
 # bonded publisher arrive on one of each
 media_srt_listen $IP_B1_HOST:$BOND_SRT_PORT;
 media_srt_listen_bond $IP_B2_HOST;
-media_srt_source_priority encoder-bond 100;
 
 http {
     access_log off;

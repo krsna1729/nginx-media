@@ -19,12 +19,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/hls-nginx"
 SRT_PORT="${HLS_SRT_PORT:-19046}"
 HTTP_PORT="${HLS_HTTP_PORT:-18446}"
 API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
-STREAMID='#!::r=live/news,m=publish,s='
 PUB_A=0
 PUB_B=0
 PUB_PID=0
@@ -62,8 +62,7 @@ media_record_raw $RUN/rec/raw.ts;
 media_record_iso encoder-a $RUN/rec/iso-a.ts;
 
 media_srt_listen 127.0.0.1:$SRT_PORT;
-media_srt_source_priority encoder-a 100;
-media_srt_source_priority encoder-b 90;
+media_ingest_secret $RUN/ingest.secret;
 
 http {
     access_log off;
@@ -96,7 +95,17 @@ trap cleanup EXIT
 # start_publisher <seconds> <source> <video-filter> <tone-hz> <logfile>
 # reports the ffmpeg pid through PUB_PID
 start_publisher() {
-    local seconds="$1" source="$2" video="$3" tone="$4" log="$5"
+    local seconds="$1" source="$2" video="$3" tone="$4" log="$5" priority
+
+    case "$source" in
+        encoder-a) priority=100 ;;
+        encoder-b) priority=90 ;;
+        *) echo "unknown source $source" >&2; return 2 ;;
+    esac
+
+    local publisher_url
+    publisher_url="$(media_test_srt_publisher_url \
+        "$API" 127.0.0.1 "$SRT_PORT" live news "$source" "$priority")"
 
     ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "$video" \
@@ -104,7 +113,7 @@ start_publisher() {
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t "$seconds" -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$STREAMID$source" \
+        "$publisher_url" \
         >"$log" 2>&1 &
 
     PUB_PID=$!
@@ -136,7 +145,7 @@ PUB_A="$PUB_PID"
 
 sleep 3
 
-start_publisher 22 encoder-b "$VIDEO_B" 880 "$RUN/pub-b.log"
+start_publisher 30 encoder-b "$VIDEO_B" 880 "$RUN/pub-b.log"
 PUB_B="$PUB_PID"
 
 for _ in $(seq 1 200); do
@@ -432,7 +441,7 @@ printf '%s' "$AFTER_KILL" | grep -q '"switches":1' \
     || { echo "a dead standby was counted as a switch" >&2; exit 1; }
 
 echo "== encoder-a returns, but the selection holds the program on encoder-b"
-start_publisher 8 encoder-a "$VIDEO_A" 440 "$RUN/pub-a2.log"
+start_publisher 20 encoder-a "$VIDEO_A" 440 "$RUN/pub-a2.log"
 PUB_A="$PUB_PID"
 
 for _ in $(seq 1 200); do

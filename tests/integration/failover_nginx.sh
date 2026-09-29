@@ -18,12 +18,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/failover-nginx"
 SRT_PORT="${FAILOVER_SRT_PORT:-19045}"
 HTTP_PORT="${FAILOVER_HTTP_PORT:-18445}"
 API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
-STREAMID='#!::r=live/news,m=publish,s='
 
 WIDTH_A=320
 WIDTH_B=640
@@ -57,8 +57,7 @@ media_failover_switchback auto;
 
 media_hls $RUN/hls;
 media_srt_listen 127.0.0.1:$SRT_PORT;
-media_srt_source_priority encoder-a 100;
-media_srt_source_priority encoder-b 90;
+media_ingest_secret $RUN/ingest.secret;
 
 http {
     access_log off;
@@ -133,7 +132,17 @@ wait_for_healthy() {
 
 # starts ffmpeg in the background and reports its real pid through PUB_PID
 start_publisher() {
-    local pattern="$1" freq="$2" source="$3" out="$4" seconds="$5"
+    local pattern="$1" freq="$2" source="$3" out="$4" seconds="$5" priority
+
+    case "$source" in
+        encoder-a) priority=100 ;;
+        encoder-b) priority=90 ;;
+        *) echo "unknown source $source" >&2; return 2 ;;
+    esac
+
+    local publisher_url
+    publisher_url="$(media_test_srt_publisher_url \
+        "$API" 127.0.0.1 "$SRT_PORT" live news "$source" "$priority")"
 
     ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "$pattern" \
@@ -141,7 +150,7 @@ start_publisher() {
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t "$seconds" -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$STREAMID$source" \
+        "$publisher_url" \
         >"$RUN/$out.log" 2>&1 &
 
     PUB_PID=$!
@@ -425,9 +434,12 @@ wait_for_active encoder-b
 
 head -c 200000 /dev/urandom > "$RUN/garbage.bin"
 
+CORRUPT_URL="$(media_test_srt_publisher_url \
+    "$API" 127.0.0.1 "$SRT_PORT" live news encoder-a 100)"
+
 srt-live-transmit \
     "file://$RUN/garbage.bin" \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$STREAMID""encoder-a" \
+    "$CORRUPT_URL" \
     >"$RUN/pub_c.log" 2>&1 &
 PUB_C=$!
 

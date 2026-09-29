@@ -12,6 +12,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/rtmps"
 API="http://127.0.0.1:18446/media/api/v1"
@@ -78,8 +79,8 @@ events {
 }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 media_rtmp_listen 127.0.0.1:$RTMP_PORT;
-media_rtmp_source_priority encoder-tls 100;
 media_rtmp_ssl on;
 media_rtmp_ssl_certificate $RUN/cert.pem;
 media_rtmp_ssl_certificate_key $RUN/key.pem;
@@ -108,14 +109,11 @@ EOF
 "$NGINX" -p "$RUN" -c conf/nginx.conf
 sleep 0.5
 
-# The key is the stream name; the app is the listener's fixed field.
-RTMP_KEY="$(curl -fsS -X POST -H 'Content-Type: application/json' \
-    -d '{"application":"live","name":"tls"}' "$API/streams" >/dev/null \
-    && curl -fsS -X POST -H 'Content-Type: application/json' \
-    -d '{"id":"encoder-a","type":"rtmp","priority":100}' \
-    "$API/streams/live/tls/sources" \
-    | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])")"
-[ -n "$RTMP_KEY" ] || { echo "the API issued no key" >&2; exit 1; }
+# The app is the listener's fixed field; the API-issued source key identifies
+# the stream on the RTMPS connection.
+RTMP_URL="$(media_test_rtmp_publisher_url \
+    "$API" rtmps 127.0.0.1 "$RTMP_PORT" live tls encoder-tls 100)" \
+    || { echo "the API did not issue an RTMPS publisher URL" >&2; exit 1; }
 
 echo "== publishing over rtmps"
 timeout 60 ffmpeg -hide_banner -loglevel error -re \
@@ -124,7 +122,7 @@ timeout 60 ffmpeg -hide_banner -loglevel error -re \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -c:a aac -b:a 96k \
     -tls_verify 1 -ca_file "$RUN/cert.pem" \
-    -t 8 -f flv "rtmps://127.0.0.1:$RTMP_PORT/live/$RTMP_KEY" \
+    -t 8 -f flv "$RTMP_URL" \
     >"$RUN/pub.log" 2>&1 &
 PUB=$!
 

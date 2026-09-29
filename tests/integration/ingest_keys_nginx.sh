@@ -84,6 +84,7 @@ publish_srt() {   # <key> <seconds>
         "srt://127.0.0.1:$SRT_PORT?streamid=$1" >"$RUN/pub.log" 2>&1
 }
 
+
 publish_rtmp() {   # <stream name> <seconds>
     timeout 40 ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "testsrc2=size=320x180:rate=25" -t "$2" \

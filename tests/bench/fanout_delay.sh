@@ -26,6 +26,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="$ROOT/.build/nginx-install/sbin/nginx"
 RUN="$ROOT/.build/bench-fanout-delay"
 
@@ -137,7 +138,7 @@ media_hls $RUN/hls;
 media_record $RUN/rec/program.ts;
 
 media_srt_listen 127.0.0.1:$SRT_PORT;
-media_srt_source_priority encoder-a 100;
+media_ingest_secret $RUN/ingest.secret;
 
 media_rtmp_listen 127.0.0.1:$RTMP_PORT;
 
@@ -269,7 +270,7 @@ timeout "$PUB_SECONDS" ffmpeg -hide_banner -loglevel error -re \
     -c:v libx264 -preset ultrafast -b:v 2M -g 50 -pix_fmt yuv420p \
     -c:a aac -b:a 96k \
     -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/bench,m=publish,s=encoder-a" \
+    "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live bench encoder-a 100)" \
     >"$RUN/pub.log" 2>&1 &
 PUB=$!
 
@@ -518,7 +519,7 @@ ffmpeg -hide_banner -loglevel error \
     -c:v libx264 -preset ultrafast -b:v 2M -g 50 -pix_fmt yuv420p \
     -c:a aac -b:a 96k -t 60 \
     -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/bench,m=publish,s=encoder-a" \
+    "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live bench encoder-a 100)" \
     >"$RUN/burst.log" 2>&1 &
 PUB=$!
 

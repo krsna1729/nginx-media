@@ -21,6 +21,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="$ROOT/.build/nginx-install/sbin/nginx"
 RUN="$ROOT/.build/ingest-ceiling"
 BASE=$(( 24000 + ($$ % 40) * 8 ))
@@ -65,6 +66,7 @@ pid logs/nginx.pid;
 events { worker_connections 4096; }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 media_srt_listen 127.0.0.1:$SRT_PORT;
 
 http {
@@ -125,7 +127,7 @@ for K in $STEPS; do
     for i in $(seq 1 "$K"); do
         ffmpeg -hide_banner -loglevel error -re -stream_loop -1 \
             -i "$RUN/media/source.ts" -c copy -f mpegts \
-            "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/c$i,m=publish,s=p$i" \
+            "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live "c$i" "p$i" 0)" \
             >/dev/null 2>&1 &
         PUB_PIDS+=("$!")
     done

@@ -41,6 +41,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/srt-lane-isolation-fanout"
 BASE=$(( 24000 + ($$ % 40) * 16 ))
@@ -80,22 +81,6 @@ stop_instance() {
     return 0
 }
 
-# A publisher attaches with a provisioned key, and the key is read back from
-# the API: the source is created first (idempotent), then asked for its key,
-# which is what an operator configuring an encoder does.
-ingest_key() {   # <program> <source id> [srt|rtmp]
-    local program="$1" id="$2" proto="${3:-srt}"
-    # the program first: a source cannot be created before the stream it
-    # belongs to, and both calls are idempotent, so this is safe to repeat
-    curl -fsS -X POST -H 'Content-Type: application/json' \
-        -d "{\"application\":\"live\",\"name\":\"$program\"}" \
-        "$API/streams" >/dev/null 2>&1 || true
-    curl -fsS -X POST -H 'Content-Type: application/json' \
-        -d "{\"id\":\"$id\",\"type\":\"$proto\",\"priority\":100}" \
-        "$API/streams/live/$program/sources" >/dev/null 2>&1 || true
-    curl -fsS "$API/streams/live/$program/sources/$id/key" 2>/dev/null \
-        | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"
-}
 
 cleanup() {
     [ -n "$SINK_PID" ] && kill -TERM "$SINK_PID" 2>/dev/null
@@ -236,8 +221,7 @@ pid logs/nginx.pid;
 events { worker_connections 2048; }
 
 media_srt_listen 127.0.0.1:$SRT_PORT;
-media_srt_source_priority encoder-a 100;
-media_srt_source_priority encoder-b 50;
+media_ingest_secret $RUN/ingest.secret;
 
 http {
     access_log off;
@@ -265,14 +249,11 @@ sleep 0.5
 "$NGINX" -p "$RUN" -c conf/nginx.conf || fail "nginx did not start"
 sleep 0.5
 
-curl -fsS -X POST -H 'Content-Type: application/json' \
-    -d '{"application":"live","name":"fan"}' "$API/streams" >/dev/null \
-    || fail "stream not created"
 timeout 900 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=640x360:rate=25" -t 600 \
     -c:v libx264 -preset ultrafast -b:v 1200k -maxrate 1200k -bufsize 600k \
     -g 25 -pix_fmt yuv420p -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "fan" "enc")" \
+    "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live fan encoder-a 100)" \
     >"$RUN/pub.log" 2>&1 &
 PUB_PID=$!
 for _ in $(seq 1 100); do
@@ -643,7 +624,7 @@ timeout 300 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=640x360:rate=25" -t 120 \
     -c:v libx264 -preset ultrafast -b:v 1200k -maxrate 1200k -bufsize 600k \
     -g 25 -pix_fmt yuv420p -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "fan" "enc")" \
+    "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live fan encoder-a 100)" \
     >"$RUN/pub.log" 2>&1 &
 PUB_PID=$!
 for _ in $(seq 1 600); do
@@ -688,7 +669,7 @@ timeout 300 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=640x360:rate=25" -t 120 \
     -c:v libx264 -preset ultrafast -b:v 1200k -maxrate 1200k -bufsize 600k \
     -g 25 -pix_fmt yuv420p -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "fan" "encoder-b")" \
+    "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live fan encoder-b 50)" \
     >"$RUN/pub-b.log" 2>&1 &
 PUB_PID=$!
 for _ in $(seq 1 300); do
