@@ -93,7 +93,7 @@ say "building the measuring SRT receiver and mirroring the repository"
 command -v cc >/dev/null && pkg-config --exists srt \
     || die "cc and libsrt are required to build the measuring receiver"
 mkdir -p "$RUN"
-cc -O2 -g -Wall -Wextra -Werror -std=c11 $(pkg-config --cflags srt) \
+cc -O2 -g -Wall -Wextra -Werror -std=c2x $(pkg-config --cflags srt) \
     "$ROOT/tests/bench/srt_fanout_sink.c" -o "$RUN/srt_fanout_sink" \
     $(pkg-config --libs srt) || die "could not build the SRT receiver"
 if [ "$DRY_RUN" = no ]; then

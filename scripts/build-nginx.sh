@@ -40,12 +40,11 @@ SRT_SELECTION="$SRT_BACKEND|${MEDIA_SRT_PKG:-srt}|${SRT_DIR:-}"
 # configured for one prefix silently keeps it and installs somewhere else.
 PREFIX_STAMP="$BUILD/.prefix"
 
-# Extra compiler and linker flags, appended to nginx's own.  A sanitizer build
-# needs both halves, and the flags have to be stamped like everything else that
-# changes the binary: without the stamp a tree configured for a plain build
-# would keep it and quietly ignore them.
-NGINX_CC_OPT="${NGINX_CC_OPT:-}"
-NGINX_LD_OPT="${NGINX_LD_OPT:-}"
+# Extra compiler and linker flags are appended to nginx's own.  The default
+# build uses the GNU C2x dialect plus optimization and hardening; caller flags
+# (including sanitizer flags) remain supported and are tracked in the stamp.
+NGINX_CC_OPT="${NGINX_CC_OPT:+$NGINX_CC_OPT }-std=gnu2x -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong"
+NGINX_LD_OPT="${NGINX_LD_OPT:+$NGINX_LD_OPT }-Wl,-z,relro,-z,now,-z,noexecstack"
 OPT_STAMP="$BUILD/.cc-opt"
 OPT_VALUE="$NGINX_CC_OPT|$NGINX_LD_OPT"
 

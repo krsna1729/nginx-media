@@ -565,9 +565,12 @@ ngx_media_core_init_module(ngx_cycle_t *cycle)
 
         policy = ngx_media_policy_get(cycle);
 
-        if (policy != NULL && policy->ingest_secret_path.len != 0) {
-            (void) ngx_media_ingest_secret_load(&policy->ingest_secret_path,
-                                                cycle->log);
+        if (policy != NULL && policy->ingest_secret_path.len != 0
+            && ngx_media_ingest_secret_load(&policy->ingest_secret_path,
+                                            cycle->log)
+                != NGX_OK)
+        {
+            return NGX_ERROR;
         }
     }
 

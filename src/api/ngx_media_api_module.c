@@ -531,7 +531,7 @@ ngx_media_hls_ingest_ready(ngx_http_request_t *r)
 {
     ngx_media_api_loc_conf_t  *mlcf;
     ngx_str_t                  key, rel, name, source_dir;
-    ngx_media_source_t        *source;
+    ngx_media_source_t        *source = NULL;
     u_char                    *target;
     ngx_file_info_t            fi;
     ngx_uint_t                 existed;
@@ -555,8 +555,12 @@ ngx_media_hls_ingest_ready(ngx_http_request_t *r)
         ngx_http_finalize_request(r, status);
         return;
     }
-
+    if (source == NULL) {
+        ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        return;
+    }
     source_dir = source->path;
+
     while (source_dir.len > 1
            && source_dir.data[source_dir.len - 1] == '/')
     {
@@ -615,7 +619,7 @@ static ngx_int_t
 ngx_media_hls_ingest_delete(ngx_http_request_t *r)
 {
     ngx_media_api_loc_conf_t  *mlcf;
-    ngx_media_source_t        *source;
+    ngx_media_source_t        *source = NULL;
     ngx_str_t                  key, rel, name, source_dir;
     u_char                    *target, *slash;
     ngx_int_t                  status;
@@ -632,6 +636,9 @@ ngx_media_hls_ingest_delete(ngx_http_request_t *r)
     }
     if (status != NGX_OK) {
         return status;
+    }
+    if (source == NULL) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
     source_dir = source->path;
@@ -2754,7 +2761,7 @@ ngx_media_api_stream_delete(ngx_http_request_t *r,
 {
     ngx_media_stream_t  *stream;
     ngx_str_t            revision_text;
-    ngx_int_t            revision;
+    ngx_int_t            revision = -1;
     ngx_uint_t           stated = 0;
     uint64_t             op_revision;
 
@@ -4833,7 +4840,8 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
     ngx_media_policy_t    *policy;
     u_char                *p, *stop;
     ngx_uint_t             applied = 0, created = 0, stream_existed;
-    ngx_uint_t             media_mode;
+    ngx_uint_t             media_mode = NGX_MEDIA_STREAM_MEDIA_SOURCE;
+    ngx_uint_t             media_set = 0;
     ngx_int_t               rc;
 
     if (ngx_media_api_read_body(r, r->pool, &body) != NGX_OK) {
@@ -4906,12 +4914,11 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
             return NGX_HTTP_BAD_REQUEST;
         }
 
-        if (ngx_media_api_json_field(&item, "media", &media_text)
-            == NGX_OK)
-        {
-            if (ngx_media_api_media_mode(&media_text, &media_mode)
-                != NGX_OK)
-            {
+        media_set = 0;
+        if (ngx_media_api_json_field(&item, "media", &media_text) == NGX_OK) {
+            media_set = 1;
+
+            if (ngx_media_api_media_mode(&media_text, &media_mode) != NGX_OK) {
                 *last = ngx_snprintf(*last, end - *last,
                                      "{\"error\":\"unknown_media_mode\"}");
                 return NGX_HTTP_BAD_REQUEST;
@@ -4928,7 +4935,6 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
                     return NGX_HTTP_BAD_REQUEST;
                 }
             }
-
         }
         stream_existed =
             (ngx_media_registry_stream(registry, &application, &name) != NULL);
@@ -4945,9 +4951,7 @@ ngx_media_api_desired_put(ngx_http_request_t *r,
         }
 
         applied++;
-        if (ngx_media_api_json_field(&item, "media", &media_text)
-            == NGX_OK && stream->media_mode != media_mode)
-        {
+        if (media_set && stream->media_mode != media_mode) {
             stream->media_mode = media_mode;
             ngx_media_stream_touch(stream);
         }

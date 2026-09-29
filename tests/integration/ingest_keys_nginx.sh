@@ -64,6 +64,34 @@ http {
 }
 EOF
 
+echo "== configuration rejects an unusable ingest secret"
+cat > "$RUN/bad-secret.conf" <<EOF
+worker_processes 1;
+daemon off;
+error_log $RUN/logs/bad-secret.log info;
+pid $RUN/logs/bad-secret.pid;
+
+events { worker_connections 16; }
+
+media_ingest_secret $RUN/missing-secret-dir/ingest.secret;
+
+http {
+    server {
+        listen 127.0.0.1:$API_PORT;
+        location /media/api/ { media_api; }
+    }
+}
+EOF
+
+if "$NGINX" -p "$RUN" -c bad-secret.conf -t \
+    > "$RUN/logs/bad-secret-test.log" 2>&1
+then
+    cat "$RUN/logs/bad-secret-test.log" >&2
+    fail "nginx accepted an ingest secret it could not create"
+fi
+
+echo "   an unavailable configured secret aborts initialization"
+
 cleanup() {
     "$NGINX" -p "$RUN" -c nginx.conf -s quit 2>/dev/null || true
 }

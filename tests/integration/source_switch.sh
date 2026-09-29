@@ -20,7 +20,7 @@ LOG="$BUILD/source_switch.log"
 mkdir -p "$FIX"
 
 echo "== building harness"
-cc -O1 -g -Wall -Wextra -Werror -std=c11 \
+cc -O1 -g -Wall -Wextra -Werror -std=c2x \
     -DNGX_MEDIA_UNIT_TEST \
     -I"$ROOT/src/core" -I"$ROOT/src/codec" -I"$ROOT/src/mpegts" \
     -I"$ROOT/src/srt" -I"$ROOT/tests/unit/shim" \

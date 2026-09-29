@@ -1,7 +1,7 @@
 CC      ?= cc
 CFLAGS  ?= -O1 -g
 SAN     ?= -fsanitize=address,undefined
-WARN     = -Wall -Wextra -Werror -std=c11
+WARN     = -Wall -Wextra -Werror -std=c2x
 
 INCLUDES = -I../../src/core -I../../src/codec -I../../src/srt -I../../src/mpegts -I../../src/hls -I../../src/record -I../../src/rtmp -Ishim -I.
 DEFS     = -DNGX_MEDIA_UNIT_TEST

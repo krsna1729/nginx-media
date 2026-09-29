@@ -37,6 +37,33 @@ jobs:
       - name: Reusable workflow permissions
         run: python3 scripts/check-workflow-permissions.py
 
+  # Build the module and sanitizer-backed core suites with a second modern
+  # compiler.  The build script selects GNU C2x and applies production hardening.
+  clang:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang build-essential pkg-config \
+            libpcre2-dev zlib1g-dev libssl-dev libsrt-openssl-dev
+
+      - name: Build and smoke test with Clang
+        env:
+          CC: clang
+        run: |
+          make nginx
+          make unit
+          make smoke
+
   # Does a clean machine build, install and run it?  The documented path from
   # docs/deployment.md and docs/quickstart.md, in a container of the image a
   # newcomer would use - so the onboarding instructions are tested rather than

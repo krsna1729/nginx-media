@@ -56,12 +56,12 @@
  */
 #define NGX_MEDIA_KEY_NONCE_LEN   16
 
-ngx_int_t ngx_media_key_derive(const u_char *master, size_t master_len,
-    const ngx_str_t *id, const u_char *nonce, u_char *out, size_t cap,
-    size_t *out_len, u_char *hash, u_char *print);
+[[nodiscard]] ngx_int_t ngx_media_key_derive(const u_char *master,
+    size_t master_len, const ngx_str_t *id, const u_char *nonce, u_char *out,
+    size_t cap, size_t *out_len, u_char *hash, u_char *print);
 
 /* a fresh nonce, from the same entropy source a key used to come from */
-ngx_int_t ngx_media_key_nonce(u_char *nonce);
+[[nodiscard]] ngx_int_t ngx_media_key_nonce(u_char *nonce);
 
 /*
  * The deployment secret every key is derived under.  `media_ingest_secret`
@@ -71,8 +71,9 @@ ngx_int_t ngx_media_key_nonce(u_char *nonce);
  */
 #define NGX_MEDIA_KEY_MASTER_LEN  32
 
-ngx_int_t ngx_media_ingest_secret_load(const ngx_str_t *path, ngx_log_t *log);
-const u_char *ngx_media_ingest_secret(size_t *len);
+[[nodiscard]] ngx_int_t ngx_media_ingest_secret_load(
+    const ngx_str_t *path, ngx_log_t *log);
+[[nodiscard]] const u_char *ngx_media_ingest_secret(size_t *len);
 
 /* the hash and fingerprint of a key a publisher presented */
 void ngx_media_key_hash(const u_char *key, size_t len, u_char *hash);
