@@ -6,6 +6,8 @@
 #include "ngx_media_rtmp_destination.h"
 #include "ngx_media_rtmp_wire.h"
 #include "ngx_media_registry.h"
+#include "ngx_media_graph.h"
+#include "ngx_media_key.h"
 #include "ngx_media_route.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_selector.h"
@@ -132,6 +134,15 @@ typedef struct {
     ngx_array_t               *priorities;   /* ngx_media_rtmp_priority_t */
 
     /*
+     * The application name a publisher must use.  Hardware encoders usually
+     * have one fixed field for it - `live` is the near-universal default -
+     * and the stream *name* is the free-text field, which is where the ingest
+     * key goes.  Fixing the app here means the admission path compares one
+     * string and looks up another, and never parses either.
+     */
+    ngx_str_t                  app;
+
+    /*
      * RTMPS: the same RTMP protocol inside a TLS session.  The listener is
      * our own socket rather than an http one, so the handshake is driven
      * here, through the same ngx_ssl_* API the http server uses.
@@ -192,6 +203,13 @@ static ngx_command_t ngx_media_rtmp_commands[] = {
       ngx_media_rtmp_listen_cmd,
       0,
       0,
+      NULL },
+
+    { ngx_string("media_rtmp_app"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      0,
+      offsetof(ngx_media_rtmp_main_conf_t, app),
       NULL },
 
     { ngx_string("media_rtmp_ssl"),
@@ -377,36 +395,6 @@ ngx_media_rtmp_priority_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     return NGX_CONF_OK;
 }
-
-static ngx_uint_t
-ngx_media_rtmp_priority(ngx_str_t *name)
-{
-    ngx_media_rtmp_main_conf_t  *mcf;
-    ngx_media_rtmp_priority_t   *entries;
-    ngx_uint_t                   i;
-
-    mcf = (ngx_media_rtmp_main_conf_t *)
-              ((ngx_cycle_t *) ngx_cycle)
-                  ->conf_ctx[ngx_media_rtmp_module.index];
-
-    if (mcf == NULL || mcf->priorities == NULL) {
-        return NGX_MEDIA_RTMP_DEFAULT_PRIORITY;
-    }
-
-    entries = mcf->priorities->elts;
-
-    for (i = 0; i < mcf->priorities->nelts; i++) {
-
-        if (entries[i].name.len == name->len
-            && ngx_memcmp(entries[i].name.data, name->data, name->len) == 0)
-        {
-            return entries[i].priority;
-        }
-    }
-
-    return NGX_MEDIA_RTMP_DEFAULT_PRIORITY;
-}
-
 /* --- output queue -------------------------------------------------------- */
 
 static ngx_media_rtmp_session_t *
@@ -1066,10 +1054,13 @@ static ngx_int_t
 ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
     ngx_str_t *app, ngx_str_t *name, ngx_str_t *type)
 {
-    ngx_media_registry_t  *registry;
-    ngx_media_stream_t    *stream;
-    ngx_media_source_t    *source;
-    ngx_media_feed_conf_t  feed_conf;
+    ngx_media_rtmp_main_conf_t  *mcf;
+    ngx_media_registry_t        *registry;
+    ngx_media_stream_t          *stream, *key_stream = NULL;
+    ngx_media_source_t          *source;
+    u_char                       key_hash[NGX_MEDIA_KEY_HASH_LEN];
+    u_char                       key_print[NGX_MEDIA_KEY_PRINT_LEN];
+    ngx_str_t                    key_print_str;
 
     if (name->len == 0) {
         ngx_media_rtmp_send_status(session, 0, "error",
@@ -1077,6 +1068,68 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
                                    "no stream name");
         return NGX_DECLINED;
     }
+
+    /*
+     * The application is the encoder's fixed field and the stream name is the
+     * key.  One comparison, one lookup, no parsing: the app is whatever this
+     * deployment accepts (`live` unless the configuration says otherwise) and
+     * the name resolves to a provisioned source across the graph.
+     */
+    mcf = (ngx_media_rtmp_main_conf_t *)
+              ((ngx_cycle_t *) ngx_cycle)
+                  ->conf_ctx[ngx_media_rtmp_module.index];
+
+    {
+        /*
+         * `live` unless the configuration says otherwise: it is what hardware
+         * encoders ship with, and the slot is left unset rather than seeded
+         * because ngx_conf_set_str_slot refuses a slot that is already set.
+         */
+        ngx_str_t  expected = ngx_string("live");
+
+        if (mcf != NULL && mcf->app.len != 0) {
+            expected = mcf->app;
+        }
+
+        if (expected.len != app->len
+            || ngx_strncmp(expected.data, app->data, app->len) != 0)
+        {
+            ngx_log_error(NGX_LOG_WARN, session->log, 0,
+                          "media: rtmp publisher rejected: app is %V, this "
+                          "listener accepts %V", app, &expected);
+            ngx_media_rtmp_send_status(session, 0, "error",
+                                       "NetStream.Publish.BadName",
+                                       "unknown application");
+            return NGX_DECLINED;
+        }
+    }
+
+    ngx_media_key_hash(name->data, name->len, key_hash);
+    ngx_media_key_print(key_hash, key_print);
+    key_print_str.data = key_print;
+    key_print_str.len = NGX_MEDIA_KEY_PRINT_LEN;
+
+    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+
+    if (registry == NULL) {
+        return NGX_ERROR;
+    }
+
+    source = ngx_media_graph_source_by_key(registry, key_hash, &key_stream);
+
+    if (source == NULL) {
+        ngx_log_error(NGX_LOG_WARN, session->log, 0,
+                      "media: rtmp publisher rejected: no source for key %V",
+                      &key_print_str);
+        ngx_media_rtmp_send_status(session, 0, "error",
+                                   "NetStream.Publish.BadName",
+                                   "unknown stream key");
+        return NGX_DECLINED;
+    }
+
+    app = &key_stream->application;
+    name = &key_stream->name;
+    stream = key_stream;
 
     /*
      * The program lives on exactly one worker; a publisher landing elsewhere
@@ -1090,9 +1143,7 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
         return NGX_ERROR;
     }
 
-    stream = ngx_media_registry_stream(registry, app, name);
-
-    if (stream != NULL && stream->incarnation != 0) {
+    if (stream->incarnation != 0) {
         session->routed_incarnation = stream->incarnation;
     } else {
         session->routed_incarnation = ngx_media_stream_incarnation_next();
@@ -1110,9 +1161,9 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
 
         if (ngx_media_route_open((ngx_cycle_t *) ngx_cycle,
                                  session->routed_hash,
-                                 session->routed_incarnation, app, name, name,
-                                 NGX_MEDIA_SOURCE_RTMP,
-                                 ngx_media_rtmp_priority(name)) != NGX_OK)
+                                 session->routed_incarnation, app, name,
+                                 &source->id, NGX_MEDIA_SOURCE_RTMP,
+                                 source->priority) != NGX_OK)
         {
             ngx_log_error(NGX_LOG_WARN, session->log, 0,
                           "media: could not route %V/%V to its owner worker",
@@ -1140,31 +1191,18 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
         return NGX_ERROR;
     }
 
-    feed_conf.max_units = 2048;
-    feed_conf.max_bytes = 32 * 1024 * 1024;
-    feed_conf.max_age = 10000;
+    /*
+     * The stream and the source are provisioned: this worker owns the program
+     * (the routing branch above is the other case), so the graph is already
+     * here and nothing is invented.  A source that is not registered on the
+     * worker that owns its stream is a provisioning race, not a new program.
+     */
+    stream = ngx_media_registry_stream(registry, app, name);
 
-    /* the stream outlives the publisher's connection: keep the worker's log */
-    stream = ngx_media_registry_stream_create(registry, app, name, &feed_conf,
-                                              ((ngx_cycle_t *) ngx_cycle)->log);
-
-    if (stream == NULL) {
-        return NGX_ERROR;
-    }
-
-    /* a reconnect of the same identity replaces the previous incarnation */
-    source = ngx_media_stream_source_find(stream, name);
-
-    if (source != NULL) {
-        ngx_media_stream_source_remove(stream, source);
-    }
-
-    /* priority comes from trusted configuration, never from the client */
-    source = ngx_media_stream_source_add(stream, name, NGX_MEDIA_SOURCE_RTMP,
-                                         ngx_media_rtmp_priority(name),
-                                         session->log);
-
-    if (source == NULL) {
+    if (stream == NULL || stream != source->stream) {
+        ngx_log_error(NGX_LOG_ERR, session->log, 0,
+                      "media: source %V is not registered on the worker that "
+                      "owns %V/%V", &source->id, app, name);
         return NGX_ERROR;
     }
 
@@ -1201,10 +1239,10 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
     session->state = NGX_MEDIA_RTMP_STATE_PUBLISHING;
 
     ngx_log_error(NGX_LOG_NOTICE, session->log, 0,
-                  "media: rtmp publisher stream=%V/%V type=%V priority=%ui "
-                  "sources=%ui",
-                  app, name, type, ngx_media_rtmp_priority(name),
-                  ngx_media_stream_source_count(stream));
+                  "media: rtmp publisher stream=%V/%V source=%V key=%V "
+                  "type=%V priority=%ui sources=%ui",
+                  app, name, &source->id, &key_print_str, type,
+                  source->priority, ngx_media_stream_source_count(stream));
 
     ngx_media_rtmp_send_status(session, 0, "status",
                                "NetStream.Publish.Start", "publishing");
