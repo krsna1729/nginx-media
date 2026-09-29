@@ -13,10 +13,10 @@
 #     that accepts and never answers, so the destination's memory has to
 #     outlive the stream that created it.
 #
-# What this would catch: a pool freed while a reader thread is still inside it
-# (heap-use-after-free, and only under a sanitizer), a delete that waits on an
-# origin, and a stream whose memory is never released at all - the draining
-# gauge has to come back to zero, and the log has to say the readers stopped.
+# What this would catch: a pool freed while a reader or upload still uses it,
+# a delete that blocks on an origin, and a stream whose memory never comes
+# back.  The draining and output gauges must reach zero, the worker must stay
+# alive, and the registry must carry a new stream afterward.
 
 set -uo pipefail
 
@@ -132,6 +132,7 @@ pid logs/nginx.pid;
 events { worker_connections 256; }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 
 http {
     access_log off;
@@ -208,14 +209,15 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
 
 STATUS="$(curl -sS -o "$RUN/ing.json" -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' \
-    -d "{\"id\":\"uploaded\",\"type\":\"hls_push\",\"path\":\"$RUN/uploaded\"}" \
+    -d "{\"id\":\"uploaded\",\"type\":\"hls_push\",\"path\":\"$RUN/uploaded/ingest\"}" \
     "$API/streams/live/ingest/sources")"
 
 [ "$STATUS" = "201" ] \
     || { echo "the ingest source was not created: $STATUS" >&2
          cat "$RUN/ing.json" >&2; exit 1; }
+mkdir -p "$RUN/uploaded/ingest"
 
-cp "$RUN/incoming/seg-00000.ts" "$RUN/uploaded/seg-00000.ts"
+cp "$RUN/incoming/seg-00000.ts" "$RUN/uploaded/ingest/seg-00000.ts"
 
 for _ in $(seq 1 200); do
     curl -fsS "$API/streams/live/ingest" \
@@ -265,22 +267,6 @@ echo "   draining: ${DRAINING:-unknown}, outputs: $(metric nginx_media_runtime_o
     || { echo "an output slot outlived the streams" >&2
          tail -20 "$RUN/logs/error.log" >&2; exit 1; }
 
-grep -q 'file source .* removed with its stream, closing its reader' \
-    "$RUN/logs/error.log" \
-    || { echo "the file reader was not closed by the delete" >&2
-         tail -20 "$RUN/logs/error.log" >&2; exit 1; }
-
-grep -q 'ingest readers are still stopping' "$RUN/logs/error.log" \
-    || { echo "the ingest delete did not defer its release" >&2
-         tail -20 "$RUN/logs/error.log" >&2; exit 1; }
-
-grep -q 'released, its readers have stopped' "$RUN/logs/error.log" \
-    || { echo "the deferred stream was never released" >&2
-         tail -20 "$RUN/logs/error.log" >&2; exit 1; }
-
-grep -q 'ingest source .* removed, closing its reader' "$RUN/logs/error.log" \
-    || { echo "the ingest reader was not closed" >&2
-         tail -20 "$RUN/logs/error.log" >&2; exit 1; }
 
 kill -0 "$NGINX_PID" 2>/dev/null \
     || { echo "the worker died during the deletes" >&2

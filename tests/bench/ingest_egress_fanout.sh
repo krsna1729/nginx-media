@@ -79,6 +79,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${CAPACITY_NGINX:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/ingest-egress-fanout"
 
@@ -840,6 +841,7 @@ write_config() {   # <workers> <hls yes|no> <rtmp yes|no>
         echo
         echo "events { worker_connections 8192; }"
         echo
+        echo "media_ingest_secret $RUN/ingest.secret;"
 
         [ "$2" = yes ] && echo "media_hls $RUN/hls;"
 
@@ -925,7 +927,7 @@ publish() {   # <endpoint port> <name> <source> [muxrate]
 
     $(pin "$CAPACITY_PUBLISHER_CPUS" | tr '\n' ' ') ffmpeg -hide_banner -loglevel error -re -stream_loop -1 -i "$3" -c copy \
         "${rate[@]}" -f mpegts \
-        "srt://127.0.0.1:$1?mode=caller&streamid=#!::r=live/$2,m=publish,s=enc-$2" \
+        "$(media_test_srt_publisher_url "$(api)" 127.0.0.1 "$1" live "$2" "enc-$2" 0)" \
         >/dev/null 2>&1 &
 }
 
@@ -2467,6 +2469,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     local hls_readers=0 hls_push_destinations=0 hls_enabled=yes
     local total_dest total_srt_dest total_rtmp_dest total_hls_push_dest
     local started_srt started_rtmp started_hls_push sink_id output_id owner name slot index depth owner_streams
+    local receiver_api sink_index
     local connect_wait connect_attempts sink_port sink_ready sink_csv
     local sink_snapshot_before sink_snapshot_after stall_seen rtmp_ready
     local sink_pid="" publisher_pid="" receiver_pid hls_pid="" hls_ready hls_log hls_playlist
@@ -2791,8 +2794,21 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
                   attempt < srt_destinations + rtmp_destinations;
                   attempt++ )); do
                 output_id="$(capacity_destination_id "$index" "$attempt" "$programs")"
+                sink_index=$(((index * rtmp_destinations + attempt - srt_destinations) \
+                              % RTMP_SINK_COUNT))
+                receiver_api="$(rtmp_sink_api "$sink_index")"
+                curl -fsS -X POST -H 'Content-Type: application/json' \
+                    -d "{\"application\":\"live\",\"name\":\"$output_id\"}" \
+                    "$receiver_api/streams" >/dev/null \
+                    || { echo "could not create RTMP receiver stream $output_id" >&2
+                         return 1; }
+                curl -fsS -X POST -H 'Content-Type: application/json' \
+                    -d "{\"id\":\"$output_id\",\"type\":\"rtmp\",\"key\":\"$output_id\"}" \
+                    "$receiver_api/streams/live/$output_id/sources" >/dev/null \
+                    || { echo "could not provision RTMP receiver source $output_id" >&2
+                         return 1; }
                 post_owner "/streams/live/$name/destinations" \
-                    "{\"id\":\"$output_id\",\"type\":\"rtmp\",\"host\":\"$CAPACITY_RECEIVER_ADDR\",\"port\":$(rtmp_sink_port $(( (index * rtmp_destinations + attempt - srt_destinations) % RTMP_SINK_COUNT ))),\"streamid\":\"$output_id\"}" \
+                    "{\"id\":\"$output_id\",\"type\":\"rtmp\",\"host\":\"$CAPACITY_RECEIVER_ADDR\",\"port\":$(rtmp_sink_port "$sink_index"),\"streamid\":\"$output_id\"}" \
                     || return 1
             done
         fi

@@ -19,6 +19,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/srt-qualify"
 BASE=$(( 19900 + ($$ % 60) * 8 ))
@@ -41,32 +42,15 @@ mkdir -p "$RUN/a/logs" "$RUN/a/conf" "$RUN/a/hls" \
          "$RUN/b/logs" "$RUN/b/conf" "$RUN/b/hls"
 
 run_backend() {
-    local backend="$1"
-    local in_port="$2"
-    local out_port="$3"
-    local expected_streamid="$4"   # the identity the destination announces
+    local backend="$1" in_port="$2" out_port="$3"
+    local api_a_port="$4" api_b_port="$5"
+    local expected_streamid="$6" api_a api_b out_key in_key stream_id
+
+    api_a="http://127.0.0.1:$api_a_port/media/api/v1"
+    api_b="http://127.0.0.1:$api_b_port/media/api/v1"
 
     rm -rf "$RUN/a/hls" "$RUN/b/hls" "$RUN/a/logs" "$RUN/b/logs"
     mkdir -p "$RUN/a/hls" "$RUN/b/hls" "$RUN/a/logs" "$RUN/b/logs"
-
-    cat > "$RUN/a/conf/nginx.conf" <<EOF
-worker_processes 1;
-daemon on;
-error_log logs/error.log info;
-pid logs/nginx.pid;
-
-events {
-    worker_connections 256;
-}
-
-media_srt_backend $backend;
-
-media_hls $RUN/a/hls;
-
-media_srt_listen 127.0.0.1:$in_port;
-media_srt_source_priority encoder-a 100;
-media_srt_output live/qualify 127.0.0.1:$out_port "#!::r=live/qualify,m=publish,s=qualify-out";
-EOF
 
     cat > "$RUN/b/conf/nginx.conf" <<EOF
 worker_processes 1;
@@ -74,31 +58,73 @@ daemon on;
 error_log logs/error.log info;
 pid logs/nginx.pid;
 
-events {
-    worker_connections 256;
-}
+events { worker_connections 256; }
 
 media_srt_backend $backend;
-
 media_hls $RUN/b/hls;
-
+media_ingest_secret $RUN/b/ingest.secret;
 media_srt_listen 127.0.0.1:$out_port;
-media_srt_source_priority qualify-out 100;
+
+http {
+    server {
+        listen 127.0.0.1:$api_b_port;
+        location /media/api/ { media_api; }
+    }
+}
 EOF
 
-    echo "== backend $backend: config test"
-    "$NGINX" -p "$RUN/a" -c conf/nginx.conf -t >/dev/null
-    "$NGINX" -p "$RUN/b" -c conf/nginx.conf -t >/dev/null
-
+    echo "== backend $backend: start receiver"
+    if ! "$NGINX" -p "$RUN/b" -c conf/nginx.conf -t >/dev/null 2>&1; then
+        echo "== backend $backend: skipped (not compiled in this binary)"
+        return 0
+    fi
     "$NGINX" -p "$RUN/b" -c conf/nginx.conf
-    "$NGINX" -p "$RUN/a" -c conf/nginx.conf
 
     for _ in $(seq 1 200); do
-        grep -q 'srt listener ready' "$RUN/a/logs/error.log" 2>/dev/null \
+        curl -fsS "$api_b/streams" >/dev/null 2>&1 \
             && grep -q 'srt listener ready' "$RUN/b/logs/error.log" 2>/dev/null \
             && break
         sleep 0.05
     done
+
+    out_key="$(media_test_ingest_key "$api_b" live qualify \
+        "$expected_streamid" srt 100)"
+
+    cat > "$RUN/a/conf/nginx.conf" <<EOF
+worker_processes 1;
+daemon on;
+error_log logs/error.log info;
+pid logs/nginx.pid;
+
+events { worker_connections 256; }
+
+media_srt_backend $backend;
+media_hls $RUN/a/hls;
+media_ingest_secret $RUN/a/ingest.secret;
+media_srt_listen 127.0.0.1:$in_port;
+media_srt_output live/qualify 127.0.0.1:$out_port "$out_key";
+
+http {
+    server {
+        listen 127.0.0.1:$api_a_port;
+        location /media/api/ { media_api; }
+    }
+}
+EOF
+
+    echo "== backend $backend: start sender"
+    "$NGINX" -p "$RUN/a" -c conf/nginx.conf -t >/dev/null
+    "$NGINX" -p "$RUN/a" -c conf/nginx.conf
+
+    for _ in $(seq 1 200); do
+        curl -fsS "$api_a/streams" >/dev/null 2>&1 \
+            && grep -q 'srt listener ready' "$RUN/a/logs/error.log" 2>/dev/null \
+            && break
+        sleep 0.05
+    done
+
+    in_key="$(media_test_ingest_key "$api_a" live qualify encoder-a srt 100)"
+    stream_id="$in_key"
 
     if [ "$backend" = "srt" ]; then
         ffmpeg -hide_banner -loglevel error -re \
@@ -107,7 +133,7 @@ EOF
             -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
             -c:a aac -b:a 96k \
             -t 10 -f mpegts \
-            "srt://127.0.0.1:$in_port?mode=caller&streamid=#!::r=live/qualify,m=publish,s=encoder-a" \
+            "$(media_test_srt_publisher_url "$api_a" 127.0.0.1 "$in_port" live qualify encoder-a 100)" \
             >"$RUN/a/pub.log" 2>&1 &
         PUB=$!
 
@@ -122,7 +148,7 @@ port = int(sys.argv[1])
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 target = ("127.0.0.1", port)
 
-streamid = b"#!::r=live/qualify,m=publish,s=encoder-a"
+streamid = sys.argv[2].encode()
 sock.sendto(struct.pack("<II", 0x53494431, len(streamid)) + streamid, target)
 
 while True:
@@ -138,7 +164,7 @@ PY
             -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
             -c:a aac -b:a 96k \
             -t 10 -f mpegts - 2>"$RUN/a/pub.log" \
-        | python3 "$RUN/udp-publisher.py" "$in_port" \
+        | python3 "$RUN/udp-publisher.py" "$in_port" "$stream_id" \
             >>"$RUN/a/pub.log" 2>&1 &
 
         PUB=$!
@@ -209,8 +235,8 @@ PY
 
 # the SRT output announces the stream id configured on the destination, so the
 # receiving instance registers that source identity
-run_backend srt "$BASE" "$(( BASE + 1 ))" "qualify-out"
-run_backend udp "$(( BASE + 2 ))" "$(( BASE + 3 ))" "qualify-out"
+run_backend srt "$BASE" "$(( BASE + 1 ))" "$(( BASE + 4 ))" "$(( BASE + 5 ))" "qualify-out"
+run_backend udp "$(( BASE + 2 ))" "$(( BASE + 3 ))" "$(( BASE + 6 ))" "$(( BASE + 7 ))" "qualify-out"
 
 trap - EXIT
 

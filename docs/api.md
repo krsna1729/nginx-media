@@ -247,9 +247,53 @@ POST   .../sources/{id}/disable
 ```
 
 A create takes `{"id":"encoder-b","type":"file","priority":50,
-"path":"/srv/slate.ts"}`.  `type` is one of `srt`, `rtmp`, `file`, `hls_pull`,
-`hls_push`, matched case-insensitively, and defaults to `srt` when omitted;
-`priority` defaults to `0` and higher wins.  A source is created without a
+"path":"/srv/slate.ts"}`, or a publisher source takes
+`{"id":"encoder-b","type":"srt","priority":50}`.  Only `srt`, `rtmp`, and
+`hls_push` sources receive a key; `file` and `hls_pull` sources do not:
+
+```json
+{"id":"encoder-b","key":"CW3AB274M5NCZQX4896JH86PR7","key_print":"dcc2de7b5788",
+ "revision":3,"created":true}
+```
+
+For `hls_push`, the key is the first path segment in the ingest URL:
+`PUT /ingest/<key>/index.m3u8`.  The source's `path` chooses the destination
+directory; it must be beneath the root configured by `media_hls_ingest`.
+`hls_pull` fetches an origin URL and does not use an ingest key.
+
+`file` and `hls_pull` reject a supplied `key` and do not expose key-read or
+rotation operations.
+
+The key is derived from the source's id and a per-source nonce under the
+deployment secret (`media_ingest_secret`), so it can be read again whenever
+the encoder is being configured:
+
+```sh
+curl -s http://127.0.0.1:8080/media/api/v1/streams/live/news/sources/enc1/key
+# {"id":"enc1","key":"CW3AB274M5NCZQX4896JH86PR7","key_print":"dcc2de7b5788"}
+```
+
+A key read deliberately returns a bearer credential. Protect API access and
+do not log its response. A source listing carries `key_set` and `key_print`:
+when set, the fingerprint is the first six bytes of the hash, which is also
+what a refusal is logged with; when unset, `key_print` is empty. The graph
+stores the nonce and the hash, never the key, so a dump of it carries nothing
+that can publish. A source whose key an operator supplied by hand (the
+`"key"` field below) has no nonce and no derivable key: that read answers
+`key_not_readable`, and rotation issues a derived one again.
+
+`POST .../sources/{id}/rotate` issues a new key for the source and invalidates
+the old one at once; it answers with the same shape plus `"rotated":true`.
+Losing a key costs one rotation. An operator may also pass `"key"` to a
+keyed-source create — a string a device already sends, such as
+`#!::r=live/news,m=publish,s=enc1` — and the source answers to exactly that;
+a key already taken anywhere in the graph is refused with `key_in_use`.
+An `hls_push` key must additionally be one path-safe segment of at most 33
+characters: ASCII letters, digits, `.`, `_`, and `-`, not starting with `.`.
+`type` is one of `srt`,
+`rtmp`, `file`, `hls_pull`, `hls_push`, matched case-insensitively, and
+defaults to `srt` when omitted; `priority` defaults to `0` and higher wins.
+A source is created without a
 transport attached — the id is a label the operator chooses and a publisher
 presenting it attaches to this object — except for the three types that own a
 reader:
@@ -257,8 +301,9 @@ reader:
 - `file` needs `path`, the MPEG-TS file to read.  The owner opens it when the
   source is created and reads one bounded chunk per runtime tick, so a large
   file cannot stall a worker.
-- `hls_push` needs `path`, the directory the source watches for uploaded
-  segments — the `media_hls_ingest` target.  A program's own HLS output is
+- `hls_push` needs `path`, the per-source directory watched for uploaded
+  segments. It must be below the `media_hls_ingest` root; clients upload to
+  `<ingest-location>/<key>/<object-path>`. A program's own HLS output is
   `<media_hls>/<application>/<name>`, which is a different thing: that is the
   directory an `hls_push` *destination* is pointed at.
 - `hls_pull` needs `path`, the playlist URL to fetch, and accepts an optional

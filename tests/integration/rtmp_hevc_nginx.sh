@@ -20,11 +20,12 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/rtmp-hevc"
 RTMP_PORT=1953
 HTTP_PORT=18445
-
+API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
 rm -rf "$RUN"
 mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/hls"
 
@@ -58,6 +59,7 @@ stop_instance() {
     return 0
 }
 
+
 cleanup() {
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null
     stop_instance "$RUN"
@@ -76,8 +78,8 @@ events {
 }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 media_rtmp_listen 127.0.0.1:$RTMP_PORT;
-media_rtmp_source_priority encoder-hevc 100;
 
 http {
     access_log off;
@@ -104,6 +106,10 @@ EOF
 "$NGINX" -p "$RUN" -c conf/nginx.conf
 sleep 0.5
 
+PUBLISHER_URL="$(media_test_rtmp_publisher_url \
+    "$API" rtmp 127.0.0.1 "$RTMP_PORT" live hevc encoder-hevc 100)" \
+    || { echo "the API did not issue an RTMP publisher URL" >&2; exit 1; }
+
 echo "== publishing H.265 over enhanced rtmp"
 timeout 60 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
@@ -111,7 +117,7 @@ timeout 60 ffmpeg -hide_banner -loglevel error -re \
     -c:v libx265 -preset ultrafast -x265-params log-level=none \
     -g 25 -pix_fmt yuv420p \
     -c:a aac -b:a 96k \
-    -t 10 -f flv "rtmp://127.0.0.1:$RTMP_PORT/live/hevc" \
+    -t 10 -f flv "$PUBLISHER_URL" \
     >"$RUN/pub.log" 2>&1 &
 PUB=$!
 

@@ -30,6 +30,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/ffmpeg-interop"
 BASE=$(( 23000 + ($$ % 40) * 16 ))
@@ -72,6 +73,7 @@ reap() {
     PIDS=()
 }
 
+
 cleanup() {
     reap
     stop_instance
@@ -94,6 +96,7 @@ pid logs/nginx.pid;
 events { worker_connections 512; }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 media_srt_listen 127.0.0.1:$SRT_PORT;
 media_rtmp_listen 127.0.0.1:$RTMP_PORT;
 
@@ -224,6 +227,10 @@ source_add() {   # <stream> <json>
     curl -fsS -X POST -H 'Content-Type: application/json' -d "$2" \
         "$API/streams/live/$1/sources" >/dev/null
 }
+source_key() {   # <stream> <source>
+    curl -fsS "$API/streams/live/$1/sources/$2/key" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])'
+}
 
 destination_add() {   # <stream> <json>
     curl -fsS -X POST -H 'Content-Type: application/json' -d "$2" \
@@ -258,14 +265,14 @@ echo "== ffmpeg -> nginx-media"
 for codecs in h264+aac hevc+aac h264; do
     name="srt-${codecs//+/-}"
     encode "$codecs" 20 mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/$name,m=publish,s=enc"
+        "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live "$name" enc 0)"
     origin "in  srt $codecs -> hls origin" "$name" "$codecs"
     reap
 done
 
 for codecs in h264+aac hevc+aac h264; do
     name="rtmp-${codecs//+/-}"
-    encode "$codecs" 20 flv "rtmp://127.0.0.1:$RTMP_PORT/live/$name"
+    encode "$codecs" 20 flv "$(media_test_rtmp_publisher_url "$API" rtmp 127.0.0.1 "$RTMP_PORT" live "$name" encoder-a 50)"
     origin "in  rtmp $codecs -> hls origin" "$name" "$codecs"
     reap
 done
@@ -275,7 +282,8 @@ for method in PUT POST; do
     stream "$name" || die "stream $name"
     source_add "$name" "{\"id\":\"enc\",\"type\":\"hls_push\",\"path\":\"$RUN/ingest/live/$name\"}" \
         || die "hls_push source for $name"
-    encode h264+aac 24 hls "$HTTP/ingest/live/$name/index.m3u8" \
+    hls_key="$(source_key "$name" enc)" || die "hls_push key for $name"
+    encode h264+aac 24 hls "$HTTP/ingest/$hls_key/index.m3u8" \
         -hls_time 2 -hls_list_size 5 -hls_flags delete_segments -method "$method"
     origin "in  hls push ($method) h264+aac -> hls origin" "$name" h264+aac
     reap
@@ -312,7 +320,7 @@ echo "== nginx-media -> ffmpeg"
 for codecs in h264+aac hevc+aac; do
     name="out-${codecs//+/-}"
     encode "$codecs" 40 mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/$name,m=publish,s=enc"
+        "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live "$name" enc 0)"
     wait_segments "$name" 2 || die "$name never reached the HLS origin"
 
     # rtmp play: ffmpeg is the player
@@ -339,7 +347,7 @@ done
 
 name="out-rtmp-dest"
 encode h264+aac 40 mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/$name,m=publish,s=enc"
+    "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live "$name" enc 0)"
 wait_segments "$name" 2 || die "$name never reached the HLS origin"
 timeout 30 ffmpeg -hide_banner -loglevel error -y -listen 1 \
     -i "rtmp://127.0.0.1:$OUT_PORT/live/$name" -t 6 -c copy \
@@ -351,8 +359,13 @@ destination_add "$name" "{\"id\":\"rtmp-out\",\"type\":\"rtmp\",\"host\":\"127.0
 wait "$listener"
 check "out rtmp destination h264+aac" "$RUN/out/$name.flv" h264+aac
 
-# hls push: into this server's own ingest endpoint, read back by ffmpeg
-destination_add "$name" "{\"id\":\"push\",\"type\":\"hls_push\",\"host\":\"$HTTP/ingest/pushed/$name/\",\"path\":\"$RUN/hls/live/$name\"}" \
+# hls push: into a separate keyed source and read back from its directory
+sink="push-sink-$name"
+stream "$sink" || die "push sink stream"
+source_add "$sink" "{\"id\":\"sink\",\"type\":\"hls_push\",\"path\":\"$RUN/ingest/pushed/$name\"}" \
+    || die "push sink source"
+sink_key="$(source_key "$sink" sink)" || die "push sink key"
+destination_add "$name" "{\"id\":\"push\",\"type\":\"hls_push\",\"host\":\"$HTTP/ingest/$sink_key/\",\"path\":\"$RUN/hls/live/$name\"}" \
     || die "hls push destination"
 for _ in $(seq 1 200); do
     [ "$(grep -c '\.ts$' "$RUN/ingest/pushed/$name/index.m3u8" 2>/dev/null || echo 0)" -ge 3 ] \

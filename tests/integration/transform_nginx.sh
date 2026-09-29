@@ -141,10 +141,12 @@ done
          exit 1; }
 
 SEG=""
+SEG_SNAPSHOT="$RUN/transformed.ts"
 for _ in $(seq 1 100); do
     for candidate in "$RUN"/hls/live/transformed/*.ts; do
-        if [ -f "$candidate" ]; then
-            SEG="$candidate"
+        [ -f "$candidate" ] || continue
+        if cp "$candidate" "$SEG_SNAPSHOT" 2>/dev/null; then
+            SEG="$SEG_SNAPSHOT"
             break
         fi
     done

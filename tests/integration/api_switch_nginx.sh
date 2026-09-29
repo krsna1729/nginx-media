@@ -16,6 +16,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/api-nginx"
 SRT_PORT="${API_SRT_PORT:-19043}"
@@ -55,6 +56,7 @@ events {
 }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 media_srt_listen 127.0.0.1:$SRT_PORT;
 
 http {
@@ -77,6 +79,7 @@ EOF
 PUB_A=0
 PUB_B=0
 PUB_PID=0
+
 
 cleanup() {
     [ "$PUB_A" != "0" ] && kill "$PUB_A" 2>/dev/null || true
@@ -326,7 +329,7 @@ publish() {
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t 30 -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/news,m=publish,s=$source" \
+        "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live news "$source" 0)" \
         >"$RUN/$out.log" 2>&1 &
 
     PUB_PID=$!

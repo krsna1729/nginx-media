@@ -6,18 +6,21 @@ unless noted), so they sit beside `events {}` and `http {}`, not inside them.
 
 ```nginx
 media_srt_listen 127.0.0.1:9000;
-media_srt_source_priority encoder-a 100;
 media_srt_output live/news 127.0.0.1:9100 "#!::r=live/news,m=publish,s=out";
 
 media_hls /var/lib/nginx/media/hls;
 media_record /var/lib/nginx/media/record;
+media_ingest_secret /var/lib/nginx/media/ingest.secret;
 
 http {
     server {
-        listen 8080;
+        listen 127.0.0.1:8080;
         location /hls/ { alias /var/lib/nginx/media/hls/; }
         location /media/api/ { media_api; }
-        location /ingest/ { media_hls_ingest /var/lib/nginx/media/ingest; }
+        location /ingest/ {
+            access_log off; # request URI contains the HLS source key
+            media_hls_ingest /var/lib/nginx/media/ingest;
+        }
     }
 }
 ```
@@ -124,6 +127,28 @@ available CPU budget are understood.
 
 ## SRT
 
+### `media_rtmp_listen <host:port>;` and `media_rtmp_app <name>;`
+
+Accepts RTMP publishers (and RTMPS with `media_rtmp_ssl on`).  Over RTMP the
+application is the field hardware encoders fix — nearly always `live`, which
+is the default here — and the **stream name is the key**, exactly as the SRT
+stream id is.  `media_rtmp_app` changes the accepted application when a
+deployment needs a different one:
+
+```nginx
+media_rtmp_listen 0.0.0.0:1935;
+media_rtmp_app live;            # the default
+```
+
+```sh
+ffmpeg ... -f flv "rtmp://127.0.0.1:1935/live/CW3AB274M5NCZQX4896JH86PR7"
+```
+
+The app is compared, the name is looked up: one string comparison and one hash
+lookup, no parsing.  A publisher whose app is not the configured one is
+refused with both names in the log; a name that matches no key is refused with
+the fingerprint it presented.
+
 ### `media_srt_listen <host:port>;`
 
 Accepts SRT publishers.  The directive may be given once per worker, and
@@ -168,9 +193,57 @@ Every endpoint accepts with the listener's one passphrase (see
 same second leg address published on each endpoint's own port, so a bonded
 listener per worker obeys the same address rules as a single one.
 
-A publisher's identity comes from its stream id
-(`#!::r=<app>/<stream>,m=publish,s=<identity>`), never from a trusted field:
-`s=` is only a label.
+### A publisher attaches with a key
+
+The stream id **is** the key: an opaque string, provisioned per source and
+issued by the API, with nothing for this layer to parse.  One port serves
+every program, so the key is what says which source a publisher is:
+
+```sh
+# create the program, then a source; the response carries the key once
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"application":"live","name":"news"}' \
+  http://127.0.0.1:8080/media/api/v1/streams
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"id":"enc1","type":"srt","priority":100}' \
+  http://127.0.0.1:8080/media/api/v1/streams/live/news/sources
+# {"id":"enc1","key":"CW3AB274M5NCZQX4896JH86PR7","key_print":"dcc2de7b5788",...}
+
+ffmpeg ... -f mpegts "srt://127.0.0.1:9000?streamid=CW3AB274M5NCZQX4896JH86PR7"
+```
+
+The key is derived, not stored:
+
+```
+key = base32(HMAC-SHA256(secret, source_id ‖ nonce))[0:26]
+```
+
+so an operator can be given it whenever the encoder is actually being
+configured — `GET .../sources/{id}/key`, days after the source was created and
+by someone else — while the graph holds only the nonce and the hash.  A dump
+of the graph, of the shared directory or of a core file carries nothing that
+can publish; the one thing to protect is the deployment secret.
+
+```nginx
+media_ingest_secret /usr/local/nginx-media/ingest.secret;
+```
+
+The core generates that file (0600) on first start if it is not there, and
+every worker inherits it before forking. Without the directive, generated
+keys cannot be issued or read and key rotation cannot derive a replacement.
+An operator-supplied key does not use the deployment secret.
+
+`POST .../sources/{id}/rotate` issues a new nonce, so the old key dies at
+once and the new one is derivable forever after.  Every later read of a source
+shows `key_print` — the first six bytes of the hash — and the log names the
+fingerprint a refused publisher presented, never the key.  Two sources on one
+program are two keys, two priorities and two independent health states; the
+selector decides which is on air.
+
+The API-issued key is the entire SRT stream id.  The module hashes the exact
+bytes presented; it does not parse a `#!::` envelope or extract its `s=`
+field.  Present the key verbatim as `streamid=<key>`; wrapping it in a
+structured stream id produces different bytes and is refused.
 
 ### `media_srt_listen_shared <host:port>;`
 
@@ -246,10 +319,6 @@ attempt(s): the port was released`.  On a platform without `SO_REUSEPORT`,
 that first line is the cue to use `media_srt_listen` and give every worker its
 own endpoint instead.
 
-### `media_srt_source_priority <identity> <number>;`
-
-Higher wins.  The identity is the `s=` field of the stream id.  Priority is
-operator configuration on purpose — an encoder cannot promote itself.
 
 ### `media_srt_output <application/stream> <host:port> [streamid];`
 
@@ -320,9 +389,6 @@ publishers between them instead of the second one failing to start.  That is
 the same tradeoff `listen ... reuseport` makes for nginx's own listeners, and
 the answer is the same - give each instance its own address or port.
 
-### `media_rtmp_source_priority <identity> <number>;`
-
-Same semantics as the SRT form, for RTMP publishers.
 
 ### `media_rtmp_ssl on|off;`
 
@@ -359,40 +425,44 @@ publisher refused by an RTMPS listener.
 ### `media_api;`
 
 Location-level (`NGX_HTTP_LOC_CONF`, no arguments).  Enables the control API on
-that location; see `api.md` for the endpoints.  Neither the API nor
-`media_hls_ingest` below authenticates anything: the location is the whole
-boundary, so serve it on loopback, behind a proxy that authenticates, or on a
-Unix socket.  `security.md` section 3 is the deployment guidance and lists what
-a caller who reaches it can do; `api.md` has the routes.
+that location; see `api.md` for the endpoints. The control API has no
+built-in authentication: serve it on loopback, behind an authenticated proxy,
+or on a Unix socket. `security.md` section 3 is the deployment guidance.
 
 ### `media_hls_ingest <directory>;`
 
-Location-level (`NGX_HTTP_LOC_CONF`).  Turns that location into an HLS push
-(HTTP ingest) endpoint that speaks the industry's contract - YouTube's HLS
-ingest, and the DASH-IF Live Media Ingest specification's Interface-2: an
-encoder `PUT`s or `POST`s each MPEG-TS segment and then the media playlist
-that names it, and may `DELETE` segments that have left its playlist.  The
-object is stored under `<directory>` at its path relative to the location
-(`/ingest/live/news/index7.ts` -> `<directory>/live/news/index7.ts`), so one
-endpoint serves many streams.  New objects are answered `201`, replaced ones
-`204`, deletes `200` (`404` when absent), container types this build cannot
-carry (fMP4/CMAF, DASH) `415`.  What an encoder must send, with an ffmpeg
-example, is in `hls-push-interop.md`.
+Location-level (`NGX_HTTP_LOC_CONF`). Turns that location into a keyed HLS
+push endpoint. An encoder `PUT`s or `POST`s each MPEG-TS segment and then the
+media playlist that names it, and may `DELETE` segments that have left its
+playlist. The first path segment is the key returned when creating an
+`hls_push` source; the remaining safe relative path is written under that
+source's configured `path`. That source directory must be beneath
+`<directory>`. Unknown keys, non-`hls_push` keys, and paths containing
+traversal, URI encoding, or query strings are rejected. New objects are
+answered `201`, replaced ones `204`, deletes `200` (`404` when absent), and
+container types this build cannot carry (fMP4/CMAF, DASH) `415`. What an
+encoder must send, with an ffmpeg example, is in `hls-push-interop.md`.
+
+Because the key is a bearer credential in the URL, use HTTPS and prevent
+access logs and upstream proxies from recording the request path. Default
+nginx access logs include the URI; disable them for this location or use a
+custom log format that excludes the request URI.
 
 ```nginx
 location /ingest/ {
+    access_log off;
     media_hls_ingest /var/lib/nginx/media/ingest;
 }
 ```
 
-The endpoint deliberately does not know what reads the directory — the two
-halves stay separate, so an upload arriving by any other means works just as
-well.  The usual reader is a source of type `hls_push` created through the
-control API, pointed at one stream's directory.  It reads segments in the
-order the media playlist there gives (by media sequence number) and, with no
-playlist, in the order of the number at the end of their names - as a number,
-so `index10.ts` follows `index9.ts`.  This inbound `hls_push` source is
-separate from the outbound `hls_push` destination described below.
+The endpoint routes each upload to exactly one `hls_push` source. Create that
+source through the control API with a `path` directory beneath the configured
+ingest root, then use its returned key as the first URL segment. The source
+reads segments in the order the media playlist there gives (by media sequence
+number) and, with no playlist, in the order of the number at the end of their
+names - as a number, so `index10.ts` follows `index9.ts`. This inbound
+`hls_push` source is separate from the outbound `hls_push` destination
+described below.
 
 The body is written to a file by nginx's own machinery rather than read into
 memory, and the handler then renames it into place, so a reader either sees a

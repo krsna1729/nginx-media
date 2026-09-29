@@ -36,9 +36,9 @@ on:
         type: number
         default: 60
 
-env:
-  ROBOTWEAX_REPO: https://github.com/robotweax/srt
-  ROBOTWEAX_REF: b6687f51c3c6d2eddc3b03f346874b114b187514
+# The SRT libraries the tiers link are pinned in scripts/srt-pins.sh, which
+# the local build targets use too: a capacity number from a laptop and one
+# from CI come from the same library at the same commit.
 
 jobs:
   run:
@@ -84,28 +84,30 @@ jobs:
       - name: Build nginx with the module
         run: make nginx
 
-      - name: Build robotweax/srt and a second nginx against it
+      # The pinned library is built from source, so the tier's numbers are
+      # about one library at one commit rather than whatever the runner
+      # ships.  make srt-pinned is the same target a local capacity run uses.
+      - name: Cache the pinned SRT libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/srt-haivision
+            .build/srt-robotweax
+          key: srt-pins-${{ runner.os }}-${{ hashFiles('scripts/srt-pins.sh') }}
+
+      - name: Build nginx against the pinned Haivision/srt
+        run: |
+          make srt-pinned
+          echo "CAPACITY_NGINX=$PWD/.build/nginx-haivision/install/sbin/nginx" \
+            >> "$GITHUB_ENV"
+          scripts/srt-pins.sh --print | sed 's/^/   /'
+
+      - name: Build a second nginx against the pinned robotweax/srt
         if: inputs.tier == 'weekly' && contains(matrix.configs, 'robotweax')
         run: |
-          git init -q "$RUNNER_TEMP/robotweax-srt"
-          git -C "$RUNNER_TEMP/robotweax-srt" fetch -q --depth 1 \
-            "$ROBOTWEAX_REPO" "$ROBOTWEAX_REF"
-          git -C "$RUNNER_TEMP/robotweax-srt" checkout -q FETCH_HEAD
-          test "$(git -C "$RUNNER_TEMP/robotweax-srt" rev-parse HEAD)" = "$ROBOTWEAX_REF"
-          echo "robotweax/srt $ROBOTWEAX_REF"
-          echo "BENCH_ROBOTWEAX_REF=$ROBOTWEAX_REF" >> "$GITHUB_ENV"
-          cmake -S "$RUNNER_TEMP/robotweax-srt" -B "$RUNNER_TEMP/robotweax-build" \
-            -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/robotweax"
-          ninja -C "$RUNNER_TEMP/robotweax-build" install
-          mkdir -p "$RUNNER_TEMP/nginx-rw"
-          cp -r .build/nginx-1.30.5 "$RUNNER_TEMP/nginx-rw/"
-          rm -rf "$RUNNER_TEMP/nginx-rw/nginx-1.30.5/objs"
-          BUILD_DIR="$RUNNER_TEMP/nginx-rw" \
-          NGINX_PREFIX="$RUNNER_TEMP/nginx-rw/install" \
-          SRT_DIR="$RUNNER_TEMP/robotweax" MEDIA_SRT_PKG=robotweax-srt \
-            scripts/build-nginx.sh
-          echo "ROBOTWEAX_NGINX=$RUNNER_TEMP/nginx-rw/install/sbin/nginx" >> "$GITHUB_ENV"
+          make nginx-robotweax
+          echo "ROBOTWEAX_NGINX=$PWD/.build/nginx-robotweax/install/sbin/nginx" \
+            >> "$GITHUB_ENV"
 
       - name: Fetch published history for regression warnings
         continue-on-error: true

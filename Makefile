@@ -8,9 +8,10 @@ NGINX_VERSION ?= 1.30.5
     failover hls hls-push hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
     file-source transform \
     stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
-    srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
+    srt-lane-isolation srt-lane-isolation-fanout srt-crypto ingest-keys \
     srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls \
-    bench-hls-fanout bench-push-fanout bench-fanout-delay clean
+    bench-hls-fanout bench-push-fanout bench-fanout-delay \
+    srt-pinned nginx-robotweax install onboarding clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -36,6 +37,17 @@ tsan:
 
 nginx:
 	NGINX_VERSION=$(NGINX_VERSION) scripts/build-nginx.sh
+
+# The capacity tiers link a library built from source at the pin in
+# scripts/srt-pins.sh rather than whatever the machine ships, so a number that
+# moved between runs moved because the code moved.  Local and CI run these
+# same two targets, which is why a local capacity run and a CI one link the
+# same library.
+srt-pinned:
+	scripts/build-pinned-nginx.sh haivision
+
+nginx-robotweax:
+	scripts/build-pinned-nginx.sh robotweax
 
 smoke:
 	NGINX_VERSION=$(NGINX_VERSION) tests/integration/smoke.sh
@@ -271,9 +283,40 @@ bench-capacity-curve:
 bench-capacity-quality:
 	PHASES=capacity-quality-ladder tests/bench/ingest_egress_fanout.sh
 
+# Ingest keys: one source and several on one program, rotation, refusal by
+# fingerprint, and the same scheme over RTMP.
+ingest-keys:
+	tests/integration/ingest_keys_nginx.sh
+
 srt-qualify:
 	MEDIA_SRT_BACKEND=both $(MAKE) nginx
 	tests/integration/srt_backend_qualify.sh
+
+# Deploy what was built: the binary, a configuration to start from and the
+# service unit, under PREFIX (default /usr/local/nginx-media).  The binary's
+# compiled-in prefix is the build tree, so the unit passes -p explicitly -
+# which is also why moving a deployment is a file copy and a unit edit rather
+# than a rebuild.  docs/deployment.md is the whole path.
+PREFIX ?= /usr/local/nginx-media
+install:
+	@[ -x .build/nginx-install/sbin/nginx ] \
+	    || { echo "nothing built yet; run: make nginx" >&2; exit 1; }
+	install -d "$(PREFIX)/sbin" "$(PREFIX)/logs" "$(PREFIX)/hls" \
+	    "$(PREFIX)/record" "$(PREFIX)/share"
+	install -m 0755 .build/nginx-install/sbin/nginx "$(PREFIX)/sbin/nginx"
+	install -m 0644 container/nginx.conf "$(PREFIX)/nginx.conf"
+	install -m 0644 README.md "$(PREFIX)/share/README.md"
+	install -m 0644 deploy/nginx-media.service \
+	    "$(PREFIX)/share/nginx-media.service"
+	@echo "installed to $(PREFIX)"
+	@echo "next: edit $(PREFIX)/nginx.conf, then"
+	@echo "  sudo cp $(PREFIX)/share/nginx-media.service /etc/systemd/system/"
+	@echo "  sudo systemctl daemon-reload && sudo systemctl enable --now nginx-media"
+
+# Does a clean machine build, install and run it?  The documented path, run
+# in a container: the onboarding instructions are tested, not believed.
+onboarding:
+	scripts/verify-onboarding.sh
 
 clean:
 	$(MAKE) -C tests/unit clean

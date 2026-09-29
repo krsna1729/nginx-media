@@ -47,6 +47,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/srt-worker-ports"
 ONE="$RUN/one"
@@ -58,6 +59,8 @@ ONE_SRT_PORT="$BASE"
 ONE_HTTP_PORT="$(( BASE + 1 ))"
 SRT_PORTS=( "$(( BASE + 2 ))" "$(( BASE + 3 ))" "$(( BASE + 4 ))" "$(( BASE + 5 ))" )
 MANY_HTTP_PORT="$(( BASE + 6 ))"
+ONE_API="http://127.0.0.1:$ONE_HTTP_PORT/media/api/v1"
+MANY_API="http://127.0.0.1:$MANY_HTTP_PORT/media/api/v1"
 
 WORKERS=4
 PUBS=()
@@ -164,13 +167,19 @@ PY
 }
 
 publish() {  # <port> <stream name> <seconds>
+    local api="$MANY_API" url
+
+    [ "$1" = "$ONE_SRT_PORT" ] && api="$ONE_API"
+    url="$(media_test_srt_publisher_url "$api" 127.0.0.1 "$1" \
+        live "$2" encoder 0)" || fail "could not provision $2"
+    # Let every listener worker receive the source before accepting publishers.
+    sleep 2
     ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "testsrc2=size=320x240:rate=25" \
         -f lavfi -i "sine=frequency=440:sample_rate=48000" -ac 2 \
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
-        -t "$3" -f mpegts \
-        "srt://127.0.0.1:$1?mode=caller&streamid=#!::r=live/$2,m=publish,s=encoder" \
+        -t "$3" -f mpegts "$url" \
         >"$RUN/pub-$1.log" 2>&1 &
 
     PUBS+=( $! )
@@ -299,6 +308,7 @@ pid logs/nginx.pid;
 
 events { worker_connections 256; }
 
+media_ingest_secret $ONE/ingest.secret;
 media_srt_listen 127.0.0.1:$ONE_SRT_PORT;
 
 http {
@@ -343,7 +353,7 @@ publish "$ONE_SRT_PORT" "$ONE_NAME" 3
 wait_for "$ONE_LOG" "srt publisher routed to the owner stream=live/$ONE_NAME" 1 \
     || fail "the publisher to the single endpoint was not routed"
 
-ONE_ACCEPTED="$(pid_of "$ONE_LOG" "srt source open app=live stream=$ONE_NAME ")"
+ONE_ACCEPTED="$(pid_of "$ONE_LOG" "srt source open live/$ONE_NAME source=")"
 [ "$ONE_ACCEPTED" = "$ONE_W0" ] \
     || fail "the publisher was accepted by pid $ONE_ACCEPTED, not worker 0"
 
@@ -372,6 +382,7 @@ echo "== four workers, four endpoints"
     echo "events { worker_connections 256; }"
     echo
 
+    echo "media_ingest_secret $MANY/ingest.secret;"
     for port in "${SRT_PORTS[@]}"; do
         echo "media_srt_listen 127.0.0.1:$port;"
     done
@@ -391,7 +402,6 @@ EOF
 } > "$MANY/conf/nginx.conf"
 
 MANY_LOG="$MANY/logs/error.log"
-MANY_API="http://127.0.0.1:$MANY_HTTP_PORT/media/api/v1"
 
 "$NGINX" -p "$MANY" -c conf/nginx.conf -t
 "$NGINX" -p "$MANY" -c conf/nginx.conf
@@ -448,7 +458,7 @@ while [ "$i" -lt "$WORKERS" ]; do
     i=$(( i + 1 ))
 done
 
-ACCEPTED="$(pids_of "$MANY_LOG" 'srt source open app=live' | sort -u | wc -l)"
+ACCEPTED="$(pids_of "$MANY_LOG" 'srt source open live/' | sort -u | wc -l)"
 [ "$ACCEPTED" -eq "$WORKERS" ] \
     || fail "the four publishers were accepted by $ACCEPTED distinct workers, not $WORKERS"
 
@@ -458,7 +468,7 @@ while [ "$i" -lt "$WORKERS" ]; do
     WP="$(worker_pid "$MANY_LOG" "$i")"
     OP="$(worker_pid "$MANY_LOG" "$OWNER")"
 
-    ACCEPTED_PID="$(pid_of "$MANY_LOG" "srt source open app=live stream=${NAMES[$i]} ")"
+    ACCEPTED_PID="$(pid_of "$MANY_LOG" "srt source open live/${NAMES[$i]} source=")"
     [ "$ACCEPTED_PID" = "$WP" ] \
         || fail "the publisher on ${SRT_PORTS[$i]} was accepted by pid $ACCEPTED_PID, not worker $i ($WP)"
 
@@ -477,7 +487,7 @@ done
 drain_pubs
 
 echo "   four publishers on four endpoints, accepted by workers" \
-     "$(pids_of "$MANY_LOG" 'srt source open app=live' | sort -u | tr '\n' ' ')"
+     "$(pids_of "$MANY_LOG" 'srt source open live/' | sort -u | tr '\n' ' ')"
 echo "   each routed to the owner the graph reports"
 
 stop_nginx "$MANY"

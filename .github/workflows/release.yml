@@ -59,6 +59,16 @@ jobs:
       - name: Build nginx with the module
         run: make nginx
 
+      # The released dynamic binary links a library built from source at the
+      # pin in scripts/srt-pins.sh, not the runner's package: a release is a
+      # claim about a version, and the version is in the release notes.
+      - name: Build the pinned SRT library and an nginx against it
+        run: |
+          make srt-pinned
+          echo "NGINX_BIN=$PWD/.build/nginx-haivision/install/sbin/nginx" \
+            >> "$GITHUB_ENV"
+          scripts/srt-pins.sh --print | sed 's/^/   /'
+
       - name: Unit tests
         run: make unit
 
@@ -100,6 +110,12 @@ jobs:
           fi
           make nginx
 
+      # The second artifact: one file, no library dependencies.  Both are
+      # built from this tag, so "the dynamic one" and "the static one" are the
+      # same source with different dependency answers.
+      - name: Build the statically linked artifact
+        run: scripts/build-static.sh
+
       - name: Package
         run: |
           VERSION="${GITHUB_REF_NAME:-dev}"
@@ -112,9 +128,13 @@ jobs:
               config src tests scripts Makefile README.md \
               | tar -xf - -C "dist/$STAGE"
 
-          # the built server, for anyone who wants the exact artifact
+          # the built servers, for anyone who wants the exact artifact:
+          # one dynamic against the pinned libsrt, one static with no
+          # library dependencies at all
           tar -czf "dist/nginx-$VERSION-linux-x86_64.tar.gz" \
-              -C .build/nginx-install sbin/nginx
+              -C .build/nginx-haivision/install sbin/nginx
+          tar -czf "dist/nginx-$VERSION-linux-x86_64-static.tar.gz" \
+              -C .build/static nginx
 
           tar -czf "dist/$STAGE.tar.gz" -C dist "$STAGE"
           rm -rf "dist/$STAGE"
@@ -136,6 +156,22 @@ jobs:
               else
                   echo "Initial release."
               fi
+              echo
+              echo "## Libraries"
+              echo
+              echo "Both binaries are built from this tag.  The dynamic one links"
+              echo "libsrt built from source at the commit below; the static one"
+              echo "links libsrt, OpenSSL, PCRE2 and zlib into the file itself, so"
+              echo "a fix in any of them is a new artifact rather than a system"
+              echo "update."
+              echo
+              scripts/srt-pins.sh --release-notes
+              echo "- nginx ${NGINX_VERSION:-1.30.5}"
+              echo "- OpenSSL $(openssl version 2>/dev/null || echo 'unknown') for the dynamic build"
+              echo
+              echo "The static artifact is built in an Alpine/musl container with"
+              echo "Alpine's static OpenSSL; the dynamic one uses this runner's"
+              echo "OpenSSL, which is why its version is not pinned."
           } > dist/CHANGELOG.md
 
           cat dist/CHANGELOG.md

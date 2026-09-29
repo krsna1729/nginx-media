@@ -24,6 +24,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/srt-lane-isolation"
 BASE=$(( 22000 + ($$ % 40) * 16 ))
@@ -57,6 +58,7 @@ stop_instance() {
     kill -KILL "$pid" 2>/dev/null
     return 0
 }
+
 
 cleanup() {
     [ -n "$SINK_PID" ] && kill -TERM "$SINK_PID" 2>/dev/null
@@ -151,6 +153,7 @@ pid logs/nginx.pid;
 events { worker_connections 512; }
 
 media_srt_listen 127.0.0.1:$SRT_PORT;
+media_ingest_secret $RUN/ingest.secret;
 
 http {
     access_log off;
@@ -182,11 +185,11 @@ timeout 120 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=640x360:rate=25" -t 90 \
     -c:v libx264 -preset ultrafast -b:v 1200k -maxrate 1200k -bufsize 600k \
     -g 25 -pix_fmt yuv420p -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/iso,m=publish,s=enc" \
+    "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live iso enc 100)" \
     >"$RUN/pub.log" 2>&1 &
 PUB_PID=$!
 for _ in $(seq 1 100); do
-    grep -q 'srt source open app=live stream=iso' "$RUN/logs/error.log" && break
+    grep -q 'srt source open live/iso' "$RUN/logs/error.log" && break
     sleep 0.1
 done
 

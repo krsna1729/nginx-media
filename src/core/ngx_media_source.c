@@ -350,3 +350,49 @@ ngx_media_source_tracks_destroy(ngx_media_source_t *source)
     ngx_free(source->tracks);
     source->tracks = NULL;
 }
+
+void
+ngx_media_source_key_set(ngx_media_source_t *source, const u_char *hash,
+    const u_char *print)
+{
+    if (source == NULL || hash == NULL) {
+        return;
+    }
+
+    ngx_memcpy(source->key_hash, hash, NGX_MEDIA_SOURCE_KEY_HASH);
+    ngx_memcpy(source->key_print, print, NGX_MEDIA_SOURCE_KEY_PRINT);
+    source->key_set = 1;
+}
+
+void
+ngx_media_source_key_nonce(ngx_media_source_t *source, const u_char *nonce)
+{
+    if (source == NULL || nonce == NULL) {
+        return;
+    }
+
+    ngx_memcpy(source->key_nonce, nonce, NGX_MEDIA_SOURCE_KEY_NONCE);
+    source->key_nonce_set = 1;
+}
+
+ngx_uint_t
+ngx_media_source_key_matches(const ngx_media_source_t *source,
+    const u_char *hash)
+{
+    u_char    diff = 0;
+    ngx_uint_t  i;
+
+    if (source == NULL || hash == NULL || !source->key_set) {
+        return 0;
+    }
+
+    /*
+     * No early exit: how far a wrong key matched is not something a caller
+     * should be able to measure.
+     */
+    for (i = 0; i < NGX_MEDIA_SOURCE_KEY_HASH; i++) {
+        diff |= (u_char) (source->key_hash[i] ^ hash[i]);
+    }
+
+    return diff == 0 ? 1 : 0;
+}

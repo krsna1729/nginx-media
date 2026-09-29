@@ -27,6 +27,7 @@ RUN="$ROOT/.build/churn"
 HTTP_PORT=18580
 RTMP_PORT=18582
 SINK_SRT_PORT=18583
+SINK_HTTP_PORT=18584
 DEADLINE_MS=500
 
 rm -rf "$RUN"
@@ -89,6 +90,7 @@ events { worker_connections 512; }
 # the sink.  Listening on the same port a destination targets would make it
 # publish to itself, which is a test bug that looks like a code bug.
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 
 http {
     access_log off;
@@ -118,14 +120,29 @@ events { worker_connections 256; }
 
 media_srt_listen 127.0.0.1:$SINK_SRT_PORT;
 media_rtmp_listen 127.0.0.1:$RTMP_PORT;
+http {
+    server {
+        listen 127.0.0.1:$SINK_HTTP_PORT;
+        location /media/api/ { media_api; }
+    }
+}
 EOF
 
 "$NGINX" -p "$RUN/sink" -c conf/nginx.conf -t >/dev/null || exit 1
 "$NGINX" -p "$RUN/sink" -c conf/nginx.conf
 sleep 0.5
+SINK_API="http://127.0.0.1:$SINK_HTTP_PORT/media/api/v1"
 
 curl -fsS -X POST -H 'Content-Type: application/json' \
     -d '{"application":"live","name":"main"}' "$API/streams" >/dev/null
+curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"application":"live","name":"main"}' "$SINK_API/streams" >/dev/null
+curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"srt1","type":"srt","key":"srt1"}' \
+    "$SINK_API/streams/live/main/sources" >/dev/null
+curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"rtmp1","type":"rtmp","key":"main"}' \
+    "$SINK_API/streams/live/main/sources" >/dev/null
 
 # The consumers are established loudly: a destination that failed to start
 # would make the whole case meaningless, and silencing the create is how that
@@ -133,8 +150,8 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
 # The local HLS output is not a destination: it belongs to the stream and is
 # always draining the feed.  So the three consumers here are that output plus
 # the two socket destinations below.
-for d in '{"id":"srt1","type":"srt","host":"127.0.0.1","port":'"$SINK_SRT_PORT"'}' \
-         '{"id":"rtmp1","type":"rtmp","host":"127.0.0.1","port":'"$RTMP_PORT"'}'
+for d in '{"id":"srt1","type":"srt","host":"127.0.0.1","port":'"$SINK_SRT_PORT"',"streamid":"srt1"}' \
+         '{"id":"rtmp1","type":"rtmp","host":"127.0.0.1","port":'"$RTMP_PORT"',"streamid":"main"}'
 do
     STATUS="$(curl -sS -o "$RUN/dest.json" -w '%{http_code}' \
         -X POST -H 'Content-Type: application/json' -d "$d" \
@@ -158,30 +175,35 @@ echo "== churning the graph while the program is carried"
 CHURN=0
 for i in $(seq 1 40); do
 
-    # a stream that comes and goes
     curl -fsS -X POST -H 'Content-Type: application/json' \
         -d '{"application":"live","name":"churn'"$i"'"}' "$API/streams" \
-        >/dev/null 2>&1
+        >/dev/null \
+        || { echo "could not create churn stream $i" >&2; exit 1; }
 
     # a source added and removed under the live program
     curl -fsS -X POST -H 'Content-Type: application/json' \
         -d '{"id":"tmp'"$i"'","type":"srt","host":"127.0.0.1","port":'"$SINK_SRT_PORT"',"priority":1}' \
-        "$API/streams/live/main/sources" >/dev/null 2>&1
+        "$API/streams/live/main/sources" >/dev/null \
+        || { echo "could not add churn source $i" >&2; exit 1; }
 
     curl -fsS -X DELETE \
-        "$API/streams/live/main/sources/tmp'"$i" >/dev/null 2>&1
+        "$API/streams/live/main/sources/tmp$i" >/dev/null \
+        || { echo "could not remove churn source $i" >&2; exit 1; }
 
     # A destination added and removed.  It points at the live sink on purpose:
     # an SRT or RTMP destination needs a peer, and a mutation that is expected
     # to fail would be testing the failure path, not the churn.
     curl -fsS -X POST -H 'Content-Type: application/json' \
-        -d '{"id":"tmpd'"$i"'","type":"srt","host":"127.0.0.1","port":'"$SINK_SRT_PORT"'}' \
-        "$API/streams/live/main/destinations" >/dev/null 2>&1
+        -d '{"id":"tmpd'"$i"'","type":"srt","host":"127.0.0.1","port":'"$SINK_SRT_PORT"',"streamid":"srt1"}' \
+        "$API/streams/live/main/destinations" >/dev/null \
+        || { echo "could not add churn destination $i" >&2; exit 1; }
 
     curl -fsS -X DELETE \
-        "$API/streams/live/main/destinations/tmpd'"$i" >/dev/null 2>&1
+        "$API/streams/live/main/destinations/tmpd$i" >/dev/null \
+        || { echo "could not remove churn destination $i" >&2; exit 1; }
 
-    curl -fsS -X DELETE "$API/streams/live/churn'"$i" >/dev/null 2>&1
+    curl -fsS -X DELETE "$API/streams/live/churn$i" >/dev/null \
+        || { echo "could not remove churn stream $i" >&2; exit 1; }
 
     CHURN=$((CHURN + 1))
     sleep 0.25

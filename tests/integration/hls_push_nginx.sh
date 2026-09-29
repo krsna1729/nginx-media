@@ -13,6 +13,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/hls-push"
 SRT_PORT=24660
@@ -53,6 +54,7 @@ stop_instance() {
 
     return 0
 }
+
 
 cleanup() {
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null
@@ -129,8 +131,8 @@ events {
 }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 media_srt_listen 127.0.0.1:$SRT_PORT;
-media_srt_source_priority encoder-a 100;
 
 http {
     access_log off;
@@ -166,7 +168,7 @@ timeout 60 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -t 25 -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/push,m=publish,s=encoder-a" \
+    "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live push encoder-a 100)" \
     >"$RUN/pub.log" 2>&1 &
 PUB=$!
 

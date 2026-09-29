@@ -17,6 +17,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/incarnation"
 SRT_PORT=24720
@@ -26,6 +27,7 @@ rm -rf "$RUN"
 mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/hls"
 
 PUB=0
+
 
 cleanup() {
     [ "$PUB" != "0" ] && { kill -KILL "$PUB" 2>/dev/null; wait "$PUB" 2>/dev/null; }
@@ -60,6 +62,7 @@ pid logs/nginx.pid;
 events { worker_connections 256; }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 
 # one endpoint: worker 0 accepts every publisher, so a stream owned by worker 1
 # is fed across the routing layer
@@ -118,7 +121,7 @@ timeout 120 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -t 90 -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/$NAME,m=publish,s=enc-a" \
+    "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live "$NAME" enc-a 0)" \
     >"$RUN/pub.log" 2>&1 &
 PUB=$!
 

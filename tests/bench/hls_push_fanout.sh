@@ -14,6 +14,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 RUN="$ROOT/.build/bench-push"
 SRT_PORT=24680
 HTTP_PORT=18510
@@ -88,7 +89,7 @@ events {
 
 media_hls $RUN/hls;
 media_srt_listen 127.0.0.1:$SRT_PORT;
-media_srt_source_priority encoder-a 100;
+media_ingest_secret $RUN/ingest.secret;
 
 http {
     access_log off;
@@ -126,7 +127,7 @@ EOF
         -f lavfi -i "testsrc2=size=640x360:rate=25" \
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -t "$SECONDS_TO_PUBLISH" -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/bench,m=publish,s=encoder-a" \
+        "$(media_test_srt_publisher_url "$api" 127.0.0.1 "$SRT_PORT" live bench encoder-a 100)" \
         >"$RUN/pub.log" 2>&1 &
     PUB=$!
 

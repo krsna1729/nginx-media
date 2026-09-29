@@ -12,13 +12,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/srt-output"
 # unique ports per run: back-to-back runs cannot collide on SRT sockets
-BASE=$(( 19200 + ($$ % 200) * 4 ))
+BASE=$(( 19200 + ($$ % 200) * 6 ))
 IN_PORT="${SRT_OUT_IN_PORT:-$BASE}"
 OUT_A="${SRT_OUT_A_PORT:-$(( BASE + 1 ))}"
 OUT_B="${SRT_OUT_B_PORT:-$(( BASE + 2 ))}"
+API_A_PORT="$(( BASE + 3 ))"
+API_B_PORT="$(( BASE + 4 ))"
+API_A="http://127.0.0.1:$API_A_PORT/media/api/v1"
+API_B="http://127.0.0.1:$API_B_PORT/media/api/v1"
 PUB=0
 
 if [ ! -x "$NGINX" ]; then
@@ -37,6 +42,40 @@ rm -rf "$RUN"
 mkdir -p "$RUN/a/logs" "$RUN/a/conf" "$RUN/a/hls" \
          "$RUN/b/logs" "$RUN/b/conf" "$RUN/b/hls"
 
+# B: receives the first destination and serves its own program as HLS
+cat > "$RUN/b/conf/nginx.conf" <<EOF
+worker_processes 1;
+daemon on;
+error_log logs/error.log info;
+pid logs/nginx.pid;
+
+events { worker_connections 256; }
+
+media_hls $RUN/b/hls;
+media_ingest_secret $RUN/b/ingest.secret;
+media_srt_listen 127.0.0.1:$OUT_A;
+
+http {
+    server {
+        listen 127.0.0.1:$API_B_PORT;
+        location /media/api/ { media_api; }
+    }
+}
+EOF
+
+echo "== starting the SRT receiver"
+"$NGINX" -p "$RUN/b" -c conf/nginx.conf -t
+"$NGINX" -p "$RUN/b" -c conf/nginx.conf
+
+for _ in $(seq 1 200); do
+    curl -fsS "$API_B/streams" >/dev/null 2>&1 \
+        && grep -q 'srt listener ready' "$RUN/b/logs/error.log" 2>/dev/null \
+        && break
+    sleep 0.05
+done
+
+OUT_KEY="$(media_test_ingest_key "$API_B" live news srt-out-a srt 100)"
+
 # A: SRT ingest, the program preparation, two SRT destinations and HLS
 cat > "$RUN/a/conf/nginx.conf" <<EOF
 worker_processes 1;
@@ -44,46 +83,31 @@ daemon on;
 error_log logs/error.log info;
 pid logs/nginx.pid;
 
-events {
-    worker_connections 256;
-}
+events { worker_connections 256; }
 
 media_hls $RUN/a/hls;
-
+media_ingest_secret $RUN/a/ingest.secret;
 media_srt_listen 127.0.0.1:$IN_PORT;
-media_srt_source_priority encoder-a 100;
-media_srt_output live/news 127.0.0.1:$OUT_A "#!::r=live/news,m=publish,s=srt-out-a";
+media_srt_output live/news 127.0.0.1:$OUT_A "$OUT_KEY";
 media_srt_output live/news 127.0.0.1:$OUT_B "#!::r=live/news,m=publish,s=srt-out-b";
-EOF
 
-# B: receives one destination and serves its own program as HLS
-cat > "$RUN/b/conf/nginx.conf" <<EOF
-worker_processes 1;
-daemon on;
-error_log logs/error.log info;
-pid logs/nginx.pid;
-
-events {
-    worker_connections 256;
+http {
+    server {
+        listen 127.0.0.1:$API_A_PORT;
+        location /media/api/ { media_api; }
+    }
 }
-
-media_hls $RUN/b/hls;
-
-media_srt_listen 127.0.0.1:$OUT_A;
-media_srt_source_priority srt-out-a 100;
 EOF
 
 echo "== config test"
 "$NGINX" -p "$RUN/a" -c conf/nginx.conf -t
-"$NGINX" -p "$RUN/b" -c conf/nginx.conf -t
 
-echo "== starting nginx (sink first)"
-"$NGINX" -p "$RUN/b" -c conf/nginx.conf
+echo "== starting the SRT sender"
 "$NGINX" -p "$RUN/a" -c conf/nginx.conf
 
 for _ in $(seq 1 200); do
-    grep -q 'srt listener ready' "$RUN/a/logs/error.log" 2>/dev/null \
-        && grep -q 'srt listener ready' "$RUN/b/logs/error.log" 2>/dev/null \
+    curl -fsS "$API_A/streams" >/dev/null 2>&1 \
+        && grep -q 'srt listener ready' "$RUN/a/logs/error.log" 2>/dev/null \
         && break
     sleep 0.05
 done
@@ -110,19 +134,19 @@ ffmpeg -hide_banner -loglevel error -re \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -c:a aac -b:a 96k \
     -t 10 -f mpegts \
-    "srt://127.0.0.1:$IN_PORT?mode=caller&streamid=#!::r=live/news,m=publish,s=encoder-a" \
+    "$(media_test_srt_publisher_url "$API_A" 127.0.0.1 "$IN_PORT" live news encoder-a 100)" \
     >"$RUN/pub.log" 2>&1 &
 PUB=$!
 
 # the receiver of the first destination must register the source the caller
 # announced
 for _ in $(seq 1 200); do
-    grep -q 'media: srt source open app=live stream=news source=srt-out-a' \
+    grep -q 'media: srt source open live/news source=srt-out-a' \
         "$RUN/b/logs/error.log" 2>/dev/null && break
     sleep 0.1
 done
 
-grep -q 'media: srt source open app=live stream=news source=srt-out-a' \
+grep -q 'media: srt source open live/news source=srt-out-a' \
     "$RUN/b/logs/error.log" \
     || { echo "the srt output never reached its destination" >&2; exit 1; }
 

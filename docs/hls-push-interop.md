@@ -55,9 +55,10 @@ Sources: [YouTube: Delivering live content via HLS](https://developers.google.co
 
 ## What to send us
 
-This is the contract an encoder, a packager or another nginx-media targets
-when it pushes HLS into nginx-media.  Any encoder that can push to YouTube's
-HLS ingest can push here unchanged.
+This is the contract an encoder, packager or another nginx-media instance
+targets when it pushes HLS into nginx-media. The encoder must send the source
+key as the first URL path segment; protect it as a bearer credential.
+Requests using YouTube's unmodified URL will not authenticate.
 
 ```nginx
 server {
@@ -66,45 +67,47 @@ server {
     client_max_body_size 16m;
 
     location /ingest/ {
-        # authenticate here: auth_basic, auth_request, or ssl_verify_client
+        access_log off; # default access logs include the bearer key
         media_hls_ingest /var/lib/nginx/media/ingest;
     }
 }
 ```
 
-Then a source per stream, pointed at the stream's directory.  The directory
-need not exist yet - the endpoint creates it with the first upload, and the
-source starts reading when it appears:
+Then create a source per stream, pointed at its own directory beneath the
+configured ingest root. The directory need not exist yet; the endpoint creates
+it with the first upload:
 
 ```sh
-curl -X POST -H 'Content-Type: application/json' \
+response=$(curl -sS -X POST -H 'Content-Type: application/json' \
   -d '{"id":"encoder","type":"hls_push","path":"/var/lib/nginx/media/ingest/live/news"}' \
-  http://127.0.0.1:8080/media/api/v1/streams/live/news/sources
+  http://127.0.0.1:8080/media/api/v1/streams/live/news/sources)
+KEY=$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')
 ```
 
-and push to it — for example with ffmpeg's HLS muxer:
+Push to the key's URL, for example with ffmpeg's HLS muxer:
 
 ```sh
 ffmpeg -re -i input -c:v libx264 -g 50 -c:a aac \
   -f hls -hls_time 2 -hls_list_size 5 -hls_flags delete_segments \
-  -method PUT https://media.example/ingest/live/news/index.m3u8
+  -method PUT "https://media.example/ingest/$KEY/index.m3u8"
 ```
 
 ### Requests
 
 | Request | Answer |
 |---|---|
-| `PUT` or `POST` `<location>/<path>.ts` — a media segment | `201 Created`, or `204 No Content` when it replaced an object of the same name |
-| `PUT` or `POST` `<location>/<path>.m3u8` — a media playlist | `201` / `204` as above |
-| `DELETE <location>/<path>` | `200 OK`; `404` when there is no such object |
+| `PUT` or `POST` `<location>/<key>/<path>.ts` — a media segment | `201 Created`, or `204 No Content` when it replaced an object of the same name |
+| `PUT` or `POST` `<location>/<key>/<path>.m3u8` — a media playlist | `201` / `204` as above |
+| `DELETE <location>/<key>/<path>` | `200 OK`; `404` when there is no such object or the key is unknown |
+| unknown key, key for a non-`hls_push` source, path traversal, URI-encoded path, or query string | `404` or `400` |
 | `PUT`/`POST` of a type this build cannot carry: `.m4s`, `.mp4`, `.m4v`, `.m4a`, `.cmfv`, `.cmfa`, `.cmft`, `.cmfm`, `.init`, `.header`, `.mpd`, `.key`, `.vtt`, `.aac` | `415 Unsupported Media Type` |
-| any other extension, a hidden name, an empty component, more than four path components, or characters outside `[A-Za-z0-9._-]` | `400 Bad Request` |
+| any other extension, a hidden name, an empty component, more than four object-path components, or characters outside `[A-Za-z0-9._-]` | `400 Bad Request` |
 | any other method | `405 Not Allowed` |
 
-`<path>` is kept below the ingest directory, so one endpoint serves many
-streams (`live/news/index7.ts` lands in `<ingest>/live/news/`).  Each object is
-written to a temporary file by nginx and renamed into place, so a reader sees
-a whole object or none of it.
+The key selects exactly one source directory; `<path>` is kept below that
+directory, so uploads cannot cross between sources. Each object is written to
+a temporary file by nginx and renamed into place, so a reader sees a whole
+object or none of it.
 
 ### What the objects must be
 

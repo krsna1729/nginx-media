@@ -15,6 +15,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/soak"
 BASE=$(( 19700 + ($$ % 80) * 4 ))
@@ -40,6 +41,7 @@ if [ ! -x "$NGINX" ]; then
     echo "nginx is not built; run: make nginx" >&2
     exit 1
 fi
+
 
 cleanup() {
     local p
@@ -76,11 +78,10 @@ media_failover_recovery_timeout 300;
 media_failover_switchback auto;
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 media_record $RUN/rec/program.ts;
 
 media_srt_listen 127.0.0.1:$SRT_PORT;
-media_srt_source_priority encoder-a 100;
-media_srt_source_priority encoder-b 90;
 # $marker
 
 http {
@@ -115,7 +116,8 @@ rss_kb() {
 # starts a publisher and echoes its pid, so a phase can hold more than one
 # (the failover phase needs the standby on air as well as the active source)
 start_publisher() {
-    local source="$1" seconds="$2" pattern="$3" log="${4:-pub}" pid
+    local source="$1" priority="$2" seconds="$3" pattern="$4"
+    local log="${5:-pub}" pid
 
     ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "$pattern" \
@@ -123,7 +125,7 @@ start_publisher() {
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t "$seconds" -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/soak,m=publish,s=$source" \
+        "$(media_test_srt_publisher_url "$API" 127.0.0.1 "$SRT_PORT" live soak "$source" "$priority")" \
         >>"$RUN/$log.log" 2>&1 &
     pid=$!
 
@@ -131,7 +133,7 @@ start_publisher() {
 }
 
 publish() {
-    PUB="$(start_publisher "$1" "$2" "$3")"
+    PUB="$(start_publisher "$1" "$2" "$3" "$4")"
 }
 
 echo "== config test"
@@ -156,12 +158,14 @@ for cycle in $(seq 1 "$CYCLES"); do
 
     if [ $(( cycle % 2 )) -eq 0 ]; then
         source="encoder-a"
+        priority=100
     else
         source="encoder-b"
+        priority=90
     fi
 
     echo "== cycle $cycle: publishing as $source for 3s"
-    publish "$source" 3 "testsrc2=size=320x240:rate=25"
+    publish "$source" "$priority" 3 "testsrc2=size=320x240:rate=25"
 
     sleep 4
 
@@ -323,7 +327,7 @@ worker_metric() {
 # the standby goes on air first, so that the program is verifiably carrying a
 # source before anything is measured: an "active" that was already the value we
 # are waiting for would time nothing at all
-PUB_B="$(start_publisher encoder-b 120 "smptehdbars=size=320x240:rate=25" pub_b)"
+PUB_B="$(start_publisher encoder-b 90 120 "smptehdbars=size=320x240:rate=25" pub_b)"
 wait_for_active encoder-b
 
 for _ in $(seq 1 400); do
@@ -333,7 +337,7 @@ for _ in $(seq 1 400); do
 done
 
 # and the primary comes back, which is the switchback the config asks for
-PUB="$(start_publisher encoder-a 120 "testsrc=size=320x240:rate=25")"
+PUB="$(start_publisher encoder-a 100 120 "testsrc=size=320x240:rate=25")"
 wait_for_active encoder-a
 
 echo "   on air: encoder-a, with encoder-b healthy behind it"
@@ -357,7 +361,7 @@ QUIET_SWITCHES="$(switches)"
          exit 1; }
 
 # back on the primary, so the storm measurement starts from the same place
-PUB="$(start_publisher encoder-a 120 "testsrc=size=320x240:rate=25")"
+PUB="$(start_publisher encoder-a 100 120 "testsrc=size=320x240:rate=25")"
 wait_for_active encoder-a
 
 echo "== failover under the storm"

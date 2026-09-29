@@ -2,16 +2,16 @@
 #include "ngx_media_file.h"
 #include "ngx_media_hls_ingest.h"
 #include "ngx_media_hls_pull.h"
+#include "ngx_media_srt_module.h"
 #include "ngx_media_runtime.h"
 
 static ngx_media_registry_t  *ngx_media_registry_worker;
 
 /*
  * How long a deleted stream may stay on the draining list before the worker
- * says so.  A reader stops as soon as it notices its source is gone, which is
- * a refresh interval for a pull and a directory pass for an ingest; a reader
- * still there after this has stopped making progress and its pool is being
- * held by a thread that will not leave.
+ * says so.  Pull and directory readers stop after noticing source removal;
+ * an SRT session stops after the worker asks its transport thread to close it.
+ * The pool stays alive until every such reference is gone.
  */
 #define NGX_MEDIA_REGISTRY_DRAIN_WARN_MS  5000
 
@@ -47,9 +47,9 @@ ngx_media_registry_init(ngx_media_registry_t *registry, ngx_pool_t *pool,
 
 /*
  * Releases one entry: the stream's ordered teardown, then the pool that
- * carries it.  Reached either straight from a delete, when nothing else
- * references the stream, or from the tick once the last reader that
- * referenced it has been closed.
+ * carries it.  Reached either straight from a delete, when no reader or SRT
+ * session references the stream, or from the tick once the last one has
+ * stopped.
  */
 static void
 ngx_media_registry_entry_release(ngx_media_registry_entry_t *entry)
@@ -86,13 +86,12 @@ ngx_media_registry_destroy(ngx_media_registry_t *registry)
         return;
     }
 
-    /*
-     * Both queues go, draining included.  A draining entry waits for a reader
-     * that holds a thread, and the shutdown that precedes this has already
-     * joined those: exit_process stops the pull, ingest and push threads
-     * before the cycle pool is destroyed, so nothing can still be reading a
-     * stream whose pool is released here.
-     */
+/*
+ * Both queues go, draining included.  A draining entry waits for every
+ * reader and SRT session that holds a reference to stop; shutdown has already
+ * joined the pull, ingest, push and SRT threads before the cycle pool is
+ * destroyed.
+ */
     ngx_media_registry_release_queue(&registry->entries);
     ngx_media_registry_release_queue(&registry->draining);
 
@@ -265,7 +264,7 @@ ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
     ngx_media_registry_entry_t  *entry;
     ngx_media_source_t          *source;
     ngx_queue_t                 *q, *next;
-    ngx_uint_t                   pull, ingest;
+    ngx_uint_t                   pull, ingest, srt;
 
     if (registry == NULL || stream == NULL) {
         return NGX_ERROR;
@@ -296,13 +295,12 @@ ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
          */
         ngx_media_file_close_stream(&entry->stream);
 
-        /*
-         * The remaining sources are detached rather than destroyed, because
-         * the readers that hold a thread - an origin being pulled, a directory
-         * being watched - see the removal in their own loop and leave, and a
-         * transport that was attached to one of these finds its next publish
-         * refused instead of feeding a stream the operator has deleted.
-         */
+/*
+ * The remaining sources are detached rather than destroyed, because readers
+ * and transport sessions may still hold pointers into the stream pool.  They
+ * see removal and stop publishing; the draining list keeps the pool alive
+ * until their references are gone.
+ */
         for (q = ngx_queue_head(&entry->stream.sources);
              q != (ngx_queue_t *) &entry->stream.sources;
              q = next)
@@ -331,8 +329,9 @@ ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
 
         pull = ngx_media_hls_pull_stream_readers(&entry->stream);
         ingest = ngx_media_hls_ingest_stream_readers(&entry->stream);
+        srt = ngx_media_srt_stream_readers(&entry->stream);
 
-        if (pull == 0 && ingest == 0) {
+        if (pull == 0 && ingest == 0 && srt == 0) {
             ngx_media_registry_entry_release(entry);
             return NGX_OK;
         }
@@ -344,10 +343,10 @@ ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
         registry->draining_count++;
 
         ngx_log_error(NGX_LOG_NOTICE, registry->log, 0,
-                      "media: %V/%V deleted, its %ui pull and %ui ingest "
-                      "readers are still stopping",
+                      "media: %V/%V deleted, %ui pull, %ui ingest and %ui "
+                      "SRT session(s) are still stopping",
                       &entry->stream.application, &entry->stream.name,
-                      pull, ingest);
+                      pull, ingest, srt);
 
         return NGX_OK;
     }
@@ -360,7 +359,7 @@ ngx_media_registry_drain(ngx_media_registry_t *registry, ngx_log_t *log)
 {
     ngx_media_registry_entry_t  *entry;
     ngx_queue_t                 *q, *next;
-    ngx_uint_t                   pull, ingest;
+    ngx_uint_t                   pull, ingest, srt;
 
     if (registry == NULL) {
         return;
@@ -376,14 +375,15 @@ ngx_media_registry_drain(ngx_media_registry_t *registry, ngx_log_t *log)
 
         pull = ngx_media_hls_pull_stream_readers(&entry->stream);
         ingest = ngx_media_hls_ingest_stream_readers(&entry->stream);
+        srt = ngx_media_srt_stream_readers(&entry->stream);
 
-        if (pull > 0 || ingest > 0) {
+        if (pull > 0 || ingest > 0 || srt > 0) {
 
             /*
-             * The reader has a thread and has been told its source is gone;
-             * it leaves in its own time, and the pool it reads stays alive
-             * until it does.  An operator who wonders where the memory went
-             * gets one line naming what is holding it, not a silent leak.
+             * Readers and SRT sessions have been told their source is gone;
+             * they stop in their own time, and the pool stays alive until
+             * then.  An operator who wonders where the memory went gets one
+             * line naming what is holding it, not a silent leak.
              */
             if (!entry->draining_warned
                 && ngx_current_msec - entry->draining_since
@@ -392,10 +392,11 @@ ngx_media_registry_drain(ngx_media_registry_t *registry, ngx_log_t *log)
                 entry->draining_warned = 1;
 
                 ngx_log_error(NGX_LOG_WARN, log, 0,
-                              "media: %V/%V is still held by %ui pull and %ui "
-                              "ingest readers %Mms after its delete",
+                              "media: %V/%V is still held by %ui pull, %ui "
+                              "ingest and %ui SRT session(s) %Mms after its "
+                              "delete",
                               &entry->stream.application, &entry->stream.name,
-                              pull, ingest,
+                              pull, ingest, srt,
                               ngx_current_msec - entry->draining_since);
             }
 
@@ -403,7 +404,8 @@ ngx_media_registry_drain(ngx_media_registry_t *registry, ngx_log_t *log)
         }
 
         ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                      "media: %V/%V released, its readers have stopped",
+                      "media: %V/%V released, its readers and sessions have "
+                      "stopped",
                       &entry->stream.application, &entry->stream.name);
 
         ngx_queue_remove(&entry->link);

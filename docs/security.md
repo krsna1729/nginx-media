@@ -173,25 +173,28 @@ escape, never an authorization.)
   on its own listener behind the authenticating proxy, not in a location beside
   the public site.
 
-The same reasoning applies to `media_hls_ingest`, which is a separate location
-that writes uploaded bodies into a directory on disk.  It authenticates nobody
-either, so restrict it to the encoder's address or put it behind the same
-proxy.  Its surface is narrower than the API's — the URI has to end in `.ts`
-and may not start with a dot, and the body size is nginx's own — but a public
-ingest endpoint is disk and media pipeline that an anonymous caller controls.
+`media_hls_ingest` writes uploaded bodies into a directory on disk. It
+requires the bearer key of one `hls_push` source and confines writes to that
+source's configured directory beneath the ingest root. Unknown keys and
+non-HLS-push keys are refused; URI traversal and encoded paths are rejected.
+Restrict network access to expected encoders anyway. The key is part of the
+URL: use HTTPS, disable access logging for the ingest location or redact the
+request URI, and ensure upstream proxies do not record it.
 
 ### What the module does do
 
-None of this is authentication; all of it limits what a reached API or a stored
-value can be turned into, and it is worth knowing when triaging:
+For the control API, none of the following is authentication; these measures
+limit what a reached API or a stored value can be turned into:
 
 - Request bodies are capped at 8192 bytes (`400 body_too_large`) and every
   response is built into a fixed buffer, where truncation is a `500` and never a
   partial document answered `200` (finding 17).
-- Endpoint credentials are redacted wherever an endpoint is reported — the
-  query string is dropped and userinfo replaced — so a key carried in an
-  `hls_push` URL cannot be read back out of the API, a log line, or the
-  desired-state document.
+- Endpoint credentials in destination URLs are redacted wherever those
+  endpoints are reported — the query string is dropped and userinfo replaced.
+  This does not redact `hls_push` ingest keys from access logs: the ingest key
+  is a bearer credential in the request path, so use the logging precautions
+  above. Treat SRT stream IDs and RTMP stream names carrying keys as credentials
+  too; do not expose them to untrusted clients or diagnostics.
 - A destination type with no backend in the build is accepted and then fails to
   start with `500`, so the API cannot start a transport this build does not
   carry (there is no `record` destination backend here).

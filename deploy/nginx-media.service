@@ -1,0 +1,45 @@
+[Unit]
+Description=nginx-media (SRT/RTMP/HLS ingest and egress)
+Documentation=file:/usr/local/nginx-media/share/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/usr/local/nginx-media/logs/nginx.pid
+
+# The compiled-in prefix is the build tree; -p points at the deployed one.
+ExecStart=/usr/local/nginx-media/sbin/nginx -p /usr/local/nginx-media -c nginx.conf
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/usr/local/nginx-media/sbin/nginx -p /usr/local/nginx-media -c nginx.conf -s quit
+
+# Media servers hold many sockets and a lot of address space for queues:
+# one SRT or RTMP session per destination, plus HLS readers.
+LimitNOFILE=1048576
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+
+# The master runs as an unprivileged user and the workers with it: nothing
+# here needs a capability, and the example configuration binds ports above
+# 1024.  Drop the two lines below the user if you need to bind 80/443.
+User=nginx-media
+Group=nginx-media
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=no
+
+# The only writable paths: the media this deployment produces.
+ReadWritePaths=/usr/local/nginx-media/logs /usr/local/nginx-media/hls \
+                /usr/local/nginx-media/record
+
+[Install]
+WantedBy=multi-user.target

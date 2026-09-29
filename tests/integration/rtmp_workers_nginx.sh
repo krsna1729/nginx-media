@@ -28,6 +28,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/rtmp-workers"
 BASE=$(( 19900 + ($$ % 80) * 4 ))
@@ -59,6 +60,7 @@ events {
     worker_connections 256;
 }
 
+media_ingest_secret $RUN/ingest.secret;
 media_rtmp_listen 127.0.0.1:$RTMP_PORT;
 
 http {
@@ -73,6 +75,7 @@ http {
     }
 }
 EOF
+
 
 cleanup() {
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null || true
@@ -111,7 +114,7 @@ line_pid() {
 # stream name, the local form continues with the source count, so the match
 # ends at a space or the end of the line rather than assuming one.
 publish_line() {  # <name>
-    grep -m1 -E "media: rtmp publisher (routed to the owner )?stream=live/$1( |$)" \
+    grep -a -m1 -E "media: rtmp publisher (routed to the owner )?stream=live/$1( |$)" \
         "$LOG" 2>/dev/null || true
 }
 
@@ -137,7 +140,7 @@ publish() {  # <name> <seconds>
     if timeout 30 ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "sine=frequency=440:sample_rate=48000" \
         -c:a aac -b:a 32k \
-        -t "$2" -f flv "rtmp://127.0.0.1:$RTMP_PORT/live/$1" \
+        -t "$2" -f flv "$(media_test_rtmp_publisher_url "$API" rtmp 127.0.0.1 "$RTMP_PORT" live "$1" encoder-a 50)" \
         >"$RUN/pub-$1.log" 2>&1
     then
         return 0
@@ -187,7 +190,12 @@ ACCEPTED=""
 for i in $(seq -w 1 "$PROBES"); do
     publish "p$i" 1
 
-    LINE="$(publish_line "p$i")"
+    LINE=""
+    for _ in $(seq 1 40); do
+        LINE="$(publish_line "p$i")"
+        [ -n "$LINE" ] && break
+        sleep 0.05
+    done
     [ -n "$LINE" ] || fail "live/p$i was published but no worker recorded it"
 
     ACCEPTED="$ACCEPTED $(line_pid "$LINE")"

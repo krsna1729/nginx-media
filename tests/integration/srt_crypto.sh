@@ -17,6 +17,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/srt-crypto"
 PASS="correct-horse-battery"
@@ -74,11 +75,17 @@ events {
 }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
+media_srt_listen 127.0.0.1:$PORT;
 
 $1
 
-media_srt_listen 127.0.0.1:$PORT;
-media_srt_source_priority encoder-a 100;
+http {
+    server {
+        listen 127.0.0.1:$API_PORT;
+        location /media/api/ { media_api; }
+    }
+}
 EOF
 }
 
@@ -117,13 +124,17 @@ stop_nginx() {
 
 publish() {
     # $1: passphrase, $2: log file, $3: seconds
+    local key
+
+    key="$(media_test_ingest_key "$API" live crypto encoder-a srt 100)" \
+        || return
     timeout "$(( $3 + 15 ))" ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "testsrc2=size=320x240:rate=25" \
         -f lavfi -i "sine=frequency=440:sample_rate=48000" -ac 2 \
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t "$3" -f mpegts \
-        "srt://127.0.0.1:$PORT?mode=caller&passphrase=$1&streamid=#!::r=live/crypto,m=publish,s=encoder-a" \
+        "srt://127.0.0.1:$PORT?mode=caller&passphrase=$1&streamid=$key" \
         >"$2" 2>&1
 }
 
@@ -132,6 +143,8 @@ publish() {
 # ---------------------------------------------------------------------------
 
 PORT=24610
+API_PORT=24614
+API="http://127.0.0.1:$API_PORT/media/api/v1"
 write_conf "media_srt_crypto \"$PASS\";"
 
 "$NGINX" -p "$RUN" -c conf/nginx.conf -t >/dev/null || {
@@ -152,7 +165,7 @@ done
 wait "$PUB" 2>/dev/null
 sleep 1
 
-if ! grep -q 'srt source open app=live stream=crypto source=encoder-a' \
+if ! grep -q 'srt source open live/crypto source=encoder-a' \
         "$RUN/logs/error.log"; then
     echo "FAIL: the encrypted publisher was not registered"
     tail -5 "$RUN/logs/error.log"
@@ -224,6 +237,8 @@ stop_nginx "$RUN"
 # ---------------------------------------------------------------------------
 
 PORT=24611
+API_PORT=24615
+API="http://127.0.0.1:$API_PORT/media/api/v1"
 write_conf "media_srt_crypto \"$PASS\" gcm;"
 
 "$NGINX" -p "$RUN" -c conf/nginx.conf -t >/dev/null || {
@@ -278,28 +293,12 @@ mkdir -p "$RUN/a/conf" "$RUN/a/logs" "$RUN/a/hls" \
 
 IN=24612
 OUT=24613
+API_A_PORT=24616
+API_B_PORT=24617
+API_A="http://127.0.0.1:$API_A_PORT/media/api/v1"
+API_B="http://127.0.0.1:$API_B_PORT/media/api/v1"
 GLOBAL="global-secret-1234"
 STREAM="stream-secret-5678"
-
-cat > "$RUN/a/conf/nginx.conf" <<EOF
-worker_processes 1;
-daemon on;
-error_log logs/error.log info;
-pid logs/nginx.pid;
-
-events {
-    worker_connections 256;
-}
-
-media_hls $RUN/a/hls;
-
-media_srt_crypto "$GLOBAL";
-media_srt_crypto_stream live/crypto "$STREAM";
-
-media_srt_listen 127.0.0.1:$IN;
-media_srt_source_priority encoder-a 100;
-media_srt_output live/crypto 127.0.0.1:$OUT "#!::r=live/crypto,m=publish,s=qualify-out";
-EOF
 
 cat > "$RUN/b/conf/nginx.conf" <<EOF
 worker_processes 1;
@@ -307,30 +306,68 @@ daemon on;
 error_log logs/error.log info;
 pid logs/nginx.pid;
 
-events {
-    worker_connections 256;
-}
+events { worker_connections 256; }
 
 media_hls $RUN/b/hls;
-
+media_ingest_secret $RUN/b/ingest.secret;
 media_srt_crypto "$STREAM";
-
 media_srt_listen 127.0.0.1:$OUT;
-media_srt_source_priority qualify-out 100;
+
+http {
+    server {
+        listen 127.0.0.1:$API_B_PORT;
+        location /media/api/ { media_api; }
+    }
+}
+EOF
+
+"$NGINX" -p "$RUN/b" -c conf/nginx.conf -t >/dev/null || {
+    echo "FAIL: the destination configuration was rejected"
+    exit 1
+}
+start_nginx "$RUN/b" 'srt listener ready' || exit 1
+
+for _ in $(seq 1 100); do
+    curl -fsS "$API_B/streams" >/dev/null 2>&1 && break
+    sleep 0.1
+done
+OUT_KEY="$(media_test_ingest_key "$API_B" live crypto qualify-out srt 100)"
+
+cat > "$RUN/a/conf/nginx.conf" <<EOF
+worker_processes 1;
+daemon on;
+error_log logs/error.log info;
+pid logs/nginx.pid;
+
+events { worker_connections 256; }
+
+media_hls $RUN/a/hls;
+media_ingest_secret $RUN/a/ingest.secret;
+media_srt_crypto "$GLOBAL";
+media_srt_crypto_stream live/crypto "$STREAM";
+media_srt_listen 127.0.0.1:$IN;
+media_srt_output live/crypto 127.0.0.1:$OUT "$OUT_KEY";
+
+http {
+    server {
+        listen 127.0.0.1:$API_A_PORT;
+        location /media/api/ { media_api; }
+    }
+}
 EOF
 
 "$NGINX" -p "$RUN/a" -c conf/nginx.conf -t >/dev/null || {
     echo "FAIL: the scoped configuration was rejected"
     exit 1
 }
-"$NGINX" -p "$RUN/b" -c conf/nginx.conf -t >/dev/null || {
-    echo "FAIL: the destination configuration was rejected"
-    exit 1
-}
-
-start_nginx "$RUN/b" 'srt listener ready' || exit 1
 start_nginx "$RUN/a" 'srt listener ready' || exit 1
 
+for _ in $(seq 1 100); do
+    curl -fsS "$API_A/streams" >/dev/null 2>&1 && break
+    sleep 0.1
+done
+
+API="$API_A"
 PORT=$IN
 publish "$GLOBAL" "$RUN/case4.log" 8 &
 PUB=$!
@@ -342,7 +379,7 @@ if ! grep -q 'srt source open' "$RUN/a/logs/error.log"; then
     exit 1
 fi
 
-if ! grep -q 'srt source open app=live stream=crypto source=qualify-out' \
+if ! grep -q 'srt source open live/crypto source=qualify-out' \
         "$RUN/b/logs/error.log"; then
     echo "FAIL: the destination did not connect with the per-stream passphrase"
     tail -3 "$RUN/b/logs/error.log"

@@ -719,9 +719,15 @@ passes the strict full-rate qualification (minimum ratio 0.99903, worst
 interval 0.9355).  That is the same direction the 2026-09-25 comparison
 found, with a wider margin on this host.
 
-Two things to note.  The weekly tier pins robotweax/srt at `b6687f51`
-(a v0.2.5-era commit) on purpose - "moving the pin is a deliberate change
-here" - so this measurement is a reason to move it, not a reason it moved.
+Two things to note.  This measurement was the reason to move the pin, and it
+has moved: `scripts/srt-pins.sh` now names robotweax/srt **v0.2.6**
+(`50cba37b`, the commit measured here) and Haivision/srt **v1.5.7**
+(`899348d8`), and both are built from source by `make srt-pinned` /
+`make nginx-robotweax` rather than taken from the distribution.  The capacity
+tiers call those same two targets, so a number taken on a laptop and a number
+taken in CI link the same library at the same commit, and each rung's bundle
+records which one: `libsrt.so.1.5 1.5.7 (/…/.build/srt-haivision/lib/libsrt.so.1.5)`
+or `robotweax-srt (/…/.build/srt-robotweax/lib/librobotweax-srt.so.0.2)`.
 And the diagnostics cannot attribute robotweax's send queue: its threads are
 not named `SRT:SndQ`, so `cpu.workers[*].libsrt_sndq` is absent for that
 build.  The comparison above therefore rests on delivered bytes and total

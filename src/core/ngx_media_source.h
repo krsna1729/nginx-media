@@ -81,6 +81,31 @@ void ngx_media_source_lease_begin(ngx_media_source_t *source);
 void ngx_media_source_lease_end(ngx_media_source_t *source);
 
 /*
+ * The ingest key (goal doc 11.6).  A publisher presents a key - an SRT stream
+ * id, an RTMP app/name, an HLS push path prefix - and the key is what decides
+ * which source it attaches to.  The key itself is never stored: the caller
+ * hashes it, and only the hash reaches the graph, so a dump of the graph, of
+ * the shared directory or of a core file carries nothing that can publish.
+ *
+ * `print` is the first four bytes of the hash in hex, which is what a refusal
+ * is logged with.
+ */
+void ngx_media_source_key_set(ngx_media_source_t *source,
+    const u_char *hash, const u_char *print);
+
+/* the nonce the key is derived from: not a secret, but never derived without */
+void ngx_media_source_key_nonce(ngx_media_source_t *source,
+    const u_char *nonce);
+
+/* constant-time: a key comparison must not leak how far it matched */
+ngx_uint_t ngx_media_source_key_matches(const ngx_media_source_t *source,
+    const u_char *hash);
+
+/* NGX_OK when a key may be issued or rotated: not already taken in the graph */
+ngx_int_t ngx_media_source_key_available(const ngx_media_source_t *source,
+    const u_char *hash, const ngx_media_source_t *ignore);
+
+/*
  * Stores the source's track contract (a copy) so the selector can classify
  * compatibility against the program.  Replaces any previous contract.
  */

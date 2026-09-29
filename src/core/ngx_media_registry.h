@@ -23,11 +23,10 @@
  *
  * The pool is the entry's own rather than the registry's, so deleting a
  * stream releases its memory instead of leaving it in the cycle pool until
- * the worker exits.  A reader that holds a thread - an origin being pulled, a
- * directory being watched - can be inside that memory while it stops, which
- * is what the draining list is for: the entry leaves the registry at once,
- * and its pool waits on the draining list until the last reader that
- * references it has been closed.
+ * the worker exits.  A reader or transport session may still be inside that
+ * memory while it stops, which is what the draining list is for: the entry
+ * leaves the registry at once, and its pool waits there until the last
+ * reference has closed.
  */
 typedef struct {
     ngx_queue_t         link;
@@ -88,10 +87,9 @@ ngx_uint_t ngx_media_registry_is_tombstoned(
     const ngx_media_registry_t *registry, uint64_t hash, uint64_t revision);
 
 /*
- * Releases the pools of the streams whose readers have all stopped, and
- * returns at once when there are none.  Called from the runtime tick, after
- * the readers have been reaped: a reader that holds a thread is closed there,
- * and closing it is what lets the stream it points at be freed.
+ * Releases pools whose pull readers, ingest readers and SRT sessions have
+ * all stopped.  Called from the runtime tick after readers have been reaped;
+ * the pool remains alive while any transport session still references it.
  */
 void ngx_media_registry_drain(ngx_media_registry_t *registry, ngx_log_t *log);
 

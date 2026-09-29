@@ -2459,9 +2459,7 @@ ngx_media_runtime_visit(ngx_log_t *log)
                     stream->generation, stream->program_frames,
                     ngx_media_stream_source_count(stream));
             }
-
             before = stream->switches;
-
             (void) ngx_media_selector_run(stream, now, &res);
 
             if (now - ngx_media_runtime_last_idle_log >= 1000) {

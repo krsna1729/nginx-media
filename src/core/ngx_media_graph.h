@@ -101,6 +101,11 @@ typedef struct {
     uint32_t   id_len;            /* source id, zero for a stream operation */
     uint32_t   path_len;          /* file path, URL or directory, else zero */
     uint32_t   ca_file_len;       /* HLS pull trust anchor, else zero */
+    uint32_t   key_set;           /* the source answers to a key */
+    u_char     key_hash[NGX_MEDIA_SOURCE_KEY_HASH];
+    u_char     key_print[NGX_MEDIA_SOURCE_KEY_PRINT];
+    u_char     key_nonce[NGX_MEDIA_SOURCE_KEY_NONCE];
+    uint32_t   key_nonce_set;     /* the nonce the key is derived from */
 } ngx_media_graph_wire_t;
 
 /* a decoded operation; the strings point into the message payload */
@@ -120,6 +125,11 @@ typedef struct {
     ngx_str_t   id;
     ngx_str_t   path;
     ngx_str_t   ca_file;
+    ngx_uint_t  key_set;
+    u_char      key_hash[NGX_MEDIA_SOURCE_KEY_HASH];
+    u_char      key_print[NGX_MEDIA_SOURCE_KEY_PRINT];
+    ngx_uint_t  key_nonce_set;
+    u_char      key_nonce[NGX_MEDIA_SOURCE_KEY_NONCE];
 } ngx_media_graph_op_t;
 
 /*
@@ -156,6 +166,15 @@ void ngx_media_graph_repair_tick(ngx_log_t *log);
  * log is kept by the reader this may open, which outlives the request that
  * asked for it: pass the worker's log, never a connection's.
  */
+/*
+ * The source a presented ingest key names, and the stream it belongs to.
+ * A key is unique across the graph, so no program is needed to disambiguate
+ * it; the walk is over the registry, which every worker keeps.
+ */
+ngx_media_source_t *ngx_media_graph_source_by_key(
+    ngx_media_registry_t *registry, const u_char *hash,
+    ngx_media_stream_t **stream_out);
+
 ngx_media_source_t *ngx_media_graph_source_open(ngx_media_stream_t *stream,
     const ngx_str_t *id, ngx_uint_t type, ngx_uint_t priority,
     const ngx_str_t *path, const ngx_str_t *ca_file, ngx_log_t *log);

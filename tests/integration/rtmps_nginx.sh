@@ -12,8 +12,10 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${NGINX_BIN:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="$ROOT/.build/rtmps"
+API="http://127.0.0.1:18446/media/api/v1"
 RTMP_PORT=1936
 HTTP_PORT=18446
 
@@ -77,8 +79,8 @@ events {
 }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 media_rtmp_listen 127.0.0.1:$RTMP_PORT;
-media_rtmp_source_priority encoder-tls 100;
 media_rtmp_ssl on;
 media_rtmp_ssl_certificate $RUN/cert.pem;
 media_rtmp_ssl_certificate_key $RUN/key.pem;
@@ -88,6 +90,9 @@ http {
 
     server {
         listen 127.0.0.1:$HTTP_PORT;
+
+        # the API issues the ingest key the publisher attaches with
+        location /media/api/ { media_api; }
 
         location /hls/ {
             alias $RUN/hls/;
@@ -104,6 +109,12 @@ EOF
 "$NGINX" -p "$RUN" -c conf/nginx.conf
 sleep 0.5
 
+# The app is the listener's fixed field; the API-issued source key identifies
+# the stream on the RTMPS connection.
+RTMP_URL="$(media_test_rtmp_publisher_url \
+    "$API" rtmps 127.0.0.1 "$RTMP_PORT" live tls encoder-tls 100)" \
+    || { echo "the API did not issue an RTMPS publisher URL" >&2; exit 1; }
+
 echo "== publishing over rtmps"
 timeout 60 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
@@ -111,7 +122,7 @@ timeout 60 ffmpeg -hide_banner -loglevel error -re \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -c:a aac -b:a 96k \
     -tls_verify 1 -ca_file "$RUN/cert.pem" \
-    -t 8 -f flv "rtmps://127.0.0.1:$RTMP_PORT/live/tls" \
+    -t 8 -f flv "$RTMP_URL" \
     >"$RUN/pub.log" 2>&1 &
 PUB=$!
 

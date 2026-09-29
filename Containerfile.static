@@ -1,0 +1,45 @@
+# A statically linked nginx with the module, for a release artifact that has
+# no library dependencies at all.
+#
+# Alpine/musl rather than the glibc distributions: glibc warns loudly about
+# static linking (NSS, dlopen, getaddrinfo) and OpenSSL's providers are
+# loadable modules there, while musl is built for it and Alpine ships
+# static OpenSSL, PCRE2 and zlib.
+#
+# Built by scripts/build-static.sh, which is what a local run and CI call.
+FROM alpine:3.22 AS build
+
+ARG SRT_REPO=https://github.com/Haivision/srt
+ARG SRT_REF
+
+RUN apk add --no-cache \
+        bash build-base cmake ninja git linux-headers pkgconf curl \
+        openssl-dev openssl-libs-static \
+        pcre2-dev pcre2-static \
+        zlib-dev zlib-static
+
+# The SRT library is built static here, from the same pin the capacity tiers
+# use: the whole point of a static artifact is that the library cannot drift.
+COPY scripts/build-srt.sh /src/scripts/build-srt.sh
+RUN test -n "$SRT_REF" \
+    && SRT_SHARED=no bash /src/scripts/build-srt.sh \
+         "$SRT_REPO" "$SRT_REF" /opt/srt srt-static
+
+WORKDIR /src
+COPY config /src/config
+COPY src /src/src
+COPY scripts/build-nginx.sh /src/scripts/build-nginx.sh
+
+# NGINX_VERSION comes from the build context so a release pins it the same
+# way the libraries are pinned.
+ARG NGINX_VERSION=1.30.5
+ENV NGINX_VERSION=$NGINX_VERSION
+
+RUN BUILD_DIR=/src/.build NGINX_PREFIX=/opt/nginx \
+    SRT_DIR=/opt/srt MEDIA_SRT_PKG=srt-static \
+    NGINX_LD_OPT="-static -static-libgcc -static-libstdc++" \
+    bash /src/scripts/build-nginx.sh
+
+# Only the binary: everything it needs is inside it.
+FROM scratch AS artifact
+COPY --from=build /opt/nginx/sbin/nginx /nginx

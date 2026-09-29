@@ -120,7 +120,8 @@ ngx_module_name="ngx_media_core_module ngx_media_srt_module ngx_media_rtmp_modul
 # incremental build and vanished on a clean one.  Declaring the headers here
 # makes any change to them rebuild the module.
 ngx_module_deps=`ls $ngx_addon_dir/src/*/*.h 2>/dev/null | tr '\n' ' '`
-ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
+ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_key.c \
+                 $ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/core/ngx_media_runtime.c \
                  $ngx_addon_dir/src/core/ngx_media_owner.c \
                  $ngx_addon_dir/src/core/ngx_media_ipc.c \
@@ -174,7 +175,15 @@ if [ "$MEDIA_SRT_PKG" = robotweax-srt ] && [ -n "$media_srt_libs" ]; then
     media_srt_libs="$media_srt_libs -lstdc++ -lm"
 fi
 
-ngx_module_libs="$media_srt_libs -lpthread"
+# libsrt is C++: a static link of it needs the C++ runtime named after it,
+# and this line is where the module's libraries are ordered.  With a shared
+# libsrt the flag is redundant (the library records its own dependency), with
+# a static one it is the difference between linking and not.
+media_srt_cxx=
+case "$MEDIA_SRT_BACKEND" in
+    srt|both) media_srt_cxx="-lstdc++" ;;
+esac
+ngx_module_libs="$media_srt_libs $media_srt_cxx -lpthread"
 ngx_module_order=
 
 CORE_INCS="$CORE_INCS $media_srt_include_dirs \

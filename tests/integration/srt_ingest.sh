@@ -69,7 +69,8 @@ if ! grep -q '^LISTENING' "$LOG"; then
     exit 1
 fi
 
-# #!::r=live/news,m=publish,s=encoder-a, URL-encoded
+# This transport-only fixture exercises the structured resource/mode/source
+# fields; nginx ingest authentication is covered by srt_ingest_nginx.sh.
 STREAMID='#!::r=live/news,m=publish,s=encoder-a'
 
 echo "== pushing 3s of MPEG-TS over SRT"
