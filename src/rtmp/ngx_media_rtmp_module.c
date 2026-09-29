@@ -478,7 +478,9 @@ ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
     if (stream != NULL && session->source != NULL) {
         ngx_media_health_transport(&session->source->health, 0,
                                    ngx_current_msec);
-        ngx_media_stream_source_remove(stream, session->source);
+
+        /* provisioned state, with a key: a disconnect is not a delete */
+        session->source = NULL;
 
         ngx_log_error(NGX_LOG_NOTICE, session->log, 0,
                       "media: rtmp publisher closed stream=%V/%V frames=%uL "

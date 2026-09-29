@@ -702,10 +702,14 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
     if (session->source != NULL) {
         ngx_media_health_transport(&session->source->health, 0,
                                    ngx_current_msec);
-    }
 
-    if (stream != NULL && session->source != NULL) {
-        ngx_media_stream_source_remove(stream, session->source);
+        /*
+         * The source stays: it is provisioned state with a key the operator
+         * configured, and a publisher that disconnects is a publisher that
+         * disconnected - not a source the operator deleted.  Removing it here
+         * deleted the key with it, so an encoder that reconnected presented a
+         * key that no longer existed.  Deleting a source is the API's job.
+         */
         session->source = NULL;
     }
 

@@ -49,9 +49,14 @@ typedef struct ngx_media_application_s ngx_media_application_t;
 typedef struct ngx_media_stream_s ngx_media_stream_t;
 typedef struct ngx_media_source_s ngx_media_source_t;
 
-/* the key's hash, and the fingerprint a refusal is logged with */
+/*
+ * The key's hash, and the fingerprint a refusal is logged with.  These are
+ * the canonical lengths: src/core/ngx_media_key.h names them too, and the
+ * two must agree - they did not once, and a 12-character fingerprint was
+ * written into an 8-byte array.
+ */
 #define NGX_MEDIA_SOURCE_KEY_HASH   32
-#define NGX_MEDIA_SOURCE_KEY_PRINT  8
+#define NGX_MEDIA_SOURCE_KEY_PRINT  12
 typedef struct ngx_media_source_ops_s ngx_media_source_ops_t;
 
 /* selection policy (goal doc 8) */

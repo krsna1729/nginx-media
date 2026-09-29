@@ -106,8 +106,28 @@ if [ "$OWNERS" -ne 1 ]; then
     exit 1
 fi
 
-# #!::r=live/news,m=publish,s=encoder-a, URL-encoded
-STREAMID='#!::r=live/news,m=publish,s=encoder-a'
+# The key is what a publisher attaches with, and it is provisioned: create
+# the program and its sources through the API, and publish with the keys it
+# issues.  The identities below are the sources' own ids, which is what the
+# log lines name.
+api() { curl -fsS "$@"; }
+
+api -X POST -H 'Content-Type: application/json' \
+    -d '{"application":"live","name":"news"}' "$API/streams" >/dev/null
+
+key_of() { python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"; }
+
+STREAMID="$(api -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"encoder-a","type":"srt","priority":100}' \
+    "$API/streams/live/news/sources" | key_of)"
+CHURN_KEY="$(api -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"encoder-churn","type":"srt","priority":50}' \
+    "$API/streams/live/news/sources" | key_of)"
+FRESH_KEY="$(api -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"encoder-fresh","type":"srt","priority":50}' \
+    "$API/streams/live/news/sources" | key_of)"
+[ -n "$STREAMID" ] && [ -n "$CHURN_KEY" ] && [ -n "$FRESH_KEY" ] \
+    || { echo "the API issued no key" >&2; exit 1; }
 
 echo "== pushing 3s of MPEG-TS (H.264 + AAC) over SRT"
 ffmpeg -hide_banner -loglevel error -re \
@@ -209,7 +229,7 @@ timeout "$(( CHURN_SECS + 20 ))" ffmpeg -hide_banner -loglevel error -re \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -c:a aac -b:a 96k \
     -t "$CHURN_SECS" -f mpegts \
-    "srt://127.0.0.1:$PORT?mode=caller&streamid=#!::r=live/news,m=publish,s=encoder-churn" \
+    "srt://127.0.0.1:$PORT?mode=caller&streamid=$CHURN_KEY" \
     >"$RUN/churn.log" 2>&1 &
 CHURN_PID=$!
 
@@ -267,7 +287,7 @@ timeout "$(( FRESH_SECS + 20 ))" ffmpeg -hide_banner -loglevel error -re \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -c:a aac -b:a 96k \
     -t "$FRESH_SECS" -f mpegts \
-    "srt://127.0.0.1:$PORT?mode=caller&streamid=#!::r=live/news,m=publish,s=encoder-fresh" \
+    "srt://127.0.0.1:$PORT?mode=caller&streamid=$FRESH_KEY" \
     >"$RUN/fresh.log" 2>&1 &
 FRESH_PID=$!
 

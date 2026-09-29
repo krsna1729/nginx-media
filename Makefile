@@ -8,7 +8,7 @@ NGINX_VERSION ?= 1.30.5
     failover hls hls-push hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
     file-source transform \
     stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
-    srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
+    srt-lane-isolation srt-lane-isolation-fanout srt-crypto ingest-keys \
     srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls \
     bench-hls-fanout bench-push-fanout bench-fanout-delay \
     srt-pinned nginx-robotweax install onboarding clean
@@ -282,6 +282,11 @@ bench-capacity-curve:
 # Set CAPACITY_QUALITY_MIXES to a subset; default `all` runs every mix.
 bench-capacity-quality:
 	PHASES=capacity-quality-ladder tests/bench/ingest_egress_fanout.sh
+
+# Ingest keys: one source and several on one program, rotation, refusal by
+# fingerprint, and the same scheme over RTMP.
+ingest-keys:
+	tests/integration/ingest_keys_nginx.sh
 
 srt-qualify:
 	MEDIA_SRT_BACKEND=both $(MAKE) nginx

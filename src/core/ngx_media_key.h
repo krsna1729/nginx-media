@@ -27,14 +27,15 @@
 #define NGX_MEDIA_KEY_SECRET_LEN  26
 
 /* SHA-256 of the key: what the graph keeps and what is compared */
-#define NGX_MEDIA_KEY_HASH_LEN    32
+#define NGX_MEDIA_KEY_HASH_LEN    NGX_MEDIA_SOURCE_KEY_HASH
 
 /*
  * The first six bytes of the hash, in hex: what a refusal is logged with, and
  * what an operator greps the API for.  Long enough that two keys in one graph
- * will not share one.
+ * will not share one.  One definition, in ngx_media.h, because the source
+ * struct sizes its own array with it.
  */
-#define NGX_MEDIA_KEY_PRINT_LEN   12
+#define NGX_MEDIA_KEY_PRINT_LEN   NGX_MEDIA_SOURCE_KEY_PRINT
 
 /*
  * Issues a key for one source.  `application`, `name` and `id` are the
