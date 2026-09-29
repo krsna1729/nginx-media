@@ -1537,7 +1537,7 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "# TYPE nginx_media_runtime_outputs gauge\n"
                          "# HELP nginx_media_streams_draining "
                          "deleted streams whose memory is still held by a "
-                         "reader that is stopping\n"
+                         "reader or transport session that is stopping\n"
                          "# TYPE nginx_media_streams_draining gauge\n"
                          "# HELP nginx_media_worker_event_loop_delay_ms "
                          "interval between the last two periodic timer visits\n"

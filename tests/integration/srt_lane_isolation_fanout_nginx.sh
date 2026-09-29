@@ -726,6 +726,22 @@ done
     || fail "the deleted stream left $(destination_count) destinations behind"
 echo "   deleting the stream released every destination"
 
+SRT_DRAIN_RE='media: live/fan deleted, [0-9]+ pull, [0-9]+ ingest and [1-9][0-9]* SRT session'
+for _ in $(seq 1 100); do
+    grep -qE "$SRT_DRAIN_RE" "$RUN/logs/error.log" && break
+    sleep 0.1
+done
+grep -qE "$SRT_DRAIN_RE" "$RUN/logs/error.log" \
+    || fail "the live SRT session did not hold the deleted stream pool"
+
+for _ in $(seq 1 100); do
+    grep -q 'media: live/fan released' "$RUN/logs/error.log" && break
+    sleep 0.1
+done
+grep -q 'media: live/fan released' "$RUN/logs/error.log" \
+    || fail "the deleted stream pool was not released after SRT close"
+
+
 WORKER_PID="$(pgrep -P "$(cat "$RUN/logs/nginx.pid")" | head -1)"
 RSS_AFTER="$(awk '/^VmRSS/ { print $2 }' /proc/"$WORKER_PID"/status)"
 python3 - "$RSS_BEFORE" "$RSS_AFTER" <<'PYEOF' || fail "worker memory grew without bound"

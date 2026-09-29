@@ -49,6 +49,7 @@
  */
 
 #include "ngx_media_platform.h"
+#include "ngx_media_srt_module.h"
 #include "ngx_media_registry.h"
 #include "ngx_media_route.h"
 #include "ngx_media_runtime.h"
@@ -345,6 +346,28 @@ ngx_media_srt_stream_live(const ngx_media_stream_t *stream)
     registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
 
     return ngx_media_registry_stream_is_live(registry, stream);
+}
+
+ngx_uint_t
+ngx_media_srt_stream_readers(const ngx_media_stream_t *stream)
+{
+    ngx_uint_t  i, count;
+
+    if (stream == NULL) {
+        return 0;
+    }
+
+    count = 0;
+
+    for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
+        if (ngx_media_srt_slots[i].used
+            && ngx_media_srt_slots[i].stream == stream)
+        {
+            count++;
+        }
+    }
+
+    return count;
 }
 
 static ngx_media_srt_slot_t *
