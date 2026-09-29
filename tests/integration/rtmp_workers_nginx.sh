@@ -74,6 +74,23 @@ http {
 }
 EOF
 
+# A publisher attaches with a provisioned key, and the key is read back from
+# the API: the source is created first (idempotent), then asked for its key,
+# which is what an operator configuring an encoder does.
+ingest_key() {   # <program> <source id> [srt|rtmp]
+    local program="$1" id="$2" proto="${3:-srt}"
+    # the program first: a source cannot be created before the stream it
+    # belongs to, and both calls are idempotent, so this is safe to repeat
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"application\":\"live\",\"name\":\"$program\"}" \
+        "$API/streams" >/dev/null 2>&1 || true
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"id\":\"$id\",\"type\":\"$proto\",\"priority\":100}" \
+        "$API/streams/live/$program/sources" >/dev/null 2>&1 || true
+    curl -fsS "$API/streams/live/$program/sources/$id/key" 2>/dev/null \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"
+}
+
 cleanup() {
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null || true
     "$NGINX" -p "$RUN" -c conf/nginx.conf -s quit 2>/dev/null || true
@@ -137,7 +154,7 @@ publish() {  # <name> <seconds>
     if timeout 30 ffmpeg -hide_banner -loglevel error -re \
         -f lavfi -i "sine=frequency=440:sample_rate=48000" \
         -c:a aac -b:a 32k \
-        -t "$2" -f flv "rtmp://127.0.0.1:$RTMP_PORT/live/$1" \
+        -t "$2" -f flv "rtmp://127.0.0.1:$RTMP_PORT/live/$(ingest_key "live/$1" "encoder-a" rtmp)" \
         >"$RUN/pub-$1.log" 2>&1
     then
         return 0

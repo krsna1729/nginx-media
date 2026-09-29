@@ -72,6 +72,23 @@ reap() {
     PIDS=()
 }
 
+# A publisher attaches with a provisioned key, and the key is read back from
+# the API: the source is created first (idempotent), then asked for its key,
+# which is what an operator configuring an encoder does.
+ingest_key() {   # <program> <source id> [srt|rtmp]
+    local program="$1" id="$2" proto="${3:-srt}"
+    # the program first: a source cannot be created before the stream it
+    # belongs to, and both calls are idempotent, so this is safe to repeat
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"application\":\"live\",\"name\":\"$program\"}" \
+        "$API/streams" >/dev/null 2>&1 || true
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"id\":\"$id\",\"type\":\"$proto\",\"priority\":100}" \
+        "$API/streams/live/$program/sources" >/dev/null 2>&1 || true
+    curl -fsS "$API/streams/live/$program/sources/$id/key" 2>/dev/null \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"
+}
+
 cleanup() {
     reap
     stop_instance
@@ -94,6 +111,7 @@ pid logs/nginx.pid;
 events { worker_connections 512; }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 media_srt_listen 127.0.0.1:$SRT_PORT;
 media_rtmp_listen 127.0.0.1:$RTMP_PORT;
 
@@ -258,14 +276,14 @@ echo "== ffmpeg -> nginx-media"
 for codecs in h264+aac hevc+aac h264; do
     name="srt-${codecs//+/-}"
     encode "$codecs" 20 mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/$name,m=publish,s=enc"
+        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "$name" "enc")"
     origin "in  srt $codecs -> hls origin" "$name" "$codecs"
     reap
 done
 
 for codecs in h264+aac hevc+aac h264; do
     name="rtmp-${codecs//+/-}"
-    encode "$codecs" 20 flv "rtmp://127.0.0.1:$RTMP_PORT/live/$name"
+    encode "$codecs" 20 flv "rtmp://127.0.0.1:$RTMP_PORT/live/$(ingest_key "live/$name" "encoder-a" rtmp)"
     origin "in  rtmp $codecs -> hls origin" "$name" "$codecs"
     reap
 done
@@ -312,12 +330,12 @@ echo "== nginx-media -> ffmpeg"
 for codecs in h264+aac hevc+aac; do
     name="out-${codecs//+/-}"
     encode "$codecs" 40 mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/$name,m=publish,s=enc"
+        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "$name" "enc")"
     wait_segments "$name" 2 || die "$name never reached the HLS origin"
 
     # rtmp play: ffmpeg is the player
     timeout 30 ffmpeg -hide_banner -loglevel error -y \
-        -i "rtmp://127.0.0.1:$RTMP_PORT/live/$name" -t 6 -c copy \
+        -i "rtmp://127.0.0.1:$RTMP_PORT/live/$(ingest_key "live/$name" "encoder-a" rtmp)" -t 6 -c copy \
         "$RUN/out/$name-play.flv" >>"$RUN/players.log" 2>&1
     check "out rtmp play $codecs" "$RUN/out/$name-play.flv" "$codecs"
 
@@ -339,7 +357,7 @@ done
 
 name="out-rtmp-dest"
 encode h264+aac 40 mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/$name,m=publish,s=enc"
+    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "$name" "enc")"
 wait_segments "$name" 2 || die "$name never reached the HLS origin"
 timeout 30 ffmpeg -hide_banner -loglevel error -y -listen 1 \
     -i "rtmp://127.0.0.1:$OUT_PORT/live/$name" -t 6 -c copy \

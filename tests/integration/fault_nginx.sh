@@ -25,6 +25,23 @@ if [ ! -x "$NGINX" ]; then
     exit 1
 fi
 
+# A publisher attaches with a provisioned key, and the key is read back from
+# the API: the source is created first (idempotent), then asked for its key,
+# which is what an operator configuring an encoder does.
+ingest_key() {   # <program> <source id> [srt|rtmp]
+    local program="$1" id="$2" proto="${3:-srt}"
+    # the program first: a source cannot be created before the stream it
+    # belongs to, and both calls are idempotent, so this is safe to repeat
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"application\":\"live\",\"name\":\"$program\"}" \
+        "$API/streams" >/dev/null 2>&1 || true
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"id\":\"$id\",\"type\":\"$proto\",\"priority\":100}" \
+        "$API/streams/live/$program/sources" >/dev/null 2>&1 || true
+    curl -fsS "$API/streams/live/$program/sources/$id/key" 2>/dev/null \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"
+}
+
 cleanup() {
     [ "$PUB_A" != "0" ] && kill -KILL "$PUB_A" 2>/dev/null || true
     [ "$PUB_B" != "0" ] && kill -KILL "$PUB_B" 2>/dev/null || true
@@ -51,6 +68,7 @@ media_failover_failure_timeout 800;
 media_failover_recovery_timeout 300;
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 
 media_srt_listen 127.0.0.1:$SRT_PORT;
 media_srt_source_priority encoder-a 100;
@@ -79,7 +97,7 @@ publish() {
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
         -t "$seconds" -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/fault,m=publish,s=$source" \
+        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "fault" "$source")" \
         >>"$RUN/pub-$source.log" 2>&1 &
 
     pid=$!
@@ -111,7 +129,7 @@ except (BrokenPipeError, ValueError):
 ' \
     | ffmpeg -hide_banner -loglevel error -f mpegts -i pipe:0 -c copy \
         -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/fault,m=publish,s=encoder-a" \
+        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "fault" "encoder-a")" \
         >>"$RUN/pub-corrupt.log" 2>&1 &
 }
 

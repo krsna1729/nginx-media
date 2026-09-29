@@ -20,6 +20,23 @@ rm -rf "$RUN"
 mkdir -p "$RUN/conf" "$RUN/logs" "$RUN/hls"
 
 PUB=0
+# A publisher attaches with a provisioned key, and the key is read back from
+# the API: the source is created first (idempotent), then asked for its key,
+# which is what an operator configuring an encoder does.
+ingest_key() {   # <program> <source id> [srt|rtmp]
+    local program="$1" id="$2" proto="${3:-srt}"
+    # the program first: a source cannot be created before the stream it
+    # belongs to, and both calls are idempotent, so this is safe to repeat
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"application\":\"live\",\"name\":\"$program\"}" \
+        "$API/streams" >/dev/null 2>&1 || true
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"id\":\"$id\",\"type\":\"$proto\",\"priority\":100}" \
+        "$API/streams/live/$program/sources" >/dev/null 2>&1 || true
+    curl -fsS "$API/streams/live/$program/sources/$id/key" 2>/dev/null \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"
+}
+
 cleanup() {
     [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null
 
@@ -65,6 +82,7 @@ events {
 }
 
 media_hls $RUN/hls;
+media_ingest_secret $RUN/ingest.secret;
 media_srt_listen 127.0.0.1:$SRT_PORT;
 media_srt_source_priority encoder-a 100;
 
@@ -210,7 +228,7 @@ publish() {
         -f lavfi -i "testsrc2=size=320x240:rate=25" \
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -t "$2" -f mpegts \
-        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/news,m=publish,s=$1" \
+        "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "news" "$1")" \
         >"$RUN/pub-$1.log" 2>&1 &
     echo $!
 }
@@ -250,17 +268,17 @@ timeout 40 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -t 12 -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/news,m=publish,s=encoder-a" \
+    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "news" "encoder-a")" \
     >"$RUN/pub.log" 2>&1 &
 PUB=$!
 
 for _ in $(seq 1 100); do
-    grep -q 'srt source open app=live stream=news' "$RUN/logs/error.log" \
+    grep -q 'srt source open live/news' "$RUN/logs/error.log" \
         2>/dev/null && break
     sleep 0.1
 done
 
-grep -q 'srt source open app=live stream=news' "$RUN/logs/error.log" \
+grep -q 'srt source open live/news' "$RUN/logs/error.log" \
     || { cat "$RUN/pub.log"; echo "the publisher did not attach" >&2; exit 1; }
 
 HLS_READY=0
@@ -679,12 +697,12 @@ echo "== a publisher is accepted after the reload"
 PAFTER="$(publish encoder-after 10)"
 
 for _ in $(seq 1 200); do
-    grep -q 'srt source open app=live stream=news source=encoder-after' \
+    grep -q 'srt source open live/news source=encoder-after' \
         "$RUN/logs/error.log" 2>/dev/null && break
     sleep 0.1
 done
 
-grep -q 'srt source open app=live stream=news source=encoder-after' \
+grep -q 'srt source open live/news source=encoder-after' \
     "$RUN/logs/error.log" \
     || { echo "nothing accepted a publisher on $SRT_PORT after the reload" >&2
          tail -5 "$RUN/logs/error.log" >&2; exit 1; }

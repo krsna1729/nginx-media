@@ -58,6 +58,23 @@ stop_instance() {
     return 0
 }
 
+# A publisher attaches with a provisioned key, and the key is read back from
+# the API: the source is created first (idempotent), then asked for its key,
+# which is what an operator configuring an encoder does.
+ingest_key() {   # <program> <source id> [srt|rtmp]
+    local program="$1" id="$2" proto="${3:-srt}"
+    # the program first: a source cannot be created before the stream it
+    # belongs to, and both calls are idempotent, so this is safe to repeat
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"application\":\"live\",\"name\":\"$program\"}" \
+        "$API/streams" >/dev/null 2>&1 || true
+    curl -fsS -X POST -H 'Content-Type: application/json' \
+        -d "{\"id\":\"$id\",\"type\":\"$proto\",\"priority\":100}" \
+        "$API/streams/live/$program/sources" >/dev/null 2>&1 || true
+    curl -fsS "$API/streams/live/$program/sources/$id/key" 2>/dev/null \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])"
+}
+
 cleanup() {
     [ -n "$SINK_PID" ] && kill -TERM "$SINK_PID" 2>/dev/null
     [ -n "$RELAY_PID" ] && kill -TERM "$RELAY_PID" 2>/dev/null
@@ -182,11 +199,11 @@ timeout 120 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=640x360:rate=25" -t 90 \
     -c:v libx264 -preset ultrafast -b:v 1200k -maxrate 1200k -bufsize 600k \
     -g 25 -pix_fmt yuv420p -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/iso,m=publish,s=enc" \
+    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$(ingest_key "iso" "enc")" \
     >"$RUN/pub.log" 2>&1 &
 PUB_PID=$!
 for _ in $(seq 1 100); do
-    grep -q 'srt source open app=live stream=iso' "$RUN/logs/error.log" && break
+    grep -q 'srt source open live/iso' "$RUN/logs/error.log" && break
     sleep 0.1
 done
 
