@@ -3129,6 +3129,82 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
 }
 
 /*
+ * POST .../sources/{source}/rotate
+ *
+ * Issues a new key for a source and invalidates the old one at once: no grace
+ * window, because a key is either the one the encoder has or it is not.  The
+ * plaintext is returned here and never again; losing it costs one rotation.
+ */
+static ngx_int_t
+ngx_media_api_source_rotate(ngx_media_stream_t *stream, ngx_str_t *source_id,
+    u_char **last, u_char *end)
+{
+    ngx_media_source_t   *source;
+    ngx_media_registry_t *registry;
+    ngx_media_stream_t   *owner;
+    u_char                key[NGX_MEDIA_KEY_MAX];
+    u_char                key_hash[NGX_MEDIA_KEY_HASH_LEN];
+    u_char                key_print[NGX_MEDIA_KEY_PRINT_LEN];
+    ngx_str_t             issued, print_str;
+    size_t                key_len = 0;
+
+    source = ngx_media_stream_source_find(stream, source_id);
+
+    if (source == NULL) {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"source_not_found\"}");
+        return NGX_HTTP_NOT_FOUND;
+    }
+
+    /*
+     * A fresh key can collide with another source's only by chance, and the
+     * chance is 2^-130; the check is here because the cost of being wrong is
+     * a publisher attaching to the wrong source.
+     */
+    for (;;) {
+        if (ngx_media_key_issue(key, sizeof(key), &key_len, key_hash, key_print)
+            != NGX_OK)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"key_issue_failed\"}");
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+
+        registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+        owner = NULL;
+
+        if (ngx_media_graph_source_by_key(registry, key_hash, &owner) == NULL) {
+            break;
+        }
+    }
+
+    ngx_media_source_key_set(source, key_hash, key_print);
+    ngx_media_source_touch(source);
+    ngx_media_stream_touch(stream);
+
+    (void) ngx_media_graph_source_set(stream, source, &source->path,
+                                      &source->ca_file);
+
+    issued.data = key;
+    issued.len = key_len;
+    print_str.data = key_print;
+    print_str.len = NGX_MEDIA_KEY_PRINT_LEN;
+
+    *last = ngx_snprintf(*last, end - *last, "{\"id\":");
+
+    if (ngx_media_api_json_string(last, end, &source->id) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    *last = ngx_snprintf(*last, end - *last,
+                         ",\"key\":\"%V\",\"key_print\":\"%V\","
+                         "\"revision\":%uL,\"rotated\":true}",
+                         &issued, &print_str, source->revision);
+
+    return NGX_HTTP_OK;
+}
+
+/*
  * DELETE /media/api/v1/streams/{application}/{name}/sources/{source}
  *
  * Removing the active source is a normal operation: the selector fails over
@@ -3325,6 +3401,12 @@ ngx_media_api_sources(ngx_http_request_t *r, ngx_media_stream_t *stream,
     {
         return ngx_media_api_source_set_enabled(stream, &source_id, 0, last,
                                                 end);
+    }
+
+    if (verb.len == sizeof("rotate") - 1
+        && ngx_strncmp(verb.data, "rotate", sizeof("rotate") - 1) == 0)
+    {
+        return ngx_media_api_source_rotate(stream, &source_id, last, end);
     }
 
     return NGX_DECLINED;
