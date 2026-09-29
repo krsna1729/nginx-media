@@ -209,13 +209,32 @@ curl -X POST -H 'Content-Type: application/json' \
 ffmpeg ... -f mpegts "srt://127.0.0.1:9000?streamid=CW3AB274M5NCZQX4896JH86PR7"
 ```
 
-The key is a bearer credential: only its hash is stored, the plaintext is
-returned in that one response, and every later read shows `key_print` — the
-first six bytes of the hash — instead.  `POST .../sources/{id}/rotate` issues
-a new one and invalidates the old at once.  A publisher that presents
-anything else is refused, and the log names the fingerprint it presented, not
-the key.  Two sources on one program are two keys, two priorities and two
-independent health states; the selector decides which is on air.
+The key is derived, not stored:
+
+```
+key = base32(HMAC-SHA256(secret, source_id ‖ nonce))[0:26]
+```
+
+so an operator can be given it whenever the encoder is actually being
+configured — `GET .../sources/{id}/key`, days after the source was created and
+by someone else — while the graph holds only the nonce and the hash.  A dump
+of the graph, of the shared directory or of a core file carries nothing that
+can publish; the one thing to protect is the deployment secret.
+
+```nginx
+media_ingest_secret /usr/local/nginx-media/ingest.secret;
+```
+
+The core generates that file (0600) on first start if it is not there, and
+every worker inherits it before forking.  Without the directive no key can be
+issued or read — the API says so rather than deriving from nothing.
+
+`POST .../sources/{id}/rotate` issues a new nonce, so the old key dies at
+once and the new one is derivable forever after.  Every later read of a source
+shows `key_print` — the first six bytes of the hash — and the log names the
+fingerprint a refused publisher presented, never the key.  Two sources on one
+program are two keys, two priorities and two independent health states; the
+selector decides which is on air.
 
 Nothing about the `#!::` convention is required or parsed: a device that
 emits `#!::r=live/news,m=publish,s=enc1` can be provisioned with exactly that

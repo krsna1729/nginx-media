@@ -256,11 +256,22 @@ A create takes `{"id":"encoder-b","type":"file","priority":50,
  "revision":3,"created":true}
 ```
 
-The key is a bearer credential, so it is returned in this one response and
-never again: every later read of the source carries `"key_set":true` and
-`"key_print":"dcc2de7b5788"`, the first six bytes of its SHA-256, which is
-also what a refusal is logged with.  Only the hash is stored, in the graph and
-in every replica of it.
+The key is derived from the source's id and a per-source nonce under the
+deployment secret (`media_ingest_secret`), so it can be read again whenever
+the encoder is being configured:
+
+```sh
+curl -s http://127.0.0.1:8080/media/api/v1/streams/live/news/sources/enc1/key
+# {"id":"enc1","key":"CW3AB274M5NCZQX4896JH86PR7","key_print":"dcc2de7b5788"}
+```
+
+A read is deliberate and lands in the access log; a source listing carries
+only `"key_set":true` and `"key_print":"dcc2de7b5788"`, the first six bytes of
+the hash, which is also what a refusal is logged with.  The graph stores the
+nonce and the hash, never the key, so a dump of it carries nothing that can
+publish.  A source whose key an operator supplied by hand (the `"key"` field
+below) has no nonce and no derivable key: that read answers
+`key_not_readable`, and rotation issues a derived one again.
 
 `POST .../sources/{id}/rotate` issues a new key for the source and invalidates
 the old one at once; it answers with the same shape plus `"rotated":true`.

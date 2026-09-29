@@ -49,6 +49,18 @@ carries the version it was built against.  The distribution's library is the
 default because a distribution's security update reaches it; the pinned one is
 what a capacity claim names.
 
+### The ingest secret
+
+```nginx
+media_ingest_secret /usr/local/nginx-media/ingest.secret;
+```
+
+Ingest keys are derived from this secret, so it is the one file in a
+deployment that must not be readable by anyone else: the server creates it
+0600 on first start if it is absent, and every worker inherits it.  Back it up
+with the configuration — without it, existing keys cannot be re-derived (they
+can still be rotated, which issues new ones).
+
 ### Run it as a service
 
 ```sh

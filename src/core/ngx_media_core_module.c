@@ -21,8 +21,111 @@
 #include "ngx_media_egress_manager.h"
 #include "ngx_media_key.h"
 
+#include <openssl/rand.h>
+
 static void *ngx_media_core_create_conf(ngx_cycle_t *cycle);
 static ngx_int_t ngx_media_core_init_module(ngx_cycle_t *cycle);
+
+/*
+ * The deployment secret every ingest key is derived under.  It lives in the
+ * process, not in the graph: the graph is replicated to every worker and
+ * written to the shared directory, and a secret there would be a secret in
+ * every dump of it.  Loaded once before the workers fork, so they inherit it
+ * and no worker reads the file itself.
+ */
+static u_char   ngx_media_key_master[NGX_MEDIA_KEY_MASTER_LEN];
+static size_t   ngx_media_key_master_len;
+
+const u_char *
+ngx_media_ingest_secret(size_t *len)
+{
+    if (len != NULL) {
+        *len = ngx_media_key_master_len;
+    }
+
+    return ngx_media_key_master_len == 0 ? NULL : ngx_media_key_master;
+}
+
+ngx_int_t
+ngx_media_ingest_secret_load(const ngx_str_t *path, ngx_log_t *log)
+{
+    u_char    buf[NGX_MEDIA_KEY_MASTER_LEN * 4];
+    ngx_fd_t  fd;
+    ssize_t   n;
+    size_t    i;
+
+    if (path == NULL || path->len == 0) {
+        return NGX_ERROR;
+    }
+
+    fd = ngx_open_file(path->data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+
+    if (fd == NGX_INVALID_FILE) {
+
+        /*
+         * First start: make one.  0600, and it is the one file in a
+         * deployment that must not be readable by anyone else - which is a
+         * simpler thing to protect than a key per source in state.
+         */
+        if (RAND_bytes(ngx_media_key_master, NGX_MEDIA_KEY_MASTER_LEN) != 1) {
+            return NGX_ERROR;
+        }
+
+        fd = ngx_open_file(path->data,
+                           NGX_FILE_WRONLY | NGX_FILE_CREATE_OR_OPEN
+                               | NGX_FILE_TRUNCATE,
+                           NGX_FILE_DEFAULT_ACCESS, 0600);
+
+        if (fd == NGX_INVALID_FILE) {
+            ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                          "media: could not create the ingest secret at %V",
+                          path);
+            return NGX_ERROR;
+        }
+
+        n = ngx_write_fd(fd, ngx_media_key_master, NGX_MEDIA_KEY_MASTER_LEN);
+        ngx_close_file(fd);
+
+        if (n != NGX_MEDIA_KEY_MASTER_LEN) {
+            return NGX_ERROR;
+        }
+
+        ngx_media_key_master_len = NGX_MEDIA_KEY_MASTER_LEN;
+
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: generated the ingest secret at %V", path);
+        return NGX_OK;
+    }
+
+    n = ngx_read_fd(fd, buf, sizeof(buf));
+    ngx_close_file(fd);
+
+    if (n <= 0) {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "media: the ingest secret at %V is empty", path);
+        return NGX_ERROR;
+    }
+
+    if ((size_t) n > sizeof(buf)) {
+        n = (ssize_t) sizeof(buf);
+    }
+
+    /*
+     * Whatever the file holds is the secret, stretched to the length the
+     * derivation wants: an operator can supply one from a secret manager in
+     * whatever form that produces.
+     */
+    for (i = 0; i < NGX_MEDIA_KEY_MASTER_LEN; i++) {
+        ngx_media_key_master[i] = buf[i % (size_t) n];
+    }
+
+    ngx_media_key_master_len = NGX_MEDIA_KEY_MASTER_LEN;
+
+    ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                  "media: loaded the ingest secret from %V", path);
+
+    return NGX_OK;
+}
 static char *ngx_media_failure_timeout_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_media_recovery_timeout_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
