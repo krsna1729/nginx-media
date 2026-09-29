@@ -37,6 +37,22 @@ jobs:
       - name: Reusable workflow permissions
         run: python3 scripts/check-workflow-permissions.py
 
+  # Does a clean machine build, install and run it?  The documented path from
+  # docs/deployment.md and docs/quickstart.md, in a container of the image a
+  # newcomer would use - so the onboarding instructions are tested rather than
+  # believed, and drift fails here instead of in someone's first ten minutes.
+  onboarding:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Onboarding, end to end
+        run: make onboarding
+
   ubuntu:
     runs-on: ubuntu-24.04
     timeout-minutes: 45

@@ -118,12 +118,15 @@ ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=25" \
     -f lavfi -i "sine=frequency=440:sample_rate=48000" -ac 2 \
     -c:v libx264 -preset ultrafast -g 50 -pix_fmt yuv420p \
     -c:a aac -b:a 128k \
-    -f mpegts "srt://127.0.0.1:9000?streamid=#!::r=live/demo,m=publish"
+    -f mpegts "srt://127.0.0.1:9000?streamid=#!::r=live/demo,s=enc1,m=publish"
 ```
 
-Add `media_srt_listen 0.0.0.0:9000;` to the configuration first.  A second
-encoder publishing the same program is a second *source*, not a replacement:
-give it a priority and it stands by until the selector promotes it.
+Add `media_srt_listen 0.0.0.0:9000;` to the configuration first.  The `s=`
+field is the source's identity and is required - the publisher is refused
+without it (`no source identity in the stream id`), because a program's
+sources are distinguished by it.  A second encoder publishing the same program
+is a second *source*, not a replacement: give it a priority and it stands by
+until the selector promotes it.
 
 ## Where to go next
 

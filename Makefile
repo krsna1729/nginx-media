@@ -11,7 +11,7 @@ NGINX_VERSION ?= 1.30.5
     srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
     srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls \
     bench-hls-fanout bench-push-fanout bench-fanout-delay \
-    srt-pinned nginx-robotweax clean
+    srt-pinned nginx-robotweax install onboarding clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -286,6 +286,32 @@ bench-capacity-quality:
 srt-qualify:
 	MEDIA_SRT_BACKEND=both $(MAKE) nginx
 	tests/integration/srt_backend_qualify.sh
+
+# Deploy what was built: the binary, a configuration to start from and the
+# service unit, under PREFIX (default /usr/local/nginx-media).  The binary's
+# compiled-in prefix is the build tree, so the unit passes -p explicitly -
+# which is also why moving a deployment is a file copy and a unit edit rather
+# than a rebuild.  docs/deployment.md is the whole path.
+PREFIX ?= /usr/local/nginx-media
+install:
+	@[ -x .build/nginx-install/sbin/nginx ] \
+	    || { echo "nothing built yet; run: make nginx" >&2; exit 1; }
+	install -d "$(PREFIX)/sbin" "$(PREFIX)/logs" "$(PREFIX)/hls" \
+	    "$(PREFIX)/record" "$(PREFIX)/share"
+	install -m 0755 .build/nginx-install/sbin/nginx "$(PREFIX)/sbin/nginx"
+	install -m 0644 container/nginx.conf "$(PREFIX)/nginx.conf"
+	install -m 0644 README.md "$(PREFIX)/share/README.md"
+	install -m 0644 deploy/nginx-media.service \
+	    "$(PREFIX)/share/nginx-media.service"
+	@echo "installed to $(PREFIX)"
+	@echo "next: edit $(PREFIX)/nginx.conf, then"
+	@echo "  sudo cp $(PREFIX)/share/nginx-media.service /etc/systemd/system/"
+	@echo "  sudo systemctl daemon-reload && sudo systemctl enable --now nginx-media"
+
+# Does a clean machine build, install and run it?  The documented path, run
+# in a container: the onboarding instructions are tested, not believed.
+onboarding:
+	scripts/verify-onboarding.sh
 
 clean:
 	$(MAKE) -C tests/unit clean
