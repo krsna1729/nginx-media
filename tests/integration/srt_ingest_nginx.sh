@@ -147,7 +147,7 @@ done
 echo "== worker view"
 grep -E 'srt listener ready|srt source open|srt source close|srt ingest drained' "$LOG" || true
 
-grep -q 'srt source open app=live stream=news source=encoder-a' "$LOG" \
+grep -q 'srt source open live/news source=encoder-a' "$LOG" \
     || { echo "source was not registered with the expected identity" >&2; exit 1; }
 
 CLOSE_LINE="$(grep 'srt source close' "$LOG" | tail -1 || true)"
@@ -234,14 +234,14 @@ timeout "$(( CHURN_SECS + 20 ))" ffmpeg -hide_banner -loglevel error -re \
 CHURN_PID=$!
 
 for _ in $(seq 1 200); do
-    if grep -q 'srt source open app=live stream=news source=encoder-churn' \
+    if grep -q 'srt source open live/news source=encoder-churn' \
             "$LOG" 2>/dev/null; then
         break
     fi
     sleep 0.1
 done
 
-grep -q 'srt source open app=live stream=news source=encoder-churn' "$LOG" \
+grep -q 'srt source open live/news source=encoder-churn' "$LOG" \
     || { echo "the churn publisher was not accepted" >&2
          cat "$RUN/churn.log" >&2; exit 1; }
 

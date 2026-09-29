@@ -73,7 +73,7 @@ start_publisher() {
         -f lavfi -i "sine=frequency=440:sample_rate=48000" -ac 2 \
         -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
         -c:a aac -b:a 96k \
-        -t "$seconds" -f flv "rtmp://127.0.0.1:$RTMP_PORT/live/news" \
+        -t "$seconds" -f flv "rtmp://127.0.0.1:$RTMP_PORT/live/$RTMP_KEY" \
         >"$RUN/pub.log" 2>&1 &
 
     PUB_PID=$!
@@ -92,6 +92,16 @@ done
 
 grep -q 'rtmp listener ready' "$RUN/logs/error.log" \
     || { echo "rtmp listener not ready" >&2; exit 1; }
+
+# The publisher attaches with a provisioned key: over RTMP the app is the
+# listener's fixed field and the stream name is the key.
+RTMP_KEY="$(curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"application":"live","name":"news"}' "$API/streams" >/dev/null \
+    && curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"encoder-a","type":"rtmp","priority":100}' \
+    "$API/streams/live/news/sources" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])")"
+[ -n "$RTMP_KEY" ] || { echo "the API issued no key" >&2; exit 1; }
 
 echo "== publishing over rtmp for 14s"
 start_publisher 14

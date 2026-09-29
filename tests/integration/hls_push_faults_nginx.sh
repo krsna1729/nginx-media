@@ -126,6 +126,13 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
     -d '{"application":"live","name":"faults"}' "$API/streams" >/dev/null \
     || fail "stream not created"
 
+# The publisher attaches with a provisioned key, which is the whole stream id.
+SRT_KEY="$(curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"encoder-a","type":"srt","priority":100}' \
+    "$API/streams/live/faults/sources" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])")" \
+    || fail "no key was issued"
+
 curl -fsS "http://127.0.0.1:$OK_PORT/__mark" >"$RUN/ok.mark.json" \
     || fail "could not mark the healthy sink"
 curl -fsS "http://127.0.0.1:$BAD_PORT/__mark" >"$RUN/bad.mark.json" \
@@ -135,11 +142,11 @@ timeout 120 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" -t 90 \
     -c:v libx264 -preset ultrafast -b:v 1200k -maxrate 1200k -bufsize 600k \
     -g 25 -pix_fmt yuv420p -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/faults,m=publish,s=encoder-a" \
+    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$SRT_KEY" \
     >"$RUN/pub.log" 2>&1 &
 PUB_PID=$!
 for _ in $(seq 1 100); do
-    grep -q 'srt source open app=live stream=faults' "$RUN/logs/error.log" && break
+    grep -q 'srt source open live/faults source=encoder-a' "$RUN/logs/error.log" && break
     sleep 0.1
 done
 

@@ -119,15 +119,22 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
     -d '{"application":"live","name":"profiles"}' "$API/streams" >/dev/null \
     || fail "stream not created"
 
+# The publisher attaches with a provisioned key, which is the whole stream id.
+SRT_KEY="$(curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"encoder-a","type":"srt","priority":100}' \
+    "$API/streams/live/profiles/sources" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])")" \
+    || fail "no key was issued"
+
 timeout 120 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" -t 60 \
     -c:v libx264 -preset ultrafast -b:v 1200k -maxrate 1200k -bufsize 600k \
     -g 25 -pix_fmt yuv420p -f mpegts \
-    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=#!::r=live/profiles,m=publish,s=encoder-a" \
+    "srt://127.0.0.1:$SRT_PORT?mode=caller&streamid=$SRT_KEY" \
     >"$RUN/pub.log" 2>&1 &
 PUB_PID=$!
 for _ in $(seq 1 100); do
-    grep -q 'srt source open app=live stream=profiles' "$RUN/logs/error.log" && break
+    grep -q 'srt source open live/profiles source=encoder-a' "$RUN/logs/error.log" && break
     sleep 0.1
 done
 
