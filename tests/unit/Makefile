@@ -6,7 +6,8 @@ WARN     = -Wall -Wextra -Werror -std=c11
 INCLUDES = -I../../src/core -I../../src/codec -I../../src/srt -I../../src/mpegts -I../../src/hls -I../../src/record -I../../src/rtmp -Ishim -I.
 DEFS     = -DNGX_MEDIA_UNIT_TEST
 
-CORE := ../../src/core/ngx_media_buffer.c \
+CORE := ../../src/core/ngx_media_key.c \
+        ../../src/core/ngx_media_buffer.c \
         ../../src/core/ngx_media_executor.c \
         ../../src/core/ngx_media_transform.c \
         ../../src/core/ngx_media_frame.c \
@@ -45,7 +46,7 @@ CORE := ../../src/core/ngx_media_buffer.c \
 
 SHIM := shim/ngx_shim.c
 
-TESTS := test_buffer test_destination test_egress_manager test_frame test_feed test_track test_timeline \
+TESTS := test_key test_buffer test_destination test_egress_manager test_frame test_feed test_track test_timeline \
          test_rtmp_wire test_rtmp_flv test_srt_output test_owner test_ipc test_lifecycle test_fuzz test_bounds test_srt_udp test_security test_tombstone test_transform test_executor \
          test_hls_playlist test_hls
 BINS  := $(addprefix build/,$(TESTS))
@@ -56,7 +57,7 @@ all: $(BINS)
 
 build/%: %.c ngx_media_test.h $(CORE) $(SHIM)
 	@mkdir -p build
-	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) $(SAN) -o $@ $< $(CORE) $(SHIM) -lpthread
+	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) $(SAN) -o $@ $< $(CORE) $(SHIM) -lpthread -lcrypto
 
 test: $(BINS)
 	@fail=0; for t in $(TESTS); do ./build/$$t || fail=1; done; exit $$fail
@@ -72,7 +73,7 @@ tsan: $(TSAN_BINS)
 
 build/tsan/%: %.c ngx_media_test.h $(CORE) $(SHIM)
 	@mkdir -p build/tsan
-	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) -fsanitize=thread -o $@ $< $(CORE) $(SHIM) -lpthread
+	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) -fsanitize=thread -o $@ $< $(CORE) $(SHIM) -lpthread -lcrypto
 
 # The HLS ingest reader is host-side code - it reads a directory, demuxes and
 # sleeps - and no other suite links it, so it gets its own rule instead of a
@@ -81,7 +82,7 @@ build/tsan/%: %.c ngx_media_test.h $(CORE) $(SHIM)
 build/tsan/test_hls_ingest: test_hls_ingest.c ngx_media_test.h $(CORE) $(SHIM)
 	@mkdir -p build/tsan
 	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) -fsanitize=thread -o $@ $< \
-	    ../../src/core/ngx_media_hls_ingest.c $(CORE) $(SHIM) -lpthread
+	    ../../src/core/ngx_media_hls_ingest.c $(CORE) $(SHIM) -lpthread -lcrypto
 
 clean:
 	rm -rf build

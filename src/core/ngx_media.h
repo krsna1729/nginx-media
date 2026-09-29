@@ -48,6 +48,10 @@
 typedef struct ngx_media_application_s ngx_media_application_t;
 typedef struct ngx_media_stream_s ngx_media_stream_t;
 typedef struct ngx_media_source_s ngx_media_source_t;
+
+/* the key's hash, and the fingerprint a refusal is logged with */
+#define NGX_MEDIA_SOURCE_KEY_HASH   32
+#define NGX_MEDIA_SOURCE_KEY_PRINT  8
 typedef struct ngx_media_source_ops_s ngx_media_source_ops_t;
 
 /* selection policy (goal doc 8) */
@@ -164,6 +168,19 @@ struct ngx_media_source_s {
     ngx_uint_t              type;      /* NGX_MEDIA_SOURCE_* */
     ngx_uint_t              priority;
     ngx_str_t               path;      /* desired file, directory or URL */
+
+    /*
+     * The ingest key: what a publisher presents to attach to this source, and
+     * the only thing that decides which source a connection is.  It is a
+     * bearer credential - whoever holds it can publish as this source - so
+     * only its hash is kept, never the key itself, and the hash is what
+     * travels between workers.  key_print is the first four bytes of that
+     * hash in hex: a refusal names the fingerprint, so an operator can find
+     * the misconfigured encoder without the log becoming a key store.
+     */
+    u_char                  key_hash[NGX_MEDIA_SOURCE_KEY_HASH];
+    u_char                  key_print[NGX_MEDIA_SOURCE_KEY_PRINT];
+    unsigned                key_set:1;
     ngx_str_t               ca_file;   /* desired HLS pull trust anchor */
     ngx_uint_t              state;     /* activation gate state */
     ngx_msec_t              last_media;

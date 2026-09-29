@@ -221,6 +221,9 @@ ngx_media_graph_encode(const ngx_media_graph_op_t *op,
     wire.id_len = (uint32_t) op->id.len;
     wire.path_len = (uint32_t) op->path.len;
     wire.ca_file_len = (uint32_t) op->ca_file.len;
+    wire.key_set = op->key_set ? 1 : 0;
+    ngx_memcpy(wire.key_hash, op->key_hash, NGX_MEDIA_SOURCE_KEY_HASH);
+    ngx_memcpy(wire.key_print, op->key_print, NGX_MEDIA_SOURCE_KEY_PRINT);
 
     p = ngx_media_buf_data(buf);
 
@@ -388,6 +391,9 @@ ngx_media_graph_source_set(const ngx_media_stream_t *stream,
     op.id = source->id;
     op.path = source->path;
     op.ca_file = source->ca_file;
+    op.key_set = source->key_set ? 1 : 0;
+    ngx_memcpy(op.key_hash, source->key_hash, NGX_MEDIA_SOURCE_KEY_HASH);
+    ngx_memcpy(op.key_print, source->key_print, NGX_MEDIA_SOURCE_KEY_PRINT);
 
     if (path != NULL && path->len != 0) {
         op.path = *path;
@@ -450,6 +456,10 @@ ngx_media_graph_decode(const ngx_media_ipc_header_t *header,
     }
 
     ngx_memcpy(&wire, ngx_media_buf_data(payload), sizeof(wire));
+
+    op->key_set = wire.key_set ? 1 : 0;
+    ngx_memcpy(op->key_hash, wire.key_hash, NGX_MEDIA_SOURCE_KEY_HASH);
+    ngx_memcpy(op->key_print, wire.key_print, NGX_MEDIA_SOURCE_KEY_PRINT);
 
     need = sizeof(wire) + (size_t) wire.application_len + wire.name_len
            + wire.id_len + wire.path_len + wire.ca_file_len;
@@ -853,6 +863,14 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
         }
 
         /*
+         * The key is desired state like the path: the worker that did not
+         * answer the API still has to admit the publisher the key names.
+         */
+        if (op.key_set) {
+            ngx_media_source_key_set(source, op.key_hash, op.key_print);
+        }
+
+        /*
          * The desired fields are set from the operation, not just when the
          * source is new: an enable or a priority change is the same operation
          * with the same fields, so applying it twice is a no-op and applying
@@ -890,4 +908,54 @@ ngx_media_graph_apply(const ngx_media_ipc_header_t *header,
     }
 
     return NGX_ERROR;
+}
+
+/*
+ * The source a presented key names, anywhere in the graph.
+ *
+ * A key is unique across the graph - the API refuses to issue one that is
+ * taken - so the lookup needs no program to disambiguate it, and the caller
+ * learns both from one call.  The walk is over the registry, which every
+ * worker keeps: a publisher that lands on a worker that does not own its
+ * program is still resolved here, before it is routed.
+ */
+ngx_media_source_t *
+ngx_media_graph_source_by_key(ngx_media_registry_t *registry,
+    const u_char *hash, ngx_media_stream_t **stream_out)
+{
+    ngx_queue_t                *q, *sq;
+    ngx_media_registry_entry_t *entry;
+    ngx_media_source_t         *source;
+
+    if (stream_out != NULL) {
+        *stream_out = NULL;
+    }
+
+    if (registry == NULL || hash == NULL) {
+        return NULL;
+    }
+
+    for (q = ngx_queue_head(&registry->entries);
+         q != (ngx_queue_t *) &registry->entries;
+         q = ngx_queue_next(q))
+    {
+        entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
+
+        for (sq = ngx_queue_head(&entry->stream.sources);
+             sq != (ngx_queue_t *) &entry->stream.sources;
+             sq = ngx_queue_next(sq))
+        {
+            source = ngx_queue_data(sq, ngx_media_source_t, queue);
+
+            if (ngx_media_source_key_matches(source, hash)) {
+                if (stream_out != NULL) {
+                    *stream_out = &entry->stream;
+                }
+
+                return source;
+            }
+        }
+    }
+
+    return NULL;
 }

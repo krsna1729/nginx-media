@@ -120,7 +120,8 @@ ngx_module_name="ngx_media_core_module ngx_media_srt_module ngx_media_rtmp_modul
 # incremental build and vanished on a clean one.  Declaring the headers here
 # makes any change to them rebuild the module.
 ngx_module_deps=`ls $ngx_addon_dir/src/*/*.h 2>/dev/null | tr '\n' ' '`
-ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_core_module.c \
+ngx_module_srcs="$ngx_addon_dir/src/core/ngx_media_key.c \
+                 $ngx_addon_dir/src/core/ngx_media_core_module.c \
                  $ngx_addon_dir/src/core/ngx_media_runtime.c \
                  $ngx_addon_dir/src/core/ngx_media_owner.c \
                  $ngx_addon_dir/src/core/ngx_media_ipc.c \
