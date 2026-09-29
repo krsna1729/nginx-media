@@ -247,7 +247,27 @@ POST   .../sources/{id}/disable
 ```
 
 A create takes `{"id":"encoder-b","type":"file","priority":50,
-"path":"/srv/slate.ts"}`.  `type` is one of `srt`, `rtmp`, `file`, `hls_pull`,
+"path":"/srv/slate.ts"}`, or for a source a publisher attaches to,
+`{"id":"encoder-b","type":"srt","priority":50}` — and the response carries the
+**key** that publisher presents:
+
+```json
+{"id":"encoder-b","key":"CW3AB274M5NCZQX4896JH86PR7","key_print":"dcc2de7b5788",
+ "revision":3,"created":true}
+```
+
+The key is a bearer credential, so it is returned in this one response and
+never again: every later read of the source carries `"key_set":true` and
+`"key_print":"dcc2de7b5788"`, the first six bytes of its SHA-256, which is
+also what a refusal is logged with.  Only the hash is stored, in the graph and
+in every replica of it.
+
+`POST .../sources/{id}/rotate` issues a new key for the source and invalidates
+the old one at once; it answers with the same shape plus `"rotated":true`.
+Losing a key costs one rotation.  An operator may also pass `"key"` to a
+create — a string a device already sends, such as
+`#!::r=live/news,m=publish,s=enc1` — and the source answers to exactly that;
+a key already taken anywhere in the graph is refused with `key_in_use`.  `type` is one of `srt`, `rtmp`, `file`, `hls_pull`,
 `hls_push`, matched case-insensitively, and defaults to `srt` when omitted;
 `priority` defaults to `0` and higher wins.  A source is created without a
 transport attached — the id is a label the operator chooses and a publisher

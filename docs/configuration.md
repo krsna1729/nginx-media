@@ -124,6 +124,28 @@ available CPU budget are understood.
 
 ## SRT
 
+### `media_rtmp_listen <host:port>;` and `media_rtmp_app <name>;`
+
+Accepts RTMP publishers (and RTMPS with `media_rtmp_ssl on`).  Over RTMP the
+application is the field hardware encoders fix — nearly always `live`, which
+is the default here — and the **stream name is the key**, exactly as the SRT
+stream id is.  `media_rtmp_app` changes the accepted application when a
+deployment needs a different one:
+
+```nginx
+media_rtmp_listen 0.0.0.0:1935;
+media_rtmp_app live;            # the default
+```
+
+```sh
+ffmpeg ... -f flv "rtmp://127.0.0.1:1935/live/CW3AB274M5NCZQX4896JH86PR7"
+```
+
+The app is compared, the name is looked up: one string comparison and one hash
+lookup, no parsing.  A publisher whose app is not the configured one is
+refused with both names in the log; a name that matches no key is refused with
+the fingerprint it presented.
+
 ### `media_srt_listen <host:port>;`
 
 Accepts SRT publishers.  The directive may be given once per worker, and
@@ -168,9 +190,36 @@ Every endpoint accepts with the listener's one passphrase (see
 same second leg address published on each endpoint's own port, so a bonded
 listener per worker obeys the same address rules as a single one.
 
-A publisher's identity comes from its stream id
-(`#!::r=<app>/<stream>,m=publish,s=<identity>`), never from a trusted field:
-`s=` is only a label.
+### A publisher attaches with a key
+
+The stream id **is** the key: an opaque string, provisioned per source and
+issued by the API, with nothing for this layer to parse.  One port serves
+every program, so the key is what says which source a publisher is:
+
+```sh
+# create the program, then a source; the response carries the key once
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"application":"live","name":"news"}' \
+  http://127.0.0.1:8080/media/api/v1/streams
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"id":"enc1","type":"srt","priority":100}' \
+  http://127.0.0.1:8080/media/api/v1/streams/live/news/sources
+# {"id":"enc1","key":"CW3AB274M5NCZQX4896JH86PR7","key_print":"dcc2de7b5788",...}
+
+ffmpeg ... -f mpegts "srt://127.0.0.1:9000?streamid=CW3AB274M5NCZQX4896JH86PR7"
+```
+
+The key is a bearer credential: only its hash is stored, the plaintext is
+returned in that one response, and every later read shows `key_print` — the
+first six bytes of the hash — instead.  `POST .../sources/{id}/rotate` issues
+a new one and invalidates the old at once.  A publisher that presents
+anything else is refused, and the log names the fingerprint it presented, not
+the key.  Two sources on one program are two keys, two priorities and two
+independent health states; the selector decides which is on air.
+
+Nothing about the `#!::` convention is required or parsed: a device that
+emits `#!::r=live/news,m=publish,s=enc1` can be provisioned with exactly that
+string as its key, and it resolves like any other.
 
 ### `media_srt_listen_shared <host:port>;`
 

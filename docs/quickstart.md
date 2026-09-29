@@ -118,15 +118,24 @@ ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=25" \
     -f lavfi -i "sine=frequency=440:sample_rate=48000" -ac 2 \
     -c:v libx264 -preset ultrafast -g 50 -pix_fmt yuv420p \
     -c:a aac -b:a 128k \
-    -f mpegts "srt://127.0.0.1:9000?streamid=#!::r=live/demo,s=enc1,m=publish"
+    -f mpegts "srt://127.0.0.1:9000?streamid=CW3AB274M5NCZQX4896JH86PR7"
 ```
 
-Add `media_srt_listen 0.0.0.0:9000;` to the configuration first.  The `s=`
-field is the source's identity and is required - the publisher is refused
-without it (`no source identity in the stream id`), because a program's
-sources are distinguished by it.  A second encoder publishing the same program
-is a second *source*, not a replacement: give it a priority and it stands by
-until the selector promotes it.
+Add `media_srt_listen 0.0.0.0:9000;` to the configuration first, then give
+the program a source and take the key the API issues:
+
+```sh
+curl -s -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"enc1","type":"srt","priority":100}' \
+    http://127.0.0.1:8080/media/api/v1/streams/live/demo/sources
+# {"id":"enc1","key":"CW3AB274M5NCZQX4896JH86PR7",...}
+```
+
+The key **is** the stream id, and it is what the publisher presents; anything
+else is refused (`no source for key <fingerprint>`), with the fingerprint in
+the log rather than the key.  A second encoder publishing the same program is
+a second *source* with its own key and priority, not a replacement: it stands
+by until the selector promotes it.
 
 ## Where to go next
 

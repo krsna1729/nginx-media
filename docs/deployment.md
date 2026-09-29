@@ -12,8 +12,11 @@ srt ffmpeg`):
 
 ```sh
 sudo apt-get install -y build-essential pkg-config curl ca-certificates \
-    libpcre2-dev zlib1g-dev libssl-dev libsrt-openssl-dev ffmpeg
+    python3 libpcre2-dev zlib1g-dev libssl-dev libsrt-openssl-dev ffmpeg
 ```
+
+`ffmpeg` is what the examples publish with; `python3` is what they parse the
+API's JSON with.  Neither is needed to build or run the server.
 
 Then the four commands, in a checkout:
 
@@ -86,7 +89,7 @@ curl -s -X POST -H 'Content-Type: application/json' \
 
 ffmpeg -re -f lavfi -i "testsrc2=size=320x180:rate=25" -t 10 \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p -f mpegts \
-    "srt://127.0.0.1:9000?streamid=#!::r=live/demo,s=enc1,m=publish"
+    "srt://127.0.0.1:9000?streamid=CW3AB274M5NCZQX4896JH86PR7"
 
 curl -s localhost:8080/hls/live/demo/index.m3u8
 ```

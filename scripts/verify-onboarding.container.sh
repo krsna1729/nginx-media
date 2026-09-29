@@ -17,7 +17,7 @@ export DEBIAN_FRONTEND
 echo "== prerequisites (docs/deployment.md)"
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-    build-essential pkg-config curl ca-certificates \
+    build-essential pkg-config curl ca-certificates python3 \
     libpcre2-dev zlib1g-dev libssl-dev libsrt-openssl-dev \
     ffmpeg >/dev/null
 
@@ -81,10 +81,18 @@ curl -fsS -X POST -H 'Content-Type: application/json' \
     http://127.0.0.1:8080/media/api/v1/streams >/dev/null
 
 echo "== a live encoder instead (SRT publish)"
+# the quickstart: a source is provisioned and the API issues the key
+KEY="$(curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"enc1","type":"srt","priority":100}' \
+    http://127.0.0.1:8080/media/api/v1/streams/live/demo/sources \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])")"
+[ -n "$KEY" ] || { echo "the API issued no key" >&2; exit 1; }
+echo "   issued key: $KEY"
+
 timeout 30 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x180:rate=25" -t 6 \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
-    -f mpegts "srt://127.0.0.1:9000?streamid=#!::r=live/demo,s=enc1,m=publish" \
+    -f mpegts "srt://127.0.0.1:9000?streamid=$KEY" \
     >/tmp/pub.log 2>&1 || true
 
 echo "== watch it come out"

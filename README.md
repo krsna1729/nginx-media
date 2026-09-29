@@ -42,7 +42,7 @@ curl -X POST -H 'Content-Type: application/json' \
 # publish to it over SRT, RTMP, or from a file
 ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=25" \
   -c:v libx264 -preset ultrafast -g 50 -pix_fmt yuv420p \
-  -f mpegts "srt://127.0.0.1:9000?streamid=#!::r=live/demo,s=enc1,m=publish"
+  -f mpegts "srt://127.0.0.1:9000?streamid=CW3AB274M5NCZQX4896JH86PR7"
 
 curl http://127.0.0.1:8080/hls/live/demo/index.m3u8
 ```
