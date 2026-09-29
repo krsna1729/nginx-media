@@ -30,7 +30,7 @@ make nginx >/tmp/nginx.log 2>&1 || { tail -20 /tmp/nginx.log; exit 1; }
 ./.build/nginx-install/sbin/nginx -V 2>&1 | head -1
 
 echo "== make unit"
-make unit >/tmp/unit.log 2>&1 || { tail -20 /tmp/unit.log; exit 1; }
+make unit >/tmp/unit.log 2>&1 || { cat /tmp/unit.log; exit 1; }
 tail -1 /tmp/unit.log
 
 echo "== make smoke"
