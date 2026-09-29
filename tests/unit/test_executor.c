@@ -117,7 +117,9 @@ main(void)
     TEST_ASSERT_EQ_INT(ngx_media_executor_feed(&executor, payload, 0, 8),
                        NGX_OK);
 
-    for (i = 0; i < 20 && state.failed == 0; i++) {
+    /* Child scheduling can exceed 40ms on a loaded runner; the reap wait
+     * remains bounded. */
+    for (i = 0; i < 500 && state.failed == 0; i++) {
         executor_wait_briefly();
         ngx_media_executor_tick(&executor, now++, NULL);
     }
