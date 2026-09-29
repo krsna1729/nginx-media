@@ -30,6 +30,7 @@
 #include "ngx_media_hls_profile.h"
 #include "ngx_media_policy.h"
 #include "ngx_media_hls_ingest.h"
+#include "ngx_media_key.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -848,6 +849,9 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
     ngx_queue_t         *q;
     ngx_media_source_t  *source;
     ngx_uint_t           first = 1;
+    ngx_str_t            key_print_str;
+
+    key_print_str.len = NGX_MEDIA_KEY_PRINT_LEN;
 
     *last = ngx_snprintf(*last, end - *last, "[");
 
@@ -856,6 +860,7 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
          q = q->next)
     {
         source = ngx_queue_data(q, ngx_media_source_t, queue);
+        key_print_str.data = source->key_print;
 
         *last = ngx_snprintf(*last, end - *last, "%s{\"id\":",
                              first ? "" : ",");
@@ -868,6 +873,7 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
                              ",\"type\":%ui,\"state\":\"%s\","
                              "\"priority\":%ui,\"healthy\":%s,"
                              "\"eligible\":%s,\"active\":%s,\"compat\":\"%s\","
+                             "\"key_set\":%s,\"key_print\":\"%V\","
                              "\"evidence\":%ui,\"health_transitions\":%uL,"
                              "\"container_errors\":%uL,\"frames_in\":%uL,"
                              "\"frames_out\":%uL,\"writers\":%ui,"
@@ -884,6 +890,8 @@ ngx_media_api_sources_json(u_char **last, u_char *end,
                              source->health.eligible ? "true" : "false",
                              source->active ? "true" : "false",
                              ngx_media_compat_name(source->compat),
+                             source->key_set ? "true" : "false",
+                             &key_print_str,
                              source->health.evidence,
                              source->health.transitions,
                              source->health.container_errors,
@@ -2902,7 +2910,14 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
     ngx_str_t           body, id, type_text, priority_text;
     ngx_str_t           source_path = ngx_null_string;
     ngx_str_t           source_ca = ngx_null_string;
+    ngx_str_t           given_key = ngx_null_string;
     ngx_media_source_t *source;
+    ngx_media_registry_t *registry;
+    ngx_media_stream_t  *key_owner;
+    u_char              key[NGX_MEDIA_KEY_MAX];
+    u_char              key_hash[NGX_MEDIA_KEY_HASH_LEN];
+    u_char              key_print[NGX_MEDIA_KEY_PRINT_LEN];
+    size_t              key_len = 0;
     ngx_uint_t          type = NGX_MEDIA_SOURCE_SRT, priority = 0;
     ngx_int_t           n;
 
@@ -2999,6 +3014,51 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
     }
 
     /*
+     * The ingest key.  An operator may paste one the encoder already sends -
+     * a device's own stream id - or leave it out and have one issued here.
+     * Either way only the hash is kept, and the plaintext is returned in this
+     * response and never again.
+     */
+    if (ngx_media_api_json_field(&body, "key", &given_key) == NGX_OK
+        && given_key.len != 0)
+    {
+        if (given_key.len >= NGX_MEDIA_KEY_MAX) {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"key_too_long\"}");
+            return NGX_HTTP_BAD_REQUEST;
+        }
+
+        ngx_memcpy(key, given_key.data, given_key.len);
+        key_len = given_key.len;
+
+    } else if (ngx_media_key_issue(key, sizeof(key), &key_len, key_hash,
+                                   key_print) != NGX_OK)
+    {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"key_issue_failed\"}");
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    ngx_media_key_hash(key, key_len, key_hash);
+    ngx_media_key_print(key_hash, key_print);
+
+    /*
+     * A key resolves to exactly one source across the whole graph, so it is
+     * checked here rather than at connect time: a key that names two sources
+     * is a provisioning mistake, and refusing it now says so once.
+     */
+    registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+    key_owner = NULL;
+
+    if (ngx_media_graph_source_by_key(registry, key_hash, &key_owner)
+        != NULL)
+    {
+        *last = ngx_snprintf(*last, end - *last,
+                             "{\"error\":\"key_in_use\"}");
+        return NGX_HTTP_BAD_REQUEST;
+    }
+
+    /*
      * A file source has to be opened, not merely registered: it owns a reader
      * that the periodic runtime visit advances.  Everything else is a label a
      * transport attaches to later - and a reader is opened on the worker that
@@ -3031,10 +3091,11 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
+    ngx_media_source_key_set(source, key_hash, key_print);
     ngx_media_source_touch(source);
     ngx_media_stream_touch(stream);
 
-    /* the source, its path and its desired state reach every other worker */
+    /* the source, its path, its key and its desired state reach every worker */
     (void) ngx_media_graph_source_set(stream, source, &source_path,
                                       &source_ca);
 
@@ -3044,9 +3105,25 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    *last = ngx_snprintf(*last, end - *last,
-                         ",\"revision\":%uL,\"created\":true}",
-                         source->revision);
+    /*
+     * The plaintext, here and nowhere else: this response is the one place a
+     * key can be read, which is what makes a bearer credential out of it.
+     */
+    {
+        ngx_str_t  issued, print_str;
+
+        issued.data = key;
+        issued.len = key_len;
+        print_str.data = key_print;
+        print_str.len = NGX_MEDIA_KEY_PRINT_LEN;
+
+        *last = ngx_snprintf(*last, end - *last, ",\"key\":\"%V\"", &issued);
+
+        *last = ngx_snprintf(*last, end - *last,
+                             ",\"key_print\":\"%V\","
+                             "\"revision\":%uL,\"created\":true}",
+                             &print_str, source->revision);
+    }
 
     return NGX_HTTP_CREATED;
 }

@@ -37,22 +37,16 @@ ngx_media_key_print(const u_char *hash, u_char *print)
 }
 
 ngx_int_t
-ngx_media_key_issue(const ngx_str_t *id, u_char *out, size_t cap,
-    size_t *out_len, u_char *hash, u_char *print)
+ngx_media_key_issue(u_char *out, size_t cap, size_t *out_len, u_char *hash,
+    u_char *print)
 {
     u_char      secret[NGX_MEDIA_KEY_SECRET_LEN];
     u_char     *p;
-    size_t      need, i;
+    size_t      i;
 
-    if (id == NULL || out == NULL || out_len == NULL || hash == NULL
-        || print == NULL || id->len == 0)
+    if (out == NULL || out_len == NULL || hash == NULL || print == NULL
+        || cap < NGX_MEDIA_KEY_SECRET_LEN)
     {
-        return NGX_ERROR;
-    }
-
-    need = id->len + 1 + NGX_MEDIA_KEY_SECRET_LEN;
-
-    if (need > cap) {
         return NGX_ERROR;
     }
 
@@ -66,10 +60,6 @@ ngx_media_key_issue(const ngx_str_t *id, u_char *out, size_t cap,
     }
 
     p = out;
-
-    ngx_memcpy(p, id->data, id->len);
-    p += id->len;
-    *p++ = '-';
 
     for (i = 0; i < NGX_MEDIA_KEY_SECRET_LEN; i++) {
         /* 256 is not a multiple of 32, so take the low five bits */

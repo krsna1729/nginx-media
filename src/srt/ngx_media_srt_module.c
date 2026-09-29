@@ -67,6 +67,8 @@ extern ngx_media_srt_ops_t  ngx_media_srt_udp_ops
 #include "ngx_media_selector.h"
 #include "ngx_media_srt_ingest.h"
 #include "ngx_media_ts_demux.h"
+#include "ngx_media_key.h"
+#include "ngx_media_graph.h"
 
 #include <ngx_event.h>
 
@@ -205,7 +207,6 @@ static ngx_int_t ngx_media_srt_destination_add(ngx_media_stream_t *stream,
 static void ngx_media_srt_destination_remove(ngx_media_stream_t *stream,
     ngx_media_destination_t *destination);
 static void ngx_media_srt_output_handler(ngx_event_t *ev);
-static ngx_uint_t ngx_media_srt_priority(const ngx_str_t *id);
 static void ngx_media_srt_stream_policy(ngx_media_stream_t *stream);
 static uint64_t ngx_media_srt_demux_errors(
     const ngx_media_ts_demux_stats_t *stats);
@@ -214,7 +215,7 @@ static void ngx_media_srt_sink_frame(void *ctx,
 static void ngx_media_srt_sink_tracks(void *ctx,
     const ngx_media_trackset_t *tracks);
 static void ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
-    ngx_media_srt_streamid_t *id);
+    ngx_media_source_t *source);
 static void ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id);
 static ngx_media_srt_slot_t *ngx_media_srt_slot_find(uint64_t id);
 static ngx_uint_t ngx_media_srt_stream_live(
@@ -251,10 +252,6 @@ static ngx_media_srt_slot_t  ngx_media_srt_slots[
 static ngx_media_srt_outputs_t  *ngx_media_srt_outputs;
 static ngx_connection_t         *ngx_media_srt_output_connection;
 static ngx_event_t              ngx_media_srt_egress_adapt_ev;
-
-static ngx_media_feed_conf_t    ngx_media_srt_feed_conf = {
-    2048, 32 * 1024 * 1024, 10000
-};
 
 static ngx_command_t ngx_media_srt_commands[] = {
 
@@ -505,11 +502,10 @@ ngx_media_srt_demux_start(ngx_media_srt_slot_t *session, ngx_log_t *log)
 
 static void
 ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
-    ngx_media_srt_streamid_t *id)
+    ngx_media_source_t *source)
 {
-    ngx_media_registry_t     *registry;
-    ngx_media_source_t       *source;
-    ngx_media_stream_t       *stream;
+    ngx_media_registry_t  *registry;
+    ngx_media_stream_t    *stream;
     ngx_media_srt_slot_t  *session;
 
     session = ngx_media_srt_slot_alloc();
@@ -523,11 +519,19 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
     session->id = session_id;
 
     /*
+     * The program and the source are provisioned, not discovered: the key a
+     * publisher presented resolved to this source before we got here, so the
+     * priority is the operator's and the identity is one the graph already
+     * knows.  A key that matches nothing never reaches this function.
+     */
+    stream = source->stream;
+
+    /*
      * The program lives on exactly one worker.  When the publisher lands
      * elsewhere, the frames are forwarded over the bounded inter-worker
      * transport instead of being registered here (goal doc 22, 23).
      */
-    session->hash = ngx_media_owner_hash(&id->application, &id->stream);
+    session->hash = ngx_media_owner_hash(&stream->application, &stream->name);
 
     registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
 
@@ -538,10 +542,7 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
         return;
     }
 
-    stream = ngx_media_registry_stream(registry, &id->application,
-                                       &id->stream);
-
-    if (stream != NULL && stream->incarnation != 0) {
+    if (stream->incarnation != 0) {
         session->routed_incarnation = stream->incarnation;
     } else {
         session->routed_incarnation = ngx_media_stream_incarnation_next();
@@ -552,14 +553,14 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
 
         if (ngx_media_route_open((ngx_cycle_t *) ngx_cycle, session->hash,
                                  session->routed_incarnation,
-                                 &id->application, &id->stream, &id->source,
-                                 NGX_MEDIA_SOURCE_SRT,
-                                 ngx_media_srt_priority(&id->source))
+                                 &stream->application, &stream->name,
+                                 &source->id, NGX_MEDIA_SOURCE_SRT,
+                                 source->priority)
             != NGX_OK)
         {
             ngx_log_error(NGX_LOG_WARN, log, 0,
                           "media: could not route %V/%V to its owner worker",
-                          &id->application, &id->stream);
+                          &stream->application, &stream->name);
             session->routed = 0;
             ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
             return;
@@ -569,46 +570,28 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
 
         ngx_log_error(NGX_LOG_NOTICE, log, 0,
                       "media: srt publisher routed to the owner stream=%V/%V "
-                      "source=%V", &id->application, &id->stream, &id->source);
+                      "source=%V", &stream->application, &stream->name,
+                      &source->id);
 
         return;
     }
 
     /*
-     * The stream outlives the publisher's connection, so the log it keeps has
-     * to be the worker's: a connection log dies with the connection, and a
-     * reader or a pool logging through it afterwards reads freed memory.
+     * The stream is provisioned, so it is already registered here - the graph
+     * reaches every worker - and this is the owner, so this is where its
+     * media is demuxed.  A stream that is not registered on the owner is a
+     * provisioning race, not something to invent: inventing it would put a
+     * program on air that no operator asked for.
      */
-    stream = ngx_media_registry_stream_create(registry, &id->application,
-                                              &id->stream,
-                                              &ngx_media_srt_feed_conf,
-                                              ((ngx_cycle_t *) ngx_cycle)->log);
+    stream = ngx_media_registry_stream(registry, &stream->application,
+                                       &stream->name);
 
-    if (stream == NULL) {
+    if (stream == NULL || stream != source->stream) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
-                      "media: could not create stream %V/%V",
-                      &id->application, &id->stream);
-        return;
-    }
-
-    /* a reconnect of the same identity replaces the previous incarnation */
-    source = ngx_media_stream_source_find(stream, &id->source);
-
-    if (source != NULL) {
-        ngx_media_stream_source_remove(stream, source);
-        source = NULL;
-    }
-
-    /* priority comes from trusted configuration, never from the encoder */
-    source = ngx_media_stream_source_add(stream, &id->source,
-                                         NGX_MEDIA_SOURCE_SRT,
-                                         ngx_media_srt_priority(&id->source),
-                                         log);
-
-    if (source == NULL) {
-        ngx_log_error(NGX_LOG_ERR, log, 0,
-                      "media: could not register source %V for %V/%V",
-                      &id->source, &id->application, &id->stream);
+                      "media: source %V is not registered on the worker that "
+                      "owns %V/%V", &source->id, &source->stream->application,
+                      &source->stream->name);
+        ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
         return;
     }
 
@@ -1221,31 +1204,6 @@ ngx_media_srt_demux_errors(const ngx_media_ts_demux_stats_t *stats)
     return stats->sync_errors + stats->transport_errors
            + stats->continuity_errors + stats->psi_errors
            + stats->crc_errors + stats->pes_errors;
-}
-
-static ngx_uint_t
-ngx_media_srt_priority(const ngx_str_t *id)
-{
-    ngx_media_srt_main_conf_t  *mcf;
-    ngx_uint_t                  i;
-
-    mcf = (ngx_media_srt_main_conf_t *)
-              ((ngx_cycle_t *) ngx_cycle)
-                  ->conf_ctx[ngx_media_srt_module.index];
-
-    if (mcf == NULL) {
-        return 0;
-    }
-
-    for (i = 0; i < mcf->npriorities; i++) {
-        if (mcf->priorities[i].id.len == id->len
-            && ngx_memcmp(mcf->priorities[i].id.data, id->data, id->len) == 0)
-        {
-            return mcf->priorities[i].priority;
-        }
-    }
-
-    return 0;
 }
 
 static char *
@@ -1985,7 +1943,6 @@ ngx_media_srt_handler(ngx_event_t *ev)
     ngx_media_ts_ingest_chunk_t  chunks[16];
     ngx_media_ts_ingest_stats_t  stats;
     ngx_media_ts_demux_stats_t   demux_stats;
-    ngx_media_srt_streamid_t     id;
     ngx_media_srt_slot_t     *session;
     ngx_uint_t                   n, i, count;
     ngx_uint_t                   force_summary;
@@ -2055,40 +2012,64 @@ ngx_media_srt_handler(ngx_event_t *ev)
                 break;
 
             case NGX_MEDIA_SRT_EVENT_OPEN:
+            {
+                ngx_media_registry_t  *registry;
+                ngx_media_stream_t    *key_stream = NULL;
+                ngx_media_source_t    *key_source;
+                u_char                 key_hash[NGX_MEDIA_KEY_HASH_LEN];
+                u_char                 key_print[NGX_MEDIA_KEY_PRINT_LEN];
+                ngx_str_t              key_print_str;
 
-                if (ngx_media_srt_streamid_parse(events[i].streamid,
-                                                 events[i].streamid_len, &id)
-                    != NGX_OK)
-                {
+                /*
+                 * The stream id is the key, verbatim: an opaque string the
+                 * operator provisioned on a source, with nothing for this
+                 * layer to parse.  It is hashed and looked up across the
+                 * graph, which every worker keeps, so a publisher that lands
+                 * on a worker that does not own its program is still resolved
+                 * here - before it is routed.
+                 */
+                if (events[i].streamid_len == 0) {
                     ngx_log_error(NGX_LOG_WARN, ev->log, 0,
                                   "media: srt publisher rejected session=%uL: "
-                                  "malformed stream id", events[i].session_id);
+                                  "no stream id", events[i].session_id);
                     break;
                 }
 
-                if (id.mode_kind != NGX_MEDIA_SRT_MODE_PUBLISH) {
-                    ngx_log_error(NGX_LOG_WARN, ev->log, 0,
-                                  "media: srt publisher rejected session=%uL: "
-                                  "mode is not publish", events[i].session_id);
-                    break;
-                }
+                ngx_media_key_hash(events[i].streamid, events[i].streamid_len,
+                                   key_hash);
+                ngx_media_key_print(key_hash, key_print);
+                key_print_str.data = key_print;
+                key_print_str.len = NGX_MEDIA_KEY_PRINT_LEN;
 
-                if (id.source.len == 0) {
+                registry = ngx_media_registry_get((ngx_cycle_t *) ngx_cycle);
+
+                key_source = ngx_media_graph_source_by_key(registry, key_hash,
+                                                           &key_stream);
+
+                if (key_source == NULL) {
+                    /*
+                     * The fingerprint, never the key: a refusal must be
+                     * findable in the log and must not turn the log into a
+                     * key store.
+                     */
                     ngx_log_error(NGX_LOG_WARN, ev->log, 0,
                                   "media: srt publisher rejected session=%uL: "
-                                  "no source identity in the stream id",
-                                  events[i].session_id);
+                                  "no source for key %V",
+                                  events[i].session_id, &key_print_str);
                     break;
                 }
 
                 ngx_log_error(NGX_LOG_NOTICE, ev->log, 0,
-                              "media: srt source open app=%V stream=%V "
-                              "source=%V session=%uL",
-                              &id.application, &id.stream, &id.source,
+                              "media: srt source open %V/%V source=%V key=%V "
+                              "session=%uL",
+                              &key_stream->application, &key_stream->name,
+                              &key_source->id, &key_print_str,
                               events[i].session_id);
 
-                ngx_media_srt_slot_open(ev->log, events[i].session_id, &id);
+                ngx_media_srt_slot_open(ev->log, events[i].session_id,
+                                        key_source);
                 break;
+            }
 
             case NGX_MEDIA_SRT_EVENT_CLOSE:
                 ngx_log_error(NGX_LOG_NOTICE, ev->log, 0,
