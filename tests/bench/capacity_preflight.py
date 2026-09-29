@@ -47,6 +47,7 @@ import glob
 import json
 import os
 import platform
+import re
 import socket
 import struct
 import subprocess
@@ -191,10 +192,29 @@ def softnet():
     return stats
 
 
+def shared_library_version(path):
+    """The library's own version string, from the file itself."""
+    try:
+        out = subprocess.run(["strings", "-a", path], capture_output=True,
+                             text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.stdout.splitlines():
+        match = re.search(r"^(\d+\.\d+\.\d+)$", line.strip())
+        if match:
+            return match.group(1)
+    return None
+
+
 def transport_version(binary):
-    """Which libsrt a binary carries: the harness's capacity_srt_library()
-    answers the same question from ldd, and a statically linked robotweax
-    build reports its version string instead."""
+    """Which libsrt a binary carries, and which build of it.
+
+    The soname alone cannot say whether a run used the distribution's library
+    or the pinned one built from source - both are libsrt.so.1.5 - so the
+    resolved path and the library's own version are reported with it.  A
+    statically linked robotweax build has no resolved path and reports its
+    version string instead.
+    """
     if not binary or not os.path.exists(binary):
         return None
     version = None
@@ -203,7 +223,8 @@ def transport_version(binary):
                              text=True, timeout=30)
         for line in out.stdout.splitlines():
             if "robotweax" in line.lower():
-                return "robotweax-srt"
+                version = "robotweax-srt"
+                break
             if version is None and line.startswith("libsrt"):
                 version = line
     except (OSError, subprocess.SubprocessError):
@@ -212,8 +233,20 @@ def transport_version(binary):
         out = subprocess.run(["ldd", binary], capture_output=True, text=True,
                              timeout=10)
         for line in out.stdout.splitlines():
-            if "libsrt" in line:
-                return line.split()[0].strip()
+            # both names end in srt: the reference library is libsrt.so, the
+            # clean-slate one librobotweax-srt.so
+            if "srt" not in line or "=>" not in line:
+                continue
+            soname = line.split()[0].strip()
+            resolved = line.split("=>")[-1].strip().split(" ")[0] \
+                if "=>" in line else ""
+            library_version = shared_library_version(resolved) \
+                if resolved and os.path.exists(resolved) else None
+            label = version or soname
+            if resolved:
+                return (f"{label} {library_version} ({resolved})"
+                        if library_version else f"{label} ({resolved})")
+            return label
     except (OSError, subprocess.SubprocessError):
         pass
     return version

@@ -10,7 +10,8 @@ NGINX_VERSION ?= 1.30.5
     stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
     srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
     srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls \
-    bench-hls-fanout bench-push-fanout bench-fanout-delay clean
+    bench-hls-fanout bench-push-fanout bench-fanout-delay \
+    srt-pinned nginx-robotweax clean
 
 unit:
 	$(MAKE) -C tests/unit test
@@ -36,6 +37,17 @@ tsan:
 
 nginx:
 	NGINX_VERSION=$(NGINX_VERSION) scripts/build-nginx.sh
+
+# The capacity tiers link a library built from source at the pin in
+# scripts/srt-pins.sh rather than whatever the machine ships, so a number that
+# moved between runs moved because the code moved.  Local and CI run these
+# same two targets, which is why a local capacity run and a CI one link the
+# same library.
+srt-pinned:
+	scripts/build-pinned-nginx.sh haivision
+
+nginx-robotweax:
+	scripts/build-pinned-nginx.sh robotweax
 
 smoke:
 	NGINX_VERSION=$(NGINX_VERSION) tests/integration/smoke.sh

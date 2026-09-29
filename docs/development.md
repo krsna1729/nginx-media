@@ -55,6 +55,17 @@ is tracked with a stamp file because it changes which sources are linked, and
 the script itself is tracked because adding a configure flag was otherwise
 ignored on a tree that already had an `objs/Makefile`.
 
+`make srt-pinned` and `make nginx-robotweax` build the module against an SRT
+library built from source at the pins in `scripts/srt-pins.sh` - Haivision/srt
+v1.5.7 and robotweax/srt v0.2.6 - and put the binaries in
+`.build/nginx-haivision/install/sbin/nginx` and
+`.build/nginx-robotweax/install/sbin/nginx`.  The capacity tiers run the same
+two targets, so a number taken here and a number taken in CI come from the same
+library at the same commit; the binary records an rpath into its own library,
+since the pinned one carries the system's soname.  The distribution's libsrt
+still matters - it is what users have, and the ci matrix spans three of them -
+but a capacity claim is about one library at one version.
+
 `MEDIA_SRT_BACKEND` selects which implementations of the module's own
 transport contract are compiled in: `srt` (the default and the only production
 configuration), `udp`, or `both`.  It is documented in `configuration.md`; for
@@ -418,8 +429,9 @@ universal bitrate-derived setting.
 tier (`.github/workflows/bench.yml` calls it): `pr` on every pull request,
 `branch` after a merge to main, `nightly` all seven workloads, `weekly` long
 rungs plus the fixed-vs-adaptive SRT sender comparison, HLS preparation off,
-and libsrt vs robotweax/srt (one pinned commit, `ROBOTWEAX_REF` in
-`bench.yml`, recorded in each run so a shift is ours and not the library's).
+and libsrt vs robotweax/srt (both built from source at the pins in
+`scripts/srt-pins.sh` and recorded in each run, so a shift is ours and not the
+library's).
 
 The gate (`bench_history.py gate`) fails the job on:
 
