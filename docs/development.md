@@ -75,6 +75,33 @@ library.  The library is found through `pkg-config`; `SRT_DIR` selects an
 installation that ships no `.pc` file, and `MEDIA_SRT_PKG` a package with a
 different name (`robotweax-srt`, see `configuration.md`).
 
+### A statically linked artifact
+
+`scripts/build-static.sh` builds one file with no library dependencies at all:
+nginx, the module, libsrt (at the pin in `scripts/srt-pins.sh`), OpenSSL, PCRE2
+and zlib linked into a single static executable.  It builds in an Alpine/musl
+container - glibc warns loudly about static linking (NSS, `dlopen`,
+`getaddrinfo`) and OpenSSL's providers are loadable modules there, while musl
+is built for it and Alpine ships static OpenSSL, PCRE2 and zlib - and leaves
+the binary in `.build/static/nginx`.
+
+Measured here: **28.6 MB**, `readelf -d` reports no `NEEDED` entries at all,
+and it passes the module's own integration suites unchanged - `smoke`,
+`srt-ingest-nginx`, `rtmp` and `hls-push` - run with
+`NGINX_BIN=.build/static/nginx`.  The dynamic build of the same source is
+6.0 MB.
+
+The trade is explicit.  A static artifact has no dependency matrix and cannot
+drift from the library it was measured against; it also cannot be fixed by a
+distribution's security update, so a libsrt or OpenSSL advisory means a new
+artifact rather than a new system package.  That is why it is an *additional*
+release asset, not a replacement for the dynamic build.
+
+One product change came out of building it: `config` now names the C++ runtime
+after libsrt (`-lstdc++`), because a static link of a C++ library needs it and
+the module's library order is where it belongs.  With a shared libsrt the flag
+is redundant, since the library records its own dependency.
+
 ### The container
 
 `docker build -f Containerfile -t nginx-media .` builds the same module in two

@@ -26,7 +26,7 @@ work="${SRT_BUILD_DIR:-$(mktemp -d)}"
 # must rebuild.
 pc="$prefix/lib/pkgconfig/$pkg.pc"
 if [ -f "$pc" ] && grep -q "^Version: $ref$" "$pc" \
-        && ls "$prefix"/lib/libsrt.* >/dev/null 2>&1; then
+        && { [ "${SRT_SHARED:-yes}" = no ] || ls "$prefix"/lib/libsrt.* >/dev/null 2>&1; }; then
     echo "$pkg already built at $ref in $prefix"
     exit 0
 fi
@@ -52,7 +52,7 @@ esac
 
 cmake -S "$work/src" -B "$work/build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
-    -DBUILD_SHARED_LIBS=ON \
+    -DBUILD_SHARED_LIBS="$([ "${SRT_SHARED:-yes}" = no ] && echo OFF || echo ON)" \
     -DCMAKE_INSTALL_PREFIX="$prefix" \
     -DCMAKE_INSTALL_LIBDIR=lib \
     -DCMAKE_INSTALL_INCLUDEDIR=include \
@@ -63,18 +63,36 @@ ninja -C "$work/build" install
 # a static archive would leave the linker to find -lsrt somewhere else - the
 # system's library - and the "pinned" binary would quietly be the old one.
 # The name comes from what is on disk, never from an assumption.
-shared=""
-for candidate in "$prefix"/lib/libsrt.so "$prefix"/lib/lib*srt.so; do
-    [ -e "$candidate" ] || continue
-    shared="$(basename "$candidate")"
-    break
-done
-[ -n "$shared" ] \
-    || { echo "$repo at $ref installed no shared library under $prefix/lib" \
-              "(only: $(ls "$prefix"/lib 2>/dev/null | tr '\n' ' '))" >&2
-         exit 1; }
-libname="${shared#lib}"
-libname="${libname%.so}"
+if [ "${SRT_SHARED:-yes}" = no ]; then
+    # A static artifact wants the archive, and it must be the archive: a
+    # static build that silently linked the system's shared library would be
+    # no more portable than the dynamic one.
+    archive=""
+    for candidate in "$prefix"/lib/libsrt.a "$prefix"/lib/lib*srt.a; do
+        [ -e "$candidate" ] || continue
+        archive="$(basename "$candidate")"
+        break
+    done
+    [ -n "$archive" ] \
+        || { echo "$repo at $ref installed no static archive under $prefix/lib" \
+                  "(only: $(ls "$prefix"/lib 2>/dev/null | tr '\n' ' '))" >&2
+             exit 1; }
+    libname="${archive#lib}"
+    libname="${libname%.a}"
+else
+    shared=""
+    for candidate in "$prefix"/lib/libsrt.so "$prefix"/lib/lib*srt.so; do
+        [ -e "$candidate" ] || continue
+        shared="$(basename "$candidate")"
+        break
+    done
+    [ -n "$shared" ] \
+        || { echo "$repo at $ref installed no shared library under $prefix/lib" \
+                  "(only: $(ls "$prefix"/lib 2>/dev/null | tr '\n' ' '))" >&2
+             exit 1; }
+    libname="${shared#lib}"
+    libname="${libname%.so}"
+fi
 
 # The module finds the library through pkg-config, so the pinned build needs
 # a .pc of its own: the package name is what the build stamps and what the

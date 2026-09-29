@@ -174,7 +174,15 @@ if [ "$MEDIA_SRT_PKG" = robotweax-srt ] && [ -n "$media_srt_libs" ]; then
     media_srt_libs="$media_srt_libs -lstdc++ -lm"
 fi
 
-ngx_module_libs="$media_srt_libs -lpthread"
+# libsrt is C++: a static link of it needs the C++ runtime named after it,
+# and this line is where the module's libraries are ordered.  With a shared
+# libsrt the flag is redundant (the library records its own dependency), with
+# a static one it is the difference between linking and not.
+media_srt_cxx=
+case "$MEDIA_SRT_BACKEND" in
+    srt|both) media_srt_cxx="-lstdc++" ;;
+esac
+ngx_module_libs="$media_srt_libs $media_srt_cxx -lpthread"
 ngx_module_order=
 
 CORE_INCS="$CORE_INCS $media_srt_include_dirs \
