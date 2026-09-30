@@ -95,10 +95,11 @@ case "$TIER" in
             CAPACITY_QUALITY_STEPS="1 16 32" CAPACITY_QUALITY_SECONDS=10
         ;;
     branch)
+        steps="${BENCH_STEPS:-1 16 32 64 128}"
+        seconds="${BENCH_SECONDS:-15}"
         for mix in srt:pure-srt rtmp:pure-rtmp rtmp-srt:rtmp-95-srt-5; do
             run_config "${mix%%:*}" CAPACITY_QUALITY_MIXES="${mix#*:}" \
-                CAPACITY_QUALITY_STEPS="1 16 32 64 128" \
-                CAPACITY_QUALITY_SECONDS=15
+                CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS="$seconds"
         done
         ;;
     nightly)
@@ -107,33 +108,40 @@ case "$TIER" in
         # than the sum of all seven workloads.  The publish job collects every
         # job's results and writes one record with these four config names.
         steps="${BENCH_STEPS:-1 16 64 128 256 512}"
+        seconds="${BENCH_SECONDS:-30}"
         run_config srt-rtmp CAPACITY_QUALITY_MIXES="pure-srt pure-rtmp" \
-            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30
+            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS="$seconds"
         run_config hls CAPACITY_QUALITY_MIXES="pure-hls pure-hls-push" \
-            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30
+            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS="$seconds"
         run_config mix-srt-share \
             CAPACITY_QUALITY_MIXES="rtmp-95-srt-5 hls-push-95-srt-5" \
-            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30
+            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS="$seconds"
         run_config mix-all-protocols \
             CAPACITY_QUALITY_MIXES="rtmp-50-hls-push-45-srt-5" \
-            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30
+            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS="$seconds"
         ;;
     weekly)
-        steps="${BENCH_STEPS:-1 32 64 128 192 256 384 512 768 1000}"
-        run_config all CAPACITY_QUALITY_MIXES=all \
-            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=120
-        for senders in 1 2 4 adaptive; do
-            run_config "srt-senders-$senders" CAPACITY_QUALITY_MIXES=pure-srt \
+        if [ "${BENCH_TREND:-0}" = 1 ]; then
+            run_config all CAPACITY_QUALITY_MIXES=all \
+                CAPACITY_QUALITY_STEPS="${BENCH_STEPS:-1 32 128}" \
+                CAPACITY_QUALITY_SECONDS="${BENCH_SECONDS:-10}"
+        else
+            steps="${BENCH_STEPS:-1 32 64 128 192 256 384 512 768 1000}"
+            run_config all CAPACITY_QUALITY_MIXES=all \
+                CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=120
+            for senders in 1 2 4 adaptive; do
+                run_config "srt-senders-$senders" CAPACITY_QUALITY_MIXES=pure-srt \
+                    CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30 \
+                    CAPACITY_FIXED_SRT_WORKERS="$senders"
+            done
+            run_config srt-no-hls CAPACITY_QUALITY_MIXES=pure-srt \
                 CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30 \
-                CAPACITY_FIXED_SRT_WORKERS="$senders"
-        done
-        run_config srt-no-hls CAPACITY_QUALITY_MIXES=pure-srt \
-            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30 \
-            CAPACITY_SRT_HLS=no
-        if [ -n "${ROBOTWEAX_NGINX:-}" ] && [ -x "$ROBOTWEAX_NGINX" ]; then
-            run_config srt-robotweax CAPACITY_QUALITY_MIXES=pure-srt \
-                CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30 \
-                CAPACITY_NGINX="$ROBOTWEAX_NGINX"
+                CAPACITY_SRT_HLS=no
+            if [ -n "${ROBOTWEAX_NGINX:-}" ] && [ -x "$ROBOTWEAX_NGINX" ]; then
+                run_config srt-robotweax CAPACITY_QUALITY_MIXES=pure-srt \
+                    CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30 \
+                    CAPACITY_NGINX="$ROBOTWEAX_NGINX"
+            fi
         fi
         ;;
     *)

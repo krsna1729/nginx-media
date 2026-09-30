@@ -347,8 +347,8 @@
   <div id="view-charts" class="spa-view" style="display: none;">
     <div class="view-header">
       <div>
-        <h2>Highest passing capacity rung (higher is better)</h2>
-        <p>Maximum concurrent clients sustaining ≥95% of reference bitrate.</p>
+        <h2>Highest passing tested rung (higher is better)</h2>
+        <p>When available, charts use a same-runner trend cohort with a compact ladder; its highest tested rung is not a capacity limit. Full qualification results remain in Overview and Latest Run.</p>
       </div>
     </div>
     <div class="charts-grid" id="capacity"></div>
@@ -710,13 +710,16 @@ function switchView(viewName) {
   }
 }
 
-function inspectCommit(sha) {
-  const rec = currentTierRecords.find(r => (r.sha || "").startsWith(sha));
+function inspectCommit(sha, trend = false) {
+  const rec = currentTierRecords.find(r => (r.sha || "").startsWith(sha)
+    && Boolean(r.comparison_group) === trend);
   if (!rec) return;
   const panel = document.getElementById("commit-inspector");
   panel.classList.add("open");
   document.getElementById("inspect-sha").textContent = (rec.sha || "").slice(0, 10);
-  document.getElementById("inspect-meta").textContent = `Tier: ${rec.tier} · Date: ${rec.timestamp} · Status: ${rec.complete ? "Complete" : "Incomplete"}`;
+  document.getElementById("inspect-meta").textContent =
+    `Tier: ${rec.tier} · Date: ${rec.timestamp} · Status: ${rec.complete ? "Complete" : "Incomplete"}` +
+    (rec.comparison_group ? " · Same-runner trend probe (compact ladder; not qualification)" : "");
   
   const tiles = document.getElementById("inspect-tiles");
   const hwSet = new Set();
@@ -764,11 +767,12 @@ function renderCapacityDiagnostics() {
     diagnosticChart = null;
   }
 
-  const newest = currentTierRecords.reduce((latest, record) =>
-    Object.values(record.configs || {}).some(config =>
-      Object.values(config.mixes || {}).some(mix =>
-        activeHardware === "all" || runnerHardware(mix.fingerprint) === activeHardware)) &&
-    (!latest || (record.timestamp || "") > (latest.timestamp || "")) ? record : latest, null);
+  const newest = currentTierRecords.filter(record => !record.comparison_group)
+    .reduce((latest, record) =>
+      Object.values(record.configs || {}).some(config =>
+        Object.values(config.mixes || {}).some(mix =>
+          activeHardware === "all" || runnerHardware(mix.fingerprint) === activeHardware)) &&
+      (!latest || (record.timestamp || "") > (latest.timestamp || "")) ? record : latest, null);
   const mixes = {};
   if (newest) {
     for (const [configName, config] of Object.entries(newest.configs || {})) {
@@ -901,7 +905,8 @@ function render(records, selectedHardware = activeHardware) {
   renderCapacityDiagnostics();
   // 1. Discover distinct hardware in this tier
   const hwCounts = new Map();
-  for (const r of records) {
+  const qualificationRecords = records.filter(r => !r.comparison_group);
+  for (const r of qualificationRecords) {
     for (const c of Object.values(r.configs || {})) {
       if (c.complete === true) {
         for (const m of Object.values(c.mixes || {})) {
@@ -915,8 +920,9 @@ function render(records, selectedHardware = activeHardware) {
   }
 
   // 2. Update KPI Banner
-  const latestOverall = records[records.length - 1];
-  document.getElementById("kpi-runs").textContent = records.length;
+  const latestOverall = qualificationRecords.reduce((newest, record) =>
+    !newest || (record.timestamp || "") > (newest.timestamp || "") ? record : newest, null);
+  document.getElementById("kpi-runs").textContent = qualificationRecords.length;
   document.getElementById("kpi-runs-sub").textContent = hwCounts.size > 0 ? `${hwCounts.size} hardware types` : "No runs";
   document.getElementById("kpi-hw").textContent = activeHardware === "all" ? "All Hardware" : activeHardware;
   document.getElementById("kpi-hw-sub").textContent = activeHardware === "all" ? "Comparing across all runners" : `Filtered to ${activeHardware}`;
@@ -932,7 +938,7 @@ function render(records, selectedHardware = activeHardware) {
     hwRow.style.display = "";
     hwNav.innerHTML = "";
     const allBtn = document.createElement("button");
-    allBtn.textContent = `All Hardware (${records.length} runs)`;
+    allBtn.textContent = `All Hardware (${qualificationRecords.length} runs)`;
     allBtn.setAttribute("aria-pressed", activeHardware === "all");
     allBtn.onclick = () => render(records, "all");
     hwNav.appendChild(allBtn);
@@ -952,11 +958,21 @@ function render(records, selectedHardware = activeHardware) {
   const filteredRecords = activeHardware === "all" ? records : records.filter(r =>
     Object.values(r.configs || {}).some(c =>
       Object.values(c.mixes || {}).some(m => m.fingerprint && runnerHardware(m.fingerprint) === activeHardware)));
+  const filteredQualification = activeHardware === "all" ? qualificationRecords : qualificationRecords.filter(r =>
+    Object.values(r.configs || {}).some(c =>
+      Object.values(c.mixes || {}).some(m => m.fingerprint && runnerHardware(m.fingerprint) === activeHardware)));
+  const latestComparisonGroup = [...records].reverse().find(r => r.comparison_group)?.comparison_group;
+  const trendRecords = latestComparisonGroup
+    ? records.filter(r => r.comparison_group === latestComparisonGroup) : records;
+  const filteredTrendRecords = activeHardware === "all" ? trendRecords : trendRecords.filter(r =>
+    Object.values(r.configs || {}).some(c =>
+      Object.values(c.mixes || {}).some(m => m.fingerprint && runnerHardware(m.fingerprint) === activeHardware)));
 
   // 4. Render Executive Scorecard Grid with inline sparklines
   const scorecardContainer = document.getElementById("scorecard-container");
   if (scorecardContainer) {
-    const latestForScore = (filteredRecords.length ? filteredRecords : records)[(filteredRecords.length ? filteredRecords : records).length - 1];
+    const latestForScore = (filteredQualification.length ? filteredQualification : qualificationRecords).reduce((newest, record) =>
+      !newest || (record.timestamp || "") > (newest.timestamp || "") ? record : newest, null);
     let cardsHtml = "";
     const sparkData = {};
     if (latestForScore) {
@@ -972,7 +988,7 @@ function render(records, selectedHardware = activeHardware) {
           
           // Collect sparkline trend points across matching runs with matching hardware
           const trendVals = [];
-          for (const rec of filteredRecords) {
+          for (const rec of filteredTrendRecords) {
             const entry = rec.configs?.[cName]?.mixes?.[mName];
             if (!entry || (m.fingerprint && runnerHardware(entry.fingerprint) !== runnerHardware(m.fingerprint))) continue;
             const p = (entry?.rungs || []).find(g => g.outcome === "pass" && g.destinations > 1 && Number.isFinite(g.sender_cpu_per_gbps));
@@ -1023,7 +1039,7 @@ function render(records, selectedHardware = activeHardware) {
   const matrixTable = document.getElementById("run-matrix");
   if (matrixTable) {
     let mRows = `<tr><th>Date & Time (UTC)</th><th>Commit</th><th>Hardware</th>` +
-                `<th>Status</th><th>Workloads Summary (Passing Rungs & CPU/Gbps)</th></tr>`;
+                `<th>Profile</th><th>Status</th><th>Workloads Summary (Passing Rungs & CPU/Gbps)</th></tr>`;
     for (const r of [...filteredRecords].reverse()) {
       const sha = (r.sha || "").slice(0, 8);
       const ts = (r.timestamp || "").slice(0, 16).replace("T", " ");
@@ -1042,9 +1058,10 @@ function render(records, selectedHardware = activeHardware) {
         }
       }
       const hwLabel = [...hwSet].join(", ") || "Unknown hardware";
-      mRows += `<tr onclick="inspectCommit('${esc(sha)}')"><td><strong>${esc(ts)}</strong></td>` +
+      mRows += `<tr onclick="inspectCommit('${esc(sha)}', ${Boolean(r.comparison_group)})"><td><strong>${esc(ts)}</strong></td>` +
                `<td><code>${esc(sha)}</code></td>` +
                `<td>${esc(hwLabel)}</td>` +
+               `<td>${r.comparison_group ? '<span class="badge unverified">same-runner trend probe</span>' : '<span class="badge complete">qualification</span>'}</td>` +
                `<td>${status}</td>` +
                `<td style="font-size: 12px; line-height: 1.6;">${summaries.join("<br>") || "–"}</td></tr>`;
     }
@@ -1053,7 +1070,7 @@ function render(records, selectedHardware = activeHardware) {
 
   // 6. Render Capacity and Efficiency Charts
   const byMix = {};
-  for (const r of records) {
+  for (const r of filteredTrendRecords) {
     for (const c of Object.values(r.configs || {})) {
       for (const [mix, e] of Object.entries(c.mixes || {})) {
         if (!mix.endsWith("-srt-reference")) {
@@ -1068,11 +1085,11 @@ function render(records, selectedHardware = activeHardware) {
 
   for (const mix of Object.keys(byMix).sort()) {
     chart(document.getElementById("capacity"), mix,
-      series(records, (config, m, e, hw) => {
+      series(filteredTrendRecords, (config, m, e, hw) => {
         return m === mix && e.highest_passing != null ? [[config, e.highest_passing]] : [];
       }, activeHardware));
     chart(document.getElementById("efficiency"), mix,
-      series(records, (config, m, e, hw) => {
+      series(filteredTrendRecords, (config, m, e, hw) => {
         if (m !== mix) return [];
         return e.rungs.filter(g => g.outcome === "pass"
                             && Number.isFinite(g.sender_cpu_per_gbps)
@@ -1082,7 +1099,7 @@ function render(records, selectedHardware = activeHardware) {
   }
 
   // 7. Latest Run Breakdown Table
-  const latest = (filteredRecords.length ? filteredRecords : records).reduce((newest, record) =>
+  const latest = (filteredQualification.length ? filteredQualification : qualificationRecords).reduce((newest, record) =>
     !newest || (record.timestamp || "") > (newest.timestamp || "")
       ? record : newest, null);
   const table = document.getElementById("latest");

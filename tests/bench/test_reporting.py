@@ -866,6 +866,24 @@ def test_summary_marks_uncollected_expected_configs(work):
           "the separate publisher machine must not be recorded as benchmark host")
 
 
+
+def test_summary_persists_same_runner_comparison_metadata(work):
+    results = os.path.join(work, "trend-meta")
+    make_config(results, "srt", [(1, "pass", srt_delivery(1.0))])
+    out = os.path.join(work, "trend-meta.json")
+    env = os.environ.copy()
+    env["BENCH_COMMIT_TIMESTAMP"] = "2026-09-28T12:30:00+00:00"
+    env["BENCH_COMPARISON_GROUP"] = "workflow-42-attempt-1"
+    result = run([sys.executable, HISTORY, "summarize", results, "--tier",
+                  "branch", "--out", out], env=env)
+    check(result.returncode == 0, f"trend summary succeeds: {result.stderr}")
+    with open(out, encoding="utf-8") as source:
+        record = json.load(source)
+    check(record.get("comparison_group") == "workflow-42-attempt-1",
+          f"summary retains the same-runner cohort: {record}")
+    check(record.get("commit_timestamp") == "2026-09-28T12:30:00+00:00",
+          f"summary retains source commit time for graph ordering: {record}")
+
 def test_regressions_require_complete_passing_same_runner_baselines():
     module = load_module(HISTORY, "bench_history_regressions")
     host = {"cpu_model": "runner-a", "kernel": "7.2", "transport": "libsrt"}
@@ -922,6 +940,70 @@ def test_regressions_require_complete_passing_same_runner_baselines():
         check(interleaved_findings[0]["baseline_count"] == 3,
               "all 3 same-runner runs found despite intervening runs")
 
+
+
+def test_regression_cohorts_do_not_mix_with_qualification_history():
+    module = load_module(HISTORY, "bench_history_cohorts")
+    host = {"cpu_model": "runner-a", "kernel": "7.2", "transport": "libsrt"}
+
+    def record(value, sha, group=None):
+        return {
+            "schema": "nginx-media.bench-history/3",
+            "tier": "branch",
+            "sha": sha,
+            "comparison_group": group,
+            "configs": {"srt": {
+                "complete": True,
+                "mixes": {"pure-srt": {
+                    "fingerprint": host,
+                    "rungs": [{"destinations": 16, "outcome": "pass",
+                               "sender_cpu_per_gbps": value}],
+                }},
+            }},
+        }
+
+    qualification = record(14, "qualified-head")
+    trend_only = [record(value, f"trend-{index}", "workflow-a")
+                  for index, value in enumerate((10, 11, 12, 100))]
+    check(module.regressions(qualification, trend_only) == [],
+          "same-runner probe records cannot become qualification baselines")
+
+    current = record(14, "sampled-head", "workflow-b")
+    history = ([record(10, "b1", "workflow-b"),
+                record(11, "b2", "workflow-b"),
+                record(12, "b3", "workflow-b"),
+                record(100, "a1", "workflow-a")]
+               + [record(14, f"qualified-{index}") for index in range(4)])
+    findings = module.regressions(current, history)
+    check(len(findings) == 1,
+          f"same-runner samples must compare within their workflow cohort: {findings}")
+    if findings:
+        check(findings[0]["baseline_count"] == 3,
+              f"other cohorts and qualifications must be excluded: {findings}")
+
+
+def test_publish_appends_same_runner_samples(work):
+    pages = os.path.join(work, "trend-pages")
+    os.makedirs(pages, exist_ok=True)
+    summary = os.path.join(work, "trend-summary.json")
+    samples = os.path.join(work, "trend-samples.jsonl")
+    write_json(summary, {"tier": "branch", "sha": "qualified"})
+    sample_records = [
+        {"tier": "branch", "sha": "old", "comparison_group": "one"},
+        {"tier": "branch", "sha": "head", "comparison_group": "one"},
+    ]
+    with open(samples, "w", encoding="utf-8") as output:
+        for record in sample_records:
+            output.write(json.dumps(record) + "\n")
+    result = run([sys.executable, HISTORY, "publish", summary, "--pages", pages,
+                  "--samples", samples])
+    check(result.returncode == 0,
+          f"publishing same-runner records succeeds: {result.stderr}")
+    with open(os.path.join(pages, "data", "branch.jsonl"),
+              encoding="utf-8") as source:
+        rows = [json.loads(line) for line in source if line.strip()]
+    check([row["sha"] for row in rows] == ["qualified", "old", "head"],
+          f"qualification then trend samples are appended: {rows}")
 
 def test_parse_expected_configs_validation():
     module = load_module(HISTORY, "bench_history_config_parser")
@@ -1232,7 +1314,10 @@ def main():
         test_history_carries_the_strict_result_separately(work)
         test_history_separates_observed_from_threshold(work)
         test_summary_marks_uncollected_expected_configs(work)
+        test_summary_persists_same_runner_comparison_metadata(work)
         test_regressions_require_complete_passing_same_runner_baselines()
+        test_regression_cohorts_do_not_mix_with_qualification_history()
+        test_publish_appends_same_runner_samples(work)
         test_parse_expected_configs_validation()
         test_gate_accepts_a_finished_ladder_that_stopped_at_the_boundary(work)
         test_gate_accepts_an_infrastructure_limited_rung(work)
