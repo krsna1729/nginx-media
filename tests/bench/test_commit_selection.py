@@ -4,11 +4,14 @@
 import datetime as dt
 import importlib.util
 import os
+import subprocess
+import sys
 
 path = os.path.join(os.path.dirname(__file__), "bench_commit_selection.py")
 spec = importlib.util.spec_from_file_location("bench_commit_selection", path)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 UTC = dt.timezone.utc
 
 
@@ -45,4 +48,12 @@ weekly = module.select("weekly", weekly_history, weekly_head, now)
 check(len(weekly) == 9, f"weekly samples up to eight dates plus HEAD, got {len(weekly)}")
 check(len({sha for sha, _ in weekly}) == len(weekly), "weekly samples are unique")
 check(weekly[-1][0] == weekly_head, "weekly includes current HEAD")
+
+head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
+                      capture_output=True, text=True).stdout.strip()
+cli = subprocess.run([sys.executable, path, "branch", "--head", head,
+                      "--ref", head], cwd=ROOT, capture_output=True, text=True)
+check(cli.returncode == 0, f"commit-selection CLI failed: {cli.stderr}")
+check(cli.stdout.strip().splitlines()[-1].startswith(f"{head}\t"),
+      "the CLI includes its selected HEAD and exercises default UTC handling")
 print("test_commit_selection.py: branch=10 nightly=8 weekly=9 (including HEAD)")

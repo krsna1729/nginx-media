@@ -6,6 +6,8 @@ import datetime as dt
 import subprocess
 import sys
 
+UTC = dt.timezone.utc
+
 
 def parse_history(lines):
     commits = []
