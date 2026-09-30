@@ -561,15 +561,18 @@ function series(records, pick, selectedHardware = "all") {
   const out = {};
   for (const r of records) {
     for (const [config, c] of Object.entries(r.configs || {})) {
-      if (c.complete !== true && selectedHardware !== "all") continue;
+      if (c.complete !== true) continue;
       for (const [mix, m] of Object.entries(c.mixes || {})) {
+        if (!m.fingerprint) continue;
         const hw = runnerHardware(m.fingerprint);
         if (selectedHardware !== "all" && hw !== selectedHardware) continue;
         for (const [label, y] of pick(config, mix, m, hw)) {
           const key = selectedHardware === "all" ? `${label} · ${hw}` : label;
           const data = out[key] ||= {label: key, points: []};
-          data.points.push({x: r.timestamp.slice(0, 16).replace("T", " "),
-                            y, sha: (r.sha || "").slice(0, 8), hw});
+          const commitTime = (r.commit_timestamp || r.timestamp).slice(0, 19);
+          const sha = r.sha || "";
+          data.points.push({x: `${commitTime}\u0000${sha}`,
+                            y, sha: sha.slice(0, 8), hw});
         }
       }
     }
@@ -610,7 +613,8 @@ function chart(container, mix, data) {
     card.innerHTML += `<div class="scroll"><table>${rows}</table></div>`;
     return;
   }
-  const labels = [...new Set(data.flatMap(({points}) => points.map(p => p.x)))].sort();
+  const xKeys = [...new Set(data.flatMap(({points}) => points.map(p => p.x)))].sort();
+  const labels = xKeys.map(key => key.split("\u0000", 1)[0].replace("T", " "));
   charts.push(new Chart(card.querySelector("canvas"), {
     type: "line",
     data: {
@@ -619,7 +623,7 @@ function chart(container, mix, data) {
         const theme = PALETTE[idx % PALETTE.length];
         return {
           label,
-          data: labels.map(x => (points.find(p => p.x === x) || {}).y ?? null),
+          data: xKeys.map(x => (points.find(p => p.x === x) || {}).y ?? null),
           spanGaps: false,
           tension: 0.3,
           borderColor: theme.stroke,
@@ -644,10 +648,14 @@ function chart(container, mix, data) {
         tooltip: {
           callbacks: {
             title: items => {
-              const p = items[0]?.raw;
-              return p?.sha ? `${items[0].label} (commit ${p.sha})` : items[0].label;
+              const key = xKeys[items[0]?.dataIndex] || "";
+              const [when, sha] = key.split("\u0000");
+              return `${when || ""}${sha ? ` · commit ${sha.slice(0, 8)}` : ""}`;
             },
-            afterLabel: item => item.raw?.hw ? `Hardware: ${item.raw.hw}` : ""
+            afterLabel: item => {
+              const pt = data[item.datasetIndex]?.points?.find(p => p.x === xKeys[item.dataIndex]);
+              return pt?.hw ? `Hardware: ${pt.hw}` : "";
+            }
           }
         }
       }
@@ -717,10 +725,12 @@ function inspectCommit(sha) {
       if (m.fingerprint) hwSet.add(runnerHardware(m.fingerprint));
     }
   }
+  const configsEscaped = Object.keys(rec.configs || {}).map(esc).join(", ");
+  const missingEscaped = (rec.missing_configs || []).map(esc).join(", ");
   tiles.innerHTML = `
     <div class="kpi-tile"><div class="kpi-head">Hardware</div><div style="font-size:13px; font-weight:700;">${esc([...hwSet].join(", ") || "Unknown")}</div></div>
-    <div class="kpi-tile"><div class="kpi-head">Configs</div><div style="font-size:13px; font-weight:700;">${Object.keys(rec.configs || {}).join(", ")}</div></div>
-    <div class="kpi-tile"><div class="kpi-head">Missing Configs</div><div style="font-size:13px; font-weight:700; color: ${rec.missing_configs?.length ? "var(--warn-fg)" : "var(--good-fg)"};">${rec.missing_configs?.join(", ") || "None"}</div></div>
+    <div class="kpi-tile"><div class="kpi-head">Configs</div><div style="font-size:13px; font-weight:700;">${configsEscaped || "None"}</div></div>
+    <div class="kpi-tile"><div class="kpi-head">Missing Configs</div><div style="font-size:13px; font-weight:700; color: ${rec.missing_configs?.length ? "var(--warn-fg)" : "var(--good-fg)"};">${missingEscaped || "None"}</div></div>
   `;
 
   let rows = `<tr><th>Config</th><th>Workload</th><th>Destinations</th><th>Outcome</th><th>Delivery Ratio</th><th>CPU % / Gbps</th></tr>`;
@@ -729,9 +739,9 @@ function inspectCommit(sha) {
       for (const rung of m.rungs || []) {
         const outBadge = rung.outcome === "pass" ? `<span class="badge complete">pass</span>`
           : rung.outcome === "quality-failure" ? `<span class="badge" style="background:var(--bad-bg);color:var(--bad-fg);">fail</span>`
-          : `<span class="badge incomplete">${rung.outcome}</span>`;
-        const ratio = rung.observed_delivery_ratio ? (rung.observed_delivery_ratio * 100).toFixed(1) + "%" : "–";
-        const cpu = rung.sender_cpu_per_gbps ? `${rung.sender_cpu_per_gbps.toFixed(1)}%` : "–";
+          : `<span class="badge incomplete">${esc(rung.outcome)}</span>`;
+        const ratio = Number.isFinite(rung.observed_delivery_ratio) ? (rung.observed_delivery_ratio * 100).toFixed(1) + "%" : "–";
+        const cpu = Number.isFinite(rung.sender_cpu_per_gbps) ? `${rung.sender_cpu_per_gbps.toFixed(1)}%` : "–";
         rows += `<tr><td>${esc(cName)}</td><td><code>${esc(mName)}</code></td><td>${rung.destinations}</td><td>${outBadge}</td><td>${ratio}</td><td>${cpu}</td></tr>`;
       }
     }
@@ -842,7 +852,7 @@ function renderCapacityDiagnostics() {
     ? r.observed_delivery_ratio * 100 : null);
   const thresholds = rungs.map(r => Number.isFinite(r.delivery_ratio_threshold)
     ? r.delivery_ratio_threshold * 100 : null);
-  if (labels.length) {
+  if (labels.length && typeof Chart !== "undefined") {
     diagnosticChart = new Chart(document.getElementById("diagnostic-delivery"), {
       type: "line",
       data: {labels, datasets: [
@@ -960,11 +970,12 @@ function render(records, selectedHardware = activeHardware) {
           const cpuRate = passRung ? `${passRung.sender_cpu_per_gbps.toFixed(1)}%` : "–";
           const cpuSub = passRung ? `@ ${passRung.destinations} destinations` : "No goodput";
           
-          // Collect sparkline trend points across matching runs
+          // Collect sparkline trend points across matching runs with matching hardware
           const trendVals = [];
           for (const rec of filteredRecords) {
             const entry = rec.configs?.[cName]?.mixes?.[mName];
-            const p = (entry?.rungs || []).find(g => g.outcome === "pass" && g.destinations > 1 && g.sender_cpu_per_gbps);
+            if (!entry || (m.fingerprint && runnerHardware(entry.fingerprint) !== runnerHardware(m.fingerprint))) continue;
+            const p = (entry?.rungs || []).find(g => g.outcome === "pass" && g.destinations > 1 && Number.isFinite(g.sender_cpu_per_gbps));
             if (p) trendVals.push(p.sender_cpu_per_gbps);
           }
           sparkData[mName] = trendVals;
@@ -1105,7 +1116,7 @@ function render(records, selectedHardware = activeHardware) {
   rows += `<tr><td colspan="7">Run ${runStatus} · <code>${esc(latest.sha || "")}</code> · ` +
           `${esc(latest.timestamp)} · missing configs: ` +
           `${esc((latest.missing_configs || []).join(", ") || "none")} · unexpected configs: ` +
-          `${(latest.unexpected_configs || []).join(", ") || "none"}</td></tr>`;
+          `${esc((latest.unexpected_configs || []).join(", ") || "none")}</td></tr>`;
   table.innerHTML = rows;
 }
 
