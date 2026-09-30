@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nginx-media capacity & efficiency history</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <style>
   :root {
     --bg: #090e0d; --fg: #eef5f3; --muted: #7e9490; --muted-dark: #4d5e5b; --line: #182825;
@@ -161,7 +160,19 @@
   .chart-head h3 { margin: 0 0 2px; font-size: 14.5px; font-weight: 700; }
   .chart-head p { margin: 0; font-size: 11.5px; color: var(--muted); }
   .chart-card canvas { width: 100% !important; height: 220px !important; }
-  #three-container canvas { width: 100% !important; height: 100% !important; display: block; }
+  .diagnostic-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .diagnostic-filters select { display: block; margin-top: 4px; max-width: 260px; border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; background: var(--card); color: var(--fg); font: inherit; }
+  .diagnostic-context { margin: 4px 0 10px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .architecture-flow { display: grid; grid-template-columns: minmax(0,1fr) 32px minmax(0,1fr) 32px minmax(0,1fr) 32px minmax(0,1fr); align-items: stretch; gap: 8px; padding: 22px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 16px; background: radial-gradient(ellipse at 50% 0%, rgba(20,184,166,.12), transparent 65%), var(--card); box-shadow: var(--shadow); }
+  .architecture-node { min-width: 0; min-height: 190px; padding: 17px; border: 1px solid var(--accent-border); border-radius: 13px; background: linear-gradient(150deg, var(--card-active), var(--card)); display: flex; flex-direction: column; justify-content: center; }
+  .architecture-node h3 { margin: 10px 0 5px; font-size: 15px; }
+  .architecture-node p { min-height: 36px; margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+  .architecture-node strong { color: var(--accent); font-size: clamp(18px, 2vw, 25px); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .architecture-node small { margin-top: 3px; color: var(--muted); font-size: 10.5px; }
+  .architecture-step { color: var(--accent); font-size: 10px; font-weight: 800; letter-spacing: .1em; }
+  .flow-arrow { display: grid; place-items: center; color: var(--accent); font-size: 24px; }
+  .diagnostic-note { margin: 0 0 20px; color: var(--muted); font-size: 11px; }
+  @media (max-width: 900px) { .architecture-flow { grid-template-columns: 1fr; } .flow-arrow { transform: rotate(90deg); min-height: 22px; } .architecture-node { min-height: 145px; } }
   /* Badges & Tags */
   .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
   .badge.complete { background: var(--good-bg); color: var(--good-fg); }
@@ -211,6 +222,10 @@
     .charts-grid { grid-template-columns: 1fr; }
     .kpi-grid { grid-template-columns: 1fr 1fr; }
     .control-bar { flex-direction: column; align-items: flex-start; }
+    .control-bar, .filter-cluster, .filter-segment, .view-tabs { min-width: 0; max-width: 100%; }
+    .filter-cluster, .filter-segment, .view-tabs { width: 100%; }
+    .view-tabs { flex-wrap: wrap; border-radius: 14px; }
+    .view-header { align-items: flex-start; flex-direction: column; }
   }
 </style>
 </head>
@@ -265,7 +280,7 @@
       <button id="tab-overview" role="tab" aria-selected="true" onclick="switchView('overview')">📊 Overview</button>
       <button id="tab-timeline" role="tab" aria-selected="false" onclick="switchView('timeline')">📋 Commit Matrix</button>
       <button id="tab-charts" role="tab" aria-selected="false" onclick="switchView('charts')">📈 Deep Charts</button>
-      <button id="tab-topology" role="tab" aria-selected="false" onclick="switchView('topology')">🌐 3D Pipeline</button>
+      <button id="tab-diagnostics" role="tab" aria-selected="false" onclick="switchView('diagnostics')">🔬 Capacity Diagnostics</button>
       <button id="tab-breakdown" role="tab" aria-selected="false" onclick="switchView('breakdown')">🔍 Latest Run</button>
     </div>
   </section>
@@ -347,24 +362,68 @@
     <div class="charts-grid" id="efficiency"></div>
   </div>
 
-  <!-- VIEW 4: 3D Stream Topology Visualizer -->
-  <div id="view-topology" class="spa-view" style="display: none;">
+  <!-- VIEW 4: Receiver-verified capacity diagnostics -->
+  <div id="view-diagnostics" class="spa-view" style="display: none;">
     <div class="view-header">
       <div>
-        <h2>3D Stream Egress Topology & Traffic Pipeline</h2>
-        <p>Live spatial visualizer of nginx-media stream ingress, worker shards, and fanout destinations. Click and drag to orbit, scroll to zoom.</p>
+        <h2>Capacity boundary diagnostics</h2>
+        <p>Receiver-measured delivery and resource pressure at each rung of the latest matching workload run.</p>
+      </div>
+      <div class="diagnostic-filters">
+        <label class="filter-label" for="diagnostic-workload">Workload
+          <select id="diagnostic-workload" onchange="renderCapacityDiagnostics()"></select>
+        </label>
+        <label class="filter-label" for="diagnostic-rung">Rung
+          <select id="diagnostic-rung" onchange="renderCapacityDiagnostics()"></select>
+        </label>
       </div>
     </div>
-    <div class="chart-card" style="position: relative; height: 500px; padding: 0; overflow: hidden; border-radius: 16px;">
-      <div id="three-container" style="width: 100%; height: 100%;"></div>
-      <div style="position: absolute; top: 16px; left: 16px; background: rgba(16, 26, 24, 0.88); backdrop-filter: blur(8px); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; font-size: 12px; pointer-events: none; z-index: 10;">
-        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--accent); letter-spacing: .08em; margin-bottom: 5px;">Active Stream Topology</div>
-        <div id="hud-ingest">Source Ingest: 8.0 Mbit/s MPEG-TS</div>
-        <div id="hud-core">Workers: 4 Nginx Worker Shards (Lanes 0..3)</div>
-        <div id="hud-egress">Egress Protocols: SRT, RTMP, HLS Origin & Push</div>
-        <div id="hud-status" style="margin-top: 4px; color: var(--good-fg);">Pipeline: Active Verified Fanout</div>
+    <div id="diagnostic-context" class="diagnostic-context"></div>
+    <div class="architecture-flow" aria-label="Measured benchmark flow through the nginx-media architecture">
+      <article class="architecture-node">
+        <span class="architecture-step">01 · WORKLOAD</span>
+        <h3>Benchmark offer</h3>
+        <p id="flow-workload">–</p>
+        <strong id="flow-rung">–</strong>
+        <small>selected workload · tested destination rung</small>
+      </article>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <article class="architecture-node">
+        <span class="architecture-step">02 · PROGRAM</span>
+        <h3>Owner worker</h3>
+        <p>One logical program feed; the owner handles timeline and fanout.</p>
+        <strong id="flow-program">–</strong>
+        <small>receiver-measured egress throughput</small>
+      </article>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <article class="architecture-node">
+        <span class="architecture-step">03 · EXECUTE</span>
+        <h3>Worker pressure</h3>
+        <p id="flow-workers">–</p>
+        <strong id="flow-cpu">–</strong>
+        <small id="flow-worker-detail">sender CPU · one-core percentage</small>
+      </article>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <article class="architecture-node architecture-output">
+        <span class="architecture-step">04 · DELIVER</span>
+        <h3>Selected egress</h3>
+        <p id="flow-protocols">–</p>
+        <strong id="flow-delivery">–</strong>
+        <small id="flow-gate">receiver-observed delivery · quality gate</small>
+      </article>
+    </div>
+    <p class="diagnostic-note">This view describes the selected benchmark rung, not a live system. Workload mix labels show the configured protocols; delivery and resource values are measured for the rung as a whole.</p>
+    <div id="diagnostic-summary" class="kpi-grid"></div>
+    <div class="charts-grid">
+      <div class="chart-card">
+        <div class="chart-head">
+          <div><h3>Receiver delivery by destination rung</h3>
+          <p>Observed delivery versus the qualification threshold.</p></div>
+        </div>
+        <canvas id="diagnostic-delivery"></canvas>
       </div>
     </div>
+    <div class="table-card scroll"><table id="diagnostic-rungs"></table></div>
   </div>
 
   <!-- VIEW 5: Latest Run Detailed Breakdown -->
@@ -635,16 +694,11 @@ let currentView = "overview";
 
 function switchView(viewName) {
   currentView = viewName;
-  for (const name of ["overview", "timeline", "charts", "topology", "breakdown"]) {
+  for (const name of ["overview", "timeline", "charts", "diagnostics", "breakdown"]) {
     const el = document.getElementById(`view-${name}`);
     const btn = document.getElementById(`tab-${name}`);
     if (el) el.style.display = name === viewName ? "" : "none";
     if (btn) btn.setAttribute("aria-selected", name === viewName);
-  }
-  if (viewName === "topology") {
-    initOrResumeThree();
-  } else {
-    pauseThree();
   }
 }
 
@@ -689,13 +743,152 @@ function inspectCommit(sha) {
 function closeInspector() {
   document.getElementById("commit-inspector").classList.remove("open");
 }
+let diagnosticChart = null;
+
+function renderCapacityDiagnostics() {
+  const selector = document.getElementById("diagnostic-workload");
+  const summary = document.getElementById("diagnostic-summary");
+  const table = document.getElementById("diagnostic-rungs");
+  if (diagnosticChart) {
+    diagnosticChart.destroy();
+    diagnosticChart = null;
+  }
+
+  const newest = currentTierRecords.reduce((latest, record) =>
+    Object.values(record.configs || {}).some(config =>
+      Object.values(config.mixes || {}).some(mix =>
+        activeHardware === "all" || runnerHardware(mix.fingerprint) === activeHardware)) &&
+    (!latest || (record.timestamp || "") > (latest.timestamp || "")) ? record : latest, null);
+  const mixes = {};
+  if (newest) {
+    for (const [configName, config] of Object.entries(newest.configs || {})) {
+      for (const [name, mix] of Object.entries(config.mixes || {})) {
+        if (activeHardware !== "all" && runnerHardware(mix.fingerprint) !== activeHardware) continue;
+        mixes[name] = {configName, ...mix};
+      }
+    }
+  }
+  const names = Object.keys(mixes).filter(name => !name.endsWith("-srt-reference"));
+  const selected = names.includes(selector.value) ? selector.value : names[0];
+  selector.innerHTML = names.map(name =>
+    `<option value="${esc(name)}">${esc(workloadMeta(name).title)}</option>`).join("");
+  selector.disabled = !selected;
+  const rungSelector = document.getElementById("diagnostic-rung");
+  if (!selected) {
+    document.getElementById("diagnostic-context").textContent = "";
+    for (const id of ["flow-workload", "flow-rung", "flow-program", "flow-workers", "flow-cpu", "flow-worker-detail", "flow-protocols", "flow-delivery", "flow-gate"]) {
+      document.getElementById(id).textContent = "–";
+    }
+    rungSelector.innerHTML = "";
+    rungSelector.disabled = true;
+    summary.innerHTML = `<div class="kpi-tile"><div class="kpi-head">No matching run</div><div class="kpi-note">Choose another tier or hardware filter with rung diagnostics.</div></div>`;
+    table.innerHTML = `<tr><td>No receiver-verified capacity rungs are available for this selection.</td></tr>`;
+    return;
+  }
+  selector.value = selected;
+
+  const workload = mixes[selected];
+  const rungs = workload.rungs || [];
+  const bestPass = [...rungs].reverse().find(r => r.outcome === "pass");
+  const selectedRung = rungs.find(r => String(r.destinations) === rungSelector.value) || bestPass || rungs[0];
+  rungSelector.innerHTML = rungs.map(r =>
+    `<option value="${esc(r.destinations)}">${esc(r.destinations)} destinations · ${esc(r.outcome)}</option>`).join("");
+  rungSelector.disabled = !selectedRung;
+  if (!selectedRung) {
+    document.getElementById("diagnostic-context").textContent = `${workloadMeta(selected).title} · ${runnerHardware(workload.fingerprint)} · no rung-level diagnostics`;
+    for (const id of ["flow-workload", "flow-rung", "flow-program", "flow-workers", "flow-cpu", "flow-worker-detail", "flow-protocols", "flow-delivery", "flow-gate"]) {
+      document.getElementById(id).textContent = "–";
+    }
+    summary.innerHTML = `<div class="kpi-tile"><div class="kpi-head">No measured rungs</div><div class="kpi-note">This workload has no rung-level diagnostics.</div></div>`;
+    table.innerHTML = `<tr><td>No measured rungs.</td></tr>`;
+    return;
+  }
+  rungSelector.value = String(selectedRung.destinations);
+  const highestPass = workload.highest_passing ?? "–";
+  const firstFailure = workload.first_quality_failure ?? "none";
+  const infra = rungs.filter(r => r.outcome === "infrastructure-limited").map(r => r.destinations);
+  const meta = workloadMeta(selected);
+  const peak = selectedRung.peak || {};
+  const fmt = (value, suffix = "") => Number.isFinite(value) ? `${value.toFixed(1)}${suffix}` : "–";
+  const delivery = Number.isFinite(selectedRung.observed_delivery_ratio)
+    ? `${(selectedRung.observed_delivery_ratio * 100).toFixed(1)}%` : "unmeasured";
+  const threshold = Number.isFinite(selectedRung.delivery_ratio_threshold)
+    ? `${(selectedRung.delivery_ratio_threshold * 100).toFixed(1)}%` : "gate unavailable";
+  document.getElementById("diagnostic-context").textContent =
+    `${meta.title} · ${workload.configName} · ${runnerHardware(workload.fingerprint)} · ` +
+    `commit ${(newest.sha || "unknown").slice(0, 8)} · ${newest.timestamp || "unknown date"}`;
+  document.getElementById("flow-workload").textContent = meta.desc;
+  document.getElementById("flow-rung").textContent = `${selectedRung.destinations ?? "–"} destinations`;
+  document.getElementById("flow-program").textContent =
+    Number.isFinite(selectedRung.delivered_gbps) ? `${selectedRung.delivered_gbps.toFixed(2)} Gbit/s` : "throughput unmeasured";
+  document.getElementById("flow-workers").textContent =
+    `Peak event-loop delay ${fmt(peak.event_loop_max_delay_ms, " ms")} · worker RSS ${Number.isFinite(peak.worker_rss_kb_max) ? `${(peak.worker_rss_kb_max / 1024).toFixed(0)} MiB` : "–"}`;
+  document.getElementById("flow-cpu").textContent = `${fmt(peak.sender_cpu_pct_of_core, "%")} of one core`;
+  document.getElementById("flow-worker-detail").textContent =
+    `sender CPU · receiver CPU ${fmt(peak.receiver_cpu_pct_of_core, "%")} · socket drops ${Number.isFinite(peak.socket_drops) ? peak.socket_drops : "–"}`;
+  document.getElementById("flow-protocols").textContent = meta.badge;
+  document.getElementById("flow-delivery").textContent = delivery;
+  document.getElementById("flow-gate").textContent = `receiver-observed delivery · gate ${threshold}`;
+
+  const tile = (label, value, note) => `<div class="kpi-tile"><div class="kpi-head">${label}</div><div class="kpi-metric">${esc(value)}</div><div class="kpi-note">${esc(note)}</div></div>`;
+  summary.innerHTML =
+    tile("Highest verified pass", highestPass === "–" ? highestPass : `${highestPass} destinations`, "Receiver quality met the rung's qualification gate") +
+    tile("First quality failure", firstFailure === "none" ? firstFailure : `${firstFailure} destinations`, "First measured rung that failed delivery quality") +
+    tile("Infrastructure-limited", infra.length ? infra.join(", ") : "none", "Not counted as a software quality failure") +
+    tile("Measured rungs", rungs.length, "Only executed rungs; omitted rungs are not inferred");
+
+  const labels = rungs.map(r => String(r.destinations ?? "–"));
+  const observed = rungs.map(r => Number.isFinite(r.observed_delivery_ratio)
+    ? r.observed_delivery_ratio * 100 : null);
+  const thresholds = rungs.map(r => Number.isFinite(r.delivery_ratio_threshold)
+    ? r.delivery_ratio_threshold * 100 : null);
+  if (labels.length) {
+    diagnosticChart = new Chart(document.getElementById("diagnostic-delivery"), {
+      type: "line",
+      data: {labels, datasets: [
+        {label: "Receiver-observed delivery", data: observed, borderColor: "#14b8a6",
+         backgroundColor: "rgba(20,184,166,.14)", pointBackgroundColor: rungs.map(r =>
+           r.outcome === "pass" ? "#6ee7b7" : r.outcome === "quality-failure" ? "#fda4af" : "#fcd34d"),
+         pointRadius: 5, spanGaps: false, tension: 0.15},
+        {label: "Qualification threshold", data: thresholds, borderColor: "#fcd34d",
+         borderDash: [5, 4], pointRadius: 0, spanGaps: false}
+      ]},
+      options: {responsive: true, maintainAspectRatio: false, animation: false,
+        interaction: {mode: "index", intersect: false},
+        scales: {
+          x: {title: {display: true, text: "Destinations", color: css("--muted")},
+              ticks: {color: css("--muted")}},
+          y: {min: 0, max: 105, title: {display: true, text: "Delivery (%)", color: css("--muted")},
+              ticks: {color: css("--muted")}}
+        },
+        plugins: {legend: {labels: {color: css("--fg")}},
+          tooltip: {callbacks: {afterLabel: item => `Outcome: ${rungs[item.dataIndex]?.outcome || "unknown"}`}}}
+      }
+    });
+  }
+
+  const outcome = rung => `<span class="badge ${rung.outcome === "pass" ? "complete" : rung.outcome === "quality-failure" ? "incomplete" : "unverified"}">${esc(rung.outcome || "unknown")}</span>`;
+  let rows = `<tr><th>Destinations</th><th>Outcome</th><th>Observed delivery</th><th>Gate</th><th>Sender CPU / Gbit/s</th><th>Sender / receiver CPU</th><th>Socket drops</th><th>Max event-loop delay</th><th>Worker RSS max</th></tr>`;
+  for (const rung of rungs) {
+    const peak = rung.peak || {};
+    rows += `<tr><td>${esc(rung.destinations ?? "–")}</td><td>${outcome(rung)}</td>` +
+      `<td>${fmt(Number.isFinite(rung.observed_delivery_ratio) ? rung.observed_delivery_ratio * 100 : null, "%")}</td>` +
+      `<td>${fmt(Number.isFinite(rung.delivery_ratio_threshold) ? rung.delivery_ratio_threshold * 100 : null, "%")}</td>` +
+      `<td>${fmt(rung.sender_cpu_per_gbps, "%")}</td>` +
+      `<td>${fmt(peak.sender_cpu_pct_of_core, "%")} / ${fmt(peak.receiver_cpu_pct_of_core, "%")}</td>` +
+      `<td>${Number.isFinite(peak.socket_drops) ? esc(peak.socket_drops) : "–"}</td>` +
+      `<td>${fmt(peak.event_loop_max_delay_ms, " ms")}</td>` +
+      `<td>${Number.isFinite(peak.worker_rss_kb_max) ? `${(peak.worker_rss_kb_max / 1024).toFixed(1)} MiB` : "–"}</td></tr>`;
+  }
+  table.innerHTML = rows;
+}
 
 function render(records, selectedHardware = activeHardware) {
   currentTierRecords = records;
   activeHardware = selectedHardware;
   charts.splice(0).forEach(c => c.destroy());
   for (const id of ["capacity", "efficiency"]) document.getElementById(id).innerHTML = "";
-
+  renderCapacityDiagnostics();
   // 1. Discover distinct hardware in this tier
   const hwCounts = new Map();
   for (const r of records) {
@@ -916,111 +1109,6 @@ function render(records, selectedHardware = activeHardware) {
   table.innerHTML = rows;
 }
 
-// Three.js 3D Stream Topology Visualizer
-let threeScene, threeCamera, threeRenderer, threeAnimId;
-let threeParticles = [];
-
-function initOrResumeThree() {
-  const container = document.getElementById("three-container");
-  if (!container || typeof THREE === "undefined") return;
-  if (threeRenderer) {
-    if (!threeAnimId) animateThree();
-    return;
-  }
-  const w = container.clientWidth || 800;
-  const h = container.clientHeight || 500;
-  threeScene = new THREE.Scene();
-  threeScene.background = new THREE.Color(0x090e0d);
-  
-  threeCamera = new THREE.PerspectiveCamera(50, w / h, 0.1, 1000);
-  threeCamera.position.set(0, 8, 22);
-  threeCamera.lookAt(0, 0, 0);
-
-  threeRenderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  threeRenderer.setSize(w, h);
-  threeRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  container.appendChild(threeRenderer.domElement);
-
-  // Ingress Node
-  const ingGeo = new THREE.SphereGeometry(0.8, 16, 16);
-  const ingMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true });
-  const ingMesh = new THREE.Mesh(ingGeo, ingMat);
-  ingMesh.position.set(-10, 0, 0);
-  threeScene.add(ingMesh);
-
-  // Center NGINX Core
-  const coreGeo = new THREE.OctahedronGeometry(1.6, 1);
-  const coreMat = new THREE.MeshBasicMaterial({ color: 0x14b8a6, wireframe: true });
-  const coreMesh = new THREE.Mesh(coreGeo, coreMat);
-  coreMesh.position.set(0, 0, 0);
-  threeScene.add(coreMesh);
-
-  // Egress Clusters (SRT = cyan, RTMP = amber, HLS = violet)
-  const targets = [
-    { pos: [10, 4, 0], color: 0x38bdf8, label: "SRT" },
-    { pos: [10, 0, 3], color: 0xfbbf24, label: "RTMP" },
-    { pos: [10, -4, -3], color: 0xa855f7, label: "HLS" }
-  ];
-  targets.forEach(t => {
-    const geo = new THREE.IcosahedronGeometry(0.9, 0);
-    const mat = new THREE.MeshBasicMaterial({ color: t.color, wireframe: true });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(...t.pos);
-    threeScene.add(mesh);
-  });
-
-  // Flow Particles
-  const partCount = 90;
-  const partGeo = new THREE.BufferGeometry();
-  const positions = new Float32Array(partCount * 3);
-  for (let i = 0; i < partCount; i++) {
-    positions[i * 3] = (Math.random() - 0.5) * 20;
-    positions[i * 3 + 1] = (Math.random() - 0.5) * 6;
-    positions[i * 3 + 2] = (Math.random() - 0.5) * 6;
-  }
-  partGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  const partMat = new THREE.PointsMaterial({ color: 0x14b8a6, size: 0.25, transparent: true, opacity: 0.8 });
-  const pMesh = new THREE.Points(partGeo, partMat);
-  threeScene.add(pMesh);
-
-  // Mouse interaction
-  let isDragging = false;
-  let prevMouse = { x: 0, y: 0 };
-  container.addEventListener("mousedown", e => { isDragging = true; prevMouse = { x: e.clientX, y: e.clientY }; });
-  window.addEventListener("mouseup", () => { isDragging = false; });
-  window.addEventListener("mousemove", e => {
-    if (!isDragging) return;
-    const dx = e.clientX - prevMouse.x;
-    const dy = e.clientY - prevMouse.y;
-    threeCamera.position.x += dx * 0.04;
-    threeCamera.position.y -= dy * 0.04;
-    threeCamera.lookAt(0, 0, 0);
-    prevMouse = { x: e.clientX, y: e.clientY };
-  });
-
-  function animate() {
-    threeAnimId = requestAnimationFrame(animate);
-    coreMesh.rotation.y += 0.01;
-    coreMesh.rotation.x += 0.005;
-    ingMesh.rotation.y += 0.015;
-    
-    const pos = pMesh.geometry.attributes.position.array;
-    for (let i = 0; i < partCount; i++) {
-      pos[i * 3] += 0.08;
-      if (pos[i * 3] > 10) pos[i * 3] = -10;
-    }
-    pMesh.geometry.attributes.position.needsUpdate = true;
-    threeRenderer.render(threeScene, threeCamera);
-  }
-  animate();
-}
-
-function pauseThree() {
-  if (threeAnimId) {
-    cancelAnimationFrame(threeAnimId);
-    threeAnimId = null;
-  }
-}
 
 (async () => {
   let tiers = ["nightly"];
