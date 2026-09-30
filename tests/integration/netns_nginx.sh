@@ -1171,7 +1171,7 @@ CEOF
 
     # the rpath is what lets the caller find the bonding-enabled library when
     # it is started inside its namespace as root
-    cc -O1 -g -Wall -Wextra -Werror -std=c11 \
+    cc -O1 -g -Wall -Wextra -Werror -std=c2x \
         -I"$BOND_PREFIX/include" -L"$BOND_PREFIX/lib" \
         -Wl,-rpath,"$BOND_PREFIX/lib" \
         -o "$BOND_SENDER_BIN" "$RUN/srt_group_send.c" -lsrt -lpthread

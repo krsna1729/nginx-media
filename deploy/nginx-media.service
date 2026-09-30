@@ -25,6 +25,9 @@ TimeoutStopSec=30
 # 1024.  Drop the two lines below the user if you need to bind 80/443.
 User=nginx-media
 Group=nginx-media
+# systemd creates this private persistent directory for the ingest secret.
+StateDirectory=nginx-media
+StateDirectoryMode=0700
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -37,7 +40,7 @@ SystemCallFilter=@system-service
 SystemCallArchitectures=native
 MemoryDenyWriteExecute=no
 
-# The only writable paths: the media this deployment produces.
+# `StateDirectory` is also writable; these paths hold media output.
 ReadWritePaths=/usr/local/nginx-media/logs /usr/local/nginx-media/hls \
                 /usr/local/nginx-media/record
 

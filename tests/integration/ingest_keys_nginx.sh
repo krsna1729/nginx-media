@@ -24,6 +24,9 @@ SRT_PORT="${INGEST_KEYS_SRT_PORT:-19072}"
 RTMP_PORT="${INGEST_KEYS_RTMP_PORT:-19073}"
 API_PORT="${INGEST_KEYS_API_PORT:-19074}"
 API="http://127.0.0.1:$API_PORT/media/api/v1"
+NO_SECRET_API_PORT="${INGEST_KEYS_NO_SECRET_API_PORT:-19075}"
+NO_SECRET_API="http://127.0.0.1:$NO_SECRET_API_PORT/media/api/v1"
+NO_SECRET_RUN="$RUN/no-secret"
 LOG="$RUN/logs/error.log"
 
 if [ ! -x "$NGINX" ]; then
@@ -64,10 +67,101 @@ http {
 }
 EOF
 
+echo "== configuration rejects an unusable ingest secret"
+cat > "$RUN/bad-secret.conf" <<EOF
+worker_processes 1;
+daemon off;
+error_log $RUN/logs/bad-secret.log info;
+pid $RUN/logs/bad-secret.pid;
+
+events { worker_connections 16; }
+
+media_ingest_secret $RUN/missing-secret-dir/ingest.secret;
+
+http {
+    server {
+        listen 127.0.0.1:$API_PORT;
+        location /media/api/ { media_api; }
+    }
+}
+EOF
+
+if "$NGINX" -p "$RUN" -c bad-secret.conf -t \
+    > "$RUN/logs/bad-secret-test.log" 2>&1
+then
+    cat "$RUN/logs/bad-secret-test.log" >&2
+    fail "nginx accepted an ingest secret it could not create"
+fi
+
+echo "   an unavailable configured secret aborts initialization"
+
+mkdir -p "$RUN/missing-secret-dir"
+printf 'short-secret' > "$RUN/missing-secret-dir/ingest.secret"
+if "$NGINX" -p "$RUN" -c bad-secret.conf -t \
+    > "$RUN/logs/short-secret-test.log" 2>&1
+then
+    cat "$RUN/logs/short-secret-test.log" >&2
+    fail "nginx accepted an ingest secret shorter than 32 bytes"
+fi
+[ "$(cat "$RUN/missing-secret-dir/ingest.secret")" = short-secret ] \
+    || fail "nginx changed a rejected short ingest secret"
+echo "   a short configured secret is rejected without modification"
+
+rm "$RUN/missing-secret-dir/ingest.secret"
+ln -s "$RUN/missing-secret-target" "$RUN/missing-secret-dir/ingest.secret"
+if "$NGINX" -p "$RUN" -c bad-secret.conf -t \
+    > "$RUN/logs/dangling-secret-test.log" 2>&1
+then
+    cat "$RUN/logs/dangling-secret-test.log" >&2
+    fail "nginx replaced a dangling ingest-secret path"
+fi
+[ -L "$RUN/missing-secret-dir/ingest.secret" ] \
+    && [ ! -e "$RUN/missing-secret-target" ] \
+    || fail "nginx changed a dangling ingest-secret path"
+rm "$RUN/missing-secret-dir/ingest.secret"
+echo "   a pre-existing secret path is not replaced"
+
 cleanup() {
+    "$NGINX" -p "$NO_SECRET_RUN" -c nginx.conf -s quit 2>/dev/null || true
     "$NGINX" -p "$RUN" -c nginx.conf -s quit 2>/dev/null || true
 }
 trap cleanup EXIT
+
+echo "== missing secret does not leave a source registered"
+mkdir -p "$NO_SECRET_RUN/logs"
+cat > "$NO_SECRET_RUN/nginx.conf" <<EOF
+worker_processes 1;
+daemon on;
+error_log logs/error.log info;
+pid logs/nginx.pid;
+
+events { worker_connections 256; }
+
+http {
+    server {
+        listen 127.0.0.1:$NO_SECRET_API_PORT;
+        location /media/api/ { media_api; }
+    }
+}
+EOF
+"$NGINX" -p "$NO_SECRET_RUN" -c nginx.conf
+curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"application":"live","name":"no-secret"}' \
+    "$NO_SECRET_API/streams" >/dev/null
+status="$(curl -sS -o "$NO_SECRET_RUN/source.json" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"enc1","type":"srt"}' \
+    "$NO_SECRET_API/streams/live/no-secret/sources")"
+[ "$status" = 500 ] \
+    || fail "source creation without a secret returned HTTP $status"
+state="$(curl -fsS "$NO_SECRET_API/streams/live/no-secret")"
+python3 - "$state" <<'PY' || fail "failed key derivation registered a source"
+import json, sys
+assert json.loads(sys.argv[1])["sources"] == []
+PY
+"$NGINX" -p "$NO_SECRET_RUN" -c nginx.conf -s quit
+echo "   failed key derivation leaves no source behind"
+
 
 "$NGINX" -p "$RUN" -c nginx.conf
 
@@ -193,6 +287,17 @@ echo "   refused by fingerprint, key not logged"
 echo "== rtmp: the key is the stream name, the app is fixed"
 program rt
 rk="$(source rt enc1 100 rtmp | key_of)"
+
+before="$(grep -c 'srt publisher rejected.*no source for key' "$LOG" || true)"
+publish_srt "$rk" 3 || true
+after="$(grep -c 'srt publisher rejected.*no source for key' "$LOG" || true)"
+[ "$after" -gt "$before" ] || fail "SRT accepted an RTMP source key"
+
+before="$(grep -c 'rtmp publisher rejected: no source for key' "$LOG" || true)"
+publish_rtmp "$new" 3 || true
+after="$(grep -c 'rtmp publisher rejected: no source for key' "$LOG" || true)"
+[ "$after" -gt "$before" ] || fail "RTMP accepted an SRT source key"
+echo "   each ingest transport rejects keys for the other transport"
 
 publish_rtmp "WRONGKEY1234567890ABCDEFG" 3 || true
 grep -q 'rtmp publisher rejected: no source for key' "$LOG" \

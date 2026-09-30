@@ -49,76 +49,163 @@ ngx_media_ingest_secret(size_t *len)
 ngx_int_t
 ngx_media_ingest_secret_load(const ngx_str_t *path, ngx_log_t *log)
 {
-    u_char    buf[NGX_MEDIA_KEY_MASTER_LEN * 4];
+    u_char    buf[NGX_MEDIA_KEY_MASTER_LEN];
     ngx_fd_t  fd;
     ssize_t   n;
-    size_t    i;
+    size_t    nread, nwritten;
+    ngx_err_t err;
+    ngx_int_t rc;
 
     if (path == NULL || path->len == 0) {
         return NGX_ERROR;
     }
 
+    ngx_memzero(ngx_media_key_master, sizeof(ngx_media_key_master));
+    ngx_media_key_master_len = 0;
     fd = ngx_open_file(path->data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
 
     if (fd == NGX_INVALID_FILE) {
+        err = ngx_errno;
 
-        /*
-         * First start: make one.  0600, and it is the one file in a
-         * deployment that must not be readable by anyone else - which is a
-         * simpler thing to protect than a key per source in state.
-         */
-        if (RAND_bytes(ngx_media_key_master, NGX_MEDIA_KEY_MASTER_LEN) != 1) {
-            return NGX_ERROR;
-        }
-
-        fd = ngx_open_file(path->data,
-                           NGX_FILE_WRONLY | NGX_FILE_CREATE_OR_OPEN
-                               | NGX_FILE_TRUNCATE,
-                           NGX_FILE_DEFAULT_ACCESS, 0600);
-
-        if (fd == NGX_INVALID_FILE) {
-            ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
-                          "media: could not create the ingest secret at %V",
+        if (err != NGX_ENOENT) {
+            ngx_log_error(NGX_LOG_ERR, log, err,
+                          "media: could not open the ingest secret at %V",
                           path);
             return NGX_ERROR;
         }
 
-        n = ngx_write_fd(fd, ngx_media_key_master, NGX_MEDIA_KEY_MASTER_LEN);
-        ngx_close_file(fd);
-
-        if (n != NGX_MEDIA_KEY_MASTER_LEN) {
+        /*
+         * First start: make one.  Exclusive creation preserves an existing
+         * secret if another process wins the race after our read-open.
+         */
+        if (RAND_bytes(ngx_media_key_master, NGX_MEDIA_KEY_MASTER_LEN) != 1) {
+            ngx_log_error(NGX_LOG_ERR, log, 0,
+                          "media: could not generate the ingest secret");
+            ngx_memzero(ngx_media_key_master,
+                        sizeof(ngx_media_key_master));
             return NGX_ERROR;
         }
 
-        ngx_media_key_master_len = NGX_MEDIA_KEY_MASTER_LEN;
+        fd = ngx_open_file(path->data, NGX_FILE_WRONLY,
+                           NGX_FILE_CREATE_OR_OPEN | O_EXCL, 0600);
 
-        ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                      "media: generated the ingest secret at %V", path);
-        return NGX_OK;
+        if (fd == NGX_INVALID_FILE) {
+            err = ngx_errno;
+
+            if (err != NGX_EEXIST) {
+                ngx_log_error(NGX_LOG_ERR, log, err,
+                              "media: could not create the ingest secret at %V",
+                              path);
+                ngx_memzero(ngx_media_key_master,
+                            sizeof(ngx_media_key_master));
+                return NGX_ERROR;
+            }
+
+            fd = ngx_open_file(path->data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+
+            if (fd == NGX_INVALID_FILE) {
+                err = ngx_errno;
+                ngx_log_error(NGX_LOG_ERR, log, err,
+                              "media: could not open the ingest secret at %V",
+                              path);
+                ngx_memzero(ngx_media_key_master,
+                            sizeof(ngx_media_key_master));
+                return NGX_ERROR;
+            }
+
+        } else {
+            nwritten = 0;
+
+            while (nwritten < sizeof(ngx_media_key_master)) {
+                n = ngx_write_fd(fd, ngx_media_key_master + nwritten,
+                                 sizeof(ngx_media_key_master) - nwritten);
+
+                if (n == NGX_ERROR) {
+                    err = ngx_errno;
+                    if (err == NGX_EINTR) {
+                        continue;
+                    }
+                    break;
+                }
+
+                if (n == 0) {
+                    break;
+                }
+
+                nwritten += (size_t) n;
+            }
+
+            rc = ngx_close_file(fd);
+
+            if (nwritten != sizeof(ngx_media_key_master)
+                || rc == NGX_FILE_ERROR)
+            {
+                err = ngx_errno;
+                ngx_memzero(ngx_media_key_master,
+                            sizeof(ngx_media_key_master));
+
+                if (ngx_delete_file(path->data) == NGX_FILE_ERROR) {
+                    ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                                  "media: could not remove the incomplete "
+                                  "ingest secret at %V", path);
+                }
+
+                ngx_log_error(NGX_LOG_ERR, log, err,
+                              "media: could not write the ingest secret at %V",
+                              path);
+                return NGX_ERROR;
+            }
+
+            ngx_media_key_master_len = NGX_MEDIA_KEY_MASTER_LEN;
+
+            ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                          "media: generated the ingest secret at %V", path);
+            return NGX_OK;
+        }
     }
 
-    n = ngx_read_fd(fd, buf, sizeof(buf));
+    nread = 0;
+
+    while (nread < sizeof(buf)) {
+        n = ngx_read_fd(fd, buf + nread, sizeof(buf) - nread);
+
+        if (n == NGX_ERROR) {
+            err = ngx_errno;
+            if (err == NGX_EINTR) {
+                continue;
+            }
+
+            ngx_close_file(fd);
+            ngx_log_error(NGX_LOG_ERR, log, err,
+                          "media: could not read the ingest secret at %V",
+                          path);
+            ngx_memzero(buf, sizeof(buf));
+            ngx_memzero(ngx_media_key_master,
+                        sizeof(ngx_media_key_master));
+            return NGX_ERROR;
+        }
+
+        if (n == 0) {
+            break;
+        }
+
+        nread += (size_t) n;
+    }
+
     ngx_close_file(fd);
 
-    if (n <= 0) {
+    if (nread < sizeof(buf)) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
-                      "media: the ingest secret at %V is empty", path);
+                      "media: the ingest secret at %V must contain at least "
+                      "%uz bytes", path, sizeof(buf));
+        ngx_memzero(buf, sizeof(buf));
+        ngx_memzero(ngx_media_key_master,
+                    sizeof(ngx_media_key_master));
         return NGX_ERROR;
     }
 
-    if ((size_t) n > sizeof(buf)) {
-        n = (ssize_t) sizeof(buf);
-    }
-
-    /*
-     * Whatever the file holds is the secret, stretched to the length the
-     * derivation wants: an operator can supply one from a secret manager in
-     * whatever form that produces.
-     */
-    for (i = 0; i < NGX_MEDIA_KEY_MASTER_LEN; i++) {
-        ngx_media_key_master[i] = buf[i % (size_t) n];
-    }
-
+    ngx_memcpy(ngx_media_key_master, buf, sizeof(buf));
+    ngx_memzero(buf, sizeof(buf));
     ngx_media_key_master_len = NGX_MEDIA_KEY_MASTER_LEN;
 
     ngx_log_error(NGX_LOG_NOTICE, log, 0,
@@ -126,6 +213,7 @@ ngx_media_ingest_secret_load(const ngx_str_t *path, ngx_log_t *log)
 
     return NGX_OK;
 }
+
 static char *ngx_media_failure_timeout_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
 static char *ngx_media_recovery_timeout_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
@@ -565,9 +653,12 @@ ngx_media_core_init_module(ngx_cycle_t *cycle)
 
         policy = ngx_media_policy_get(cycle);
 
-        if (policy != NULL && policy->ingest_secret_path.len != 0) {
-            (void) ngx_media_ingest_secret_load(&policy->ingest_secret_path,
-                                                cycle->log);
+        if (policy != NULL && policy->ingest_secret_path.len != 0
+            && ngx_media_ingest_secret_load(&policy->ingest_secret_path,
+                                            cycle->log)
+                != NGX_OK)
+        {
+            return NGX_ERROR;
         }
     }
 

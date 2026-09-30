@@ -78,7 +78,7 @@ fail() {
 pkg-config --exists srt || { echo "libsrt development files are required"; exit 1; }
 read -r -a cflags <<< "$(pkg-config --cflags srt)"
 read -r -a libs <<< "$(pkg-config --libs srt)"
-cc -O2 -Wall -Wextra -Werror -std=c11 "${cflags[@]}" \
+cc -O2 -Wall -Wextra -Werror -std=c2x "${cflags[@]}" \
     "$ROOT/tests/bench/srt_fanout_sink.c" -o "$RUN/sink" "${libs[@]}" \
     || fail "could not build the SRT fanout sink"
 

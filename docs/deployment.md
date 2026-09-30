@@ -52,14 +52,20 @@ what a capacity claim names.
 ### The ingest secret
 
 ```nginx
-media_ingest_secret /usr/local/nginx-media/ingest.secret;
+media_ingest_secret /var/lib/nginx-media/ingest.secret;
 ```
 
-Ingest keys are derived from this secret, so it is the one file in a
-deployment that must not be readable by anyone else: the server creates it
-0600 on first start if it is absent, and every worker inherits it.  Back it up
-with the configuration — without it, existing keys cannot be re-derived (they
-can still be rotated, which issues new ones).
+Ingest keys are derived from this secret.  The file must contain at least 32
+bytes of unpredictable data; the server uses the first 32 bytes and creates a
+32-byte secret with mode 0600 on first start if the file is absent.  Every
+worker inherits it.  Back it up with the configuration — without it, existing
+keys cannot be re-derived (they can still be rotated, which issues new ones).
+
+For an existing installation that used `/usr/local/nginx-media/ingest.secret`,
+copy that same file to `/var/lib/nginx-media/ingest.secret` and update the
+directive before starting the service.  A secret shorter than 32 bytes is now
+rejected; replacing it changes API-issued keys, so reconfigure or rotate those
+publishers.
 
 ### Run it as a service
 
@@ -76,9 +82,11 @@ systemctl status nginx-media
 
 The unit runs the master unprivileged, with `NoNewPrivileges`, a system-call
 filter and a `ReadWritePaths` list limited to the directories media is written
-to.  The example configuration binds ports above 1024; to bind 80 or 443
-either add `CAP_NET_BIND_SERVICE` to the unit or put another nginx in front
-(`docs/security.md`).
+to.  `StateDirectory=nginx-media` creates `/var/lib/nginx-media` for the
+deployment secret and grants the service write access there under
+`ProtectSystem=strict`.  The example configuration binds ports above 1024; to
+bind 80 or 443 either add `CAP_NET_BIND_SERVICE` to the unit or put another
+nginx in front (`docs/security.md`).
 
 ### Verify the deployment
 

@@ -2047,7 +2047,7 @@ capacity_build_srt_sink() {
         || { echo "missing shared SRT receiver helper: $source" >&2; return 1; }
     read -r -a cflags <<< "$(pkg-config --cflags srt)"
     read -r -a libs <<< "$(pkg-config --libs srt)"
-    cc -O2 -g -Wall -Wextra -Werror -std=c11 "${cflags[@]}" \
+    cc -O2 -g -Wall -Wextra -Werror -std=c2x "${cflags[@]}" \
         "$source" -o "$binary" "${libs[@]}" \
         || { echo "could not build the shared SRT receiver helper" >&2; return 1; }
 }

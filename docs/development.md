@@ -55,6 +55,15 @@ is tracked with a stamp file because it changes which sources are linked, and
 the script itself is tracked because adding a configure flag was otherwise
 ignored on a tree that already had an `objs/Makefile`.
 
+The module and unit core use C23 (`gnu2x` for nginx's GNU extensions,
+`c2x` for the portable unit build).  The build script keeps the compiler mode
+and flags in its configure stamp, so switching options cannot reuse stale
+objects.  Production builds use `-O2`, `_FORTIFY_SOURCE=2`,
+`-fstack-protector-strong`, and linker RELRO, immediate binding, and a
+non-executable stack.  Security-sensitive key and secret results are marked
+`[[nodiscard]]`; an ignored failure is rejected by the warning-as-error
+builds.  CI also builds and runs the unit suites with Clang.
+
 `make srt-pinned` and `make nginx-robotweax` build the module against an SRT
 library built from source at the pins in `scripts/srt-pins.sh` - Haivision/srt
 v1.5.7 and robotweax/srt v0.2.6 - and put the binaries in
