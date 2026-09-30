@@ -866,7 +866,6 @@ def test_summary_marks_uncollected_expected_configs(work):
           "the separate publisher machine must not be recorded as benchmark host")
 
 
-
 def test_summary_persists_same_runner_comparison_metadata(work):
     results = os.path.join(work, "trend-meta")
     make_config(results, "srt", [(1, "pass", srt_delivery(1.0))])
@@ -939,7 +938,6 @@ def test_regressions_require_complete_passing_same_runner_baselines():
                     "median matches the 3 same-runner runs")
         check(interleaved_findings[0]["baseline_count"] == 3,
               "all 3 same-runner runs found despite intervening runs")
-
 
 
 def test_regression_cohorts_do_not_mix_with_qualification_history():
