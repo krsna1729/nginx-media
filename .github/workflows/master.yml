@@ -111,11 +111,16 @@ jobs:
       actions: write
 
   publish:
-    needs: bench
-    # published even when a rung failed: a failure is part of the history
-    if: always() && needs.bench.result != 'cancelled'
+    needs: [full-suite, bench]
+    # publish rung failures, but only after the required suite succeeds
+    if: >-
+      always() &&
+      needs.full-suite.result == 'success' &&
+      (needs.bench.result == 'success' || needs.bench.result == 'failure')
     uses: ./.github/workflows/bench-publish.yml
     with:
       tier: branch
+      configs: '["srt","rtmp","rtmp-srt"]'
     permissions:
       contents: write
+      issues: write

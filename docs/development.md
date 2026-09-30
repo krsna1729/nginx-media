@@ -247,6 +247,13 @@ endpoints, is the most recent one.  `make srt-qualify` is separate: it rebuilds
 nginx with `MEDIA_SRT_BACKEND=both` and runs `srt_backend_qualify.sh`, which
 drives one scenario against the SRT library and against the UDP test double.
 
+The release workflow runs `make test-integration` against the release build.
+That target shares `TEST_TARGETS` with `test-in-container` but excludes unit
+tests, which the workflow runs separately.  It then runs `make netns` and
+`make srt-qualify`; `netns` stays separate because it needs host networking
+privileges and is not part of the container suite.
+
+
 ### Benchmarks: `tests/bench`
 
 ```sh
@@ -487,15 +494,25 @@ The gate (`bench_history.py gate`) fails the job on:
   incomplete, never a short green run;
 - a quality failure at a rung the tier requires every host to carry.
 
-The boundary itself is recorded, never gated, and a CPU-per-Gbit/s regression
-against the recent history of the same tier is a warning (shared runners are
-too noisy to gate on it).
+The boundary itself is recorded, never gated. A CPU-per-Gbit/s regression is
+only compared for passing rungs in complete configurations with the same
+workload and exact runner fingerprint; it needs at least three baselines and
+must exceed their median by 25%. It remains a warning, not a gate, because
+shared runners are noisy. The publisher opens one issue per
+tier/configuration/workload/rung and skips duplicate open issues; each issue
+links the published history and the workflow run.
 
-`bench.yml` only measures, with a read-only token.  Publishing is
-`bench-publish.yml`, the one job that writes to the repository, which
-`master.yml`, `nightly.yml` and `weekly.yml` call after the benchmark: a
-called workflow can never hold more permission than its caller grants, and a
-pull request's caller grants `contents: read`.
+History schema 3 records the configurations expected from the workflow and
+marks absent matrix artifacts incomplete. The viewer plots only complete
+configurations with benchmark fingerprints, separates runner fingerprints into
+different series, and labels each latest-run row with the benchmark runner.
+
+`bench.yml` only measures, with `contents: read` and `actions: write` for
+benchmark artifact upload. Publishing is `bench-publish.yml`, the job that
+writes history and regression issues, which `master.yml`, `nightly.yml` and
+`weekly.yml` call after the benchmark. They grant `contents: write` and
+`issues: write`; a pull request's caller grants `contents: read` and never
+calls the publisher.
 `scripts/check-workflow-permissions.py` (the `workflows` job in `ci.yml`)
 refuses any reusable workflow that asks for more than a caller grants, which
 GitHub otherwise reports only as a startup failure with no jobs and no log.

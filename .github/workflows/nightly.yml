@@ -97,5 +97,7 @@ jobs:
     uses: ./.github/workflows/bench-publish.yml
     with:
       tier: nightly
+      configs: '["srt-rtmp","hls","mix-srt-share","mix-all-protocols"]'
     permissions:
       contents: write
+      issues: write

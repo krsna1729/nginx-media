@@ -48,6 +48,15 @@ Neither changes what was measured; both change what the measurement is called.
 
 The phase-5 numbers for the other six workloads are unaffected: their reports
 already carried receiver-counted bytes and their own measurement interval.
+The published CI history marks expected-but-uncollected configurations and
+incomplete ladders explicitly. Charts include only complete configurations
+with benchmark-runner fingerprints; efficiency series never join different
+fingerprints, and the latest table identifies each benchmark runner rather
+than the separate publisher host. A regression is reported only for passing
+rungs with at least three complete passing baselines from the same runner
+fingerprint and workload. The publisher opens one issue per tier/configuration/
+workload/rung and links the published history.
+
 
 ## Phase 2 — pure SRT diagnosis (2026-09-25)
 

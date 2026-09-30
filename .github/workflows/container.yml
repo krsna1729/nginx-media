@@ -25,6 +25,7 @@ on:
   pull_request:
     paths:
       - 'Containerfile'
+      - '.dockerignore'
       - 'container/**'
       - '.github/workflows/container.yml'
       - 'src/**'
@@ -89,7 +90,7 @@ jobs:
             $DOCKER_CACHE_ARGS \
             .
 
-      - name: The image carries its provenance
+      - name: Verify required OCI labels
         run: |
           # A published image with no revision label is an image nobody can
           # trace back, which is the whole reason the labels exist. Fail

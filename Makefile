@@ -4,11 +4,12 @@ NGINX_VERSION ?= 1.30.5
     nginx graph-conflict incarnation smoke bench-worker-scaling \
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
     bench-capacity-curve bench-capacity-quality bench-burst-sizing test-image test-in-container \
+    test-integration \
     srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph \
     failover hls hls-push hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
     file-source transform \
     stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
-    srt-lane-isolation srt-lane-isolation-fanout srt-crypto ingest-keys \
+    srt-lane-isolation srt-lane-isolation-fanout srt-crypto srt-shared-port ingest-keys \
     srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls \
     bench-hls-fanout bench-push-fanout bench-fanout-delay \
     srt-pinned nginx-robotweax install onboarding clean
@@ -207,6 +208,11 @@ test-image:
 
 test-in-container: test-image
 	$(DOCKER) run --rm $(TEST_IMAGE) make $(TEST_TARGETS)
+
+# Run the integration targets shared with the container suite; host-only
+# cases like netns remain explicit.
+test-integration:
+	$(MAKE) $(filter-out unit,$(TEST_TARGETS))
 
 srt-crypto:
 	tests/integration/srt_crypto.sh
