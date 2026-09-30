@@ -150,3 +150,49 @@ jobs:
           name: bench-logs-${{ inputs.tier }}-${{ strategy.job-index }}
           path: .build/**/logs/error.log
           if-no-files-found: ignore
+  history:
+    if: ${{ !cancelled() && inputs.tier != 'pr' }}
+    needs: run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Take ownership of the apt archive dir
+        run: sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
+
+      - name: Install benchmark dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake ninja-build \
+            libpcre2-dev zlib1g-dev libssl-dev \
+            ffmpeg libsrt-openssl-dev iproute2
+
+      - name: Build historical benchmark prerequisites
+        run: |
+          make nginx
+          make srt-pinned
+
+      - name: Sample selected commits on one runner
+        run: scripts/bench-trend.sh "${{ inputs.tier }}"
+
+      - name: Upload same-runner trend samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-trend-${{ inputs.tier }}
+          path: |
+            .build/bench-trend/commits.tsv
+            .build/bench-trend/*.log
+            .build/bench-trend/samples.jsonl
+            .build/bench-trend/current.json
+            .build/bench-trend/*/summary.json
+            .build/bench-trend/*/*.log
+            .build/bench-trend/*/capacity/**
+          if-no-files-found: ignore

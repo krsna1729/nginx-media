@@ -41,6 +41,12 @@ jobs:
           path: results
           merge-multiple: true
 
+      - name: Collect same-runner trend samples
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: bench-trend-${{ inputs.tier }}
+          path: trend
       - name: Summarize
         run: |
           python3 tests/bench/bench_history.py summarize results \
@@ -64,8 +70,19 @@ jobs:
       - name: Detect benchmark regressions
         id: findings
         run: |
-          python3 tests/bench/bench_history.py regressions summary.json \
-            --history "pages/data/${{ inputs.tier }}.jsonl" --out regressions.json
+          regression_summary=summary.json
+          history_file="pages/data/${{ inputs.tier }}.jsonl"
+          if [ -s trend/current.json ]; then
+            regression_summary=trend/current.json
+            if [ -s trend/samples.jsonl ]; then
+              : > trend/history.jsonl
+              if [ -f "$history_file" ]; then cat "$history_file" >> trend/history.jsonl; fi
+              cat trend/samples.jsonl >> trend/history.jsonl
+              history_file=trend/history.jsonl
+            fi
+          fi
+          python3 tests/bench/bench_history.py regressions "$regression_summary" \
+            --history "$history_file" --out regressions.json
 
       - name: Open issues for benchmark regressions
         id: issues
@@ -110,7 +127,11 @@ jobs:
       - name: Append to the gh-pages history
         if: always() && steps.pages.outcome == 'success' && steps.findings.outcome == 'success'
         run: |
-          python3 tests/bench/bench_history.py publish summary.json --pages pages
+          sample_args=()
+          if [ -s trend/samples.jsonl ]; then
+            sample_args=(--samples trend/samples.jsonl)
+          fi
+          python3 tests/bench/bench_history.py publish summary.json --pages pages "${sample_args[@]}"
           git -C pages add -A
           git -C pages commit -m "bench: ${{ inputs.tier }} ${GITHUB_SHA::8}"
           for attempt in 1 2 3; do

@@ -521,6 +521,26 @@ GitHub otherwise reports only as a startup failure with no jobs and no log.
 on the `gh-pages` branch, whose `index.html` (`tests/bench/history/index.html`)
 charts them; enable GitHub Pages on that branch to browse it.
 
+Non-PR branch, nightly and weekly jobs also run a bounded historical trend
+probe in a separate job on one runner. It rebuilds each selected mainline
+revision against the same pinned SRT library, then samples the tier's compact
+ladder sequentially: ten recent commits for `branch`, one commit per day for
+the previous seven days plus HEAD for `nightly`, and up to two commits per
+week for the previous four weeks plus HEAD for `weekly`. These records carry a
+workflow-scoped `comparison_group`; regressions compare only samples from that
+group and same-runner fingerprint. The sampled profile uses rungs 1, 32 and
+128 for 10 seconds each. Trend probes are appended to history and shown as
+such in the matrix, but never count as qualification runs or as capacity-
+boundary diagnostics. The chart uses commit time, and its highest passing
+sampled rung is explicitly not a capacity limit.
+
+The trend job's nominal receiver-measurement lower bound is 15 runner-minutes
+for branch (`10 commits × 3 workloads × 3 rungs × 10 s`), 28 for nightly
+(`8 × 7 × 3 × 10 s`), and 31.5 for weekly (`9 × 7 × 3 × 10 s`). These are
+derived from the current recipe, not observed wall-clock costs; they exclude
+per-revision builds, mixed-workload calibration, startup and retries. The
+trend job has a 180-minute ceiling, separate from the full qualification job.
+
 
 ### ffmpeg interoperability
 

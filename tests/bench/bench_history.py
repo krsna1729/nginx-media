@@ -316,6 +316,8 @@ def summarize(args):
         "tier": args.tier,
         "timestamp": datetime.datetime.now(datetime.timezone.utc)
                      .isoformat(timespec="seconds"),
+        "commit_timestamp": os.environ.get("BENCH_COMMIT_TIMESTAMP"),
+        "comparison_group": os.environ.get("BENCH_COMPARISON_GROUP"),
         "sha": os.environ.get("GITHUB_SHA") or git("rev-parse", "HEAD"),
         "ref": os.environ.get("GITHUB_REF_NAME")
                or git("rev-parse", "--abbrev-ref", "HEAD"),
@@ -422,6 +424,12 @@ def regressions(record, history, window=10, tolerance=1.25):
     recent = [old for old in history
               if old.get("schema") in supported
               and old.get("tier") == record.get("tier")]
+    if record.get("comparison_group"):
+        recent = [old for old in recent
+                  if old.get("comparison_group") == record["comparison_group"]
+                  and old.get("sha") != record.get("sha")]
+    else:
+        recent = [old for old in recent if not old.get("comparison_group")]
     findings = []
     for name, config in record.get("configs", {}).items():
         if config.get("complete") is not True:
@@ -488,11 +496,24 @@ def regression_report(args):
 def publish(args):
     with open(args.summary, encoding="utf-8") as source:
         record = json.load(source)
+    samples = []
+    sample_path = getattr(args, "samples", None)
+    if sample_path and os.path.exists(sample_path):
+        with open(sample_path, encoding="utf-8") as source:
+            samples = [json.loads(line) for line in source if line.strip()]
+        groups = {sample.get("comparison_group") for sample in samples}
+        if (any(sample.get("tier") != record["tier"]
+                or not sample.get("comparison_group") for sample in samples)
+                or len(groups) > 1):
+            raise ValueError("trend samples must match the published tier "
+                             "and have one same-runner comparison_group")
     data_dir = os.path.join(args.pages, "data")
     os.makedirs(data_dir, exist_ok=True)
     path = os.path.join(data_dir, f"{record['tier']}.jsonl")
     with open(path, "a", encoding="utf-8") as output:
         output.write(json.dumps(record, separators=(",", ":")) + "\n")
+        for sample in samples:
+            output.write(json.dumps(sample, separators=(",", ":")) + "\n")
     viewer = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "history", "index.html")
     shutil.copyfile(viewer, os.path.join(args.pages, "index.html"))
@@ -525,6 +546,7 @@ def main():
     p = sub.add_parser("publish")
     p.add_argument("summary")
     p.add_argument("--pages", required=True)
+    p.add_argument("--samples")
     args = parser.parse_args()
     return {"summarize": summarize, "gate": gate, "publish": publish,
             "regressions": regression_report}[args.command](args)
