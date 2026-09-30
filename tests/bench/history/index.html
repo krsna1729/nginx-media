@@ -3,116 +3,546 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>nginx-media capacity history</title>
+<title>nginx-media capacity & efficiency history</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   :root {
-    --bg: #f2f6f5; --fg: #152624; --muted: #5d706d; --line: #dce7e4;
-    --card: rgba(255, 255, 255, .86); --accent: #087f74;
-    --warn-bg: #fff2da; --warn-fg: #89580a;
-    --shadow: 0 14px 38px rgba(22, 61, 56, .07);
+    --bg: #090e0d; --fg: #eef5f3; --muted: #7e9490; --muted-dark: #4d5e5b; --line: #182825;
+    --card: #101a18; --card-hover: #14221f; --card-active: #172925;
+    --accent: #14b8a6; --accent-hover: #2dd4bf;
+    --accent-dim: rgba(20, 184, 166, 0.12); --accent-border: rgba(20, 184, 166, 0.32);
+    --good-bg: #064e3b; --good-fg: #6ee7b7;
+    --warn-bg: #451a03; --warn-fg: #fcd34d;
+    --bad-bg: #4c0519; --bad-fg: #fda4af;
+    --proto-srt-bg: #082f49; --proto-srt-fg: #7dd3fc;
+    --proto-rtmp-bg: #451a03; --proto-rtmp-fg: #fcd34d;
+    --proto-hls-bg: #2e1065; --proto-hls-fg: #c4b5fd;
+    --proto-mix-bg: #064e3b; --proto-mix-fg: #6ee7b7;
+    --shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
   }
-  @media (prefers-color-scheme: dark) {
+  @media (prefers-color-scheme: light) {
     :root {
-      --bg: #0d1716; --fg: #e7f2ef; --muted: #9db3ae; --line: #253936;
-      --card: rgba(19, 34, 32, .88); --accent: #64d0bd;
-      --warn-bg: #463619; --warn-fg: #f0cf85;
-      --shadow: 0 18px 44px rgba(0, 0, 0, .22);
+      --bg: #f5f8f7; --fg: #10201d; --muted: #576d69; --muted-dark: #9bb0ac; --line: #d8e2df;
+      --card: #ffffff; --card-hover: #f9fbfb; --card-active: #f0f5f4;
+      --accent: #0d9488; --accent-hover: #0f766e;
+      --accent-dim: rgba(13, 148, 136, 0.08); --accent-border: rgba(13, 148, 136, 0.28);
+      --good-bg: #e6f4ea; --good-fg: #137333;
+      --warn-bg: #fef7e0; --warn-fg: #b06000;
+      --bad-bg: #fee2e2; --bad-fg: #b91c1c;
+      --proto-srt-bg: #e0f2fe; --proto-srt-fg: #0284c7;
+      --proto-rtmp-bg: #fef3c7; --proto-rtmp-fg: #b45309;
+      --proto-hls-bg: #ede9fe; --proto-hls-fg: #6d28d9;
+      --proto-mix-bg: #d1fae5; --proto-mix-fg: #047857;
+      --shadow: 0 6px 20px rgba(16, 32, 29, 0.05);
     }
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; color: var(--fg);
-    background: radial-gradient(1000px 540px at 8% -10%,
-      rgba(8, 127, 116, .10), transparent 64%), var(--bg);
-    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; color: var(--fg); background: var(--bg);
+    font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
   }
-  main { max-width: 1180px; margin: 0 auto; padding: 36px 20px 72px; }
-  .hero {
-    padding: clamp(22px, 4vw, 42px); border: 1px solid var(--line);
-    border-radius: 22px; background: linear-gradient(130deg,
-      rgba(8, 127, 116, .09), rgba(255, 255, 255, .24)), var(--card);
-    box-shadow: var(--shadow);
+  main { max-width: 1260px; margin: 0 auto; padding: 28px 20px 80px; }
+
+  /* Header */
+  header.app-header {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 16px; margin-bottom: 22px; flex-wrap: wrap;
   }
+  .header-left { max-width: 780px; }
   .eyebrow {
-    margin: 0 0 8px; color: var(--accent); font-size: 11px;
-    font-weight: 700; letter-spacing: .14em;
+    margin: 0 0 4px; color: var(--accent); font-size: 11px;
+    font-weight: 700; letter-spacing: .12em; text-transform: uppercase;
   }
-  h1 { font-size: clamp(28px, 4vw, 38px); line-height: 1.15; margin: 0 0 9px; }
-  h2 { font-size: 18px; margin: 34px 0 12px; letter-spacing: -.02em; }
-  p.lede { color: var(--muted); margin: 0; max-width: 74ch; }
-  nav { display: flex; gap: 8px; flex-wrap: wrap; margin: 18px 0 24px; }
-  nav button {
-    border: 1px solid var(--line); background: var(--card); color: var(--fg);
-    padding: 7px 14px; border-radius: 999px; cursor: pointer; font: inherit;
-    transition: border-color .16s ease, background .16s ease, transform .16s ease;
-  }
-  nav button:hover { border-color: var(--accent); transform: translateY(-1px); }
-  nav button[aria-pressed="true"] {
-    border-color: var(--accent); background: var(--accent); color: #fff;
-  }
-  nav button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-          gap: 16px; }
-  .card {
+  h1 { font-size: 26px; line-height: 1.2; margin: 0 0 6px; font-weight: 750; letter-spacing: -.02em; }
+  p.subtitle { color: var(--muted); margin: 0; font-size: 13.5px; }
+
+  /* Top Control Strip */
+  .control-bar {
     background: var(--card); border: 1px solid var(--line); border-radius: 14px;
-    padding: 16px; min-width: 0; box-shadow: var(--shadow);
-    backdrop-filter: blur(10px);
+    padding: 12px 16px; margin-bottom: 20px; box-shadow: var(--shadow);
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
   }
-  .card h3 { font-size: 14px; margin: 0 0 10px; font-weight: 650; }
-  .empty { color: var(--muted); padding: 18px 4px; margin: 0; }
-  canvas { width: 100% !important; height: 240px !important; }
-  table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line);
-           font-variant-numeric: tabular-nums; vertical-align: top; }
+  .filter-cluster { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .filter-segment { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .filter-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  
+  .pills { display: flex; gap: 6px; flex-wrap: wrap; }
+  .pills button {
+    border: 1px solid var(--line); background: transparent; color: var(--fg);
+    padding: 5px 12px; border-radius: 999px; cursor: pointer; font: inherit; font-size: 12.5px;
+    transition: all .14s ease;
+  }
+  .pills button:hover { border-color: var(--accent); background: var(--accent-dim); }
+  .pills button[aria-pressed="true"] {
+    border-color: var(--accent); background: var(--accent); color: #fff; font-weight: 600;
+  }
+
+  /* View Tabs */
+  .view-tabs { display: flex; gap: 4px; background: rgba(0, 0, 0, 0.15); padding: 3px; border-radius: 999px; border: 1px solid var(--line); }
+  .view-tabs button {
+    border: none; background: transparent; color: var(--muted); padding: 5px 14px;
+    border-radius: 999px; cursor: pointer; font: inherit; font-size: 12.5px; font-weight: 600;
+    transition: all .14s ease;
+  }
+  .view-tabs button:hover { color: var(--fg); }
+  .view-tabs button[aria-selected="true"] {
+    background: var(--card-active); color: var(--accent); box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+  }
+
+  /* KPI Summary Banner */
+  .kpi-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px; margin-bottom: 24px;
+  }
+  .kpi-tile {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 14px; box-shadow: var(--shadow);
+  }
+  .kpi-head { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 3px; }
+  .kpi-metric { font-size: 19px; font-weight: 750; color: var(--fg); font-variant-numeric: tabular-nums; }
+  .kpi-note { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+  /* Workload Scorecard Grid (Glanceable view) */
+  .scorecard-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(285px, 1fr));
+    gap: 12px; margin-bottom: 28px;
+  }
+  .scorecard {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; box-shadow: var(--shadow); display: flex; flex-direction: column; justify-content: space-between;
+    transition: transform .14s ease, border-color .14s ease; cursor: pointer;
+  }
+  .scorecard:hover { border-color: var(--accent-border); transform: translateY(-1px); }
+  .scorecard-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 8px; }
+  .scorecard-title { font-size: 14px; font-weight: 700; color: var(--fg); margin: 0 0 2px; }
+  .scorecard-id { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; color: var(--muted); }
+  
+  .scorecard-metrics {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 8px 0 6px;
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin-bottom: 8px;
+  }
+  .metric-item .lbl { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .metric-item .val { font-size: 16px; font-weight: 750; color: var(--fg); font-variant-numeric: tabular-nums; }
+  .scorecard-bottom-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .scorecard-foot { font-size: 11.5px; color: var(--muted); line-height: 1.35; }
+  .sparkline-canvas { width: 90px !important; height: 26px !important; flex-shrink: 0; display: block; }
+  /* Section Headings */
+  .view-header {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 28px 0 12px;
+  }
+  .view-header h2 { font-size: 16.5px; font-weight: 700; margin: 0; }
+  .view-header p { margin: 0; color: var(--muted); font-size: 12.5px; }
+
+  /* Tables */
+  .table-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: var(--shadow); overflow: hidden; margin-bottom: 28px;
+  }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 740px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
   th {
-    position: sticky; top: 0; color: var(--muted); font-size: 11px;
-    font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
-    background: var(--card);
+    background: rgba(0, 0, 0, 0.12); color: var(--muted); font-size: 10.5px;
+    font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
   }
-  tbody tr:hover { background: rgba(8, 127, 116, .055); }
-  .badge {
-    display: inline-block; padding: 2px 8px; border-radius: 999px;
-    font-size: 11px; font-weight: 700; text-transform: capitalize;
+  tbody tr { cursor: pointer; transition: background .12s ease; }
+  tbody tr:hover { background: var(--card-hover); }
+
+  /* Charts Grid */
+  .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(370px, 1fr)); gap: 16px; margin-bottom: 32px; }
+  .chart-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px; box-shadow: var(--shadow); min-width: 0;
   }
+  .chart-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 10px; }
+  .chart-head h3 { margin: 0 0 2px; font-size: 14.5px; font-weight: 700; }
+  .chart-head p { margin: 0; font-size: 11.5px; color: var(--muted); }
+  .chart-card canvas { width: 100% !important; height: 220px !important; }
+  .diagnostic-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .diagnostic-filters select { display: block; margin-top: 4px; max-width: 260px; border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; background: var(--card); color: var(--fg); font: inherit; }
+  .diagnostic-context { margin: 4px 0 10px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .architecture-flow { display: grid; grid-template-columns: minmax(0,1fr) 32px minmax(0,1fr) 32px minmax(0,1fr) 32px minmax(0,1fr); align-items: stretch; gap: 8px; padding: 22px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 16px; background: radial-gradient(ellipse at 50% 0%, rgba(20,184,166,.12), transparent 65%), var(--card); box-shadow: var(--shadow); }
+  .architecture-node { min-width: 0; min-height: 190px; padding: 17px; border: 1px solid var(--accent-border); border-radius: 13px; background: linear-gradient(150deg, var(--card-active), var(--card)); display: flex; flex-direction: column; justify-content: center; }
+  .architecture-node h3 { margin: 10px 0 5px; font-size: 15px; }
+  .architecture-node p { min-height: 36px; margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+  .architecture-node strong { color: var(--accent); font-size: clamp(18px, 2vw, 25px); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .architecture-node small { margin-top: 3px; color: var(--muted); font-size: 10.5px; }
+  .architecture-step { color: var(--accent); font-size: 10px; font-weight: 800; letter-spacing: .1em; }
+  .flow-arrow { display: grid; place-items: center; color: var(--accent); font-size: 24px; }
+  .diagnostic-note { margin: 0 0 20px; color: var(--muted); font-size: 11px; }
+  @media (max-width: 900px) { .architecture-flow { grid-template-columns: 1fr; } .flow-arrow { transform: rotate(90deg); min-height: 22px; } .architecture-node { min-height: 145px; } }
+  /* Badges & Tags */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
   .badge.complete { background: var(--good-bg); color: var(--good-fg); }
   .badge.incomplete { background: var(--warn-bg); color: var(--warn-fg); }
   .badge.unverified { background: var(--line); color: var(--muted); }
-  .status-detail { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; }
-  .scroll { overflow-x: auto; border-radius: 10px; }
-  code { font-size: 12px; }
-  @media (max-width: 600px) {
-    main { padding: 20px 12px 48px; }
-    .grid { grid-template-columns: 1fr; }
+  
+  .proto-tag {
+    padding: 2px 7px; border-radius: 5px; font-size: 10px; font-weight: 750;
+    text-transform: uppercase; letter-spacing: .05em;
+  }
+  .proto-srt { background: var(--proto-srt-bg); color: var(--proto-srt-fg); }
+  .proto-rtmp { background: var(--proto-rtmp-bg); color: var(--proto-rtmp-fg); }
+  .proto-hls { background: var(--proto-hls-bg); color: var(--proto-hls-fg); }
+  .proto-mix { background: var(--proto-mix-bg); color: var(--proto-mix-fg); }
+  .tag { font-family: ui-monospace, monospace; font-size: 11px; background: rgba(128, 128, 128, 0.12); padding: 1px 5px; border-radius: 4px; color: var(--muted); }
+
+  /* Commit Inspector Modal / Panel */
+  .inspector-card {
+    background: var(--card); border: 1px solid var(--accent-border); border-radius: 14px;
+    padding: 16px 20px; margin-bottom: 28px; box-shadow: var(--shadow); display: none;
+  }
+  .inspector-card.open { display: block; animation: fadeIn .2s ease; }
+  .inspector-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+  .inspector-close {
+    background: transparent; border: 1px solid var(--line); color: var(--muted);
+    border-radius: 999px; width: 24px; height: 24px; cursor: pointer; font-weight: 700;
+  }
+  .inspector-close:hover { color: var(--fg); border-color: var(--accent); }
+  .inspector-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 14px; }
+
+  /* Guide Accordion */
+  .guide-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px 14px; margin-bottom: 24px; font-size: 12.5px;
+  }
+  .guide-card summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+  .guide-card summary:hover { color: var(--fg); }
+  .guide-card[open] summary { margin-bottom: 12px; color: var(--accent); }
+  .guide-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .guide-item strong { display: block; font-size: 12px; color: var(--fg); margin-bottom: 2px; }
+  .guide-item p { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+  @media (max-width: 768px) {
+    main { padding: 18px 12px 60px; }
+    .charts-grid { grid-template-columns: 1fr; }
+    .kpi-grid { grid-template-columns: 1fr 1fr; }
+    .control-bar { flex-direction: column; align-items: flex-start; }
+    .control-bar, .filter-cluster, .filter-segment, .view-tabs { min-width: 0; max-width: 100%; }
+    .filter-cluster, .filter-segment, .view-tabs { width: 100%; }
+    .view-tabs { flex-wrap: wrap; border-radius: 14px; }
+    .view-header { align-items: flex-start; flex-direction: column; }
   }
 </style>
 </head>
 <body>
 <main>
-  <header class="hero">
-    <p class="eyebrow">NGINX-MEDIA / BENCHMARK OBSERVABILITY</p>
-    <h1>Capacity history</h1>
-    <p class="lede">Receiver-verified capacity per workload, recorded by CI at
-    each tier. Capacity varies with the runner; CPU per delivered Gbit/s is
-    compared only between matching benchmark-runner fingerprints, not across
-    different hosts.</p>
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <p class="eyebrow">nginx-media capacity & efficiency observability</p>
+      <h1>Capacity History & Regression Tracking</h1>
+      <p class="subtitle">Receiver-verified capacity rungs and sender CPU per delivered Gbit/s tracked across commits and benchmark hardware.</p>
+    </div>
   </header>
-  <nav id="tiers" aria-label="Benchmark tier"></nav>
-  <h2>Highest passing rung</h2>
-  <div class="grid" id="capacity"></div>
-  <h2>Sender CPU per delivered Gbit/s (lower is better)</h2>
-  <div class="grid" id="efficiency"></div>
-  <h2>Latest run</h2>
-  <div class="card scroll"><table id="latest"></table></div>
+
+  <!-- KPI Banner -->
+  <section class="kpi-grid">
+    <div class="kpi-tile">
+      <div class="kpi-head">Active Tier</div>
+      <div class="kpi-metric" id="kpi-tier">–</div>
+      <div class="kpi-note" id="kpi-tier-sub">Loading history...</div>
+    </div>
+    <div class="kpi-tile">
+      <div class="kpi-head">Runs Recorded</div>
+      <div class="kpi-metric" id="kpi-runs">–</div>
+      <div class="kpi-note" id="kpi-runs-sub">–</div>
+    </div>
+    <div class="kpi-tile">
+      <div class="kpi-head">Hardware Filter</div>
+      <div class="kpi-metric" id="kpi-hw" style="font-size: 15px; line-height: 1.35;">All Hardware</div>
+      <div class="kpi-note" id="kpi-hw-sub">Comparing all machines</div>
+    </div>
+    <div class="kpi-tile">
+      <div class="kpi-head">Latest Evaluated Commit</div>
+      <div class="kpi-metric" id="kpi-commit" style="font-family: ui-monospace, monospace; font-size: 16px;">–</div>
+      <div class="kpi-note" id="kpi-commit-sub">–</div>
+    </div>
+  </section>
+
+  <!-- Interactive Controls Bar -->
+  <section class="control-bar">
+    <div class="filter-cluster">
+      <div class="filter-segment">
+        <span class="filter-label">Tier</span>
+        <nav id="tiers" class="pills" aria-label="Benchmark Tier"></nav>
+      </div>
+      <div class="filter-segment" id="hardware-row" style="display: none;">
+        <span class="filter-label">Hardware</span>
+        <nav id="runners" class="pills" aria-label="Runner Hardware"></nav>
+      </div>
+    </div>
+    <div class="view-tabs" role="tablist" aria-label="View Switcher">
+      <button id="tab-overview" role="tab" aria-selected="true" onclick="switchView('overview')">📊 Overview</button>
+      <button id="tab-timeline" role="tab" aria-selected="false" onclick="switchView('timeline')">📋 Commit Matrix</button>
+      <button id="tab-charts" role="tab" aria-selected="false" onclick="switchView('charts')">📈 Deep Charts</button>
+      <button id="tab-diagnostics" role="tab" aria-selected="false" onclick="switchView('diagnostics')">🔬 Capacity Diagnostics</button>
+      <button id="tab-breakdown" role="tab" aria-selected="false" onclick="switchView('breakdown')">🔍 Latest Run</button>
+    </div>
+  </section>
+
+  <!-- Metric Guide -->
+  <details class="guide-card">
+    <summary>Metric Glossary & Interpretation Guide (click to expand)</summary>
+    <div class="guide-grid" style="margin-top: 10px;">
+      <div class="guide-item">
+        <strong>Sender CPU per delivered Gbit/s (lower is better)</strong>
+        <p>Normalized efficiency metric: CPU cycles consumed divided by receiver-verified throughput. Allows direct regression tracking across commits on matching hardware.</p>
+      </div>
+      <div class="guide-item">
+        <strong>Highest passing rung (higher is better)</strong>
+        <p>Maximum destination count where all receivers maintained ≥95% of reference delivery without stream corruption or packet drops.</p>
+      </div>
+      <div class="guide-item">
+        <strong>Hardware Runner Isolation</strong>
+        <p>Benchmarks run on shared GitHub Actions runners with varying CPU architectures (AMD EPYC vs Intel Xeon). Use the Hardware filter above to compare commits on identical hardware.</p>
+      </div>
+      <div class="guide-item">
+        <strong>Why are there <code>*-srt-reference</code> calibration rungs?</strong>
+        <p>Mixed ladders (e.g. 95% RTMP + 5% SRT) round client counts to whole integers. At 1 destination, 5% rounds to 0 SRT receivers. The harness runs a 1-destination pre-calibration test (<code>*-srt-reference</code>) first to measure 100% SRT reference throughput for the ladder.</p>
+      </div>
+    </div>
+  </details>
+
+  <!-- Commit Detail Inspector Drawer -->
+  <section class="inspector-card" id="commit-inspector">
+    <div class="inspector-head">
+      <div>
+        <h3 style="margin: 0 0 4px; font-size: 15px;">Commit Run Inspector: <code id="inspect-sha" class="tag" style="font-size: 13px;">–</code></h3>
+        <p style="margin: 0; font-size: 12px; color: var(--muted);" id="inspect-meta">–</p>
+      </div>
+      <button class="inspector-close" onclick="closeInspector()" title="Close inspector">✕</button>
+    </div>
+    <div class="inspector-grid" id="inspect-tiles"></div>
+    <div class="scroll"><table id="inspect-table"></table></div>
+  </section>
+
+  <!-- VIEW 1: Overview Scorecard Grid -->
+  <div id="view-overview" class="spa-view">
+    <div class="view-header">
+      <div>
+        <h2>Workload Performance Scorecards</h2>
+        <p>Current passing capacity, peak CPU efficiency, and mini sparkline trend per egress protocol.</p>
+      </div>
+    </div>
+    <div class="scorecard-grid" id="scorecard-container"></div>
+  </div>
+
+  <!-- VIEW 2: Commit Comparison Matrix -->
+  <div id="view-timeline" class="spa-view" style="display: none;">
+    <div class="view-header">
+      <div>
+        <h2>Runs across commits & dates</h2>
+        <p>Chronological timeline. Click any row to inspect full diagnostics and ladder rungs.</p>
+      </div>
+    </div>
+    <div class="table-card scroll"><table id="run-matrix"></table></div>
+  </div>
+
+  <!-- VIEW 3: Deep Charts -->
+  <div id="view-charts" class="spa-view" style="display: none;">
+    <div class="view-header">
+      <div>
+        <h2>Highest passing capacity rung (higher is better)</h2>
+        <p>Maximum concurrent clients sustaining ≥95% of reference bitrate.</p>
+      </div>
+    </div>
+    <div class="charts-grid" id="capacity"></div>
+
+    <div class="view-header">
+      <div>
+        <h2>Sender CPU per delivered Gbit/s (lower is better)</h2>
+        <p>Normalized CPU cost per delivered Gbit/s across destinations.</p>
+      </div>
+    </div>
+    <div class="charts-grid" id="efficiency"></div>
+  </div>
+
+  <!-- VIEW 4: Receiver-verified capacity diagnostics -->
+  <div id="view-diagnostics" class="spa-view" style="display: none;">
+    <div class="view-header">
+      <div>
+        <h2>Capacity boundary diagnostics</h2>
+        <p>Receiver-measured delivery and resource pressure at each rung of the latest matching workload run.</p>
+      </div>
+      <div class="diagnostic-filters">
+        <label class="filter-label" for="diagnostic-workload">Workload
+          <select id="diagnostic-workload" onchange="renderCapacityDiagnostics()"></select>
+        </label>
+        <label class="filter-label" for="diagnostic-rung">Rung
+          <select id="diagnostic-rung" onchange="renderCapacityDiagnostics()"></select>
+        </label>
+      </div>
+    </div>
+    <div id="diagnostic-context" class="diagnostic-context"></div>
+    <div class="architecture-flow" aria-label="Measured benchmark flow through the nginx-media architecture">
+      <article class="architecture-node">
+        <span class="architecture-step">01 · WORKLOAD</span>
+        <h3>Benchmark offer</h3>
+        <p id="flow-workload">–</p>
+        <strong id="flow-rung">–</strong>
+        <small>selected workload · tested destination rung</small>
+      </article>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <article class="architecture-node">
+        <span class="architecture-step">02 · PROGRAM</span>
+        <h3>Owner worker</h3>
+        <p>One logical program feed; the owner handles timeline and fanout.</p>
+        <strong id="flow-program">–</strong>
+        <small>receiver-measured egress throughput</small>
+      </article>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <article class="architecture-node">
+        <span class="architecture-step">03 · EXECUTE</span>
+        <h3>Worker pressure</h3>
+        <p id="flow-workers">–</p>
+        <strong id="flow-cpu">–</strong>
+        <small id="flow-worker-detail">sender CPU · one-core percentage</small>
+      </article>
+      <div class="flow-arrow" aria-hidden="true">→</div>
+      <article class="architecture-node architecture-output">
+        <span class="architecture-step">04 · DELIVER</span>
+        <h3>Selected egress</h3>
+        <p id="flow-protocols">–</p>
+        <strong id="flow-delivery">–</strong>
+        <small id="flow-gate">receiver-observed delivery · quality gate</small>
+      </article>
+    </div>
+    <p class="diagnostic-note">This view describes the selected benchmark rung, not a live system. Workload mix labels show the configured protocols; delivery and resource values are measured for the rung as a whole.</p>
+    <div id="diagnostic-summary" class="kpi-grid"></div>
+    <div class="charts-grid">
+      <div class="chart-card">
+        <div class="chart-head">
+          <div><h3>Receiver delivery by destination rung</h3>
+          <p>Observed delivery versus the qualification threshold.</p></div>
+        </div>
+        <canvas id="diagnostic-delivery"></canvas>
+      </div>
+    </div>
+    <div class="table-card scroll"><table id="diagnostic-rungs"></table></div>
+  </div>
+
+  <!-- VIEW 5: Latest Run Detailed Breakdown -->
+  <div id="view-breakdown" class="spa-view" style="display: none;">
+    <div class="view-header">
+      <div>
+        <h2>Latest Run Detailed Breakdown</h2>
+        <p>Every measured configuration and workload ladder from the newest matching run.</p>
+      </div>
+    </div>
+    <div class="table-card scroll"><table id="latest"></table></div>
+  </div>
 </main>
+
 <script>
 const charts = [];
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const esc = s => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
+const WORKLOAD_INFO = {
+  "pure-srt": {
+    title: "Pure SRT Egress",
+    badge: "SRT",
+    protoClass: "proto-srt",
+    desc: "Scaled fanout to concurrent SRT listener destinations without transcoding."
+  },
+  "pure-rtmp": {
+    title: "Pure RTMP Egress",
+    badge: "RTMP",
+    protoClass: "proto-rtmp",
+    desc: "Flash Video / RTMP chunk stream egress to concurrent RTMP players."
+  },
+  "pure-hls": {
+    title: "HLS Origin (Pull Readers)",
+    badge: "HLS Origin",
+    protoClass: "proto-hls",
+    desc: "Origin serving m3u8 playlists and media segments to concurrent pull clients."
+  },
+  "pure-hls-push": {
+    title: "HLS Push Egress",
+    badge: "HLS Push",
+    protoClass: "proto-hls",
+    desc: "HTTP Live Streaming segments pushed out over HTTP/1.1 POST/PUT destinations."
+  },
+  "rtmp-95-srt-5": {
+    title: "Mixed: 95% RTMP + 5% SRT",
+    badge: "95% RTMP · 5% SRT",
+    protoClass: "proto-mix",
+    desc: "Concurrent egress fanout: 95% of destinations receive RTMP, 5% receive SRT."
+  },
+  "hls-push-95-srt-5": {
+    title: "Mixed: 95% HLS-Push + 5% SRT",
+    badge: "95% HLS · 5% SRT",
+    protoClass: "proto-mix",
+    desc: "Combined HTTP push egress (95%) and low-latency SRT egress (5%) from the same stream."
+  },
+  "rtmp-50-hls-push-45-srt-5": {
+    title: "Tri-Protocol Mix (RTMP + HLS + SRT)",
+    badge: "50% RTMP · 45% HLS · 5% SRT",
+    protoClass: "proto-mix",
+    desc: "Contention workload across RTMP, HTTP push, and SRT egress simultaneously."
+  },
+  "srt-50-rtmp-25-hls-push-25": {
+    title: "SRT-Heavy Mix (50% SRT)",
+    badge: "50% SRT · 25% RTMP · 25% HLS",
+    protoClass: "proto-mix",
+    desc: "SRT-weighted contention workload with remaining destinations split between RTMP and HLS push."
+  },
+  "rtmp-95-srt-5-srt-reference": {
+    title: "SRT Baseline for 95% RTMP + 5% SRT",
+    badge: "Calibration",
+    protoClass: "proto-srt",
+    desc: "1-destination pre-ladder baseline measuring 100% reference bitrate for the 5% SRT slice."
+  },
+  "hls-push-95-srt-5-srt-reference": {
+    title: "SRT Baseline for 95% HLS-Push + 5% SRT",
+    badge: "Calibration",
+    protoClass: "proto-srt",
+    desc: "1-destination pre-ladder baseline measuring 100% reference bitrate for HLS-push mixtures."
+  },
+  "rtmp-50-hls-push-45-srt-5-srt-reference": {
+    title: "SRT Baseline for Tri-Protocol Mix",
+    badge: "Calibration",
+    protoClass: "proto-srt",
+    desc: "1-destination pre-ladder baseline measuring 100% reference bitrate for the tri-protocol mixture."
+  },
+  "srt-50-rtmp-25-hls-push-25-srt-reference": {
+    title: "SRT Baseline for SRT-Heavy Mix",
+    badge: "Calibration",
+    protoClass: "proto-srt",
+    desc: "1-destination pre-ladder baseline for the SRT-heavy mixture."
+  }
+};
+
+function workloadMeta(mix) {
+  return WORKLOAD_INFO[mix] || {
+    title: mix,
+    badge: "Workload",
+    protoClass: "proto-mix",
+    desc: `Benchmark workload: ${mix}`
+  };
+}
+
 async function loadTier(tier) {
   const text = await (await fetch(`data/${tier}.jsonl`, {cache: "no-store"})).text();
   return text.split("\n").filter(Boolean).map(line => JSON.parse(line));
+}
+
+function runnerHardware(fp) {
+  if (!fp || !fp.cpu_model) return "Unknown hardware";
+  const model = fp.cpu_model
+    .replace(/ (64|80|96)-Core Processor/i, "")
+    .replace(/ Processor/i, "")
+    .replace(/ \(R\)/gi, "")
+    .replace(/\(R\)/gi, "")
+    .replace(/ CPU/i, "")
+    .trim();
+  const cores = fp.nproc_online ? ` (${fp.nproc_online} vCPU)` : "";
+  return `${model}${cores}`;
 }
 
 function runnerClass(fp) {
@@ -127,126 +557,581 @@ function statusBadge(complete) {
   return `<span class="badge ${state}">${state}</span>`;
 }
 
-function series(records, pick) {
+function series(records, pick, selectedHardware = "all") {
   const out = {};
   for (const r of records) {
     for (const [config, c] of Object.entries(r.configs || {})) {
       if (c.complete !== true) continue;
       for (const [mix, m] of Object.entries(c.mixes || {})) {
         if (!m.fingerprint) continue;
-        const host = runnerClass(m.fingerprint);
-        const fingerprint = JSON.stringify(m.fingerprint);
-        for (const [label, y] of pick(config, mix, m, host)) {
-          const key = `${label}\u0000${fingerprint}`;
-          const data = out[key] ||= {label, points: []};
-          data.points.push({x: r.timestamp.slice(0, 16).replace("T", " "),
-                            y, sha: (r.sha || "").slice(0, 8)});
+        const hw = runnerHardware(m.fingerprint);
+        if (selectedHardware !== "all" && hw !== selectedHardware) continue;
+        for (const [label, y] of pick(config, mix, m, hw)) {
+          const key = selectedHardware === "all" ? `${label} · ${hw}` : label;
+          const data = out[key] ||= {label: key, points: []};
+          const commitTime = (r.commit_timestamp || r.timestamp).slice(0, 19);
+          const sha = r.sha || "";
+          data.points.push({x: `${commitTime}\u0000${sha}`,
+                            y, sha: sha.slice(0, 8), hw});
         }
       }
     }
   }
-  const counts = new Map();
-  return Object.values(out).map(data => {
-    const count = counts.get(data.label) || 0;
-    counts.set(data.label, count + 1);
-    if (count) data.label += ` (runner ${count + 1})`;
-    return data;
-  });
+  return Object.values(out);
 }
 
-function chart(container, title, data) {
+const PALETTE = [
+  { stroke: "#14b8a6", fill: "rgba(20, 184, 166, 0.16)" },
+  { stroke: "#38bdf8", fill: "rgba(56, 189, 248, 0.16)" },
+  { stroke: "#fbbf24", fill: "rgba(251, 191, 36, 0.16)" },
+  { stroke: "#a855f7", fill: "rgba(168, 85, 247, 0.16)" },
+  { stroke: "#f43f5e", fill: "rgba(244, 63, 94, 0.16)" },
+  { stroke: "#34d399", fill: "rgba(52, 211, 153, 0.16)" }
+];
+
+function chart(container, mix, data) {
+  const meta = workloadMeta(mix);
   const card = document.createElement("div");
-  card.className = "card";
-  card.innerHTML = `<h3>${esc(title)}</h3><canvas></canvas>`;
+  card.className = "chart-card";
+  card.innerHTML = `
+    <div class="chart-head">
+      <div>
+        <h3>${esc(meta.title)}</h3>
+        <p>${esc(meta.desc)} <span class="tag">${esc(mix)}</span></p>
+      </div>
+      <span class="proto-tag ${esc(meta.protoClass)}">${esc(meta.badge)}</span>
+    </div>
+    <canvas></canvas>`;
   container.appendChild(card);
   if (!data.length) {
-    card.innerHTML = `<h3>${esc(title)}</h3><p class="empty">No complete, fingerprinted runs for this workload.</p>`;
+    card.innerHTML += `<p class="empty">No complete runs for this workload on selected hardware.</p>`;
     return;
   }
   if (typeof Chart === "undefined") {
-    // the chart library could not be loaded: keep the numbers readable
     const rows = data.map(({label, points}) =>
-      `<tr><td>${esc(label)}</td><td>${points.map(p => esc(p.y)).join(" → ")}</td></tr>`)
-      .join("");
-    card.innerHTML = `<h3>${esc(title)}</h3><div class="scroll"><table>${rows}</table></div>`;
+      `<tr><td>${esc(label)}</td><td>${points.map(p => esc(p.y)).join(" → ")}</td></tr>`).join("");
+    card.innerHTML += `<div class="scroll"><table>${rows}</table></div>`;
     return;
   }
-  const labels = [...new Set(data.flatMap(({points}) =>
-    points.map(p => p.x)))].sort();
+  const xKeys = [...new Set(data.flatMap(({points}) => points.map(p => p.x)))].sort();
+  const labels = xKeys.map(key => key.split("\u0000", 1)[0].replace("T", " "));
   charts.push(new Chart(card.querySelector("canvas"), {
     type: "line",
-    data: { labels, datasets: data.map(({label, points}) => ({
-      label, data: labels.map(x => (points.find(p => p.x === x) || {}).y ?? null),
-      spanGaps: false, tension: 0.2, pointRadius: 2 })) },
-    options: { responsive: true, maintainAspectRatio: false, animation: false,
-      scales: { x: { ticks: { color: css("--muted"), maxRotation: 0, autoSkip: true } },
-                y: { ticks: { color: css("--muted") }, beginAtZero: true } },
-      plugins: { legend: { labels: { color: css("--fg"), boxWidth: 10 } } } }
+    data: {
+      labels,
+      datasets: data.map(({label, points}, idx) => {
+        const theme = PALETTE[idx % PALETTE.length];
+        return {
+          label,
+          data: xKeys.map(x => (points.find(p => p.x === x) || {}).y ?? null),
+          spanGaps: false,
+          tension: 0.3,
+          borderColor: theme.stroke,
+          backgroundColor: theme.fill,
+          fill: true,
+          pointBackgroundColor: theme.stroke,
+          pointBorderColor: "#fff",
+          pointRadius: 3,
+          pointHoverRadius: 6
+        };
+      })
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: { ticks: { color: css("--muted"), maxRotation: 0, autoSkip: true } },
+        y: { ticks: { color: css("--muted") }, beginAtZero: true }
+      },
+      plugins: {
+        legend: { labels: { color: css("--fg"), boxWidth: 10 } },
+        tooltip: {
+          callbacks: {
+            title: items => {
+              const key = xKeys[items[0]?.dataIndex] || "";
+              const [when, sha] = key.split("\u0000");
+              return `${when || ""}${sha ? ` · commit ${sha.slice(0, 8)}` : ""}`;
+            },
+            afterLabel: item => {
+              const pt = data[item.datasetIndex]?.points?.find(p => p.x === xKeys[item.dataIndex]);
+              return pt?.hw ? `Hardware: ${pt.hw}` : "";
+            }
+          }
+        }
+      }
+    }
   }));
 }
 
-function render(records) {
+function drawSparkline(canvas, values) {
+  if (!canvas || !values || values.length < 2) return;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  const pad = 3;
+  ctx.clearRect(0, 0, w, h);
+  
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  
+  ctx.beginPath();
+  values.forEach((v, idx) => {
+    const x = pad + (idx / (values.length - 1)) * (w - pad * 2);
+    const y = h - pad - ((v - min) / range) * (h - pad * 2);
+    if (idx === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = "#14b8a6";
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.stroke();
+
+  // Highlight dot on last point
+  const lastX = w - pad;
+  const lastY = h - pad - ((values[values.length - 1] - min) / range) * (h - pad * 2);
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
+  ctx.fillStyle = "#14b8a6";
+  ctx.fill();
+}
+
+let currentTierRecords = [];
+let activeHardware = "all";
+let currentView = "overview";
+
+function switchView(viewName) {
+  currentView = viewName;
+  for (const name of ["overview", "timeline", "charts", "diagnostics", "breakdown"]) {
+    const el = document.getElementById(`view-${name}`);
+    const btn = document.getElementById(`tab-${name}`);
+    if (el) el.style.display = name === viewName ? "" : "none";
+    if (btn) btn.setAttribute("aria-selected", name === viewName);
+  }
+}
+
+function inspectCommit(sha) {
+  const rec = currentTierRecords.find(r => (r.sha || "").startsWith(sha));
+  if (!rec) return;
+  const panel = document.getElementById("commit-inspector");
+  panel.classList.add("open");
+  document.getElementById("inspect-sha").textContent = (rec.sha || "").slice(0, 10);
+  document.getElementById("inspect-meta").textContent = `Tier: ${rec.tier} · Date: ${rec.timestamp} · Status: ${rec.complete ? "Complete" : "Incomplete"}`;
+  
+  const tiles = document.getElementById("inspect-tiles");
+  const hwSet = new Set();
+  for (const c of Object.values(rec.configs || {})) {
+    for (const m of Object.values(c.mixes || {})) {
+      if (m.fingerprint) hwSet.add(runnerHardware(m.fingerprint));
+    }
+  }
+  const configsEscaped = Object.keys(rec.configs || {}).map(esc).join(", ");
+  const missingEscaped = (rec.missing_configs || []).map(esc).join(", ");
+  tiles.innerHTML = `
+    <div class="kpi-tile"><div class="kpi-head">Hardware</div><div style="font-size:13px; font-weight:700;">${esc([...hwSet].join(", ") || "Unknown")}</div></div>
+    <div class="kpi-tile"><div class="kpi-head">Configs</div><div style="font-size:13px; font-weight:700;">${configsEscaped || "None"}</div></div>
+    <div class="kpi-tile"><div class="kpi-head">Missing Configs</div><div style="font-size:13px; font-weight:700; color: ${rec.missing_configs?.length ? "var(--warn-fg)" : "var(--good-fg)"};">${missingEscaped || "None"}</div></div>
+  `;
+
+  let rows = `<tr><th>Config</th><th>Workload</th><th>Destinations</th><th>Outcome</th><th>Delivery Ratio</th><th>CPU % / Gbps</th></tr>`;
+  for (const [cName, c] of Object.entries(rec.configs || {})) {
+    for (const [mName, m] of Object.entries(c.mixes || {})) {
+      for (const rung of m.rungs || []) {
+        const outBadge = rung.outcome === "pass" ? `<span class="badge complete">pass</span>`
+          : rung.outcome === "quality-failure" ? `<span class="badge" style="background:var(--bad-bg);color:var(--bad-fg);">fail</span>`
+          : `<span class="badge incomplete">${esc(rung.outcome)}</span>`;
+        const ratio = Number.isFinite(rung.observed_delivery_ratio) ? (rung.observed_delivery_ratio * 100).toFixed(1) + "%" : "–";
+        const cpu = Number.isFinite(rung.sender_cpu_per_gbps) ? `${rung.sender_cpu_per_gbps.toFixed(1)}%` : "–";
+        rows += `<tr><td>${esc(cName)}</td><td><code>${esc(mName)}</code></td><td>${rung.destinations}</td><td>${outBadge}</td><td>${ratio}</td><td>${cpu}</td></tr>`;
+      }
+    }
+  }
+  document.getElementById("inspect-table").innerHTML = rows;
+  panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function closeInspector() {
+  document.getElementById("commit-inspector").classList.remove("open");
+}
+let diagnosticChart = null;
+
+function renderCapacityDiagnostics() {
+  const selector = document.getElementById("diagnostic-workload");
+  const summary = document.getElementById("diagnostic-summary");
+  const table = document.getElementById("diagnostic-rungs");
+  if (diagnosticChart) {
+    diagnosticChart.destroy();
+    diagnosticChart = null;
+  }
+
+  const newest = currentTierRecords.reduce((latest, record) =>
+    Object.values(record.configs || {}).some(config =>
+      Object.values(config.mixes || {}).some(mix =>
+        activeHardware === "all" || runnerHardware(mix.fingerprint) === activeHardware)) &&
+    (!latest || (record.timestamp || "") > (latest.timestamp || "")) ? record : latest, null);
+  const mixes = {};
+  if (newest) {
+    for (const [configName, config] of Object.entries(newest.configs || {})) {
+      for (const [name, mix] of Object.entries(config.mixes || {})) {
+        if (activeHardware !== "all" && runnerHardware(mix.fingerprint) !== activeHardware) continue;
+        mixes[name] = {configName, ...mix};
+      }
+    }
+  }
+  const names = Object.keys(mixes).filter(name => !name.endsWith("-srt-reference"));
+  const selected = names.includes(selector.value) ? selector.value : names[0];
+  selector.innerHTML = names.map(name =>
+    `<option value="${esc(name)}">${esc(workloadMeta(name).title)}</option>`).join("");
+  selector.disabled = !selected;
+  const rungSelector = document.getElementById("diagnostic-rung");
+  if (!selected) {
+    document.getElementById("diagnostic-context").textContent = "";
+    for (const id of ["flow-workload", "flow-rung", "flow-program", "flow-workers", "flow-cpu", "flow-worker-detail", "flow-protocols", "flow-delivery", "flow-gate"]) {
+      document.getElementById(id).textContent = "–";
+    }
+    rungSelector.innerHTML = "";
+    rungSelector.disabled = true;
+    summary.innerHTML = `<div class="kpi-tile"><div class="kpi-head">No matching run</div><div class="kpi-note">Choose another tier or hardware filter with rung diagnostics.</div></div>`;
+    table.innerHTML = `<tr><td>No receiver-verified capacity rungs are available for this selection.</td></tr>`;
+    return;
+  }
+  selector.value = selected;
+
+  const workload = mixes[selected];
+  const rungs = workload.rungs || [];
+  const bestPass = [...rungs].reverse().find(r => r.outcome === "pass");
+  const selectedRung = rungs.find(r => String(r.destinations) === rungSelector.value) || bestPass || rungs[0];
+  rungSelector.innerHTML = rungs.map(r =>
+    `<option value="${esc(r.destinations)}">${esc(r.destinations)} destinations · ${esc(r.outcome)}</option>`).join("");
+  rungSelector.disabled = !selectedRung;
+  if (!selectedRung) {
+    document.getElementById("diagnostic-context").textContent = `${workloadMeta(selected).title} · ${runnerHardware(workload.fingerprint)} · no rung-level diagnostics`;
+    for (const id of ["flow-workload", "flow-rung", "flow-program", "flow-workers", "flow-cpu", "flow-worker-detail", "flow-protocols", "flow-delivery", "flow-gate"]) {
+      document.getElementById(id).textContent = "–";
+    }
+    summary.innerHTML = `<div class="kpi-tile"><div class="kpi-head">No measured rungs</div><div class="kpi-note">This workload has no rung-level diagnostics.</div></div>`;
+    table.innerHTML = `<tr><td>No measured rungs.</td></tr>`;
+    return;
+  }
+  rungSelector.value = String(selectedRung.destinations);
+  const highestPass = workload.highest_passing ?? "–";
+  const firstFailure = workload.first_quality_failure ?? "none";
+  const infra = rungs.filter(r => r.outcome === "infrastructure-limited").map(r => r.destinations);
+  const meta = workloadMeta(selected);
+  const peak = selectedRung.peak || {};
+  const fmt = (value, suffix = "") => Number.isFinite(value) ? `${value.toFixed(1)}${suffix}` : "–";
+  const delivery = Number.isFinite(selectedRung.observed_delivery_ratio)
+    ? `${(selectedRung.observed_delivery_ratio * 100).toFixed(1)}%` : "unmeasured";
+  const threshold = Number.isFinite(selectedRung.delivery_ratio_threshold)
+    ? `${(selectedRung.delivery_ratio_threshold * 100).toFixed(1)}%` : "gate unavailable";
+  document.getElementById("diagnostic-context").textContent =
+    `${meta.title} · ${workload.configName} · ${runnerHardware(workload.fingerprint)} · ` +
+    `commit ${(newest.sha || "unknown").slice(0, 8)} · ${newest.timestamp || "unknown date"}`;
+  document.getElementById("flow-workload").textContent = meta.desc;
+  document.getElementById("flow-rung").textContent = `${selectedRung.destinations ?? "–"} destinations`;
+  document.getElementById("flow-program").textContent =
+    Number.isFinite(selectedRung.delivered_gbps) ? `${selectedRung.delivered_gbps.toFixed(2)} Gbit/s` : "throughput unmeasured";
+  document.getElementById("flow-workers").textContent =
+    `Peak event-loop delay ${fmt(peak.event_loop_max_delay_ms, " ms")} · worker RSS ${Number.isFinite(peak.worker_rss_kb_max) ? `${(peak.worker_rss_kb_max / 1024).toFixed(0)} MiB` : "–"}`;
+  document.getElementById("flow-cpu").textContent = `${fmt(peak.sender_cpu_pct_of_core, "%")} of one core`;
+  document.getElementById("flow-worker-detail").textContent =
+    `sender CPU · receiver CPU ${fmt(peak.receiver_cpu_pct_of_core, "%")} · socket drops ${Number.isFinite(peak.socket_drops) ? peak.socket_drops : "–"}`;
+  document.getElementById("flow-protocols").textContent = meta.badge;
+  document.getElementById("flow-delivery").textContent = delivery;
+  document.getElementById("flow-gate").textContent = `receiver-observed delivery · gate ${threshold}`;
+
+  const tile = (label, value, note) => `<div class="kpi-tile"><div class="kpi-head">${label}</div><div class="kpi-metric">${esc(value)}</div><div class="kpi-note">${esc(note)}</div></div>`;
+  summary.innerHTML =
+    tile("Highest verified pass", highestPass === "–" ? highestPass : `${highestPass} destinations`, "Receiver quality met the rung's qualification gate") +
+    tile("First quality failure", firstFailure === "none" ? firstFailure : `${firstFailure} destinations`, "First measured rung that failed delivery quality") +
+    tile("Infrastructure-limited", infra.length ? infra.join(", ") : "none", "Not counted as a software quality failure") +
+    tile("Measured rungs", rungs.length, "Only executed rungs; omitted rungs are not inferred");
+
+  const labels = rungs.map(r => String(r.destinations ?? "–"));
+  const observed = rungs.map(r => Number.isFinite(r.observed_delivery_ratio)
+    ? r.observed_delivery_ratio * 100 : null);
+  const thresholds = rungs.map(r => Number.isFinite(r.delivery_ratio_threshold)
+    ? r.delivery_ratio_threshold * 100 : null);
+  if (labels.length && typeof Chart !== "undefined") {
+    diagnosticChart = new Chart(document.getElementById("diagnostic-delivery"), {
+      type: "line",
+      data: {labels, datasets: [
+        {label: "Receiver-observed delivery", data: observed, borderColor: "#14b8a6",
+         backgroundColor: "rgba(20,184,166,.14)", pointBackgroundColor: rungs.map(r =>
+           r.outcome === "pass" ? "#6ee7b7" : r.outcome === "quality-failure" ? "#fda4af" : "#fcd34d"),
+         pointRadius: 5, spanGaps: false, tension: 0.15},
+        {label: "Qualification threshold", data: thresholds, borderColor: "#fcd34d",
+         borderDash: [5, 4], pointRadius: 0, spanGaps: false}
+      ]},
+      options: {responsive: true, maintainAspectRatio: false, animation: false,
+        interaction: {mode: "index", intersect: false},
+        scales: {
+          x: {title: {display: true, text: "Destinations", color: css("--muted")},
+              ticks: {color: css("--muted")}},
+          y: {min: 0, max: 105, title: {display: true, text: "Delivery (%)", color: css("--muted")},
+              ticks: {color: css("--muted")}}
+        },
+        plugins: {legend: {labels: {color: css("--fg")}},
+          tooltip: {callbacks: {afterLabel: item => `Outcome: ${rungs[item.dataIndex]?.outcome || "unknown"}`}}}
+      }
+    });
+  }
+
+  const outcome = rung => `<span class="badge ${rung.outcome === "pass" ? "complete" : rung.outcome === "quality-failure" ? "incomplete" : "unverified"}">${esc(rung.outcome || "unknown")}</span>`;
+  let rows = `<tr><th>Destinations</th><th>Outcome</th><th>Observed delivery</th><th>Gate</th><th>Sender CPU / Gbit/s</th><th>Sender / receiver CPU</th><th>Socket drops</th><th>Max event-loop delay</th><th>Worker RSS max</th></tr>`;
+  for (const rung of rungs) {
+    const peak = rung.peak || {};
+    rows += `<tr><td>${esc(rung.destinations ?? "–")}</td><td>${outcome(rung)}</td>` +
+      `<td>${fmt(Number.isFinite(rung.observed_delivery_ratio) ? rung.observed_delivery_ratio * 100 : null, "%")}</td>` +
+      `<td>${fmt(Number.isFinite(rung.delivery_ratio_threshold) ? rung.delivery_ratio_threshold * 100 : null, "%")}</td>` +
+      `<td>${fmt(rung.sender_cpu_per_gbps, "%")}</td>` +
+      `<td>${fmt(peak.sender_cpu_pct_of_core, "%")} / ${fmt(peak.receiver_cpu_pct_of_core, "%")}</td>` +
+      `<td>${Number.isFinite(peak.socket_drops) ? esc(peak.socket_drops) : "–"}</td>` +
+      `<td>${fmt(peak.event_loop_max_delay_ms, " ms")}</td>` +
+      `<td>${Number.isFinite(peak.worker_rss_kb_max) ? `${(peak.worker_rss_kb_max / 1024).toFixed(1)} MiB` : "–"}</td></tr>`;
+  }
+  table.innerHTML = rows;
+}
+
+function render(records, selectedHardware = activeHardware) {
+  currentTierRecords = records;
+  activeHardware = selectedHardware;
   charts.splice(0).forEach(c => c.destroy());
   for (const id of ["capacity", "efficiency"]) document.getElementById(id).innerHTML = "";
+  renderCapacityDiagnostics();
+  // 1. Discover distinct hardware in this tier
+  const hwCounts = new Map();
+  for (const r of records) {
+    for (const c of Object.values(r.configs || {})) {
+      if (c.complete === true) {
+        for (const m of Object.values(c.mixes || {})) {
+          if (m.fingerprint) {
+            const hw = runnerHardware(m.fingerprint);
+            hwCounts.set(hw, (hwCounts.get(hw) || 0) + 1);
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Update KPI Banner
+  const latestOverall = records[records.length - 1];
+  document.getElementById("kpi-runs").textContent = records.length;
+  document.getElementById("kpi-runs-sub").textContent = hwCounts.size > 0 ? `${hwCounts.size} hardware types` : "No runs";
+  document.getElementById("kpi-hw").textContent = activeHardware === "all" ? "All Hardware" : activeHardware;
+  document.getElementById("kpi-hw-sub").textContent = activeHardware === "all" ? "Comparing across all runners" : `Filtered to ${activeHardware}`;
+  if (latestOverall) {
+    document.getElementById("kpi-commit").textContent = (latestOverall.sha || "").slice(0, 8) || "unknown";
+    document.getElementById("kpi-commit-sub").textContent = (latestOverall.timestamp || "").slice(0, 10);
+  }
+
+  // 3. Hardware Filter Pills
+  const hwRow = document.getElementById("hardware-row");
+  const hwNav = document.getElementById("runners");
+  if (hwCounts.size > 1) {
+    hwRow.style.display = "";
+    hwNav.innerHTML = "";
+    const allBtn = document.createElement("button");
+    allBtn.textContent = `All Hardware (${records.length} runs)`;
+    allBtn.setAttribute("aria-pressed", activeHardware === "all");
+    allBtn.onclick = () => render(records, "all");
+    hwNav.appendChild(allBtn);
+    for (const [hw, count] of hwCounts) {
+      const btn = document.createElement("button");
+      btn.textContent = `${hw} (${count})`;
+      btn.setAttribute("aria-pressed", activeHardware === hw);
+      btn.onclick = () => render(records, hw);
+      hwNav.appendChild(btn);
+    }
+  } else {
+    hwRow.style.display = "none";
+    hwNav.innerHTML = "";
+    activeHardware = "all";
+  }
+
+  const filteredRecords = activeHardware === "all" ? records : records.filter(r =>
+    Object.values(r.configs || {}).some(c =>
+      Object.values(c.mixes || {}).some(m => m.fingerprint && runnerHardware(m.fingerprint) === activeHardware)));
+
+  // 4. Render Executive Scorecard Grid with inline sparklines
+  const scorecardContainer = document.getElementById("scorecard-container");
+  if (scorecardContainer) {
+    const latestForScore = (filteredRecords.length ? filteredRecords : records)[(filteredRecords.length ? filteredRecords : records).length - 1];
+    let cardsHtml = "";
+    const sparkData = {};
+    if (latestForScore) {
+      for (const [cName, c] of Object.entries(latestForScore.configs || {})) {
+        for (const [mName, m] of Object.entries(c.mixes || {})) {
+          if (mName.endsWith("-srt-reference")) continue;
+          const meta = workloadMeta(mName);
+          const highest = m.highest_passing ?? "–";
+          const firstFail = m.first_quality_failure ? `Fail @ ${m.first_quality_failure}` : "No failures";
+          const passRung = (m.rungs || []).find(g => g.outcome === "pass" && g.destinations > 1 && g.sender_cpu_per_gbps);
+          const cpuRate = passRung ? `${passRung.sender_cpu_per_gbps.toFixed(1)}%` : "–";
+          const cpuSub = passRung ? `@ ${passRung.destinations} destinations` : "No goodput";
+          
+          // Collect sparkline trend points across matching runs with matching hardware
+          const trendVals = [];
+          for (const rec of filteredRecords) {
+            const entry = rec.configs?.[cName]?.mixes?.[mName];
+            if (!entry || (m.fingerprint && runnerHardware(entry.fingerprint) !== runnerHardware(m.fingerprint))) continue;
+            const p = (entry?.rungs || []).find(g => g.outcome === "pass" && g.destinations > 1 && Number.isFinite(g.sender_cpu_per_gbps));
+            if (p) trendVals.push(p.sender_cpu_per_gbps);
+          }
+          sparkData[mName] = trendVals;
+
+          cardsHtml += `
+            <div class="scorecard" onclick="switchView('charts')">
+              <div>
+                <div class="scorecard-top">
+                  <div>
+                    <div class="scorecard-title">${esc(meta.title)}</div>
+                    <div class="scorecard-id">${esc(mName)}</div>
+                  </div>
+                  <span class="proto-tag ${esc(meta.protoClass)}">${esc(meta.badge)}</span>
+                </div>
+                <div class="scorecard-metrics">
+                  <div class="metric-item">
+                    <div class="lbl">Max Capacity</div>
+                    <div class="val">${highest} <span style="font-size:12px;font-weight:500;">clients</span></div>
+                  </div>
+                  <div class="metric-item">
+                    <div class="lbl">CPU / Gbit/s</div>
+                    <div class="val" style="color:var(--accent);">${cpuRate}</div>
+                  </div>
+                </div>
+              </div>
+              <div class="scorecard-bottom-row">
+                <div class="scorecard-foot">${esc(firstFail)} · ${esc(cpuSub)}</div>
+                <canvas class="sparkline-canvas" id="spark-${esc(mName)}" width="90" height="26"></canvas>
+              </div>
+            </div>`;
+        }
+      }
+    }
+    scorecardContainer.innerHTML = cardsHtml || `<p class="empty">No workloads recorded in this tier.</p>`;
+    // Draw sparklines after DOM insertion
+    setTimeout(() => {
+      for (const [mName, vals] of Object.entries(sparkData)) {
+        const can = document.getElementById(`spark-${mName}`);
+        if (can) drawSparkline(can, vals);
+      }
+    }, 10);
+  }
+
+  // 5. Render Commit Matrix Table
+  const matrixTable = document.getElementById("run-matrix");
+  if (matrixTable) {
+    let mRows = `<tr><th>Date & Time (UTC)</th><th>Commit</th><th>Hardware</th>` +
+                `<th>Status</th><th>Workloads Summary (Passing Rungs & CPU/Gbps)</th></tr>`;
+    for (const r of [...filteredRecords].reverse()) {
+      const sha = (r.sha || "").slice(0, 8);
+      const ts = (r.timestamp || "").slice(0, 16).replace("T", " ");
+      const status = statusBadge(r.complete);
+      const hwSet = new Set();
+      const summaries = [];
+      for (const [cName, c] of Object.entries(r.configs || {})) {
+        for (const [mName, m] of Object.entries(c.mixes || {})) {
+          if (mName.endsWith("-srt-reference")) continue;
+          if (m.fingerprint) hwSet.add(runnerHardware(m.fingerprint));
+          const meta = workloadMeta(mName);
+          const highest = m.highest_passing ?? "–";
+          const eff = (m.rungs || []).find(g => g.outcome === "pass" && g.destinations > 1 && g.sender_cpu_per_gbps);
+          const effText = eff ? ` · <span style="font-weight:600;color:var(--accent);">${eff.sender_cpu_per_gbps.toFixed(1)}%/Gbps</span> @${eff.destinations}` : "";
+          summaries.push(`<code>${esc(meta.title)}</code>: pass ≤${highest}${effText}`);
+        }
+      }
+      const hwLabel = [...hwSet].join(", ") || "Unknown hardware";
+      mRows += `<tr onclick="inspectCommit('${esc(sha)}')"><td><strong>${esc(ts)}</strong></td>` +
+               `<td><code>${esc(sha)}</code></td>` +
+               `<td>${esc(hwLabel)}</td>` +
+               `<td>${status}</td>` +
+               `<td style="font-size: 12px; line-height: 1.6;">${summaries.join("<br>") || "–"}</td></tr>`;
+    }
+    matrixTable.innerHTML = mRows;
+  }
+
+  // 6. Render Capacity and Efficiency Charts
   const byMix = {};
-  for (const r of records)
-    for (const c of Object.values(r.configs || {}))
-      if (c.complete === true)
-        for (const [mix, e] of Object.entries(c.mixes || {}))
-          if (e.fingerprint) byMix[mix] = true;
+  for (const r of records) {
+    for (const c of Object.values(r.configs || {})) {
+      for (const [mix, e] of Object.entries(c.mixes || {})) {
+        if (!mix.endsWith("-srt-reference")) {
+          const hw = runnerHardware(e.fingerprint);
+          if (activeHardware === "all" || hw === activeHardware) {
+            byMix[mix] = true;
+          }
+        }
+      }
+    }
+  }
+
   for (const mix of Object.keys(byMix).sort()) {
     chart(document.getElementById("capacity"), mix,
-      series(records, (config, m, e, host) =>
-        m === mix && e.highest_passing != null
-          ? [[`${config} · ${host}`, e.highest_passing]] : []));
+      series(records, (config, m, e, hw) => {
+        return m === mix && e.highest_passing != null ? [[config, e.highest_passing]] : [];
+      }, activeHardware));
     chart(document.getElementById("efficiency"), mix,
-      series(records, (config, m, e, host) => m !== mix ? [] :
-        e.rungs.filter(g => g.outcome === "pass"
+      series(records, (config, m, e, hw) => {
+        if (m !== mix) return [];
+        return e.rungs.filter(g => g.outcome === "pass"
                             && Number.isFinite(g.sender_cpu_per_gbps)
                             && g.sender_cpu_per_gbps > 0 && g.destinations > 1)
-               .map(g => [`${config} · ${host} @${g.destinations}`,
-                          g.sender_cpu_per_gbps])));
+               .map(g => [`${config} @${g.destinations}`, g.sender_cpu_per_gbps]);
+      }, activeHardware));
   }
-  const latest = records.reduce((newest, record) =>
+
+  // 7. Latest Run Breakdown Table
+  const latest = (filteredRecords.length ? filteredRecords : records).reduce((newest, record) =>
     !newest || (record.timestamp || "") > (newest.timestamp || "")
       ? record : newest, null);
   const table = document.getElementById("latest");
   if (!latest) { table.innerHTML = "<tr><td>No runs recorded yet.</td></tr>"; return; }
-  let rows = `<tr><th>config</th><th>workload</th><th>status</th>` +
-             `<th>highest pass</th><th>first failure</th>` +
-             `<th>setup-limited</th><th>benchmark runner</th></tr>`;
+  let rows = `<tr><th>Config</th><th>Workload</th><th>Status</th>` +
+             `<th>Highest Pass</th><th>First Failure</th>` +
+             `<th>Setup-Limited</th><th>Hardware Runner</th></tr>`;
   for (const [config, c] of Object.entries(latest.configs || {})) {
-    const status = statusBadge(c.complete);
+    const cStatus = statusBadge(c.complete);
     const mixes = Object.entries(c.mixes || {});
     if (!mixes.length) {
       const missing = (c.missing || []).map(esc).join("; ");
       rows += `<tr><td>${esc(config)}</td><td>–</td>` +
-              `<td>${status}${missing ? `<span class="status-detail">${missing}</span>` : ""}</td>` +
+              `<td>${cStatus}${missing ? `<span class="status-detail">${missing}</span>` : ""}</td>` +
               `<td>–</td><td>–</td><td>–</td><td>–</td></tr>`;
       continue;
     }
-    for (const [mix, e] of mixes)
-      rows += `<tr><td>${esc(config)}</td><td>${esc(mix)}</td><td>${status}</td>` +
+    for (const [mix, e] of mixes) {
+      const meta = workloadMeta(mix);
+      rows += `<tr><td>${esc(config)}</td>` +
+              `<td><div style="font-weight:600;margin-bottom:2px;">${esc(meta.title)}</div>` +
+              `<span class="tag">${esc(mix)}</span></td>` +
+              `<td>${cStatus}</td>` +
               `<td>${esc(e.highest_passing ?? "–")}</td>` +
               `<td>${esc(e.first_quality_failure ?? "none")}</td>` +
               `<td>${esc((e.setup_limited || []).join(", ") || "none")}</td>` +
-              `<td>${esc(runnerClass(e.fingerprint || {}))}</td></tr>`;
+              `<td>${esc(runnerHardware(e.fingerprint || {}))}</td></tr>`;
+    }
   }
-  const status = statusBadge(latest.complete);
-  rows += `<tr><td colspan="7">Run ${status} · <code>${esc(latest.sha || "")}</code> · ` +
+  const runStatus = statusBadge(latest.complete);
+  rows += `<tr><td colspan="7">Run ${runStatus} · <code>${esc(latest.sha || "")}</code> · ` +
           `${esc(latest.timestamp)} · missing configs: ` +
           `${esc((latest.missing_configs || []).join(", ") || "none")} · unexpected configs: ` +
           `${esc((latest.unexpected_configs || []).join(", ") || "none")}</td></tr>`;
   table.innerHTML = rows;
 }
 
+
 (async () => {
   let tiers = ["nightly"];
   try { tiers = (await (await fetch("data/index.json", {cache: "no-store"})).json()).tiers; } catch (e) {}
   const nav = document.getElementById("tiers");
   const show = async tier => {
+    document.getElementById("kpi-tier").textContent = tier.toUpperCase();
+    document.getElementById("kpi-tier-sub").textContent = `Selected tier: ${tier}`;
     for (const b of nav.children) b.setAttribute("aria-pressed", b.textContent === tier);
-    try { render(await loadTier(tier)); } catch (e) { render([]); }
+    activeHardware = "all";
+    closeInspector();
+    try { render(await loadTier(tier), "all"); } catch (e) { render([], "all"); }
   };
   for (const tier of tiers) {
     const b = document.createElement("button");
