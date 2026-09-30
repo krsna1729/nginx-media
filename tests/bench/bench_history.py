@@ -1,35 +1,36 @@
 #!/usr/bin/env python3
 """Summarize, gate and publish capacity benchmark results over time.
 
-  summarize <results dir> --tier T --out summary.json
-      one record for a CI run: per configuration and workload the highest
-      passing rung, the first quality failure, setup-limited rungs, and per
-      rung the delivery ratio and CPU per delivered Gbit/s.
+  summarize <results dir> --tier T --out summary.json [--expected-configs JSON]
+      one CI record: each configuration and workload's highest passing rung,
+      first quality failure and per-rung delivery/CPU efficiency. Expected
+      matrix groups are flattened into configuration names so absent artifacts
+      remain visible as incomplete configurations.
 
   gate <summary.json> --tier T [--history data.jsonl]
-      exit 1 on any setup failure, on an incomplete run (a harness that did
-      not finish, or an expected rung neither measured nor deliberately
-      skipped after the capacity boundary), and on a quality failure at a
-      rung the tier declares every supported host must carry.  With history, warns
-      (never fails) when CPU per Gbit/s regressed against the recent median
-      for the same rung - shared runners are too noisy to gate on it.
+      exit 1 on setup failures, incomplete runs or required-rung quality
+      failures. With history, warn on CPU/Gbit/s regressions over 25% against
+      at least three complete, passing runs with the same runner fingerprint.
+
+  regressions <summary.json> --history data.jsonl --out findings.json
+      write the structured regression findings used by the publisher.
 
   publish <summary.json> --pages <gh-pages checkout>
-      appends the record to data/<tier>.jsonl and installs the viewer.
+      append the record to data/<tier>.jsonl and install the viewer.
 """
 
 import argparse
 import datetime
 import glob
 import json
+import math
 import os
-import platform
 import shutil
 import statistics
 import subprocess
 import sys
 
-SCHEMA = "nginx-media.bench-history/2"
+SCHEMA = "nginx-media.bench-history/3"
 
 # Which delivery field carries a *measurement*, per protocol.  A configured
 # threshold is not one: min_delivery_ratio in the HLS reader log is the gate
@@ -69,21 +70,6 @@ def git(*args):
                                        stderr=subprocess.DEVNULL).strip()
     except (OSError, subprocess.CalledProcessError):
         return None
-
-
-def host_info():
-    model = None
-    try:
-        with open("/proc/cpuinfo", encoding="utf-8") as source:
-            for line in source:
-                if line.startswith("model name"):
-                    model = line.split(":", 1)[1].strip()
-                    break
-    except OSError:
-        pass
-    return {"nproc": os.cpu_count(), "cpu_model": model,
-            "kernel": platform.release(),
-            "runner": os.environ.get("RUNNER_NAME")}
 
 
 def value(field):
@@ -238,6 +224,42 @@ def completeness(results, name, mixes):
             "missing": missing, "stopped": stopped, "expected": expected}
 
 
+
+def run_environment(entry):
+    """The environment a workload's rungs were taken in, and the highest
+    pressure any of them reached - lifted from the rungs themselves, so the
+    record describes the run and not whatever host later reads it."""
+    for rung in entry.get("rungs", []):
+        fingerprint = rung.get("host_fingerprint")
+        if isinstance(fingerprint, dict) and "fingerprint" not in entry:
+            entry["fingerprint"] = {
+                key: fingerprint.get(key) for key in
+                ("cpu_model", "kernel", "nproc_online", "permitted_cpus",
+                 "cgroup", "governor", "no_turbo", "numa", "transport",
+                 "kernel_udp_limits")
+                if fingerprint.get(key) is not None}
+    peaks = {}
+    for rung in entry.get("rungs", []):
+        for key, value in (rung.get("peak") or {}).items():
+            if isinstance(value, (int, float)):
+                peaks[key] = max(peaks.get(key, value), value)
+    if peaks:
+        entry["peak"] = peaks
+    return entry
+
+
+def parse_expected_configs(value):
+    if value is None:
+        return None
+    groups = json.loads(value)
+    if not isinstance(groups, list) or any(not isinstance(g, str) for g in groups):
+        raise ValueError("--expected-configs must be a JSON array of strings")
+    names = sorted({name for group in groups for name in group.split()})
+    if not names:
+        raise ValueError("--expected-configs must name at least one config")
+    return names
+
+
 def summarize(args):
     configs = {}
     statuses = {}
@@ -273,6 +295,22 @@ def summarize(args):
             entry = run_environment(entry)
         configs[name] = {"harness_status": statuses.get(name), "mixes": mixes}
         configs[name].update(completeness(args.results, name, mixes))
+    expected = parse_expected_configs(getattr(args, "expected_configs", None))
+    if expected is None:
+        expected = sorted(configs)
+    missing = sorted(set(expected) - configs.keys())
+    unexpected = sorted(configs.keys() - set(expected))
+    for name in missing:
+        configs[name] = {
+            "harness_status": None,
+            "mixes": {},
+            "complete": False,
+            "finished": False,
+            "missing": ["no benchmark artifact was collected"],
+            "stopped": {},
+        }
+    complete = bool(expected) and not missing and not unexpected and all(
+        configs[name].get("complete") is True for name in expected)
     record = {
         "schema": SCHEMA,
         "tier": args.tier,
@@ -282,7 +320,10 @@ def summarize(args):
         "ref": os.environ.get("GITHUB_REF_NAME")
                or git("rev-parse", "--abbrev-ref", "HEAD"),
         "run": os.environ.get("GITHUB_RUN_ID"),
-        "host": host_info(),
+        "expected_configs": expected,
+        "missing_configs": missing,
+        "unexpected_configs": unexpected,
+        "complete": complete,
         "configs": configs,
     }
     with open(args.out, "w", encoding="utf-8") as output:
@@ -295,30 +336,9 @@ def summarize(args):
                   f" setup_limited={entry['setup_limited'] or 'none'}"
                   f" infrastructure_limited="
                   f"{entry.get('infrastructure_limited') or 'none'}")
+    for name in missing:
+        print(f"bench_missing_config={name}")
     return 0
-
-
-def run_environment(entry):
-    """The environment a workload's rungs were taken in, and the highest
-    pressure any of them reached - lifted from the rungs themselves, so the
-    record describes the run and not whatever host later reads it."""
-    for rung in entry.get("rungs", []):
-        fingerprint = rung.get("host_fingerprint")
-        if isinstance(fingerprint, dict) and "fingerprint" not in entry:
-            entry["fingerprint"] = {
-                key: fingerprint.get(key) for key in
-                ("cpu_model", "kernel", "nproc_online", "permitted_cpus",
-                 "cgroup", "governor", "no_turbo", "numa", "transport",
-                 "kernel_udp_limits")
-                if fingerprint.get(key) is not None}
-    peaks = {}
-    for rung in entry.get("rungs", []):
-        for key, value in (rung.get("peak") or {}).items():
-            if isinstance(value, (int, float)):
-                peaks[key] = max(peaks.get(key, value), value)
-    if peaks:
-        entry["peak"] = peaks
-    return entry
 
 
 def load_history(path, tier):
@@ -378,8 +398,14 @@ def gate(args):
                     errors.append(f"{name}/{mix}: quality failure at "
                                   f"{rung['destinations']} destinations, "
                                   f"which every host must carry")
-    for message in regressions(record, load_history(args.history, args.tier)):
-        print(f"::warning title=bench efficiency::{message}")
+    for finding in regressions(record, load_history(args.history, args.tier)):
+        print(f"::warning title=bench efficiency::"
+              f"{finding['config']}/{finding['mix']} at "
+              f"{finding['destinations']} destinations: sender CPU "
+              f"{finding['current']:.1f}%/Gbit/s vs recent median "
+              f"{finding['baseline_median']:.1f} "
+              f"({finding['factor']:.2f}x, "
+              f"{finding['baseline_count']} comparable runs)")
     for message in errors:
         print(f"::error title=bench gate::{message}")
     if errors:
@@ -389,32 +415,74 @@ def gate(args):
 
 
 def regressions(record, history, window=10, tolerance=1.25):
-    """CPU per Gbit/s that is more than `tolerance` times the recent median
-    for the same configuration, workload and rung."""
-    messages = []
-    recent = history[-window:]
-    for name, config in record["configs"].items():
-        for mix, entry in config["mixes"].items():
-            for rung in entry["rungs"]:
+    """Return regressions against complete passing runs with the same host."""
+    supported = {SCHEMA, "nginx-media.bench-history/2"}
+    if record.get("schema") not in supported:
+        return []
+    recent = [old for old in history
+              if old.get("schema") in supported
+              and old.get("tier") == record.get("tier")]
+    findings = []
+    for name, config in record.get("configs", {}).items():
+        if config.get("complete") is not True:
+            continue
+        for mix, entry in config.get("mixes", {}).items():
+            fingerprint = entry.get("fingerprint")
+            if not isinstance(fingerprint, dict) or not fingerprint:
+                continue
+            for rung in entry.get("rungs", []):
                 current = rung.get("sender_cpu_per_gbps")
-                if current is None or rung["outcome"] != "pass":
+                destinations = rung.get("destinations")
+                if (rung.get("outcome") != "pass"
+                        or not isinstance(destinations, int)
+                        or isinstance(destinations, bool)
+                        or not isinstance(current, (int, float))
+                        or isinstance(current, bool)
+                        or not math.isfinite(current) or current <= 0):
                     continue
                 past = []
-                for old in recent:
-                    old_entry = old.get("configs", {}).get(name, {}).get(
-                        "mixes", {}).get(mix)
-                    for old_rung in (old_entry or {}).get("rungs", []):
-                        if (old_rung["destinations"] == rung["destinations"]
-                                and old_rung.get("sender_cpu_per_gbps")):
-                            past.append(old_rung["sender_cpu_per_gbps"])
-                if len(past) >= 3:
-                    median = statistics.median(past)
-                    if current > median * tolerance:
-                        messages.append(
-                            f"{name}/{mix} at {rung['destinations']} destinations:"
-                            f" sender CPU {current:.1f}%/Gbit/s vs recent median"
-                            f" {median:.1f}")
-    return messages
+                for old in reversed(recent):
+                    old_config = old.get("configs", {}).get(name, {})
+                    old_entry = old_config.get("mixes", {}).get(mix, {})
+                    if (old_config.get("complete") is not True
+                            or old_entry.get("fingerprint") != fingerprint):
+                        continue
+                    for old_rung in old_entry.get("rungs", []):
+                        value = old_rung.get("sender_cpu_per_gbps")
+                        if (old_rung.get("outcome") == "pass"
+                                and old_rung.get("destinations") == destinations
+                                and isinstance(value, (int, float))
+                                and not isinstance(value, bool)
+                                and math.isfinite(value) and value > 0):
+                            past.append(value)
+                            break
+                    if len(past) >= window:
+                        break
+                if len(past) < 3:
+                    continue
+                median = statistics.median(past)
+                if current > median * tolerance:
+                    findings.append({
+                        "config": name,
+                        "mix": mix,
+                        "destinations": destinations,
+                        "current": current,
+                        "baseline_median": median,
+                        "baseline_count": len(past),
+                        "factor": current / median,
+                        "runner": fingerprint,
+                    })
+    return findings
+
+
+def regression_report(args):
+    with open(args.summary, encoding="utf-8") as source:
+        record = json.load(source)
+    findings = regressions(record, load_history(args.history, record["tier"]))
+    with open(args.out, "w", encoding="utf-8") as output:
+        json.dump(findings, output, indent=1)
+    print(f"bench_regressions={len(findings)}")
+    return 0
 
 
 def publish(args):
@@ -445,16 +513,21 @@ def main():
     s.add_argument("results")
     s.add_argument("--tier", required=True)
     s.add_argument("--out", required=True)
+    s.add_argument("--expected-configs")
     g = sub.add_parser("gate")
     g.add_argument("summary")
     g.add_argument("--tier", required=True)
     g.add_argument("--history")
+    r = sub.add_parser("regressions")
+    r.add_argument("summary")
+    r.add_argument("--history", required=True)
+    r.add_argument("--out", required=True)
     p = sub.add_parser("publish")
     p.add_argument("summary")
     p.add_argument("--pages", required=True)
     args = parser.parse_args()
-    return {"summarize": summarize, "gate": gate, "publish": publish}[
-        args.command](args)
+    return {"summarize": summarize, "gate": gate, "publish": publish,
+            "regressions": regression_report}[args.command](args)
 
 
 if __name__ == "__main__":

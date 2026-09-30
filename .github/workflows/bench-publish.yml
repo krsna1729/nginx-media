@@ -1,19 +1,21 @@
 name: bench-publish
 
-# Appends a benchmark run's results to the history on the gh-pages branch
-# (data/<tier>.jsonl, with a viewer at its root: tests/bench/history/index.html).
+# Publishes a benchmark run's results to the gh-pages history
+# (data/<tier>.jsonl and tests/bench/history/index.html), and opens one
+# deduplicated issue for every detected comparable regression.
 #
-# Separate from bench.yml because it is the one job that writes to the
-# repository: a pull request calls bench.yml with a read-only token and never
-# calls this, and a called workflow cannot be granted more than its caller
-# holds.  main, nightly and weekly call it after bench.yml in the same run, so
-# the artifacts it collects are that run's.  One publish at a time across
-# every workflow, so appends never race.
+# Separate from bench.yml because publishing needs contents: write and issue
+# creation needs issues: write. Pull requests run bench.yml only; publishing is
+# called after main, nightly and weekly benchmarks so it collects their
+# artifacts. One publish at a time across all workflows keeps appends ordered.
 
 on:
   workflow_call:
     inputs:
       tier:
+        required: true
+        type: string
+      configs:
         required: true
         type: string
 
@@ -27,6 +29,7 @@ jobs:
 
     permissions:
       contents: write
+      issues: write
 
     steps:
       - uses: actions/checkout@v4
@@ -41,9 +44,11 @@ jobs:
       - name: Summarize
         run: |
           python3 tests/bench/bench_history.py summarize results \
-            --tier "${{ inputs.tier }}" --out summary.json
+            --tier "${{ inputs.tier }}" --out summary.json \
+            --expected-configs '${{ inputs.configs }}'
 
-      - name: Append to the gh-pages history
+      - name: Prepare gh-pages history
+        id: pages
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -55,6 +60,56 @@ jobs:
             git -C pages checkout --orphan gh-pages
             git -C pages rm -rf --quiet .
           fi
+
+      - name: Detect benchmark regressions
+        id: findings
+        run: |
+          python3 tests/bench/bench_history.py regressions summary.json \
+            --history "pages/data/${{ inputs.tier }}.jsonl" --out regressions.json
+
+      - name: Open issues for benchmark regressions
+        id: issues
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TIER: ${{ inputs.tier }}
+          SITE_URL: https://krsna1729.github.io/nginx-media/
+        run: |
+          set -euo pipefail
+          while IFS= read -r finding; do
+            title="$(jq -r --arg tier "$TIER" \
+              '"[bench regression] \($tier) \(.config)/\(.mix) at \(.destinations) destinations"' \
+              <<<"$finding")"
+            existing="$(gh issue list --state open --limit 100 \
+              --search "\"$title\" in:title" --json number,title |
+              jq -r --arg title "$title" \
+                '[.[] | select(.title == $title)][0].number // empty')"
+            if [ -n "$existing" ]; then
+              echo "Benchmark regression issue already open: #$existing"
+              continue
+            fi
+            body="$(jq -r --arg tier "$TIER" --arg url "$SITE_URL" \
+              --arg sha "$GITHUB_SHA" \
+              --arg commit "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$GITHUB_SHA" \
+              --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '
+                "Automated benchmark regression: sender CPU per delivered Gbit/s is more than 25% above the median of at least three complete, passing runs with the same runner fingerprint.\n\n" +
+                "- Tier: `\($tier)`\n" +
+                "- Workload: `\(.config)/\(.mix)`\n" +
+                "- Rung: `\(.destinations)` destinations\n" +
+                "- Current: \(.current) %/Gbit/s\n" +
+                "- Comparable-run median: \(.baseline_median) %/Gbit/s (`\(.baseline_count)` runs)\n" +
+                "- Regression factor: \(.factor)x\n" +
+                "- Runner: \(.runner.cpu_model // "unknown"); kernel \(.runner.kernel // "unknown"); transport \(.runner.transport // "unknown")\n" +
+                "- Commit: [\($sha)](\($commit))\n" +
+                "- Workflow run: [view run](\($run))\n\n" +
+                "[View published capacity history](\($url))"
+              ' <<<"$finding")"
+            gh issue create --title "$title" --body "$body"
+          done < <(jq -c '.[]' regressions.json)
+
+      - name: Append to the gh-pages history
+        if: always() && steps.pages.outcome == 'success' && steps.findings.outcome == 'success'
+        run: |
           python3 tests/bench/bench_history.py publish summary.json --pages pages
           git -C pages add -A
           git -C pages commit -m "bench: ${{ inputs.tier }} ${GITHUB_SHA::8}"
@@ -63,4 +118,10 @@ jobs:
             sleep $(( attempt * 5 ))
             git -C pages pull --rebase origin gh-pages
           done
+          exit 1
+
+      - name: Report regression issue creation failure
+        if: steps.issues.outcome == 'failure'
+        run: |
+          echo "::error title=benchmark regression issue::History was published, but issue automation failed."
           exit 1

@@ -711,9 +711,12 @@ def make_config(results, name, rungs, status=0, finished=True, expected=None,
     return base
 
 
-def summarize(results, out):
-    return run([sys.executable, HISTORY, "summarize", results, "--tier", "pr",
-                "--out", out])
+def summarize(results, out, expected_configs=None):
+    command = [sys.executable, HISTORY, "summarize", results, "--tier", "pr",
+               "--out", out]
+    if expected_configs is not None:
+        command.extend(["--expected-configs", expected_configs])
+    return run(command)
 
 
 def gate(summary, tier="pr"):
@@ -799,7 +802,7 @@ def test_history_separates_observed_from_threshold(work):
     check(result.returncode == 0, f"summarize failed: {result.stderr}")
     with open(out, encoding="utf-8") as source:
         record = json.load(source)
-    check(record["schema"] == "nginx-media.bench-history/2",
+    check(record["schema"] == "nginx-media.bench-history/3",
           f"schema is {record['schema']}")
     rungs = record["configs"]["srt"]["mixes"]["pure-srt"]["rungs"]
     hls_rung = [r for r in rungs if r["destinations"] == 16][0]
@@ -835,6 +838,105 @@ def test_history_separates_observed_from_threshold(work):
     check("hls_readers" not in rung["observed_delivery_ratio_protocols"],
           "an unmeasured protocol is not listed as measured")
 
+
+def test_summary_marks_uncollected_expected_configs(work):
+    results = os.path.join(work, "expected-configs")
+    make_config(results, "srt", [
+        (1, "pass", srt_delivery(1.0)),
+        (16, "pass", srt_delivery(0.99)),
+        (32, "quality-failure", srt_delivery(0.80)),
+    ], status=1)
+    out = os.path.join(work, "expected-configs.json")
+    result = summarize(results, out, '["srt missing"]')
+    check(result.returncode == 0, f"summarize failed: {result.stderr}")
+    with open(out, encoding="utf-8") as source:
+        record = json.load(source)
+    check(record["expected_configs"] == ["missing", "srt"],
+          f"matrix config groups must flatten: {record['expected_configs']}")
+    check(record["missing_configs"] == ["missing"],
+          f"the absent artifact must be named: {record['missing_configs']}")
+    check(record["configs"]["missing"]["complete"] is False
+          and record["configs"]["missing"]["mixes"] == {},
+          "an absent matrix job must be an explicit incomplete config")
+    check(record["configs"]["srt"]["complete"] is True
+          and record["complete"] is False,
+          "a complete config stays valid while the missing group makes the "
+          "whole run incomplete")
+    check("host" not in record,
+          "the separate publisher machine must not be recorded as benchmark host")
+
+
+def test_regressions_require_complete_passing_same_runner_baselines():
+    module = load_module(HISTORY, "bench_history_regressions")
+    host = {"cpu_model": "runner-a", "kernel": "7.2", "transport": "libsrt"}
+
+    def record(value, schema="nginx-media.bench-history/2", complete=True,
+               fingerprint=host, outcome="pass"):
+        return {
+            "schema": schema,
+            "tier": "nightly",
+            "configs": {"srt": {
+                "complete": complete,
+                "mixes": {"pure-srt": {
+                    "fingerprint": fingerprint,
+                    "rungs": [{"destinations": 16, "outcome": outcome,
+                               "sender_cpu_per_gbps": value}],
+                }},
+            }},
+        }
+
+    current = record(14, schema="nginx-media.bench-history/3")
+    history = [
+        record(10),
+        record(12),
+        record(11),
+        record(100, outcome="quality-failure"),
+        record(100, complete=False),
+        record(100, fingerprint={"cpu_model": "runner-b"}),
+        record(100, schema="nginx-media.bench-history/1"),
+        record(100, fingerprint=None),
+    ]
+    findings = module.regressions(current, history)
+    check(len(findings) == 1, f"one valid regression expected: {findings}")
+    if findings:
+        check_close(findings[0]["baseline_median"], 11,
+                    "only valid comparable baselines contribute")
+        check(findings[0]["baseline_count"] == 3,
+              f"failed, incomplete and other-host samples are excluded: {findings}")
+        check(findings[0]["factor"] > 1.25,
+              f"the threshold is measured against the comparable median: {findings}")
+    check(module.regressions(record(14, schema="nginx-media.bench-history/3",
+                                    complete=False), history) == [],
+          "an incomplete current configuration cannot raise an alert")
+    interleaved_history = ([record(10)]
+                           + [record(50, fingerprint={"cpu_model": "runner-b"})
+                              for _ in range(12)]
+                           + [record(12), record(11)])
+    interleaved_findings = module.regressions(current, interleaved_history,
+                                              window=10)
+    check(len(interleaved_findings) == 1,
+          f"backward search must locate same-runner baselines across other-runner runs: {interleaved_findings}")
+    if interleaved_findings:
+        check_close(interleaved_findings[0]["baseline_median"], 11,
+                    "median matches the 3 same-runner runs")
+        check(interleaved_findings[0]["baseline_count"] == 3,
+              "all 3 same-runner runs found despite intervening runs")
+
+
+def test_parse_expected_configs_validation():
+    module = load_module(HISTORY, "bench_history_config_parser")
+    check(module.parse_expected_configs(None) is None,
+          "None value returns None")
+    check(module.parse_expected_configs('["srt", "rtmp"]') == ["rtmp", "srt"],
+          "list of configs parsed and sorted")
+    check(module.parse_expected_configs('["srt rtmp", "hls"]') == ["hls", "rtmp", "srt"],
+          "whitespace-separated groups flattened and deduplicated")
+    for bad in ('"not-a-list"', "[1, 2]", "[]", '["   "]'):
+        try:
+            module.parse_expected_configs(bad)
+            check(False, f"expected ValueError for {bad}")
+        except ValueError:
+            check(True, "expected ValueError raised")
 
 def test_gate_accepts_a_finished_ladder_that_stopped_at_the_boundary(work):
     results = os.path.join(work, "ok")
@@ -1129,6 +1231,9 @@ def main():
         test_history_carries_the_environment_and_peak_pressure(work)
         test_history_carries_the_strict_result_separately(work)
         test_history_separates_observed_from_threshold(work)
+        test_summary_marks_uncollected_expected_configs(work)
+        test_regressions_require_complete_passing_same_runner_baselines()
+        test_parse_expected_configs_validation()
         test_gate_accepts_a_finished_ladder_that_stopped_at_the_boundary(work)
         test_gate_accepts_an_infrastructure_limited_rung(work)
         test_gate_rejects_quality_failure_below_the_required_rung(work)
