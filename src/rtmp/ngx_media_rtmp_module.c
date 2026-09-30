@@ -1083,7 +1083,7 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
 
     source = ngx_media_graph_source_by_key(registry, key_hash, &key_stream);
 
-    if (source == NULL) {
+    if (source == NULL || source->type != NGX_MEDIA_SOURCE_RTMP) {
         ngx_log_error(NGX_LOG_WARN, session->log, 0,
                       "media: rtmp publisher rejected: no source for key %V",
                       &key_print_str);

@@ -2063,7 +2063,9 @@ ngx_media_srt_handler(ngx_event_t *ev)
                 key_source = ngx_media_graph_source_by_key(registry, key_hash,
                                                            &key_stream);
 
-                if (key_source == NULL) {
+                if (key_source == NULL
+                    || key_source->type != NGX_MEDIA_SOURCE_SRT)
+                {
                     /*
                      * The fingerprint, never the key: a refusal must be
                      * findable in the log and must not turn the log into a

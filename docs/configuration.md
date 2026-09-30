@@ -225,13 +225,18 @@ of the graph, of the shared directory or of a core file carries nothing that
 can publish; the one thing to protect is the deployment secret.
 
 ```nginx
-media_ingest_secret /usr/local/nginx-media/ingest.secret;
+media_ingest_secret /var/lib/nginx-media/ingest.secret;
 ```
 
-The core generates that file (0600) on first start if it is not there, and
-every worker inherits it before forking. Without the directive, generated
-keys cannot be issued or read and key rotation cannot derive a replacement.
-An operator-supplied key does not use the deployment secret.
+The core generates a 32-byte secret with mode 0600 on first start if it is not
+there; a supplied file must contain at least 32 bytes of unpredictable data,
+and the first 32 bytes are used.  Every worker inherits the secret before
+forking. Without the directive, generated keys cannot be issued or read and
+key rotation cannot derive a replacement. An operator-supplied key does not
+use the deployment secret.
+
+Replacing a shorter secret changes API-issued keys, so reconfigure or rotate
+those publishers.
 
 `POST .../sources/{id}/rotate` issues a new nonce, so the old key dies at
 once and the new one is derivable forever after.  Every later read of a source

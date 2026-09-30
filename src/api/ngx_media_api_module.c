@@ -3056,6 +3056,8 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
     ngx_media_source_t *source;
     ngx_media_registry_t *registry;
     ngx_media_stream_t  *key_owner;
+    const u_char         *master;
+    size_t                master_len = 0;
     u_char              key[NGX_MEDIA_KEY_MAX];
     u_char              key_hash[NGX_MEDIA_KEY_HASH_LEN];
     u_char              key_print[NGX_MEDIA_KEY_PRINT_LEN];
@@ -3219,6 +3221,16 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
         }
 
         nonce_set = 1;
+        master = ngx_media_ingest_secret(&master_len);
+        if (master == NULL
+            || ngx_media_key_derive(master, master_len, &id, key_nonce, key,
+                                    sizeof(key), &key_len, key_hash, key_print)
+                != NGX_OK)
+        {
+            *last = ngx_snprintf(*last, end - *last,
+                                 "{\"error\":\"key_derive_failed\"}");
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
     }
 
     /*
@@ -3279,16 +3291,7 @@ ngx_media_api_source_create(ngx_http_request_t *r, ngx_media_stream_t *stream,
     if (keyed) {
         if (nonce_set) {
             ngx_media_source_key_nonce(source, key_nonce);
-
-            if (ngx_media_api_source_key(source, key, sizeof(key), &key_len,
-                                         key_hash, key_print) != NGX_OK)
-            {
-                *last = ngx_snprintf(*last, end - *last,
-                                     "{\"error\":\"key_derive_failed\"}");
-                return NGX_HTTP_INTERNAL_SERVER_ERROR;
-            }
         }
-
         ngx_media_source_key_set(source, key_hash, key_print);
     }
     ngx_media_source_touch(source);

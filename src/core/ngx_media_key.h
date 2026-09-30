@@ -64,9 +64,10 @@
 [[nodiscard]] ngx_int_t ngx_media_key_nonce(u_char *nonce);
 
 /*
- * The deployment secret every key is derived under.  `media_ingest_secret`
- * names the file; the core loads it before forking, or generates one (0600)
- * when the file is not there.  NULL until then, which the API reports as a
+ * The deployment secret every ingest key is derived under.  `media_ingest_secret`
+ * names the file; it must contain at least 32 bytes of unpredictable data.
+ * The core loads the first 32 bytes before forking, or generates one (0600)
+ * when the file is absent.  NULL until then, which the API reports as a
  * configuration error rather than deriving a key from nothing.
  */
 #define NGX_MEDIA_KEY_MASTER_LEN  32
