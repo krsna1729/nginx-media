@@ -873,6 +873,7 @@ def test_summary_persists_same_runner_comparison_metadata(work):
     env = os.environ.copy()
     env["BENCH_COMMIT_TIMESTAMP"] = "2026-09-28T12:30:00+00:00"
     env["BENCH_COMPARISON_GROUP"] = "workflow-42-attempt-1"
+    env["GITHUB_SHA"] = "sampled-commit"
     result = run([sys.executable, HISTORY, "summarize", results, "--tier",
                   "branch", "--out", out], env=env)
     check(result.returncode == 0, f"trend summary succeeds: {result.stderr}")
@@ -880,6 +881,8 @@ def test_summary_persists_same_runner_comparison_metadata(work):
         record = json.load(source)
     check(record.get("comparison_group") == "workflow-42-attempt-1",
           f"summary retains the same-runner cohort: {record}")
+    check(record.get("sha") == "sampled-commit",
+          f"each profile records its source revision: {record}")
     check(record.get("commit_timestamp") == "2026-09-28T12:30:00+00:00",
           f"summary retains source commit time for graph ordering: {record}")
 

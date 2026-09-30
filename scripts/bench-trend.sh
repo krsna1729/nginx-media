@@ -90,7 +90,7 @@ while IFS=$'\t' read -r sha commit_time; do
         BENCH_TREND=1 BENCH_CONFIGS="$config_names" \
         BENCH_STEPS="$TREND_STEPS" BENCH_SECONDS="$TREND_SECONDS" \
         BENCH_COMMIT_TIMESTAMP="$commit_time" BENCH_COMPARISON_GROUP="$RUN_ID" \
-        GITHUB_REF_NAME=main \
+        GITHUB_SHA="$sha" GITHUB_REF_NAME=main \
             "$ROOT/scripts/bench-ci.sh" "$TIER" "$result" \
             > "$OUT/$sha-driver.log" 2>&1 || true
         if [ ! -s "$result/summary.json" ]; then
