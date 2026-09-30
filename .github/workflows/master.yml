@@ -120,5 +120,7 @@ jobs:
     uses: ./.github/workflows/bench-publish.yml
     with:
       tier: branch
+      configs: '["srt","rtmp","rtmp-srt"]'
     permissions:
       contents: write
+      issues: write
