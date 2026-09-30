@@ -23,6 +23,11 @@ case "$TIER" in
     *) echo "unsupported trend tier: $TIER" >&2; exit 2 ;;
 esac
 
+if [ ! -d "$ROOT/.build/nginx-1.30.5" ] || [ ! -d "$ROOT/.build/srt-haivision" ]; then
+    echo "bench-trend prerequisites missing in $ROOT/.build (nginx-1.30.5 and srt-haivision required; run make nginx)" >&2
+    exit 1
+fi
+
 rm -rf "$OUT"
 mkdir -p "$OUT"
 python3 "$ROOT/tests/bench/bench_commit_selection.py" "$TIER" \
@@ -91,6 +96,7 @@ while IFS=$'\t' read -r sha commit_time; do
         BENCH_STEPS="$TREND_STEPS" BENCH_SECONDS="$TREND_SECONDS" \
         BENCH_COMMIT_TIMESTAMP="$commit_time" BENCH_COMPARISON_GROUP="$RUN_ID" \
         GITHUB_SHA="$sha" GITHUB_REF_NAME=main \
+        CAPACITY_NGINX="$build/install/sbin/nginx" \
             "$ROOT/scripts/bench-ci.sh" "$TIER" "$result" \
             > "$OUT/$sha-driver.log" 2>&1 || true
         if [ ! -s "$result/summary.json" ]; then

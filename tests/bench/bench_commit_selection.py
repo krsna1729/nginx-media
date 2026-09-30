@@ -5,6 +5,9 @@ import argparse
 import datetime as dt
 import subprocess
 import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
 
 UTC = dt.timezone.utc
 
@@ -23,6 +26,7 @@ def select(tier, commits, head, now):
     by_sha = {sha: timestamp for sha, timestamp in commits}
     if head not in by_sha:
         raise ValueError(f"HEAD {head} is missing from fetched history")
+    order = {sha: idx for idx, (sha, _) in enumerate(commits)}
     head_time = by_sha[head]
     picked = {}
 
@@ -58,7 +62,7 @@ def select(tier, commits, head, now):
         raise ValueError(f"unknown tier: {tier}")
 
     picked[head] = head_time
-    return sorted(picked.items(), key=lambda item: (item[1], item[0]))
+    return sorted(picked.items(), key=lambda item: (item[1], -order.get(item[0], 0)))
 
 
 def main():
@@ -73,7 +77,7 @@ def main():
     if now.tzinfo is None:
         parser.error("--now must include a timezone")
     history = subprocess.run(
-        ["git", "log", "--first-parent", "--format=%H%x09%ct", args.ref],
+        ["git", "-C", ROOT, "log", "--first-parent", "--format=%H%x09%ct", args.ref],
         check=True, capture_output=True, text=True).stdout.splitlines()
     try:
         for sha, timestamp in select(args.tier, parse_history(history), args.head,

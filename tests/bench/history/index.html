@@ -710,9 +710,10 @@ function switchView(viewName) {
   }
 }
 
-function inspectCommit(sha, trend = false) {
+function inspectCommit(sha, trend = false, group = "") {
   const rec = currentTierRecords.find(r => (r.sha || "").startsWith(sha)
-    && Boolean(r.comparison_group) === trend);
+    && Boolean(r.comparison_group) === trend
+    && (r.comparison_group || "") === group);
   if (!rec) return;
   const panel = document.getElementById("commit-inspector");
   panel.classList.add("open");
@@ -1058,7 +1059,7 @@ function render(records, selectedHardware = activeHardware) {
         }
       }
       const hwLabel = [...hwSet].join(", ") || "Unknown hardware";
-      mRows += `<tr onclick="inspectCommit('${esc(sha)}', ${Boolean(r.comparison_group)})"><td><strong>${esc(ts)}</strong></td>` +
+      mRows += `<tr onclick="inspectCommit('${esc(sha)}', ${Boolean(r.comparison_group)}, '${esc(r.comparison_group || "")}')"><td><strong>${esc(ts)}</strong></td>` +
                `<td><code>${esc(sha)}</code></td>` +
                `<td>${esc(hwLabel)}</td>` +
                `<td>${r.comparison_group ? '<span class="badge unverified">same-runner trend probe</span>' : '<span class="badge complete">qualification</span>'}</td>` +
