@@ -247,6 +247,13 @@ endpoints, is the most recent one.  `make srt-qualify` is separate: it rebuilds
 nginx with `MEDIA_SRT_BACKEND=both` and runs `srt_backend_qualify.sh`, which
 drives one scenario against the SRT library and against the UDP test double.
 
+The release workflow runs `make test-integration` against the release build.
+That target shares `TEST_TARGETS` with `test-in-container` but excludes unit
+tests, which the workflow runs separately.  It then runs `make netns` and
+`make srt-qualify`; `netns` stays separate because it needs host networking
+privileges and is not part of the container suite.
+
+
 ### Benchmarks: `tests/bench`
 
 ```sh
