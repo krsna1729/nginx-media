@@ -108,6 +108,7 @@
 <script>
 const charts = [];
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const esc = s => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 async function loadTier(tier) {
   const text = await (await fetch(`data/${tier}.jsonl`, {cache: "no-store"})).text();
@@ -156,18 +157,18 @@ function series(records, pick) {
 function chart(container, title, data) {
   const card = document.createElement("div");
   card.className = "card";
-  card.innerHTML = `<h3>${title}</h3><canvas></canvas>`;
+  card.innerHTML = `<h3>${esc(title)}</h3><canvas></canvas>`;
   container.appendChild(card);
   if (!data.length) {
-    card.innerHTML = `<h3>${title}</h3><p class="empty">No complete, fingerprinted runs for this workload.</p>`;
+    card.innerHTML = `<h3>${esc(title)}</h3><p class="empty">No complete, fingerprinted runs for this workload.</p>`;
     return;
   }
   if (typeof Chart === "undefined") {
     // the chart library could not be loaded: keep the numbers readable
     const rows = data.map(({label, points}) =>
-      `<tr><td>${label}</td><td>${points.map(p => p.y).join(" → ")}</td></tr>`)
+      `<tr><td>${esc(label)}</td><td>${points.map(p => esc(p.y)).join(" → ")}</td></tr>`)
       .join("");
-    card.innerHTML = `<h3>${title}</h3><div class="scroll"><table>${rows}</table></div>`;
+    card.innerHTML = `<h3>${esc(title)}</h3><div class="scroll"><table>${rows}</table></div>`;
     return;
   }
   const labels = [...new Set(data.flatMap(({points}) =>
@@ -218,24 +219,24 @@ function render(records) {
     const status = statusBadge(c.complete);
     const mixes = Object.entries(c.mixes || {});
     if (!mixes.length) {
-      const missing = (c.missing || []).join("; ");
-      rows += `<tr><td>${config}</td><td>–</td>` +
+      const missing = (c.missing || []).map(esc).join("; ");
+      rows += `<tr><td>${esc(config)}</td><td>–</td>` +
               `<td>${status}${missing ? `<span class="status-detail">${missing}</span>` : ""}</td>` +
               `<td>–</td><td>–</td><td>–</td><td>–</td></tr>`;
       continue;
     }
     for (const [mix, e] of mixes)
-      rows += `<tr><td>${config}</td><td>${mix}</td><td>${status}</td>` +
-              `<td>${e.highest_passing ?? "–"}</td>` +
-              `<td>${e.first_quality_failure ?? "none"}</td>` +
-              `<td>${(e.setup_limited || []).join(", ") || "none"}</td>` +
-              `<td>${runnerClass(e.fingerprint || {})}</td></tr>`;
+      rows += `<tr><td>${esc(config)}</td><td>${esc(mix)}</td><td>${status}</td>` +
+              `<td>${esc(e.highest_passing ?? "–")}</td>` +
+              `<td>${esc(e.first_quality_failure ?? "none")}</td>` +
+              `<td>${esc((e.setup_limited || []).join(", ") || "none")}</td>` +
+              `<td>${esc(runnerClass(e.fingerprint || {}))}</td></tr>`;
   }
   const status = statusBadge(latest.complete);
-  rows += `<tr><td colspan="7">Run ${status} · <code>${latest.sha || ""}</code> · ` +
-          `${latest.timestamp} · missing configs: ` +
-          `${(latest.missing_configs || []).join(", ") || "none"} · unexpected configs: ` +
-          `${(latest.unexpected_configs || []).join(", ") || "none"}</td></tr>`;
+  rows += `<tr><td colspan="7">Run ${status} · <code>${esc(latest.sha || "")}</code> · ` +
+          `${esc(latest.timestamp)} · missing configs: ` +
+          `${esc((latest.missing_configs || []).join(", ") || "none")} · unexpected configs: ` +
+          `${esc((latest.unexpected_configs || []).join(", ") || "none")}</td></tr>`;
   table.innerHTML = rows;
 }
 

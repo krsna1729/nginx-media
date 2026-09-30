@@ -416,10 +416,10 @@ def gate(args):
 
 def regressions(record, history, window=10, tolerance=1.25):
     """Return regressions against complete passing runs with the same host."""
-    if record.get("schema") != SCHEMA:
-        return []
     supported = {SCHEMA, "nginx-media.bench-history/2"}
-    recent = [old for old in history[-window:]
+    if record.get("schema") not in supported:
+        return []
+    recent = [old for old in history
               if old.get("schema") in supported
               and old.get("tier") == record.get("tier")]
     findings = []
@@ -441,7 +441,7 @@ def regressions(record, history, window=10, tolerance=1.25):
                         or not math.isfinite(current) or current <= 0):
                     continue
                 past = []
-                for old in recent:
+                for old in reversed(recent):
                     old_config = old.get("configs", {}).get(name, {})
                     old_entry = old_config.get("mixes", {}).get(mix, {})
                     if (old_config.get("complete") is not True
@@ -455,6 +455,9 @@ def regressions(record, history, window=10, tolerance=1.25):
                                 and not isinstance(value, bool)
                                 and math.isfinite(value) and value > 0):
                             past.append(value)
+                            break
+                    if len(past) >= window:
+                        break
                 if len(past) < 3:
                     continue
                 median = statistics.median(past)
