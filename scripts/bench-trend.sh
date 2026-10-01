@@ -78,7 +78,7 @@ PY
 }
 
 : > "$OUT/samples.jsonl"
-while IFS=$'\t' read -r sha commit_time; do
+while IFS=$'\t' read -r -u 3 sha commit_time; do
     [ -n "$sha" ] || continue
     tree="$OUT/worktree-$sha"
     result="$OUT/$sha"
@@ -118,7 +118,7 @@ while IFS=$'\t' read -r sha commit_time; do
         cp "$result/summary.json" "$OUT/current.json"
     fi
     git -C "$ROOT" worktree remove --force "$tree" >/dev/null 2>&1 || true
-done < "$OUT/commits.tsv"
+done 3< "$OUT/commits.tsv"
 
 if [ ! -s "$OUT/current.json" ]; then
     echo "trend sample did not contain workflow HEAD $HEAD_SHA" >&2
