@@ -66,6 +66,17 @@ with open(path, "w", encoding="utf-8") as out:
 PY
 }
 
+append_sample() {
+    python3 - "$1" "$OUT/samples.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    record = json.load(source)
+with open(sys.argv[2], "a", encoding="utf-8") as output:
+    json.dump(record, output, separators=(",", ":"))
+    output.write("\n")
+PY
+}
+
 : > "$OUT/samples.jsonl"
 while IFS=$'\t' read -r sha commit_time; do
     [ -n "$sha" ] || continue
@@ -76,8 +87,7 @@ while IFS=$'\t' read -r sha commit_time; do
     if ! git -C "$ROOT" worktree add --quiet --detach "$tree" "$sha"; then
         echo "could not create worktree for $sha" >&2
         stub_summary "$sha" "$commit_time" "$result/summary.json"
-        cat "$result/summary.json" >> "$OUT/samples.jsonl"
-        printf '\n' >> "$OUT/samples.jsonl"
+        append_sample "$result/summary.json"
         continue
     fi
 
@@ -103,8 +113,7 @@ while IFS=$'\t' read -r sha commit_time; do
             stub_summary "$sha" "$commit_time" "$result/summary.json"
         fi
     fi
-    cat "$result/summary.json" >> "$OUT/samples.jsonl"
-    printf '\n' >> "$OUT/samples.jsonl"
+    append_sample "$result/summary.json"
     if [ "$sha" = "$HEAD_SHA" ]; then
         cp "$result/summary.json" "$OUT/current.json"
     fi
