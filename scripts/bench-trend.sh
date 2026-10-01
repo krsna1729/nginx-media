@@ -18,8 +18,8 @@ case "$TIER" in
         configs='["srt-rtmp","hls","mix-srt-share","mix-all-protocols"]'
         config_names="srt-rtmp hls mix-srt-share mix-all-protocols" ;;
     weekly)
-        configs='["all"]'
-        config_names="all" ;;
+        config_names="all"
+        TREND_STEPS="${BENCH_TREND_STEPS:-1 32 64}" ;;
     *) echo "unsupported trend tier: $TIER" >&2; exit 2 ;;
 esac
 

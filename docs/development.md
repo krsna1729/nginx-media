@@ -529,10 +529,13 @@ the previous seven days plus HEAD for `nightly`, and up to two commits per
 week for the previous four weeks plus HEAD for `weekly`. These records carry a
 workflow-scoped `comparison_group`; regressions compare only samples from that
 group and same-runner fingerprint. The sampled profile uses rungs 1, 32 and
-128 for 10 seconds each. Trend probes are appended to history and shown as
-such in the matrix, but never count as qualification runs or as capacity-
-boundary diagnostics. The chart uses commit time, and its highest passing
-sampled rung is explicitly not a capacity limit.
+128 for 10 seconds each in branch/nightly and 1, 32 and 64 in weekly: 128 was
+infrastructure-limited in the single-runner weekly probe, so 64 is the highest
+weekly trend rung. The full weekly qualification profile is unchanged. Trend
+probes are appended to history and shown as such in the matrix, but never count
+as qualification runs or as capacity-boundary diagnostics. The chart uses
+commit time, and its highest passing sampled rung is explicitly not a capacity
+limit.
 
 The trend job's nominal receiver-measurement lower bound is 15 runner-minutes
 for branch (`10 commits × 3 workloads × 3 rungs × 10 s`), 28 for nightly
