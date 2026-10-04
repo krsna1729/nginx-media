@@ -1952,6 +1952,17 @@ def test_gate_rejects_a_manifest_that_differs_from_the_executed_mixes(work):
           f"control: nine executed, nine promised, nine measured: "
           f"{result.stdout}")
 
+    # Old bundles can still fill every rung while the current harness runs a
+    # different ladder. The harness's recipe must agree with the manifest.
+    results = os.path.join(work, "steps-mismatch")
+    make_config(results, "all", mix_rungs(PUBLISHED_MIXES), expected=seven,
+                recipe={"steps": "1,16"})
+    out = os.path.join(work, "steps-mismatch.json")
+    summarize(results, out)
+    result = gate(out)
+    check(result.returncode == 1 and "steps" in result.stdout,
+          f"a recipe with different steps must fail: {result.stdout}")
+
 
 def test_trend_stub_summary_for_every_tier(work):
     """bench-trend.sh records a stub for a revision that did not build.  The

@@ -340,8 +340,9 @@ checkbox above marked only after the behavior is exercised.
   harness reads it and `bench-ci.sh` derives `ALL_MIXES` from it and hands the
   harness the explicit list for `all`, so the manifest (seven names; both
   contention ladders were unchecked) and execution are one set. The harness
-  prints `quality_mixes=`; `completeness()` requires it to equal the manifest
-  and treats a harness that never states it as incomplete.
+  prints `quality_mixes=` and `quality_recipe`; `completeness()` requires the
+  mixes and recipe steps to equal the manifest. A harness that never states
+  its mixes is incomplete.
 - B8: `bench-trend.sh` stub summaries take the single `config_names` list (the
   weekly branch used to leave `configs` unset under `set -u`).
 - B3/B2: each configuration's record carries its recipe (seconds, source rate,
@@ -357,8 +358,9 @@ checkbox above marked only after the behavior is exercised.
 - B9/B10 (partial): the scorecard sparkline follows the card's rung across
   runs with the same runner identity and a comparable recipe; `rung_record`
   keeps the preflight verdict and the per-protocol calibration reference.
-- Evidence: `make bench-reporting` 321 checks, 0 failures. The new cases use
-  judge fixtures, the real `bench-ci.sh` and `bench-trend.sh` in scratch trees
+- Evidence: `make bench-reporting` 322 checks, 0 failures. Manifest-step drift
+  failed before the additional check (`bench_gate=pass`) and is now rejected.
+  The cases use judge fixtures, the real `bench-ci.sh` and `bench-trend.sh` in scratch trees
   and the harness's own mix-selection function with the ladders stubbed. Run
   against the pre-change tree (`git archive origin/main` plus the new test
   file) they fail: floor, judges, calibration, mix list, manifest, recipe,

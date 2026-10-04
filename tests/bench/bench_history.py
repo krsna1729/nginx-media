@@ -347,6 +347,9 @@ def completeness(results, name, mixes):
             missing.append(f"{mix}: rungs {absent} neither measured nor "
                            f"skipped at the boundary")
     recipe = log["recipe"]
+    if recipe is not None and recipe["steps"] != expected.get("steps", []):
+        missing.append(f"the harness steps {recipe['steps']} differ from the "
+                       f"manifest steps {expected.get('steps', [])}")
     if recipe is not None:
         recipe = dict(recipe, mixes=sorted(log["mixes"] or []),
                       harness=harness_revision())
