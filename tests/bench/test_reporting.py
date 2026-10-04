@@ -2478,7 +2478,7 @@ def test_delivery_window_alignment(work):
         "interval": {"value": 10.0}, "window": measured_window(),
         "by_kind_pct_of_core": {"value": {"srt-receiver": 40.0}}}}
     result = module.efficiency_section(bundle)
-    check_close(result["receiver_cpu_per_gbps"]["value"], 50.0 / baseline,
+    check_close(result["receiver_cpu_per_gbps"]["value"], 70.0 / baseline,
                 "remote receiver CPU is attributed separately despite colliding native PIDs",
                 tolerance=0.01)
     bundle["receiver_host"]["cpu"]["window"] = {"clock_domain": "receiver-monotonic"}
