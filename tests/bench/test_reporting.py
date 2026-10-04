@@ -1603,11 +1603,21 @@ def srt_judge_rung(directory, delivered=1_250_000, queue_units=0):
                 "feed_drops", "output_queue_units", "output_queue_bytes",
                 "output_drops", "sent_bytes", "blocked_sends",
                 "retransmitted_packets"),
-               [(r, t0 + r * 10**9, 4242, "0", "0", 1, queue_units, 0, 0, 0, 0,
-                 0, r * 1000, 0, 0) for r in range(5)])
-    for name in ("metrics.before.0", "metrics.after.0", "stream.before",
-                 "stream.after"):
-        write(p(name), "")
+               [(r - 1, t0 + r * 10**9, 4242, "0", "0", 1, queue_units, 0, 0, 0, 0,
+                 0, r * 1000, 0, 0) for r in range(1, 10)])
+    metrics = (
+        "destinations", "feed_queue_units", "feed_queue_bytes",
+        "feed_queue_dropped_total", "output_queue_units", "output_queue_bytes",
+        "output_dropped_total", "sent_bytes_total", "blocked_sends_total",
+        "retransmitted_packets_total",
+    )
+    for name in ("metrics.before.0", "metrics.after.0"):
+        write(p(name), "".join(
+            f'nginx_media_srt_egress_shard_{metric}{{worker="0",shard="0"}} '
+            f'{1 if metric == "destinations" else 0}\n' for metric in metrics))
+    for name in ("stream.before", "stream.after"):
+        write(p(name), 'nginx_media_stream_feed_overruns_total{name="live"} 0\n'
+              'nginx_media_stream_feed_evictions_total{name="live"} 0\n')
     with open(p("source.ts"), "wb") as source:
         source.write(bytes(3_750_000))  # 1 Mbit/s over the 30 s it stands for
     return p
@@ -1722,6 +1732,94 @@ def test_rtmp_judge_rejects_non_finite_inputs(work):
         result = run_rtmp_judge(short, *extra)
         check(not judge_passed(result),
               f"{label} must not make a short rung pass: {result.stdout}")
+
+def test_receiver_evidence_is_required(work):
+    header = ("destination_id", "start_ns", "end_ns", "bytes_received", "total_bytes")
+    t0 = 100 * 10**9
+    normal = [("d0000", t0 + i * 10**9, t0 + (i + 1) * 10**9,
+               125000, (i + 1) * 125000) for i in range(10)]
+    corrupt = {
+        "missing": [],
+        "unknown": [("other", *normal[0][1:])] + normal[1:],
+        "truncated": normal[:5],
+        "duplicate": normal[:1] + normal,
+        "overlap": normal[:1] + [("d0000", t0, t0 + 2 * 10**9, 125000, 250000)] + normal[2:],
+        "gap": normal[:1] + normal[2:],
+        "outside": normal + [("d0000", t0 + 10 * 10**9, t0 + 11 * 10**9, 0, 1250000)],
+        "long-before-jitter": [("d0000", t0, t0 + 2100000000, 262500, 262500),
+                               ("d0000", t0 + 2100000000, t0 + 2200000000, 12500, 275000),
+                               ("d0000", t0 + 2200000000, t0 + 3 * 10**9, 100000, 375000)] + normal[3:],
+        "long-raw": [("d0000", t0, t0 + 3 * 10**9, 375000, 375000)] + normal[3:],
+        "nonpositive": [("d0000", t0, t0, 0, 0)] + normal,
+    }
+    for protocol, fixture, judge in (
+            ("srt", srt_judge_rung, run_srt_judge),
+            ("rtmp", rtmp_judge_rung, run_rtmp_judge)):
+        for label, rows in corrupt.items():
+            p = fixture(os.path.join(work, f"{protocol}-evidence-{label}"))
+            write_rows(p("intervals.csv"), header, rows)
+            result = judge(p)
+            check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout
+                  and not judge_passed(result) and "quality_strict_full_rate=yes" not in result.stdout,
+                  f"{protocol} {label} evidence is setup failure, not delivery quality: {result.stdout}")
+        p = fixture(os.path.join(work, f"{protocol}-missing-snapshot-destination"))
+        if protocol == "srt":
+            write_rows(p("final.csv"), ("destination_id", "bytes_received", "snapshot_ns"),
+                       [("other", 1250000, t0 + 10 * 10**9)])
+        else:
+            write(p("receiver.after.0"),
+                  f"# scrape_monotonic_ns {t0 + 10 * 10**9} {t0 + 10 * 10**9}\n")
+        result = judge(p)
+        check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout,
+              f"{protocol} missing snapshot destination is setup failure: {result.stdout}")
+        p = fixture(os.path.join(work, f"{protocol}-zero-delivery"), delivered=0)
+        result = judge(p)
+        check(result.returncode == 0 and "quality_measurement_valid=yes" in result.stdout
+              and "quality_pass=no" in result.stdout,
+              f"{protocol} complete zero-delivery counters are quality failure: {result.stdout}")
+    p = rtmp_judge_rung(os.path.join(work, "rtmp-jitter-zero"))
+    jitter = [("d0000", t0, t0 + 100000000, 0, 0),
+              ("d0000", t0 + 100000000, t0 + 10**9, 125000, 125000)] + normal[1:]
+    write_rows(p("intervals.csv"), header, jitter)
+    check(judge_passed(run_rtmp_judge(p)),
+          "healthy short jitter and zero-byte sample remain valid")
+    for label in ("missing-shard", "missing-metric", "truncated-queue"):
+        p = srt_judge_rung(os.path.join(work, f"srt-{label}"))
+        if label == "missing-shard":
+            # Preserve complete rounds but erase the only active shard.
+            with open(p("queues.csv"), encoding="utf-8") as source:
+                rows = list(csv.reader(source))
+            for row in rows[1:]:
+                row[4] = "1"
+            write_rows(p("queues.csv"), rows[0], rows[1:])
+        elif label == "missing-metric":
+            write(p("metrics.after.0"),
+                  'nginx_media_srt_egress_shard_destinations{worker="0",shard="0"} 1\n')
+        else:
+            with open(p("queues.csv"), encoding="utf-8") as source:
+                rows = list(csv.reader(source))
+            write_rows(p("queues.csv"), rows[0], rows[1:5])
+        result = run_srt_judge(p)
+        check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout
+              and "quality_strict_full_rate=yes" not in result.stdout,
+              f"{label} cannot pass strict qualification: {result.stdout}")
+    # Two real active sender shards, with shard 1 absent from every queue
+    # round: seeing complete rows for shard 0 is not complete evidence.
+    p = srt_judge_rung(os.path.join(work, "srt-whole-shard-vanished"))
+    for name in ("baseline.csv", "final.csv", "intervals.csv", "results.csv"):
+        with open(p(name), encoding="utf-8") as source:
+            rows = list(csv.reader(source))
+        second = [["d0001"] + row[1:] for row in rows[1:]]
+        write_rows(p(name), rows[0], rows[1:] + second)
+    for name in ("metrics.before.0", "metrics.after.0"):
+        with open(p(name), encoding="utf-8") as source:
+            blob = source.read()
+        write(p(name), blob + blob.replace('shard="0"', 'shard="1"'))
+    result = run_srt_judge(p, "--destinations", "2")
+    check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout
+          and "quality_strict_full_rate=yes" not in result.stdout,
+          f"whole missing shard invalidates otherwise healthy rounds: {result.stdout}")
+
 
 
 def hls_push_judge_rung(directory, latency_ms=250.0):
@@ -2260,6 +2358,7 @@ def main():
         test_gate_requires_positive_evidence_of_the_floor_rung(work)
         test_srt_judge_rejects_non_finite_inputs(work)
         test_rtmp_judge_rejects_non_finite_inputs(work)
+        test_receiver_evidence_is_required(work)
         test_hls_push_judge_rejects_non_finite_inputs(work)
         test_calibration_is_stored_only_from_a_passing_positive_rung(work)
         test_harness_runs_the_mixes_of_the_one_list(work)

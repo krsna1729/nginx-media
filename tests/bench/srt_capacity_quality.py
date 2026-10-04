@@ -34,6 +34,7 @@ LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"])*)"')
 SAMPLE_RE = re.compile(
     r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*?)\})?\s+"
     r"([-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)"
+    r"(?:\s+\S+)?\s*$"
 )
 
 
@@ -130,9 +131,16 @@ def parse_metrics(blob):
     for line in blob.splitlines():
         match = SAMPLE_RE.match(line)
         if match is None:
+            if any(line.startswith(name) for name in QUEUE_METRICS):
+                raise ValueError("malformed required sender metric")
             continue
         name, label_text, raw_value = match.groups()
         labels = dict(LABEL_RE.findall(label_text or ""))
+        if name in QUEUE_METRICS:
+            pairs = LABEL_RE.findall(label_text or "")
+            if (len(pairs) != len(labels)
+                    or LABEL_RE.sub("", label_text or "").strip(" ,\t")):
+                raise ValueError(f"malformed required sender metric labels: {name}")
         try:
             value = float(raw_value)
         except ValueError:
@@ -141,8 +149,14 @@ def parse_metrics(blob):
             continue
         if name == "nginx_media_worker_info" and "pid" in labels and value == 1:
             worker_pid = labels["pid"]
-        if name in QUEUE_METRICS and "worker" in labels and "shard" in labels:
-            values[(labels["worker"], labels["shard"])][name] = value
+        if name in QUEUE_METRICS:
+            if ("worker" not in labels or "shard" not in labels
+                    or not math.isfinite(value) or value < 0 or not value.is_integer()):
+                raise ValueError(f"invalid required sender metric {name}")
+            key = (labels["worker"], labels["shard"])
+            if name in values[key]:
+                raise ValueError(f"duplicate required sender metric {name} for {key}")
+            values[key][name] = value
     return worker_pid, values
 
 
@@ -196,22 +210,24 @@ def sample_queues(args):
             for pid in sorted(samples, key=int):
                 sample_ns, shard_values = samples[pid]
                 for (worker, shard), values in sorted(shard_values.items()):
+                    if not QUEUE_METRICS.issubset(values):
+                        raise ValueError(f"{worker}/{shard}: missing required sender metrics")
                     writer.writerow({
                         "round_id": round_id,
                         "sample_ns": sample_ns,
                         "worker_pid": pid,
                         "worker": worker,
                         "shard": shard,
-                        "destinations": values.get("nginx_media_srt_egress_shard_destinations", 0),
-                        "feed_queue_units": values.get("nginx_media_srt_egress_shard_feed_queue_units", 0),
-                        "feed_queue_bytes": values.get("nginx_media_srt_egress_shard_feed_queue_bytes", 0),
-                        "feed_drops": values.get("nginx_media_srt_egress_shard_feed_queue_dropped_total", 0),
-                        "output_queue_units": values.get("nginx_media_srt_egress_shard_output_queue_units", 0),
-                        "output_queue_bytes": values.get("nginx_media_srt_egress_shard_output_queue_bytes", 0),
-                        "output_drops": values.get("nginx_media_srt_egress_shard_output_dropped_total", 0),
-                        "sent_bytes": values.get("nginx_media_srt_egress_shard_sent_bytes_total", 0),
-                        "blocked_sends": values.get("nginx_media_srt_egress_shard_blocked_sends_total", 0),
-                        "retransmitted_packets": values.get("nginx_media_srt_egress_shard_retransmitted_packets_total", 0),
+                        "destinations": values["nginx_media_srt_egress_shard_destinations"],
+                        "feed_queue_units": values["nginx_media_srt_egress_shard_feed_queue_units"],
+                        "feed_queue_bytes": values["nginx_media_srt_egress_shard_feed_queue_bytes"],
+                        "feed_drops": values["nginx_media_srt_egress_shard_feed_queue_dropped_total"],
+                        "output_queue_units": values["nginx_media_srt_egress_shard_output_queue_units"],
+                        "output_queue_bytes": values["nginx_media_srt_egress_shard_output_queue_bytes"],
+                        "output_drops": values["nginx_media_srt_egress_shard_output_dropped_total"],
+                        "sent_bytes": values["nginx_media_srt_egress_shard_sent_bytes_total"],
+                        "blocked_sends": values["nginx_media_srt_egress_shard_blocked_sends_total"],
+                        "retransmitted_packets": values["nginx_media_srt_egress_shard_retransmitted_packets_total"],
                     })
             output.flush()
             round_id += 1
@@ -225,27 +241,17 @@ def read_metric_files(prefix):
         raise ValueError(f"no worker metrics files match {prefix}.*")
     for path in paths:
         with open(path, encoding="utf-8") as source:
-            for line in source:
-                match = SAMPLE_RE.match(line)
-                if match is None:
-                    continue
-                name, label_text, raw_value = match.groups()
-                if name not in QUEUE_METRICS:
-                    continue
-                labels = dict(LABEL_RE.findall(label_text or ""))
-                if "worker" not in labels or "shard" not in labels:
-                    continue
-                try:
-                    number = float(raw_value)
-                except ValueError:
-                    continue
-                if math.isfinite(number):
-                    values[(labels["worker"], labels["shard"])][name] = number
+            _, parsed = parse_metrics(source.read())
+        for key, metrics in parsed.items():
+            if key in values:
+                raise ValueError(f"duplicate sender shard in snapshot: {key}")
+            values[key] = metrics
     return values
 
 
 def read_stream_metric(path, metric):
     total = 0.0
+    found = False
     with open(path, encoding="utf-8") as source:
         for line in source:
             match = SAMPLE_RE.match(line)
@@ -255,8 +261,12 @@ def read_stream_metric(path, metric):
                 value = float(match.group(3))
             except ValueError:
                 continue
-            if math.isfinite(value):
-                total += value
+            if not math.isfinite(value) or value < 0 or not value.is_integer():
+                raise ValueError(f"invalid required {metric} in {path}")
+            total += value
+            found = True
+    if not found:
+        raise ValueError(f"missing required {metric} in {path}")
     return total
 
 
@@ -307,6 +317,8 @@ def quality_report(args):
                     or values[1] <= values[0] or values[2] < 0 or values[3] < 0):
                 raise ValueError(f"invalid receiver interval row for {destination}")
             interval_rows[destination].append(values)
+    if set(interval_rows) != expected:
+        raise ValueError("receiver interval IDs do not match the quality rung")
 
     receiver_results = {}
     with open(args.receiver_results, newline="", encoding="utf-8") as source:
@@ -318,6 +330,8 @@ def quality_report(args):
             raise ValueError("receiver results CSV lacks quality counters")
         for row in reader:
             destination = row["destination_id"]
+            if row["stalled"] is None:
+                raise ValueError(f"missing receiver stalled status for {destination}")
             if destination in receiver_results:
                 raise ValueError(f"duplicate receiver result for {destination}")
             try:
@@ -328,6 +342,10 @@ def quality_report(args):
                 } | {"stalled": row["stalled"].lower() in {"1", "true", "yes"}}
             except (TypeError, ValueError):
                 raise ValueError(f"invalid TS counters for {destination}")
+            if (row["stalled"].lower() not in {"0", "false", "no", "1", "true", "yes"}
+                    or any(value < 0 for key, value in receiver_results[destination].items()
+                           if key != "stalled")):
+                raise ValueError(f"invalid receiver quality counters for {destination}")
     if set(receiver_results) != expected:
         raise ValueError("receiver results IDs do not match the quality rung")
 
@@ -366,9 +384,7 @@ def quality_report(args):
             raise ValueError(f"receiver byte counter decreased for {destination}")
         rate_bps = total_bytes * 8 / duration_s
         ratio = rate_bps / reference_bps
-        intervals = sorted(interval_rows[destination])
-        if not intervals:
-            failures.append(f"{destination}: no short-interval samples")
+        intervals = interval_rows[destination]
         previous_end = baseline_ns
         previous_total = baseline[destination]
         low_start = None
@@ -379,12 +395,13 @@ def quality_report(args):
         for start_ns, end_ns, byte_count, cumulative in intervals:
             span_s = (end_ns - start_ns) / 1e9
             largest_interval_s = max(largest_interval_s, span_s)
-            if start_ns != previous_end:
-                failures.append(f"{destination}: interval sampling gap or overlap")
+            if (start_ns != previous_end or start_ns < baseline_ns
+                    or end_ns > final_ns):
+                raise ValueError(f"{destination}: interval sampling gap, overlap or out-of-window sample")
             if cumulative < previous_total or cumulative - previous_total != byte_count:
-                failures.append(f"{destination}: interval counters do not reconcile")
+                raise ValueError(f"{destination}: interval counters do not reconcile")
             if span_s > args.max_interval_s:
-                failures.append(f"{destination}: sample interval {span_s:.2f}s exceeds limit")
+                raise ValueError(f"{destination}: sample interval {span_s:.2f}s exceeds limit")
             interval_ratio = (byte_count * 8 / span_s) / reference_bps
             min_interval_ratio = interval_ratio if min_interval_ratio is None else min(min_interval_ratio, interval_ratio)
             interval_writer.writerow((destination, "sample", start_ns, end_ns,
@@ -405,13 +422,12 @@ def quality_report(args):
         last_end = intervals[-1][1] if intervals else baseline_ns
         residual_bytes = final[destination] - previous_total
         if residual_bytes < 0:
-            failures.append(f"{destination}: interval counter exceeds final receiver counter")
-            residual_bytes = 0
+            raise ValueError(f"{destination}: interval counter exceeds final receiver counter")
         if final_ns > last_end:
             residual_s = (final_ns - last_end) / 1e9
             largest_interval_s = max(largest_interval_s, residual_s)
             if residual_s > args.max_interval_s:
-                failures.append(f"{destination}: final sample gap {residual_s:.2f}s exceeds limit")
+                raise ValueError(f"{destination}: final sample gap {residual_s:.2f}s exceeds limit")
             residual_ratio = (residual_bytes * 8 / residual_s) / reference_bps
             min_interval_ratio = residual_ratio if min_interval_ratio is None else min(min_interval_ratio, residual_ratio)
             interval_writer.writerow((destination, "final-residual", last_end, final_ns,
@@ -425,9 +441,9 @@ def quality_report(args):
                 if (low_end - low_start) / 1e9 > args.max_low_s:
                     failures.append(f"{destination}: final under-rate persisted {(low_end-low_start)/1e9:.2f}s")
         elif final_ns < last_end:
-            failures.append(f"{destination}: interval sample extends past final snapshot")
-        if interval_bytes + residual_bytes != total_bytes:
-            failures.append(f"{destination}: interval bytes do not reconcile with final counter")
+            raise ValueError(f"{destination}: interval sample extends past final snapshot")
+        if interval_bytes + residual_bytes != total_bytes or (final_ns == last_end and residual_bytes):
+            raise ValueError(f"{destination}: interval bytes do not reconcile with final counter")
         if ratio < args.min_delivery_ratio:
             failures.append(f"{destination}: average delivery ratio {ratio:.4f} below {args.min_delivery_ratio:.4f}")
         ts = receiver_results[destination]
@@ -448,13 +464,28 @@ def quality_report(args):
     before = read_metric_files(args.metrics_before)
     after = read_metric_files(args.metrics_after)
     queue_drops = {name: 0.0 for name in PACKET_DROP_METRICS}
-    keys = set(before) | set(after)
+    keys = {key for key, values in before.items()
+            if values.get("nginx_media_srt_egress_shard_destinations", 0) > 0}
+    after_keys = {key for key, values in after.items()
+                  if values.get("nginx_media_srt_egress_shard_destinations", 0) > 0}
+    if keys != after_keys or not keys:
+        raise ValueError("active sender shard set changed or is missing")
+    for snapshot in (before, after):
+        if sum(snapshot[key]["nginx_media_srt_egress_shard_destinations"]
+               for key in keys) != len(expected):
+            raise ValueError("sender shard destination counts do not match the rung")
+        for key in keys:
+            if not QUEUE_METRICS.issubset(snapshot[key]):
+                raise ValueError(f"{key}: missing required sender metrics")
+            if not all(math.isfinite(value) and value >= 0 and value.is_integer()
+                       for value in snapshot[key].values()):
+                raise ValueError(f"{key}: invalid required sender counter")
     for key in keys:
         for metric in PACKET_DROP_METRICS:
-            old = before.get(key, {}).get(metric, 0.0)
-            new = after.get(key, {}).get(metric, 0.0)
+            old = before[key][metric]
+            new = after[key][metric]
             if new < old:
-                failures.append(f"{key[0]}/{key[1]}: {metric} counter regressed")
+                raise ValueError(f"{key[0]}/{key[1]}: {metric} counter regressed")
             queue_drops[metric] += max(0.0, new - old)
     if any(queue_drops.values()):
         failures.append("sender feed/output application drop counters increased")
@@ -463,7 +494,7 @@ def quality_report(args):
     old = read_stream_metric(args.stream_before, metric)
     new = read_stream_metric(args.stream_after, metric)
     if new < old:
-        failures.append(f"{metric} counter regressed")
+        raise ValueError(f"{metric} counter regressed")
     elif new > old:
         failures.append(f"{metric} increased by {new - old:g}")
     stream_overruns = max(0.0, new - old)
@@ -472,7 +503,7 @@ def quality_report(args):
     old = read_stream_metric(args.stream_before, metric)
     new = read_stream_metric(args.stream_after, metric)
     if new < old:
-        failures.append(f"{metric} counter regressed")
+        raise ValueError(f"{metric} counter regressed")
     stream_evictions = max(0.0, new - old)
     queue_rows = defaultdict(dict)
     with open(args.queues, newline="", encoding="utf-8") as source:
@@ -493,12 +524,30 @@ def quality_report(args):
                     "sent_bytes", "blocked_sends", "retransmitted_packets")}
             except (TypeError, ValueError):
                 raise ValueError("invalid queue sample row")
-            if not all(math.isfinite(number) for number in data.values()):
-                raise ValueError("invalid queue sample row: non-finite counter")
-            queue_rows[round_id][(row["worker"], row["shard"])] = (sample_ns, data)
+            if (round_id < 0 or sample_ns <= 0
+                    or not all(math.isfinite(number) and number >= 0
+                               and number.is_integer() for number in data.values())):
+                raise ValueError("invalid queue sample row")
+            key = (row["worker"], row["shard"])
+            if key in queue_rows[round_id]:
+                raise ValueError("duplicate queue sample row")
+            queue_rows[round_id][key] = (sample_ns, data)
     rounds = sorted(queue_rows)
-    if len(rounds) < 3:
-        failures.append(f"only {len(rounds)} complete queue samples; at least 3 required")
+    if len(rounds) < 3 or rounds != list(range(len(rounds))):
+        raise ValueError("incomplete queue sampling rounds; at least 3 required")
+    for round_id in rounds:
+        active = {key for key, (_, data) in queue_rows[round_id].items()
+                  if data["destinations"] > 0}
+        if active != keys:
+            raise ValueError(f"queue round {round_id}: missing or unknown active sender shard")
+        if sum(queue_rows[round_id][key][1]["destinations"] for key in keys) != len(expected):
+            raise ValueError(f"queue round {round_id}: incomplete destination counts")
+    for key in keys:
+        first_ns = queue_rows[rounds[0]][key][0]
+        last_ns = queue_rows[rounds[-1]][key][0]
+        if (abs(first_ns - baseline_ns) / 1e9 > args.max_interval_s
+                or abs(final_ns - last_ns) / 1e9 > args.max_interval_s):
+            raise ValueError(f"{key}: queue samples do not cover the measurement window")
 
     peak_feed = 0.0
     peak_output = 0.0
@@ -515,12 +564,8 @@ def quality_report(args):
             if old is not None:
                 old_round, old_ns, old_data = old
                 gap_s = (sample_ns - old_ns) / 1e9
-                if round_id > old_round + 1:
-                    failures.append(f"{shard[0]}/{shard[1]}: queue samples missed "
-                                    f"{round_id - old_round - 1} rounds")
-                elif round_id == old_round + 1 and gap_s > args.max_interval_s:
-                    failures.append(f"{shard[0]}/{shard[1]}: queue sample gap "
-                                    f"{gap_s:.2f}s exceeds limit")
+                if round_id != old_round + 1 or gap_s <= 0 or gap_s > args.max_interval_s:
+                    raise ValueError(f"{shard}: queue sampling gap or nonpositive interval")
                 consecutive = (
                     round_id == old_round + 1
                     and gap_s <= args.max_interval_s
@@ -568,6 +613,7 @@ def quality_report(args):
                              ts["ts_sync_errors"], ts["ts_continuity_errors"],
                              ts["ts_tei_errors"], ts["transport_error"]))
 
+    print("quality_measurement_valid=yes")
     print(f"quality_pass={'no' if failures else 'yes'}")
     print(f"quality_reference_payload_bps={reference_bps:.2f}")
     print(f"quality_reference_payload_mbps={reference_bps / 1_000_000:.4f}")
@@ -687,6 +733,11 @@ def main():
     try:
         return args.run(args)
     except (OSError, RuntimeError, ValueError) as error:
+        if args.command == "report":
+            print("quality_measurement_valid=no")
+            print("quality_pass=no")
+            print("quality_strict_full_rate=no")
+            print(f"quality_setup_failure={error}")
         print(f"srt_capacity_quality: {error}", file=sys.stderr)
         return 1
 

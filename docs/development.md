@@ -360,6 +360,16 @@ Every capacity rung leaves `diagnostics.json` in its case directory
   `quality_strict_ts_errors`).  A rung can pass the gate and fail the strict
   result; history records both (`strict_full_rate`,
   `strict_full_rate_pass`, `None` when the run never reported it).
+  RTMP and SRT judges also emit `quality_measurement_valid`. Missing receiver
+  destinations, malformed or non-reconciling counters, raw sampling gaps or
+  out-of-window intervals invalidate the measurement before quality is judged.
+  SRT additionally requires complete active-shard sender metrics and queue
+  rounds covering the window. Invalid evidence emits `quality_pass=no`,
+  `quality_measurement_valid=no` and `quality_setup_failure`, exits nonzero,
+  and cannot qualify for strict full rate. Complete counters showing zero
+  delivery still produce a measured quality failure. The harness joins its
+  samplers and checks their exit statuses before taking closing receiver
+  snapshots, while publishers are still running.
   The two are never mixed up: a *configured* acceptance threshold is reported
   under `delivery_ratio_threshold` and the HLS reader log's original
   `min_delivery_ratio` keeps that meaning, while the measured minimum is
