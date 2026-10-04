@@ -135,32 +135,20 @@ ngx_media_srt_session_state_find(ngx_media_srt_ingest_t *ingest,
 }
 
 static void
-ngx_media_srt_session_state_release(ngx_media_srt_session_state_t *state)
+ngx_media_srt_session_state_release(ngx_media_srt_ingest_t *ingest,
+    ngx_media_srt_session_state_t *state)
 {
-    /*
-     * The whole slot goes back to its free state, close_requested included.
-     * A slot that held a session the worker asked to close (the control API
-     * removed its source) kept that request, and alloc hands the slot to the
-     * first publisher that needs one - whose first poll event then took the
-     * close_requested branch in the loop below and finished the session
-     * before a byte was read: accepted, bytes=0, and no line in the log
-     * saying why.  That is why it took a source delete among a few session
-     * churn cycles to show up.
-     */
-    /*
-     * The whole slot goes back to its free state, close_requested included.
-     * A slot that held a session the worker asked to close (the control API
-     * removed its source) kept that request, and alloc hands the slot to the
-     * first publisher that needs one - whose first poll event then took the
-     * close_requested branch in the loop below and finished the session
-     * before a byte was read: accepted, bytes=0, and no line in the log
-     * saying why.  That is why it took a source delete among a few session
-     * churn cycles to show up.
-     */
+    while (!ngx_atomic_cmp_set(&ingest->sessions_lock, 0, 1)) {
+        /* spin: only session identity and the close request are shared */
+    }
+
+    /* A reused slot must not inherit its previous session's close request. */
     ngx_memzero(state, sizeof(ngx_media_srt_session_state_t));
+
+    (void) ngx_atomic_cmp_set(&ingest->sessions_lock, 1, 0);
 }
 
-static void
+static ngx_int_t
 ngx_media_srt_session_open(ngx_media_srt_ingest_t *ingest,
     ngx_media_srt_session_t *session)
 {
@@ -171,17 +159,20 @@ ngx_media_srt_session_open(ngx_media_srt_ingest_t *ingest,
     state = ngx_media_srt_session_state_alloc(ingest);
 
     if (state == NULL) {
-        /* hard session ceiling: refuse rather than degrade the scheduler */
+        /* The caller removes the session from the poll before closing it. */
         (void) ngx_atomic_fetch_add(&ingest->sessions_dropped, 1);
-        ngx_media_srt_session_close(session);
-        return;
+        return NGX_ERROR;
+    }
+
+    while (!ngx_atomic_cmp_set(&ingest->sessions_lock, 0, 1)) {
+        /* spin */
     }
 
     ingest->sessions_opened++;
     state->session = session;
     state->id = ingest->sessions_opened;
-    state->bytes = 0;
-    state->chunks = 0;
+
+    (void) ngx_atomic_cmp_set(&ingest->sessions_lock, 1, 0);
 
     ngx_memzero(&event, sizeof(event));
     event.type = NGX_MEDIA_SRT_EVENT_OPEN;
@@ -195,11 +186,17 @@ ngx_media_srt_session_open(ngx_media_srt_ingest_t *ingest,
         event.streamid_len = (ngx_uint_t) len;
     }
 
-    (void) ngx_media_srt_event_push(ingest, &event);
+    if (ngx_media_srt_event_push(ingest, &event) != NGX_OK) {
+        ngx_media_srt_session_state_release(ingest, state);
+        (void) ngx_atomic_fetch_add(&ingest->sessions_dropped, 1);
+        return NGX_ERROR;
+    }
 
     (void) ngx_atomic_fetch_add(&ingest->sessions_accepted, 1);
 
     ngx_media_srt_notify(ingest);
+
+    return NGX_OK;
 }
 
 static void
@@ -218,9 +215,34 @@ ngx_media_srt_session_finish(ngx_media_srt_ingest_t *ingest,
 
     ngx_media_srt_session_close(state->session);
 
-    ngx_media_srt_session_state_release(state);
+    ngx_media_srt_session_state_release(ingest, state);
 
     ngx_media_srt_notify(ingest);
+}
+
+static void
+ngx_media_srt_sessions_close_requested(ngx_media_srt_ingest_t *ingest,
+    ngx_media_srt_poll_t *poll)
+{
+    ngx_media_srt_session_state_t  *state;
+    ngx_uint_t                      i, requested;
+
+    for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
+        state = &ingest->sessions[i];
+
+        while (!ngx_atomic_cmp_set(&ingest->sessions_lock, 0, 1)) {
+            /* spin */
+        }
+
+        requested = state->session != NULL && state->close_requested;
+
+        (void) ngx_atomic_cmp_set(&ingest->sessions_lock, 1, 0);
+
+        if (requested) {
+            ngx_media_srt_poll_remove_session(poll, state->session);
+            ngx_media_srt_session_finish(ingest, state);
+        }
+    }
 }
 
 /*
@@ -419,6 +441,9 @@ ngx_media_srt_thread(void *data)
             }
         }
 
+        /* Requests must not depend on a socket becoming readable. */
+        ngx_media_srt_sessions_close_requested(ingest, poll);
+
         if (ngx_media_srt_poll_wait(poll, 200, events, NGX_MEDIA_SRT_POLL_MAX,
                                     &count) != NGX_OK)
         {
@@ -464,7 +489,10 @@ ngx_media_srt_thread(void *data)
                     continue;
                 }
 
-                ngx_media_srt_session_open(ingest, session);
+                if (ngx_media_srt_session_open(ingest, session) != NGX_OK) {
+                    ngx_media_srt_poll_remove_session(poll, session);
+                    ngx_media_srt_session_close(session);
+                }
                 continue;
             }
 
@@ -476,12 +504,6 @@ ngx_media_srt_thread(void *data)
                                                      events[i].session);
 
             if (state == NULL) {
-                continue;
-            }
-
-            if (state->close_requested) {
-                ngx_media_srt_poll_remove_session(poll, state->session);
-                ngx_media_srt_session_finish(ingest, state);
                 continue;
             }
 
@@ -522,8 +544,10 @@ ngx_media_srt_thread(void *data)
 
     for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
         if (ingest->sessions[i].session != NULL) {
+            ngx_media_srt_poll_remove_session(poll,
+                                              ingest->sessions[i].session);
             ngx_media_srt_session_close(ingest->sessions[i].session);
-            ngx_media_srt_session_state_release(&ingest->sessions[i]);
+            ngx_media_srt_session_state_release(ingest, &ingest->sessions[i]);
         }
     }
 
@@ -543,16 +567,22 @@ ngx_media_srt_ingest_close_session(ngx_media_srt_ingest_t *ingest,
         return NGX_ERROR;
     }
 
+    while (!ngx_atomic_cmp_set(&ingest->sessions_lock, 0, 1)) {
+        /* spin */
+    }
+
     for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
 
         if (ingest->sessions[i].session != NULL
             && ingest->sessions[i].id == session_id)
         {
-            (void) ngx_atomic_cmp_set(&ingest->sessions[i].close_requested,
-                                      0, 1);
+            ingest->sessions[i].close_requested = 1;
+            (void) ngx_atomic_cmp_set(&ingest->sessions_lock, 1, 0);
             return NGX_OK;
         }
     }
+
+    (void) ngx_atomic_cmp_set(&ingest->sessions_lock, 1, 0);
 
     return NGX_DECLINED;
 }

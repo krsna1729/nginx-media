@@ -20,6 +20,7 @@
 """
 
 import argparse
+import copy
 import datetime
 import glob
 import json
@@ -225,19 +226,35 @@ def completeness(results, name, mixes):
 
 
 
+def runner_identity(fingerprint):
+    """Stable host facts only; pressure counters stay in rung diagnostics.
+
+    Use this projection for both new summaries and published fingerprints:
+    older history includes cumulative cgroup cpu_stat counters."""
+    if (not isinstance(fingerprint, dict)
+            or fingerprint.get("status") == "unavailable"):
+        return None
+    identity = {
+        key: fingerprint[key] for key in
+        ("cpu_model", "kernel", "nproc_online", "permitted_cpus",
+         "governor", "no_turbo", "numa", "transport", "kernel_udp_limits")
+        if fingerprint.get(key) not in (None, "", [], {})}
+    cgroup = fingerprint.get("cgroup")
+    # cpu_max is the quota field emitted by proc_cpu_sampler.cgroup_info.
+    if isinstance(cgroup, dict) and cgroup.get("cpu_max"):
+        identity["cgroup"] = {"cpu_max": cgroup["cpu_max"]}
+    return copy.deepcopy(identity) if identity else None
+
+
 def run_environment(entry):
     """The environment a workload's rungs were taken in, and the highest
     pressure any of them reached - lifted from the rungs themselves, so the
     record describes the run and not whatever host later reads it."""
+    entry = dict(entry)
     for rung in entry.get("rungs", []):
-        fingerprint = rung.get("host_fingerprint")
-        if isinstance(fingerprint, dict) and "fingerprint" not in entry:
-            entry["fingerprint"] = {
-                key: fingerprint.get(key) for key in
-                ("cpu_model", "kernel", "nproc_online", "permitted_cpus",
-                 "cgroup", "governor", "no_turbo", "numa", "transport",
-                 "kernel_udp_limits")
-                if fingerprint.get(key) is not None}
+        fingerprint = runner_identity(rung.get("host_fingerprint"))
+        if fingerprint is not None and "fingerprint" not in entry:
+            entry["fingerprint"] = fingerprint
     peaks = {}
     for rung in entry.get("rungs", []):
         for key, value in (rung.get("peak") or {}).items():
@@ -435,8 +452,8 @@ def regressions(record, history, window=10, tolerance=1.25):
         if config.get("complete") is not True:
             continue
         for mix, entry in config.get("mixes", {}).items():
-            fingerprint = entry.get("fingerprint")
-            if not isinstance(fingerprint, dict) or not fingerprint:
+            fingerprint = runner_identity(entry.get("fingerprint"))
+            if fingerprint is None:
                 continue
             for rung in entry.get("rungs", []):
                 current = rung.get("sender_cpu_per_gbps")
@@ -453,7 +470,8 @@ def regressions(record, history, window=10, tolerance=1.25):
                     old_config = old.get("configs", {}).get(name, {})
                     old_entry = old_config.get("mixes", {}).get(mix, {})
                     if (old_config.get("complete") is not True
-                            or old_entry.get("fingerprint") != fingerprint):
+                            or runner_identity(old_entry.get("fingerprint"))
+                            != fingerprint):
                         continue
                     for old_rung in old_entry.get("rungs", []):
                         value = old_rung.get("sender_cpu_per_gbps")

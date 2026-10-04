@@ -1,11 +1,11 @@
 NGINX_VERSION ?= 1.30.5
 
 .PHONY: unit tsan bench-reporting bench-veth-up bench-veth-down bench-preflight \
-    nginx graph-conflict incarnation smoke bench-worker-scaling \
+    nginx graph-conflict incarnation smoke routing-bounds bench-worker-scaling \
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
     bench-capacity-curve bench-capacity-quality bench-burst-sizing test-image test-in-container \
     test-integration \
-    srt-ingest srt-ingest-nginx ts-fixture source-switch api-switch api-graph \
+    srt-ingest srt-ingest-nginx srt-admission ts-fixture source-switch api-switch api-graph \
     failover hls hls-push hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
     file-source transform \
     stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
@@ -172,6 +172,12 @@ fault:
 netns:
 	tests/integration/netns_nginx.sh
 
+routing-bounds:
+	tests/integration/routing_bounds_nginx.sh
+
+srt-admission:
+	python3 tests/integration/srt_admission_nginx.py
+
 # The integration suite's own environment, and the one CI runs it in, so a
 # failure on a runner can be reproduced here instead of guessed at.
 #
@@ -194,7 +200,7 @@ BASE ?= debian:trixie
 # type=gha), which only exists where ACTIONS_RUNTIME_TOKEN does; passing those
 # flags locally would fail, so they stay out of the default.
 DOCKER_CACHE_ARGS ?=
-TEST_TARGETS ?= unit ingest-keys srt-ingest srt-ingest-nginx ts-fixture source-switch \
+TEST_TARGETS ?= unit ingest-keys routing-bounds srt-admission srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
     hls-profile hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
     graph-conflict churn \

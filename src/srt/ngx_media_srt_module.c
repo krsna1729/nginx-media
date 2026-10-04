@@ -157,6 +157,7 @@ typedef struct {
 
     /* set when this worker does not own the stream and routes to the owner */
     unsigned               routed:1;
+    unsigned               closing:1;
     uint64_t               hash;
     uint64_t               routed_incarnation;
     uint64_t               routed_sequence;
@@ -205,9 +206,11 @@ static void ngx_media_srt_sink_frame(void *ctx,
     const ngx_media_frame_t *frame);
 static void ngx_media_srt_sink_tracks(void *ctx,
     const ngx_media_trackset_t *tracks);
-static void ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
+static ngx_int_t ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
     ngx_media_source_t *source);
 static void ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id);
+static ngx_uint_t ngx_media_srt_slot_removed(ngx_media_srt_slot_t *session,
+    ngx_log_t *log);
 static ngx_media_srt_slot_t *ngx_media_srt_slot_find(uint64_t id);
 static ngx_uint_t ngx_media_srt_stream_live(
     const ngx_media_stream_t *stream);
@@ -393,7 +396,7 @@ ngx_media_srt_sink_frame(void *ctx, const ngx_media_frame_t *frame)
 {
     ngx_media_srt_slot_t  *session = ctx;
 
-    if (session == NULL) {
+    if (session == NULL || session->closing) {
         return;
     }
 
@@ -404,7 +407,7 @@ ngx_media_srt_sink_frame(void *ctx, const ngx_media_frame_t *frame)
                                      session->routed_sequence);
     }
 
-    if (session->stream != NULL && session->source != NULL
+    if (!session->routed && session->stream != NULL && session->source != NULL
         && ngx_media_srt_stream_live(session->stream))
     {
         ngx_media_health_media(&session->source->health, frame->dts,
@@ -444,12 +447,16 @@ ngx_media_srt_sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
     ngx_media_srt_slot_t  *session = ctx;
     ngx_uint_t                i;
 
-    if (session != NULL && session->routed) {
+    if (session == NULL || session->closing) {
+        return;
+    }
+
+    if (session->routed) {
         (void) ngx_media_route_tracks((ngx_cycle_t *) ngx_cycle, session->hash,
                                       session->routed_incarnation, tracks);
     }
 
-    if (session != NULL && session->source != NULL
+    if (!session->routed && session->source != NULL
         && ngx_media_srt_stream_live(session->stream))
     {
         (void) ngx_media_source_tracks_set(session->source, tracks,
@@ -459,7 +466,7 @@ ngx_media_srt_sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
     for (i = 0; i < tracks->count; i++) {
 
         if (tracks->tracks[i].media_type == NGX_MEDIA_TYPE_VIDEO
-            && session != NULL && session->source != NULL
+            && !session->routed && session->source != NULL
             && ngx_media_srt_stream_live(session->stream))
         {
             /* the standby cache opens at a video keyframe only */
@@ -479,7 +486,7 @@ ngx_media_srt_sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
     }
 }
 
-static void
+static ngx_int_t
 ngx_media_srt_demux_start(ngx_media_srt_slot_t *session, ngx_log_t *log)
 {
     ngx_media_ts_demux_conf_t  conf;
@@ -501,13 +508,15 @@ ngx_media_srt_demux_start(ngx_media_srt_slot_t *session, ngx_log_t *log)
     {
         ngx_log_error(NGX_LOG_ERR, log, 0,
                       "media: could not start the TS demuxer");
-        return;
+        return NGX_ERROR;
     }
 
     session->demux_ready = 1;
+
+    return NGX_OK;
 }
 
-static void
+static ngx_int_t
 ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
     ngx_media_source_t *source)
 {
@@ -521,7 +530,7 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
         ngx_log_error(NGX_LOG_WARN, log, 0,
                       "media: no free ingest session slot for session=%uL",
                       session_id);
-        return;
+        return NGX_ERROR;
     }
     session->id = session_id;
 
@@ -546,7 +555,7 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
         ngx_log_error(NGX_LOG_ERR, log, 0,
                       "media: no stream registry in this worker");
         ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
-        return;
+        return NGX_ERROR;
     }
 
     if (stream->incarnation != 0) {
@@ -570,17 +579,24 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
                           &stream->application, &stream->name);
             session->routed = 0;
             ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
-            return;
+            return NGX_ERROR;
         }
 
-        ngx_media_srt_demux_start(session, log);
+        /* Keep the provisioned pool alive until the transport CLOSE arrives. */
+        session->stream = stream;
+        session->source = source;
+
+        if (ngx_media_srt_demux_start(session, log) != NGX_OK) {
+            ngx_media_srt_slot_close(log, session_id);
+            return NGX_ERROR;
+        }
 
         ngx_log_error(NGX_LOG_NOTICE, log, 0,
                       "media: srt publisher routed to the owner stream=%V/%V "
                       "source=%V", &stream->application, &stream->name,
                       &source->id);
 
-        return;
+        return NGX_OK;
     }
 
     /*
@@ -599,7 +615,7 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
                       "owns %V/%V", &source->id, &source->stream->application,
                       &source->stream->name);
         ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
-        return;
+        return NGX_ERROR;
     }
 
     ngx_media_srt_stream_policy(stream);
@@ -647,7 +663,10 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
         (void) ngx_media_stream_promote(stream, source);
     }
 
-    ngx_media_srt_demux_start(session, log);
+    if (ngx_media_srt_demux_start(session, log) != NGX_OK) {
+        ngx_media_srt_slot_close(log, session_id);
+        return NGX_ERROR;
+    }
 
     if (stream->active != NULL) {
         ngx_log_error(NGX_LOG_NOTICE, log, 0,
@@ -663,6 +682,8 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
                       &stream->application, &stream->name,
                       ngx_media_stream_source_count(stream));
     }
+
+    return NGX_OK;
 }
 
 static void
@@ -776,6 +797,31 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
     }
 
     ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
+}
+
+static ngx_uint_t
+ngx_media_srt_slot_removed(ngx_media_srt_slot_t *session, ngx_log_t *log)
+{
+    if (session->closing) {
+        return 1;
+    }
+
+    if (session->source == NULL
+        || (ngx_media_srt_stream_live(session->stream)
+            && session->source->stream != NULL
+            && !ngx_atomic_fetch_add(&session->source->pending_remove, 0)))
+    {
+        return 0;
+    }
+
+    ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                  "media: srt source %V removed, closing its session",
+                  &session->source->id);
+
+    session->closing = 1;
+    (void) ngx_media_srt_ingest_close_session(&ngx_media_srt_ingest, session->id);
+
+    return 1;
 }
 
 extern ngx_module_t  ngx_media_core_module;
@@ -1921,10 +1967,9 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
  * bound to, so the replacement's first bind fails.  Two things have to happen
  * for the port to move over: this worker must stop accepting publishers it is
  * about to drop, which this watcher does as soon as the shutdown starts, and
- * the replacement must keep retrying the bind until this worker - and with it
- * the socket a live publisher is holding - is gone.  The sessions themselves
- * are never touched here: they keep running, and keep that socket alive,
- * until this worker exits.
+ * the replacement must keep retrying the bind until this worker's socket is
+ * gone.  Existing sessions keep running until worker exit.  The same watcher
+ * also notices source removal without waiting for another payload chunk.
  *
  * That is the ordering nginx itself uses: a worker closes its listening
  * sockets when it begins to shut down and still drains what it accepted.
@@ -1937,6 +1982,19 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
 static void
 ngx_media_srt_shutdown_handler(ngx_event_t *ev)
 {
+    ngx_media_srt_slot_t  *session;
+    ngx_uint_t            i;
+
+    if (ngx_media_srt_started) {
+        /* These slots and their source pointers belong to this worker only. */
+        for (i = 0; i < NGX_MEDIA_SRT_MAX_SESSIONS; i++) {
+            session = &ngx_media_srt_slots[i];
+            if (session->used) {
+                (void) ngx_media_srt_slot_removed(session, ev->log);
+            }
+        }
+    }
+
     if (!ngx_exiting && !ngx_terminate && !ngx_quit) {
         ngx_add_timer(ev, NGX_MEDIA_SRT_SHUTDOWN_INTERVAL);
         return;
@@ -2049,6 +2107,8 @@ ngx_media_srt_handler(ngx_event_t *ev)
                     ngx_log_error(NGX_LOG_WARN, ev->log, 0,
                                   "media: srt publisher rejected session=%uL: "
                                   "no stream id", events[i].session_id);
+                    (void) ngx_media_srt_ingest_close_session(
+                               ingest, events[i].session_id);
                     break;
                 }
 
@@ -2075,6 +2135,8 @@ ngx_media_srt_handler(ngx_event_t *ev)
                                   "media: srt publisher rejected session=%uL: "
                                   "no source for key %V",
                                   events[i].session_id, &key_print_str);
+                    (void) ngx_media_srt_ingest_close_session(
+                               ingest, events[i].session_id);
                     break;
                 }
 
@@ -2085,8 +2147,12 @@ ngx_media_srt_handler(ngx_event_t *ev)
                               &key_source->id, &key_print_str,
                               events[i].session_id);
 
-                ngx_media_srt_slot_open(ev->log, events[i].session_id,
-                                        key_source);
+                if (ngx_media_srt_slot_open(ev->log, events[i].session_id,
+                                            key_source) != NGX_OK)
+                {
+                    (void) ngx_media_srt_ingest_close_session(
+                               ingest, events[i].session_id);
+                }
                 break;
             }
 
@@ -2128,23 +2194,9 @@ ngx_media_srt_handler(ngx_event_t *ev)
 
             session = ngx_media_srt_slot_find(chunks[i].session_id);
 
-            if (session != NULL && session->source != NULL
-                && (session->source->stream == NULL
-                    || ngx_atomic_fetch_add(
-                           &session->source->pending_remove, 0)))
+            if (session != NULL
+                && ngx_media_srt_slot_removed(session, ev->log))
             {
-                /*
-                 * The source was removed through the control API.  Ordered
-                 * teardown means its transport goes too: without this the
-                 * publisher is still attached and re-creates the source on
-                 * its next event, so a delete looks like it did nothing.
-                 */
-                ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
-                              "media: srt source %V removed, closing its "
-                              "session", &session->source->id);
-
-                (void) ngx_media_srt_ingest_close_session(&ngx_media_srt_ingest,
-                                                          session->id);
                 continue;
             }
 
@@ -2166,6 +2218,7 @@ ngx_media_srt_handler(ngx_event_t *ev)
             session = &ngx_media_srt_slots[i];
 
             if (!session->used || !session->demux_ready
+                || session->routed || session->closing
                 || session->source == NULL)
             {
                 continue;

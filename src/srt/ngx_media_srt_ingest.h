@@ -84,11 +84,9 @@ typedef struct {
     uint64_t                  chunks;
 
     /*
-     * Set by the worker when the source behind this session is removed
-     * through the control API.  The session belongs to the ingest thread, so
-     * the worker cannot close it; it asks, and the ingest loop acts.  Without
-     * this the publisher stays attached and re-creates the source, so a
-     * delete looks like it did nothing.
+     * Set by the worker when admission fails or the source is removed.
+     * The session belongs to the ingest thread; that thread removes it
+     * from the poll and closes it, even when no payload arrives.
      */
     ngx_atomic_t              close_requested;
 } ngx_media_srt_session_state_t;
@@ -132,9 +130,14 @@ typedef struct {
     pthread_t                    thread;
     ngx_uint_t                   thread_started;
 
-    /* transport sessions owned by the shared poll */
+    /*
+     * The ingest thread owns transport sessions.  sessions_lock protects
+     * publication/release and the worker's id lookup and close requests;
+     * no transport operation runs while it is held.
+     */
     ngx_media_srt_session_state_t  sessions[NGX_MEDIA_SRT_MAX_SESSIONS];
     ngx_uint_t                     sessions_opened;
+    ngx_atomic_t                   sessions_lock;
 
     ngx_atomic_t                 sessions_accepted;
     ngx_atomic_t                 sessions_dropped;
