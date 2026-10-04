@@ -161,6 +161,7 @@ typedef struct {
     uint64_t               hash;
     uint64_t               routed_incarnation;
     uint64_t               routed_sequence;
+    uint64_t               routed_session;
     ngx_media_ts_demux_t   demux;
     ngx_uint_t             demux_ready;
     uint64_t               frames_video;
@@ -403,7 +404,8 @@ ngx_media_srt_sink_frame(void *ctx, const ngx_media_frame_t *frame)
     if (session->routed) {
         /* the program lives on another worker: hand the frame over once */
         (void) ngx_media_route_frame((ngx_cycle_t *) ngx_cycle, session->hash,
-                                     session->routed_incarnation, frame,
+                                     session->routed_incarnation,
+                                     session->routed_session, frame,
                                      session->routed_sequence);
     }
 
@@ -453,7 +455,8 @@ ngx_media_srt_sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
 
     if (session->routed) {
         (void) ngx_media_route_tracks((ngx_cycle_t *) ngx_cycle, session->hash,
-                                      session->routed_incarnation, tracks);
+                                      session->routed_incarnation,
+                                      session->routed_session, tracks);
     }
 
     if (!session->routed && session->source != NULL
@@ -564,11 +567,14 @@ ngx_media_srt_slot_open(ngx_log_t *log, uint64_t session_id,
         session->routed_incarnation = ngx_media_stream_incarnation_next();
     }
 
+    session->routed_session = ngx_media_route_session_id(session_id);
+
     if (!ngx_media_route_is_owner((ngx_cycle_t *) ngx_cycle, session->hash)) {
         session->routed = 1;
 
         if (ngx_media_route_open((ngx_cycle_t *) ngx_cycle, session->hash,
                                  session->routed_incarnation,
+                                 session->routed_session,
                                  &stream->application, &stream->name,
                                  &source->id, NGX_MEDIA_SOURCE_SRT,
                                  source->priority)
@@ -728,7 +734,8 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
 
     if (session->routed) {
         (void) ngx_media_route_close((ngx_cycle_t *) ngx_cycle, session->hash,
-                                     session->routed_incarnation);
+                                     session->routed_incarnation,
+                                     session->routed_session);
 
         ngx_log_error(NGX_LOG_NOTICE, log, 0,
                       "media: routed srt publisher closed hash=%uL frames=%uL",

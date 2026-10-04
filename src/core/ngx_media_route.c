@@ -355,9 +355,22 @@ ngx_media_route_endpoint_for(ngx_cycle_t *cycle, uint64_t hash)
     return ngx_media_route_endpoints[owner];
 }
 
+/*
+ * A publisher connection's identity across workers.  The transport's own
+ * session numbers repeat from worker to worker, and a reconnect may reuse one,
+ * so the process id is part of it: the owner tells two connections of the same
+ * program apart, and a late frame or CLOSE of a superseded connection cannot
+ * be taken for the current one.
+ */
+uint64_t
+ngx_media_route_session_id(uint64_t local)
+{
+    return ((uint64_t) ngx_pid << 32) | (local & 0xffffffffULL);
+}
+
 ngx_int_t
 ngx_media_route_open(ngx_cycle_t *cycle, uint64_t hash,
-    uint64_t incarnation, const ngx_str_t *application,
+    uint64_t incarnation, uint64_t session, const ngx_str_t *application,
     const ngx_str_t *stream, const ngx_str_t *source_id,
     ngx_uint_t source_type, ngx_uint_t priority)
 {
@@ -407,6 +420,7 @@ ngx_media_route_open(ngx_cycle_t *cycle, uint64_t hash,
     header.type = NGX_MEDIA_IPC_MSG_OPEN;
     header.hash = hash;
     header.incarnation = incarnation;
+    header.session = session;
     header.source_type = (uint32_t) source_type;
     header.priority = (uint32_t) priority;
     rc = ngx_media_ipc_send(endpoint, &header, payload, 0, len);
@@ -418,7 +432,7 @@ ngx_media_route_open(ngx_cycle_t *cycle, uint64_t hash,
 
 ngx_int_t
 ngx_media_route_close(ngx_cycle_t *cycle, uint64_t hash,
-    uint64_t incarnation)
+    uint64_t incarnation, uint64_t session)
 {
     ngx_media_ipc_endpoint_t  *endpoint;
     ngx_media_ipc_header_t     header;
@@ -434,13 +448,15 @@ ngx_media_route_close(ngx_cycle_t *cycle, uint64_t hash,
     header.type = NGX_MEDIA_IPC_MSG_CLOSE;
     header.hash = hash;
     header.incarnation = incarnation;
+    header.session = session;
 
     return ngx_media_ipc_send_header(endpoint, &header);
 }
 
 ngx_int_t
 ngx_media_route_frame(ngx_cycle_t *cycle, uint64_t hash,
-    uint64_t incarnation, const ngx_media_frame_t *frame, uint64_t sequence)
+    uint64_t incarnation, uint64_t session, const ngx_media_frame_t *frame,
+    uint64_t sequence)
 {
     ngx_media_ipc_endpoint_t  *endpoint;
     ngx_media_ipc_header_t     header;
@@ -465,6 +481,7 @@ ngx_media_route_frame(ngx_cycle_t *cycle, uint64_t hash,
                              : NGX_MEDIA_IPC_MSG_VIDEO);
     header.hash = hash;
     header.incarnation = incarnation;
+    header.session = session;
     header.pts = frame->pts;
     header.dts = frame->dts;
     header.media_type = (uint32_t) frame->media_type;
@@ -486,7 +503,7 @@ ngx_media_route_frame(ngx_cycle_t *cycle, uint64_t hash,
  */
 ngx_int_t
 ngx_media_route_tracks(ngx_cycle_t *cycle, uint64_t hash,
-    uint64_t incarnation, const ngx_media_trackset_t *tracks)
+    uint64_t incarnation, uint64_t session, const ngx_media_trackset_t *tracks)
 {
     ngx_media_ipc_endpoint_t  *endpoint;
     ngx_media_ipc_header_t     header;
@@ -570,6 +587,7 @@ ngx_media_route_tracks(ngx_cycle_t *cycle, uint64_t hash,
     header.type = NGX_MEDIA_IPC_MSG_TRACKS;
     header.hash = hash;
     header.incarnation = incarnation;
+    header.session = session;
 
     i = ngx_media_ipc_send(endpoint, &header, payload, 0, offset);
 
