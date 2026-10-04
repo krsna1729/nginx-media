@@ -51,7 +51,7 @@ is not an assertion of an independently reproduced exploit.
   (`src/srt/ngx_media_srt_module.c:2048-2078`); the transport has 16 slots.
   Process close requests independently of another incoming data event. Test
   idle invalid publishers, wrong-type keys and valid admission afterwards.
-- [ ] **S3 / P1: bound aggregate RTMP pre-authentication allocation and lifetime.**
+- [x] **S3 / P1: bound aggregate RTMP pre-authentication allocation and lifetime.**
   The reader permits 16 MiB per message and 64 chunk streams, allocating
   advertised capacity before publish admission (`ngx_media_rtmp_wire.c:744-750`).
   Potential allocated capacity is about 1 GiB per connection, not necessarily
@@ -366,6 +366,15 @@ checkbox above marked only after the behavior is exercised.
   file) they fail: floor, judges, calibration, mix list, manifest, recipe,
   PR-history and weekly-stub cases, the weekly one with
   `bench-trend.sh: line 49: configs: unbound variable`.
+- Real pipeline smoke: `scripts/bench-ci.sh branch` with `BENCH_CONFIGS=srt`,
+  `BENCH_STEPS="1 16"` and `BENCH_SECONDS=10`, run through `omarchy-benchmark`:
+  sender on P-cores 2,4, publisher on P-core 6, receivers on E-cores 12-15.
+  Both receiver-verified rungs passed and `bench_gate=pass`; this verifies
+  reporting, not a new capacity ceiling.
+- Browser smoke used the changed viewer against published legacy records,
+  then three comparable recipe-bearing trend fixtures with changed cumulative
+  CPU counters and one incompatible-duration fixture. All three scorecard
+  sparklines rendered values 110,120,130; the incompatible sample was excluded.
 - Not done: with the current defaults the PR (10 s) and branch (15 s) recipes
   differ, so a PR is compared with nothing until the two durations are aligned
   (changing durations was out of scope). B3's actual SRT commit and receiver
@@ -381,3 +390,19 @@ checkbox above marked only after the behavior is exercised.
   incomplete; the seven-name manifest only hid which mixes were missing, and
   the nine-name manifest now names them. Fixing it means choosing a weekly
   ladder that starts at 4 for those mixes (a ladder decision, not made here).
+
+### RTMP pre-admission budget (S3)
+
+- The chunk reader tracks the payload it holds for unfinished messages
+  (`buffered`, bounded by `max_buffered`); a message that would exceed the sum is
+  refused before allocation. The default stays 2 x 16 MiB for media. Until a
+  publish key is accepted or a play starts, a connection is held to 64 KiB
+  messages and 64 KiB held in total, and to a 30 s deadline from accept.
+  Worst case before admission is therefore 64 KiB x 1024 sessions, down from
+  about 1 GiB a connection.
+- `test_rtmp_wire` covers the aggregate budget (two open messages counted, a
+  third refused, a completed message returned to the budget). `make
+  rtmp-preauth` against real nginx: a 4000-byte command is waited for, a
+  100000-byte message and six 30000-byte unfinished messages are refused, and a
+  handshaken but silent connection is dropped at the deadline; the oversize
+  case fails on the pre-fix binary.

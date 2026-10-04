@@ -9,7 +9,7 @@ This document records the security boundaries, threat models, verified vulnerabi
 | Component | Trust Boundary | Primary Invariant |
 |---|---|---|
 | **SRT Ingest** | Untrusted public network (UDP) | Stream ID parsed via strict parser (`#!::...`); raw TS buffered in bounded queues. |
-| **RTMP Ingest** | Untrusted public network (TCP) | Message lengths strictly checked against `max_message`; AMF0 strings and containers bounded; buffers unref'd before new message payloads. |
+| **RTMP Ingest** | Untrusted public network (TCP) | Message lengths strictly checked against `max_message`; before a publish key is accepted or a play starts, messages are limited to 64 KiB (64 KiB held in total) and the connection has a 30 s deadline; AMF0 strings and containers bounded; buffers unref'd before new message payloads. |
 | **HTTP Control API** | Administrative trust boundary | Has **no** built-in auth, no client-address check and no TLS of its own: the location serving it is the entire boundary, and it must be loopback, authenticated at a proxy, or a Unix socket — see section 3.  JSON responses are escaped; body sizes bounded. |
 | **HLS Ingest / Push / Pull** | External HTTP/HTTPS servers | Hostname verification (`SSL_set1_host`) enforced; DNS resolution supports IPv4 and IPv6 via `getaddrinfo()`; buffers must not share non-thread-safe pools. |
 | **Inter-Worker IPC** | Internal Unix domain sockets (`SOCK_SEQPACKET`) | Only authenticated peers in the same cluster communicate; messages are chunked and reassembled with strict length validation. |
