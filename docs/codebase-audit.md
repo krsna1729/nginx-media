@@ -346,6 +346,12 @@ checkbox above marked only after the behavior is exercised.
   taking the carrier down, and waits for active=encoder-b with an increased
   switch count in one API snapshot. `make netns` passed: carrier failure,
   recovery, severe-loss failover and bonded-path failure all retained media.
+- Review regressions reproduced three failed assertions: a codec-config frame
+  ended keyframe resync, and a different frame's continuation completed an
+  abandoned payload. Config is now carried separately through the flow API;
+  only a non-config video keyframe ends resync. Reassembly checks frame
+  identity and media metadata before appending each chunk. `test_ipc` passed
+  63 checks, and rebuilt `routed-sources` and `rtmp-workers` scenarios passed.
 
 ### RTMP pre-admission budget (S3)
 

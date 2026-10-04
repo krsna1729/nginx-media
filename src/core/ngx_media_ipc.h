@@ -180,10 +180,10 @@ typedef struct {
 
 /* 1: send this frame (with flow->sequence); 0: it was dropped */
 ngx_uint_t ngx_media_ipc_flow_admit(ngx_media_ipc_flow_t *flow,
-    ngx_uint_t video, ngx_uint_t keyframe);
+    ngx_uint_t video, ngx_uint_t keyframe, ngx_uint_t config);
 
 /* records the outcome of a send that flow_admit allowed */
 void ngx_media_ipc_flow_sent(ngx_media_ipc_flow_t *flow, ngx_uint_t video,
-    ngx_uint_t keyframe, ngx_int_t rc);
+    ngx_uint_t keyframe, ngx_uint_t config, ngx_int_t rc);
 
 #endif /* NGX_MEDIA_IPC_H */

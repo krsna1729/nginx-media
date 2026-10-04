@@ -941,7 +941,7 @@ ngx_media_rtmp_frame_cb(void *ctx, const ngx_media_frame_t *frame)
         ngx_uint_t  video = (frame->media_type == NGX_MEDIA_TYPE_VIDEO);
 
         if (ngx_media_ipc_flow_admit(&session->routed_flow, video,
-                                     frame->keyframe ? 1 : 0))
+                                     frame->keyframe, frame->config))
         {
             ngx_int_t  rc;
 
@@ -951,7 +951,7 @@ ngx_media_rtmp_frame_cb(void *ctx, const ngx_media_frame_t *frame)
                                        session->routed_session, frame,
                                        session->routed_flow.sequence);
             ngx_media_ipc_flow_sent(&session->routed_flow, video,
-                                    frame->keyframe ? 1 : 0, rc);
+                                    frame->keyframe, frame->config, rc);
         }
 
         return NGX_OK;

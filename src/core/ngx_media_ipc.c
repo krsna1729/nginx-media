@@ -391,6 +391,26 @@ ngx_media_ipc_frame_feed(ngx_media_ipc_frame_t *frame,
         frame->active = 1;
     }
 
+    /* A missing first chunk must not splice a new frame into an old one. */
+    if (message->header.hash != frame->header.hash
+        || message->header.incarnation != frame->header.incarnation
+        || message->header.session != frame->header.session
+        || message->header.sequence != frame->header.sequence
+        || message->header.total != frame->header.total
+        || message->header.type != frame->header.type
+        || message->header.pts != frame->header.pts
+        || message->header.dts != frame->header.dts
+        || message->header.media_type != frame->header.media_type
+        || message->header.codec != frame->header.codec
+        || message->header.payload_format != frame->header.payload_format
+        || message->header.track_index != frame->header.track_index
+        || message->header.keyframe != frame->header.keyframe
+        || message->header.config != frame->header.config)
+    {
+        ngx_media_ipc_frame_reset(frame);
+        return NGX_ERROR;
+    }
+
     if (message->header.offset != frame->received
         || frame->received + message->length > frame->capacity)
     {
@@ -438,9 +458,9 @@ ngx_media_ipc_frame_reset(ngx_media_ipc_frame_t *frame)
 
 ngx_uint_t
 ngx_media_ipc_flow_admit(ngx_media_ipc_flow_t *flow, ngx_uint_t video,
-    ngx_uint_t keyframe)
+    ngx_uint_t keyframe, ngx_uint_t config)
 {
-    if (flow->resync && video && !keyframe) {
+    if (flow->resync && video && !keyframe && !config) {
         flow->dropped++;
         flow->sequence++;
         return 0;
@@ -451,7 +471,7 @@ ngx_media_ipc_flow_admit(ngx_media_ipc_flow_t *flow, ngx_uint_t video,
 
 void
 ngx_media_ipc_flow_sent(ngx_media_ipc_flow_t *flow, ngx_uint_t video,
-    ngx_uint_t keyframe, ngx_int_t rc)
+    ngx_uint_t keyframe, ngx_uint_t config, ngx_int_t rc)
 {
     flow->sequence++;
 
@@ -464,7 +484,7 @@ ngx_media_ipc_flow_sent(ngx_media_ipc_flow_t *flow, ngx_uint_t video,
         return;
     }
 
-    if (video && keyframe) {
+    if (video && keyframe && !config) {
         flow->resync = 0;
     }
 }

@@ -371,28 +371,59 @@ test_abandoned_frame_and_flow(void)
     ngx_media_buf_unref(buf);
     ngx_media_ipc_frame_reset(&frame);
 
+    TEST_CASE("a continuation cannot complete a different publisher frame");
+    memset(&frame, 0, sizeof(frame));
+    memset(&message, 0, sizeof(message));
+    message.header.total = 20;
+    message.header.flags = NGX_MEDIA_IPC_FLAG_MORE;
+    message.header.session = 42;
+    message.header.sequence = 7;
+    message.length = 10;
+    buf = payload(10, 3);
+    message.payload = buf;
+    CHECK(ngx_media_ipc_frame_feed(&frame, &message) == NGX_AGAIN,
+          "frame seven starts");
+    message.header.offset = 10;
+    message.header.flags = 0;
+    message.header.sequence = 8;
+    CHECK(ngx_media_ipc_frame_feed(&frame, &message) == NGX_ERROR,
+          "frame eight cannot supply frame seven's continuation");
+    CHECK(frame.payload == NULL && !frame.active,
+          "mismatched continuation discards the partial payload");
+    ngx_media_buf_unref(buf);
+    ngx_media_ipc_frame_reset(&frame);
+
+    TEST_CASE("codec configuration is not a resynchronization boundary");
+    memset(&flow, 0, sizeof(flow));
+    flow.resync = 1;
+    /* Both TS and RTMP mark video config with keyframe=1, config=1. */
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 1, 1) == 1,
+          "configuration is delivered while waiting for a keyframe");
+    ngx_media_ipc_flow_sent(&flow, 1, 1, 1, NGX_OK);
+    CHECK(flow.resync == 1, "video configuration cannot replace the missing IDR");
+
     TEST_CASE("a failed send drops video up to the next keyframe");
 
     memset(&flow, 0, sizeof(flow));
-    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 1) == 1, "a keyframe is sent");
-    ngx_media_ipc_flow_sent(&flow, 1, 1, NGX_OK);
-    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 0) == 1, "delta frames follow");
-    ngx_media_ipc_flow_sent(&flow, 1, 0, NGX_AGAIN);
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 1, 0) == 1, "a keyframe is sent");
+    ngx_media_ipc_flow_sent(&flow, 1, 1, 0, NGX_OK);
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 0, 0) == 1, "delta frames follow");
+    ngx_media_ipc_flow_sent(&flow, 1, 0, 0, NGX_AGAIN);
     CHECK(flow.resync == 1 && flow.resyncs == 1, "the failure starts a resync");
-    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 0) == 0,
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 0, 0) == 0,
           "delta video is held back");
-    CHECK(ngx_media_ipc_flow_admit(&flow, 0, 0) == 1,
+    CHECK(ngx_media_ipc_flow_admit(&flow, 0, 0, 0) == 1,
           "audio is not held back");
-    ngx_media_ipc_flow_sent(&flow, 0, 0, NGX_OK);
+    ngx_media_ipc_flow_sent(&flow, 0, 0, 0, NGX_OK);
     CHECK(flow.resync == 1, "audio does not end the resync");
-    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 1) == 1, "the next keyframe goes");
-    ngx_media_ipc_flow_sent(&flow, 1, 1, NGX_OK);
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 1, 0) == 1, "the next keyframe goes");
+    ngx_media_ipc_flow_sent(&flow, 1, 1, 0, NGX_OK);
     CHECK(flow.resync == 0, "a delivered keyframe ends the resync");
     CHECK(flow.dropped == 1, "one frame was held back: %lu",
           (unsigned long) flow.dropped);
     CHECK(flow.sequence == 5, "every frame was numbered: %lu",
           (unsigned long) flow.sequence);
-    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 0) == 1,
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 0, 0) == 1,
           "delta video flows again");
 }
 
