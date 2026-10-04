@@ -18,6 +18,8 @@
 #define NGX_MEDIA_RTMP_DEFAULT_CHUNK    128
 #define NGX_MEDIA_RTMP_MAX_CHUNK        65536
 #define NGX_MEDIA_RTMP_MAX_MESSAGE      (16 * 1024 * 1024)
+/* what one connection may hold across all of its chunk streams at once */
+#define NGX_MEDIA_RTMP_MAX_BUFFERED     (2 * NGX_MEDIA_RTMP_MAX_MESSAGE)
 #define NGX_MEDIA_RTMP_MAX_CSID         64
 
 /* message types */
@@ -84,6 +86,7 @@ typedef struct {
     u_char            fmt;
     size_t            length;
     size_t            received;
+    size_t            allocated;      /* bytes counted against the reader */
     ngx_media_buf_t  *payload;
     unsigned          used:1;
     unsigned          extended:1;
@@ -95,6 +98,8 @@ typedef ngx_int_t (*ngx_media_rtmp_message_pt)(void *ctx, ngx_uint_t type,
 typedef struct {
     ngx_uint_t           chunk_size;      /* chunk size the peer uses */
     ngx_uint_t           max_message;
+    size_t               max_buffered;    /* bound on `buffered` */
+    size_t               buffered;        /* payload held for partial messages */
     uint64_t             bytes_in;
     ngx_media_rtmp_cs_t  chunks[NGX_MEDIA_RTMP_MAX_CSID];
 

@@ -60,6 +60,16 @@
 #define NGX_MEDIA_RTMP_MAX_OUT_BYTES     (512 * 1024)
 #define NGX_MEDIA_RTMP_PLAY_INTERVAL     40
 #define NGX_MEDIA_RTMP_MAX_PLAY_BATCH    32
+
+/*
+ * Until a connection is admitted - a publish key accepted, or a play started -
+ * it is a stranger: its messages are command-sized and it has a deadline.  The
+ * reader's own bounds (16 MiB a message, 32 MiB held) are for media, and
+ * granting them before admission let one unauthenticated connection hold tens
+ * of megabytes and let a thousand of them hold the host's memory.
+ */
+#define NGX_MEDIA_RTMP_PREAUTH_MESSAGE   (64 * 1024)
+#define NGX_MEDIA_RTMP_PREAUTH_TIMEOUT   30000
 #define NGX_MEDIA_RTMP_AMF_BUFFER        1024
 
 /* session states */
@@ -120,6 +130,7 @@ struct ngx_media_rtmp_session_s {
     ngx_uint_t                    in_flight_count;
     ngx_event_t                   play_timer;
     unsigned                      play_armed:1;
+    ngx_event_t                   preauth_timer;
 
     ngx_log_t                    *log;
 };
@@ -157,6 +168,8 @@ static ngx_uint_t ngx_media_rtmp_ssl_enabled(void);
 static ngx_int_t ngx_media_rtmp_ssl_start(ngx_media_rtmp_session_t *session);
 static void ngx_media_rtmp_ssl_ready(ngx_connection_t *c);
 static void ngx_media_rtmp_play_timer(ngx_event_t *ev);
+static void ngx_media_rtmp_preauth_timer(ngx_event_t *ev);
+static void ngx_media_rtmp_admitted(ngx_media_rtmp_session_t *session);
 static void ngx_media_rtmp_close_session(ngx_media_rtmp_session_t *session);
 static ngx_chain_t *ngx_media_rtmp_chain_buf(ngx_media_rtmp_session_t *session,
     ngx_buf_t *b);
@@ -369,6 +382,15 @@ ngx_media_rtmp_session_alloc(ngx_connection_t *c)
 
             ngx_media_rtmp_handshake_init(&session->handshake);
             ngx_media_rtmp_reader_init(&session->reader);
+
+            session->reader.max_message = NGX_MEDIA_RTMP_PREAUTH_MESSAGE;
+            session->reader.max_buffered = NGX_MEDIA_RTMP_PREAUTH_MESSAGE;
+
+            session->preauth_timer.handler = ngx_media_rtmp_preauth_timer;
+            session->preauth_timer.log = c->log;
+            session->preauth_timer.data = session;
+            ngx_add_timer(&session->preauth_timer,
+                          NGX_MEDIA_RTMP_PREAUTH_TIMEOUT);
             ngx_media_rtmp_writer_init(&session->writer,
                                        NGX_MEDIA_RTMP_OUT_CHUNK,
                                        NGX_MEDIA_RTMP_MAX_MESSAGE);
@@ -390,6 +412,10 @@ ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
 
     if (session->play_timer.timer_set) {
         ngx_del_timer(&session->play_timer);
+    }
+
+    if (session->preauth_timer.timer_set) {
+        ngx_del_timer(&session->preauth_timer);
     }
 
     if (session->out != NULL) {
@@ -1161,6 +1187,7 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
 
         session->routed = 1;
         session->state = NGX_MEDIA_RTMP_STATE_PUBLISHING;
+        ngx_media_rtmp_admitted(session);
 
         ngx_log_error(NGX_LOG_NOTICE, session->log, 0,
                       "media: rtmp publisher routed to the owner stream=%V/%V",
@@ -1242,6 +1269,7 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
     session->stream = stream;
     session->source = source;
     session->state = NGX_MEDIA_RTMP_STATE_PUBLISHING;
+    ngx_media_rtmp_admitted(session);
 
     ngx_log_error(NGX_LOG_NOTICE, session->log, 0,
                   "media: rtmp publisher stream=%V/%V source=%V key=%V "
@@ -1286,6 +1314,7 @@ ngx_media_rtmp_start_play(ngx_media_rtmp_session_t *session, ngx_str_t *app,
     session->stream = stream;
     session->prepare = ngx_media_runtime_prepare(stream, session->log);
     session->state = NGX_MEDIA_RTMP_STATE_PLAYING;
+    ngx_media_rtmp_admitted(session);
 
     /* stream begin, then the status every client waits for */
     {
@@ -1680,6 +1709,33 @@ ngx_media_rtmp_play_timer(ngx_event_t *ev)
     if (session->used && session->state == NGX_MEDIA_RTMP_STATE_PLAYING) {
         ngx_add_timer(ev, NGX_MEDIA_RTMP_PLAY_INTERVAL);
     }
+}
+
+static void
+ngx_media_rtmp_admitted(ngx_media_rtmp_session_t *session)
+{
+    if (session->preauth_timer.timer_set) {
+        ngx_del_timer(&session->preauth_timer);
+    }
+
+    session->reader.max_message = NGX_MEDIA_RTMP_MAX_MESSAGE;
+    session->reader.max_buffered = NGX_MEDIA_RTMP_MAX_BUFFERED;
+}
+
+static void
+ngx_media_rtmp_preauth_timer(ngx_event_t *ev)
+{
+    ngx_media_rtmp_session_t  *session = ev->data;
+
+    if (!session->used) {
+        return;
+    }
+
+    ngx_log_error(NGX_LOG_WARN, session->log, 0,
+                  "media: rtmp connection closed: not admitted within %d ms",
+                  NGX_MEDIA_RTMP_PREAUTH_TIMEOUT);
+
+    ngx_media_rtmp_close_session(session);
 }
 
 /* --- connection handling ------------------------------------------------- */
