@@ -456,6 +456,7 @@ ngx_media_rtmp_reader_init(ngx_media_rtmp_reader_t *r)
 
     r->chunk_size = NGX_MEDIA_RTMP_DEFAULT_CHUNK;
     r->max_message = NGX_MEDIA_RTMP_MAX_MESSAGE;
+    r->max_buffered = NGX_MEDIA_RTMP_MAX_BUFFERED;
 }
 
 void
@@ -500,6 +501,19 @@ ngx_media_rtmp_cs_get(ngx_media_rtmp_reader_t *r, ngx_uint_t csid,
     slot->csid = csid;
 
     return slot;
+}
+
+/* drops a partially received message and returns its bytes to the budget */
+static void
+ngx_media_rtmp_cs_release(ngx_media_rtmp_reader_t *r, ngx_media_rtmp_cs_t *cs)
+{
+    if (cs->payload != NULL) {
+        ngx_media_buf_unref(cs->payload);
+        cs->payload = NULL;
+    }
+
+    r->buffered -= cs->allocated;
+    cs->allocated = 0;
 }
 
 /* control messages that steer the reader itself are handled here */
@@ -554,8 +568,7 @@ ngx_media_rtmp_reader_control(ngx_media_rtmp_reader_t *r,
                                        | (ngx_uint_t) p[3], 0);
 
         if (target != NULL && target->payload != NULL) {
-            ngx_media_buf_unref(target->payload);
-            target->payload = NULL;
+            ngx_media_rtmp_cs_release(r, target);
             target->received = 0;
             target->length = 0;
         }
@@ -572,6 +585,10 @@ ngx_media_rtmp_reader_complete(ngx_media_rtmp_reader_t *r,
     ngx_int_t         rc;
 
     cs->payload = NULL;
+
+    /* the message is complete: the callback owns it, not the budget */
+    r->buffered -= cs->allocated;
+    cs->allocated = 0;
 
     if (payload == NULL) {
         return NGX_OK;
@@ -690,8 +707,7 @@ ngx_media_rtmp_reader_feed(ngx_media_rtmp_reader_t *r, const u_char *data,
                  * A new message length on this csid replaces any payload that
                  * was partially received or left by a previous message.
                  */
-                ngx_media_buf_unref(cs->payload);
-                cs->payload = NULL;
+                ngx_media_rtmp_cs_release(r, cs);
             }
 
             cs->extended = (ts_field == 0xFFFFFF);
@@ -747,12 +763,25 @@ ngx_media_rtmp_reader_feed(ngx_media_rtmp_reader_t *r, const u_char *data,
         }
 
         if (cs->payload == NULL && cs->length > 0) {
+            /*
+             * Chunk streams interleave, so a peer can open a message on every
+             * one of them and leave each unfinished.  The sum is bounded, not
+             * just each message.
+             */
+            if (cs->length > r->max_buffered - r->buffered) {
+                r->errors++;
+                return NGX_ERROR;
+            }
+
             cs->payload = ngx_media_buf_alloc(cs->length);
 
             if (cs->payload == NULL) {
                 r->errors++;
                 return NGX_ERROR;
             }
+
+            cs->allocated = cs->length;
+            r->buffered += cs->allocated;
         }
 
         want = cs->length - cs->received;
