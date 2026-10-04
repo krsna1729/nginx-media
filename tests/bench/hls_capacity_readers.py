@@ -471,6 +471,11 @@ def parse_args(argv=None):
         parser.error("--url must be an unauthenticated http:// URL")
     if not 1 <= args.readers <= 1000:
         parser.error("--readers must be between 1 and 1000")
+    if not all(math.isfinite(number) for number in (
+            args.duration, args.poll_interval, args.reference_bps,
+            args.min_delivery_ratio)):
+        parser.error("--duration, --poll-interval, --reference-bps and "
+                     "--min-delivery-ratio must be finite")
     if args.duration <= 0 or args.poll_interval <= 0:
         parser.error("--duration and --poll-interval must be positive")
     if args.reference_bps < 0 or not 0 < args.min_delivery_ratio <= 1:

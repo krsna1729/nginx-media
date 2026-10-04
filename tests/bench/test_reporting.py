@@ -24,6 +24,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -663,14 +664,30 @@ def test_efficiency_refuses_a_sender_only_counter(work):
 
 # --- history and the completeness gate ---------------------------------------
 
-def diagnostics_bundle(destinations, outcome, delivery):
-    return {"schema": "nginx-media.capacity-diagnostics/2",
-            "case": {"destinations": destinations, "mix": "pure-srt"},
-            "outcome": outcome, "delivery": delivery,
-            "cpu_environment": {"host_cpu_busy_fraction": {"value": 0.5}},
-            "efficiency": {"delivered": {"value": 1.0},
-                           "sender_cpu_per_gbps": {"value": 100.0},
-                           "receiver_cpu_per_gbps": {"value": 50.0}}}
+RUNNER = {"cpu_model": "runner-a", "kernel": "7.2", "nproc_online": 4,
+          "transport": "libsrt.so.1 1.5.4 (/usr/lib/libsrt.so.1.5)"}
+
+# the recipe a published record carries for one configuration: how its rungs
+# were taken, as bench_history.completeness derives it from the harness log
+RECIPE = {"seconds": 15, "rate": "8M", "steps": [1, 16, 32, 64, 128],
+          "stop_after_failures": 2, "min_delivery_ratio": 0.95,
+          "interval_floor": 0.8, "max_low_seconds": 2,
+          "srt_workers": "adaptive", "hls_push_workers": "adaptive",
+          "srt_hls": "yes", "mixes": ["pure-srt"], "harness": "harness-a"}
+
+
+def diagnostics_bundle(destinations, outcome, delivery, mix="pure-srt",
+                       host=None, cpu=100.0):
+    bundle = {"schema": "nginx-media.capacity-diagnostics/2",
+              "case": {"destinations": destinations, "mix": mix},
+              "outcome": outcome, "delivery": delivery,
+              "cpu_environment": {"host_cpu_busy_fraction": {"value": 0.5}},
+              "efficiency": {"delivered": {"value": 1.0},
+                             "sender_cpu_per_gbps": {"value": cpu},
+                             "receiver_cpu_per_gbps": {"value": 50.0}}}
+    if host is not None:
+        bundle["host_fingerprint"] = host
+    return bundle
 
 
 def srt_delivery(ratio):
@@ -686,18 +703,43 @@ def hls_origin_delivery(threshold, observed=None):
 
 
 def make_config(results, name, rungs, status=0, finished=True, expected=None,
-                stopped=None):
-    """One configuration's results directory, as bench-ci.sh leaves it."""
+                stopped=None, ran_mixes=None, recipe=None, host=None,
+                cpu=100.0):
+    """One configuration's results directory, as bench-ci.sh leaves it.
+
+    A rung is (destinations, outcome, delivery) or, for a workload other
+    than pure-srt, (destinations, outcome, delivery, mix).  The log carries
+    what the real harness prints: the mixes it executed (ran_mixes; default
+    the manifest's; "silent" prints none) and its recipe line (recipe=False
+    prints none; a dict overrides fields)."""
     base = os.path.join(results, name)
     os.makedirs(base, exist_ok=True)
-    for destinations, outcome, delivery in rungs:
-        case = os.path.join(base, "capacity", f"quality-pure-srt-{destinations}")
+    expected = expected or {"mixes": ["pure-srt"], "steps": [1, 16, 32]}
+    for rung in rungs:
+        destinations, outcome, delivery = rung[:3]
+        mix = rung[3] if len(rung) > 3 else "pure-srt"
+        case = os.path.join(base, "capacity",
+                            f"quality-{mix}-{destinations}")
         os.makedirs(case, exist_ok=True)
         with open(os.path.join(case, "diagnostics.json"), "w",
                   encoding="utf-8") as output:
-            json.dump(diagnostics_bundle(destinations, outcome, delivery), output)
+            json.dump(diagnostics_bundle(destinations, outcome, delivery,
+                                         mix, host, cpu), output)
     with open(os.path.join(results, f"{name}.log"), "w",
               encoding="utf-8") as output:
+        if ran_mixes != "silent":
+            output.write("quality_mixes=" + " ".join(
+                expected["mixes"] if ran_mixes is None else ran_mixes) + "\n")
+        if recipe is not False:
+            fields = {"seconds": 10, "rate": "8M",
+                      "steps": ",".join(str(s) for s in expected["steps"]),
+                      "stop_after_failures": 2, "min_delivery_ratio": 0.95,
+                      "interval_floor": 0.80, "max_low_seconds": 2,
+                      "srt_workers": "adaptive", "hls_push_workers": "adaptive",
+                      "srt_hls": "yes"}
+            fields.update(recipe or {})
+            output.write("quality_recipe " + " ".join(
+                f"{key}={value}" for key, value in fields.items()) + "\n")
         for mix, skipped in (stopped or {}).items():
             output.write(f"mix={mix} unmeasured_rungs={skipped} "
                          f"(after 2 consecutive failures)\n")
@@ -708,20 +750,23 @@ def make_config(results, name, rungs, status=0, finished=True, expected=None,
                   encoding="utf-8") as output:
             output.write(f"{status}\n")
     with open(os.path.join(base, "expected.json"), "w", encoding="utf-8") as out:
-        json.dump(expected or {"mixes": ["pure-srt"], "steps": [1, 16, 32]}, out)
+        json.dump(expected, out)
     return base
 
 
-def summarize(results, out, expected_configs=None):
-    command = [sys.executable, HISTORY, "summarize", results, "--tier", "pr",
+def summarize(results, out, expected_configs=None, tier="pr", env=None):
+    command = [sys.executable, HISTORY, "summarize", results, "--tier", tier,
                "--out", out]
     if expected_configs is not None:
         command.extend(["--expected-configs", expected_configs])
+    return run(command, env=env)
+
+
+def gate(summary, tier="pr", history=None):
+    command = [sys.executable, HISTORY, "gate", summary, "--tier", tier]
+    if history is not None:
+        command.extend(["--history", history])
     return run(command)
-
-
-def gate(summary, tier="pr"):
-    return run([sys.executable, HISTORY, "gate", summary, "--tier", tier])
 
 
 def test_history_carries_the_environment_and_peak_pressure(work):
@@ -898,6 +943,7 @@ def test_regressions_require_complete_passing_same_runner_baselines():
             "tier": "nightly",
             "configs": {"srt": {
                 "complete": complete,
+                "recipe": copy.deepcopy(RECIPE),
                 "mixes": {"pure-srt": {
                     "fingerprint": fingerprint,
                     "rungs": [{"destinations": 16, "outcome": outcome,
@@ -987,6 +1033,7 @@ def test_regression_identity_ignores_pressure_but_preserves_environment():
             "comparison_group": "36882115060-attempt-1",
             "configs": {"srt": {
                 "complete": True,
+                "recipe": copy.deepcopy(RECIPE),
                 "mixes": {"pure-srt": {
                     "fingerprint": fingerprint,
                     "rungs": [{"destinations": 16, "outcome": "pass",
@@ -1087,6 +1134,7 @@ def test_regression_cohorts_do_not_mix_with_qualification_history():
             "comparison_group": group,
             "configs": {"srt": {
                 "complete": True,
+                "recipe": copy.deepcopy(RECIPE),
                 "mixes": {"pure-srt": {
                     "fingerprint": host,
                     "rungs": [{"destinations": 16, "outcome": "pass",
@@ -1429,6 +1477,706 @@ def test_matrix_separates_observed_from_threshold(work):
           "the matrix must not publish a threshold under a measurement name")
 
 
+# --- benchmark reporting truth -----------------------------------------------
+
+HARNESS = os.path.join(HERE, "ingest_egress_fanout.sh")
+MIXES_CONF = os.path.join(HERE, "capacity-mixes.conf")
+SRT_JUDGE = os.path.join(HERE, "srt_capacity_quality.py")
+RTMP_JUDGE = os.path.join(HERE, "rtmp_capacity_quality.py")
+HLS_PUSH_JUDGE = os.path.join(HERE, "hls_push_capacity.py")
+
+# the seven workloads bench-ci.sh used to promise, and the two contention
+# ladders the harness ran on top of them without the manifest saying so
+PUBLISHED_MIXES = ["pure-srt", "pure-rtmp", "pure-hls", "pure-hls-push",
+                   "rtmp-95-srt-5", "hls-push-95-srt-5",
+                   "rtmp-50-hls-push-45-srt-5"]
+CONTENTION_MIXES = ["srt-50-rtmp-25-hls-push-25", "srt-25-rtmp-25-hls-push-50"]
+
+
+def read_text(path):
+    with open(path, encoding="utf-8") as source:
+        return source.read()
+
+
+def read_json(path):
+    with open(path, encoding="utf-8") as source:
+        return json.load(source)
+
+
+def read_mix_conf():
+    try:
+        lines = read_text(MIXES_CONF).splitlines()
+    except OSError:
+        return []
+    return [line.split(":")[0] for line in lines
+            if line.strip() and not line.lstrip().startswith("#")]
+
+
+def mix_rungs(mixes, steps=(1, 16, 32)):
+    return [(destinations, "pass", srt_delivery(1.0), mix)
+            for mix in mixes for destinations in steps]
+
+
+def test_gate_requires_positive_evidence_of_the_floor_rung(work):
+    """The gate asked only whether anything failed at the floor.  A floor
+    rung that was infrastructure-limited, unknown or never reached is neither
+    a failure nor a pass, and a run whose floor was never shown to work must
+    not come out green."""
+    one = srt_delivery(1.0)
+    cases = {
+        "infra-at-floor": ([(1, "pass", one),
+                            (16, "infrastructure-limited", one)],
+                           {"pure-srt": "16 32"}),
+        "floor-skipped": ([(1, "pass", one)], {"pure-srt": "16 32"}),
+        "unknown-at-floor": ([(1, "pass", one), (16, "unknown", one),
+                              (32, "pass", one)], None),
+        "infra-below-floor": ([(1, "infrastructure-limited", one)],
+                              {"pure-srt": "16 32"}),
+    }
+    for label, (rungs, stopped) in cases.items():
+        results = os.path.join(work, f"floor-{label}")
+        make_config(results, "srt", rungs, status=1, stopped=stopped)
+        out = os.path.join(work, f"floor-{label}.json")
+        check(summarize(results, out).returncode == 0,
+              f"{label}: summarize must succeed")
+        result = gate(out)
+        check(result.returncode == 1,
+              f"{label}: no passing floor rung must fail the gate: "
+              f"{result.stdout}")
+        check("::error" in result.stdout and "floor" in result.stdout,
+              f"{label}: the gate must say the floor was not shown: "
+              f"{result.stdout}")
+
+    # the floor of a ladder that stops below the tier floor is its highest
+    # rung at or below it - still positive evidence, not an exemption
+    short = {"mixes": ["pure-srt"], "steps": [1, 8]}
+    results = os.path.join(work, "floor-short-pass")
+    make_config(results, "srt", [(1, "pass", one), (8, "pass", one)],
+                expected=short)
+    out = os.path.join(work, "floor-short-pass.json")
+    summarize(results, out)
+    check(gate(out).returncode == 0,
+          "a short ladder whose highest floor-side rung passed is evidence")
+    results = os.path.join(work, "floor-short-infra")
+    make_config(results, "srt", [(1, "pass", one),
+                                 (8, "infrastructure-limited", one)],
+                expected=short, status=1, stopped={"pure-srt": "8"})
+    out = os.path.join(work, "floor-short-infra.json")
+    summarize(results, out)
+    check(gate(out).returncode == 1,
+          "the floor of a short ladder must itself have passed")
+
+
+def write_rows(path, header, rows):
+    write(path, ",".join(header) + "\n"
+          + "".join(",".join(str(v) for v in row) + "\n" for row in rows))
+
+
+def judge_passed(result):
+    return result.returncode == 0 and "quality_pass=yes" in result.stdout
+
+
+def srt_judge_rung(directory, delivered=1_250_000, queue_units=0):
+    """One SRT quality rung as the harness leaves it: a single destination
+    receiving `delivered` bytes over a 10 s window, once per second."""
+    t0, seconds = 100 * 10**9, 10
+
+    def p(name):
+        return os.path.join(directory, name)
+    header = ("destination_id", "bytes_received", "snapshot_ns")
+    write_rows(p("baseline.csv"), header, [("d0000", 0, t0)])
+    write_rows(p("final.csv"), header,
+               [("d0000", delivered, t0 + seconds * 10**9)])
+    step = delivered // seconds
+    write_rows(p("intervals.csv"),
+               ("destination_id", "start_ns", "end_ns", "bytes_received",
+                "total_bytes"),
+               [("d0000", t0 + i * 10**9, t0 + (i + 1) * 10**9, step,
+                 step * (i + 1)) for i in range(seconds)])
+    write_rows(p("results.csv"),
+               ("destination_id", "ts_packets", "ts_sync_errors",
+                "ts_continuity_errors", "ts_tei_errors", "stalled",
+                "transport_error"), [("d0000", 5000, 0, 0, 0, "no", 0)])
+    write_rows(p("queues.csv"),
+               ("round_id", "sample_ns", "worker_pid", "worker", "shard",
+                "destinations", "feed_queue_units", "feed_queue_bytes",
+                "feed_drops", "output_queue_units", "output_queue_bytes",
+                "output_drops", "sent_bytes", "blocked_sends",
+                "retransmitted_packets"),
+               [(r, t0 + r * 10**9, 4242, "0", "0", 1, queue_units, 0, 0, 0, 0,
+                 0, r * 1000, 0, 0) for r in range(5)])
+    for name in ("metrics.before.0", "metrics.after.0", "stream.before",
+                 "stream.after"):
+        write(p(name), "")
+    with open(p("source.ts"), "wb") as source:
+        source.write(bytes(3_750_000))  # 1 Mbit/s over the 30 s it stands for
+    return p
+
+
+def run_srt_judge(p, *extra):
+    return run([sys.executable, SRT_JUDGE, "report",
+                "--baseline", p("baseline.csv"), "--final", p("final.csv"),
+                "--intervals", p("intervals.csv"),
+                "--queues", p("queues.csv"),
+                "--receiver-results", p("results.csv"),
+                "--metrics-before", p("metrics.before"),
+                "--metrics-after", p("metrics.after"),
+                "--stream-before", p("stream.before"),
+                "--stream-after", p("stream.after"),
+                "--destination-report", p("destination.csv"),
+                "--interval-report", p("interval.csv"),
+                "--destinations", "1", "--prepared-source", p("source.ts"),
+                "--reference-bps", "1000000"] + list(extra))
+
+
+def test_srt_judge_rejects_non_finite_inputs(work):
+    """A comparison with NaN is false both ways, so a NaN threshold,
+    reference or measurement used to make every check beneath it pass."""
+    good = srt_judge_rung(os.path.join(work, "srt-good"))
+    check(judge_passed(run_srt_judge(good)),
+          "control: a full-rate rung must pass the judge")
+    short = srt_judge_rung(os.path.join(work, "srt-short"), delivered=625_000)
+    check(not judge_passed(run_srt_judge(short, "--interval-floor", "0")),
+          "control: half the reference rate must fail the average ratio")
+    check(not judge_passed(run_srt_judge(short, "--min-delivery-ratio", "0")),
+          "control: half the reference rate must fail the interval floor")
+    for label, extra in {
+            "NaN delivery threshold": ("--min-delivery-ratio", "nan",
+                                       "--interval-floor", "0"),
+            "NaN interval floor": ("--min-delivery-ratio", "0",
+                                   "--interval-floor", "nan"),
+            "infinite low-rate allowance": ("--min-delivery-ratio", "0",
+                                            "--max-low-s", "inf"),
+            "NaN reference": ("--reference-bps", "nan"),
+            "infinite reference": ("--reference-bps", "inf",
+                                   "--min-delivery-ratio", "0"),
+    }.items():
+        result = run_srt_judge(short, *extra)
+        check(not judge_passed(result),
+              f"{label} must not make a short rung pass: {result.stdout}")
+    pressure = srt_judge_rung(os.path.join(work, "srt-pressure"),
+                              queue_units=64)
+    check(not judge_passed(run_srt_judge(pressure)),
+          "control: a full feed queue for five samples must fail")
+    result = run_srt_judge(pressure, "--queue-pressure", "nan")
+    check(not judge_passed(result),
+          f"a NaN queue pressure limit must not clear a full queue: "
+          f"{result.stdout}")
+    masked = srt_judge_rung(os.path.join(work, "srt-nan-queue"),
+                            queue_units="nan")
+    result = run_srt_judge(masked)
+    check(not judge_passed(result),
+          f"a NaN queue measurement must fail, not pass: {result.stdout}")
+
+
+def rtmp_judge_rung(directory, delivered=1_250_000):
+    t0, seconds = 100 * 10**9, 10
+
+    def p(name):
+        return os.path.join(directory, name)
+    metric = ('nginx_media_source_payload_bytes_in_total{application="live",'
+              'name="d0000",source="d0000"} ')
+    write(p("receiver.before.0"),
+          f"# scrape_monotonic_ns {t0 - 1000} {t0 + 1000}\n{metric}0\n")
+    write(p("receiver.after.0"),
+          f"# scrape_monotonic_ns {t0 + seconds * 10**9 - 1000} "
+          f"{t0 + seconds * 10**9 + 1000}\n{metric}{delivered}\n")
+    step = delivered // seconds
+    write_rows(p("intervals.csv"),
+               ("destination_id", "start_ns", "end_ns", "bytes_received",
+                "total_bytes"),
+               [("d0000", t0 + i * 10**9, t0 + (i + 1) * 10**9, step,
+                 step * (i + 1)) for i in range(seconds)])
+    return p
+
+
+def run_rtmp_judge(p, *extra):
+    return run([sys.executable, RTMP_JUDGE,
+                "--before-prefix", p("receiver.before"),
+                "--after-prefix", p("receiver.after"),
+                "--programs", "1", "--destinations", "1",
+                "--measurement-s", "10", "--intervals", p("intervals.csv"),
+                "--report", p("report.csv"),
+                "--reference-bps", "1000000"] + list(extra))
+
+
+def test_rtmp_judge_rejects_non_finite_inputs(work):
+    good = rtmp_judge_rung(os.path.join(work, "rtmp-good"))
+    check(judge_passed(run_rtmp_judge(good)),
+          "control: a full-rate rung must pass the judge")
+    short = rtmp_judge_rung(os.path.join(work, "rtmp-short"),
+                            delivered=625_000)
+    check(not judge_passed(run_rtmp_judge(short, "--interval-floor", "0")),
+          "control: half the reference rate must fail the average ratio")
+    check(not judge_passed(run_rtmp_judge(short, "--min-delivery-ratio", "0")),
+          "control: half the reference rate must fail the interval floor")
+    for label, extra in {
+            "NaN delivery threshold": ("--min-delivery-ratio", "nan",
+                                       "--interval-floor", "0"),
+            "NaN interval floor": ("--min-delivery-ratio", "0",
+                                   "--interval-floor", "nan"),
+            "infinite low-rate allowance": ("--min-delivery-ratio", "0",
+                                            "--max-low-s", "inf"),
+            "NaN reference": ("--reference-bps", "nan"),
+    }.items():
+        result = run_rtmp_judge(short, *extra)
+        check(not judge_passed(result),
+              f"{label} must not make a short rung pass: {result.stdout}")
+
+
+def hls_push_judge_rung(directory, latency_ms=250.0):
+    def p(name):
+        return os.path.join(directory, name)
+    segments = {f"seg{i}.ts": {"bytes": 100_000, "at": 101.0 + i, "count": 1}
+                for i in range(6)}
+    destination = {"ts_bytes": 600_000, "segments": 6,
+                   "first_segment_monotonic": 100.25,
+                   "first_segment_latency_ms": latency_ms,
+                   "upload_durations_ms": [12.0] * 6,
+                   "segment_detail": segments, "playlist_violations": 0}
+    write_json(p("sink.before.json"),
+               {"monotonic": 100.0, "http_errors": 0, "destinations": {}})
+    write_json(p("sink.after.json"),
+               {"monotonic": 110.0, "http_errors": 0,
+                "destinations": {"d0000": destination}})
+    labels = 'protocol="hls_push",name="live",destination="d0000"'
+    pool = 'nginx_media_egress_active_workers{engine="hls_upload_pool"} 2\n'
+    write(p("workers.before.0"), pool)
+    write(p("workers.after.0"), pool
+          + f"nginx_media_egress_dropped_units_total{{{labels}}} 0\n"
+          + f"nginx_media_egress_transport_errors_total{{{labels}}} 0\n")
+    return p
+
+
+def run_hls_push_judge(p, *extra):
+    return run([sys.executable, HLS_PUSH_JUDGE, "report",
+                "--before-prefix", p("workers.before"),
+                "--after-prefix", p("workers.after"), "--stream", "live",
+                "--destinations", "1", "--sink-before", p("sink.before.json"),
+                "--sink-after", p("sink.after.json"),
+                "--report", p("report.csv"),
+                "--reference-bps", "480000"] + list(extra))
+
+
+def test_hls_push_judge_rejects_non_finite_inputs(work):
+    good = hls_push_judge_rung(os.path.join(work, "push-good"))
+    check(judge_passed(run_hls_push_judge(good)),
+          "control: a complete rung must pass the judge")
+    for label, extra in {
+            "NaN reference": ("--reference-bps", "nan"),
+            "NaN delivery threshold": ("--min-delivery-ratio", "nan"),
+            "infinite delivery threshold": ("--min-delivery-ratio", "inf"),
+            "NaN lag limit": ("--segment-lag-limit-s", "nan"),
+    }.items():
+        result = run_hls_push_judge(good, *extra)
+        check(not judge_passed(result),
+              f"{label} must not pass: {result.stdout}")
+    # the sink's own JSON can carry NaN; a NaN measurement is not a pass
+    nan_latency = hls_push_judge_rung(os.path.join(work, "push-nan"),
+                                      latency_ms=float("nan"))
+    result = run_hls_push_judge(nan_latency)
+    check(not judge_passed(result),
+          f"a NaN first-segment latency must fail: {result.stdout}")
+
+
+def bash_function(name):
+    match = re.search(rf"^{name}\(\) \{{.*?^\}}\n", read_text(HARNESS),
+                      re.M | re.S)
+    check(match is not None, f"the harness must define {name}")
+    return match.group(0) if match else None
+
+
+def test_calibration_is_stored_only_from_a_passing_positive_rung(work):
+    """A calibration rung's rate is the yardstick for every rung above it.
+    It used to be stored whether or not that rung passed, and a rate of 0.00
+    matched the number pattern."""
+    functions = [bash_function("capacity_positive_rate"),
+                 bash_function("capacity_store_reference")]
+    if None in functions:
+        return
+    script = "\n".join(functions) + (
+        '\nREF=unset\ncapacity_store_reference REF tag Label "$1" "$2" '
+        '2>/dev/null\necho "rc=$? ref=$REF"\n')
+
+    def store(quality_pass, rate):
+        result = run(["bash", "-c", script, "calibration", quality_pass, rate])
+        lines = result.stdout.strip().splitlines()
+        return lines[-1] if lines else ""
+    check(store("yes", "8000000.5") == "rc=0 ref=8000000.5",
+          "a passing rung with a positive rate is stored")
+    check(store("no", "8000000.5") == "rc=0 ref=unset",
+          "a failed calibration rung's rate must not become the reference")
+    for rate in ("0", "0.00", "nan", "inf", "-5", "1e6", ""):
+        for quality_pass in ("yes", "no"):
+            check(store(quality_pass, rate) == "rc=1 ref=unset",
+                  f"rate {rate!r} ({quality_pass}) is not a finite positive "
+                  f"number: {store(quality_pass, rate)}")
+
+
+def test_harness_runs_the_mixes_of_the_one_list(work):
+    """The harness's own mix selection, with the ladders stubbed: `all` must
+    be the file's list, an explicit list must be honoured, and the harness
+    must state what it ran in the form the history parser reads."""
+    function = bash_function("phase_capacity_quality_ladder")
+    listed = read_mix_conf()
+    check(len(listed) == 9 and set(CONTENTION_MIXES) <= set(listed),
+          f"capacity-mixes.conf must hold all nine mixes: {listed}")
+    if function is None:
+        return
+    script = function + (
+        '\ncapacity_quality_ladder() { echo "ladder $1"; }\n'
+        "phase_capacity_quality_ladder\n")
+    env = dict(os.environ, ROOT=ROOT, RUN=os.path.join(work, "stub-run"),
+               CAPACITY_QUALITY_STEPS="1 16 32", CAPACITY_QUALITY_RATE="8M",
+               CAPACITY_QUALITY_SECONDS="15",
+               CAPACITY_QUALITY_STOP_AFTER_FAILURES="2",
+               CAPACITY_QUALITY_MIN_DELIVERY_RATIO="0.95",
+               CAPACITY_QUALITY_INTERVAL_FLOOR="0.80",
+               CAPACITY_QUALITY_MAX_LOW_SECONDS="2",
+               CAPACITY_FIXED_SRT_WORKERS="adaptive",
+               CAPACITY_FIXED_HLS_PUSH_WORKERS="adaptive",
+               CAPACITY_SRT_HLS="yes")
+
+    def select(mixes):
+        result = run(["bash", "-c", script],
+                     env=dict(env, CAPACITY_QUALITY_MIXES=mixes))
+        ladders = [line.split()[1] for line in result.stdout.splitlines()
+                   if line.startswith("ladder ")]
+        stated = [line for line in result.stdout.splitlines()
+                  if line.startswith("quality_mixes=")]
+        return result, ladders, stated
+    result, ladders, stated = select("all")
+    check(ladders == listed,
+          f"`all` must run exactly the listed mixes in order: {ladders}")
+    check(stated == ["quality_mixes=" + " ".join(listed)],
+          f"the harness must state the mixes it ran: {stated}")
+    module = load_module(HISTORY, "bench_history_harness_contract")
+    recipe_lines = [line for line in result.stdout.splitlines()
+                    if line.startswith("quality_recipe ")]
+    parsed = (module.parse_recipe(recipe_lines[0].split()[1:])
+              if recipe_lines else None)
+    check(parsed is not None and parsed["seconds"] == 15
+          and parsed["steps"] == [1, 16, 32]
+          and parsed["stop_after_failures"] == 2,
+          f"the recipe line must parse back into the recipe: {recipe_lines}")
+    chosen = ["pure-srt", "srt-50-rtmp-25-hls-push-25"]
+    result, ladders, stated = select(" ".join(chosen))
+    check(ladders == chosen and stated == ["quality_mixes=" + " ".join(chosen)],
+          f"an explicit list runs exactly itself: {ladders} {stated}")
+    result, ladders, stated = select("pure-srt no-such-mix")
+    check(result.returncode != 0 and not ladders
+          and "unknown capacity quality mix" in result.stderr,
+          f"an unknown mix is refused before anything runs: {result.stderr}")
+
+
+def test_bench_ci_manifest_is_the_harness_mix_list(work):
+    """bench-ci.sh used to promise seven workloads for `all` while the
+    harness ran nine.  Run the real driver against a harness stub that
+    echoes what it was handed."""
+    tree = os.path.join(work, "ci-tree")
+    for relative in ("scripts/bench-ci.sh", "tests/bench/bench_history.py",
+                     "tests/bench/capacity-mixes.conf"):
+        source = os.path.join(ROOT, relative)
+        if os.path.exists(source):
+            os.makedirs(os.path.dirname(os.path.join(tree, relative)),
+                        exist_ok=True)
+            shutil.copyfile(source, os.path.join(tree, relative))
+    stub = os.path.join(tree, "tests", "bench", "ingest_egress_fanout.sh")
+    write(stub, '#!/usr/bin/env bash\n'
+                'echo "quality_mixes=$CAPACITY_QUALITY_MIXES"\n'
+                'echo "quality_ladders_with_failures=none"\n')
+    os.chmod(stub, 0o755)
+    out = os.path.join(work, "ci-out")
+    env = dict(os.environ, BENCH_TREND="1", BENCH_STEPS="1 16",
+               BENCH_SECONDS="10")
+    env.pop("BENCH_CONFIGS", None)
+    run(["bash", os.path.join(tree, "scripts", "bench-ci.sh"), "weekly", out],
+        env=env)
+    listed = read_mix_conf()
+    manifest = read_json(os.path.join(out, "all", "expected.json"))
+    check(manifest["mixes"] == listed and len(listed) == 9,
+          f"the manifest must list every mix the harness executes: "
+          f"{manifest['mixes']} vs {listed}")
+    log = read_text(os.path.join(out, "all.log"))
+    check(f"quality_mixes={' '.join(manifest['mixes'])}\n" in log,
+          f"the harness must be handed the manifest's explicit list: {log}")
+    config = read_json(os.path.join(out, "summary.json"))["configs"]["all"]
+    check(not any("executed" in message for message in config["missing"]),
+          f"manifest and execution agree, so no mix mismatch: {config}")
+
+
+def test_gate_rejects_a_manifest_that_differs_from_the_executed_mixes(work):
+    one = srt_delivery(1.0)
+    seven = {"mixes": PUBLISHED_MIXES, "steps": [1, 16, 32]}
+    nine = {"mixes": PUBLISHED_MIXES + CONTENTION_MIXES,
+            "steps": [1, 16, 32]}
+
+    # the old situation: the harness ran nine, the manifest promised seven
+    results = os.path.join(work, "mixes-seven")
+    make_config(results, "all", mix_rungs(PUBLISHED_MIXES), expected=seven,
+                ran_mixes=nine["mixes"])
+    out = os.path.join(work, "mixes-seven.json")
+    summarize(results, out)
+    result = gate(out)
+    check(result.returncode == 1 and "executed" in result.stdout
+          and CONTENTION_MIXES[0] in result.stdout,
+          f"a manifest that omits an executed mix must fail: {result.stdout}")
+
+    # a harness that does not say what it ran is not evidence of anything
+    results = os.path.join(work, "mixes-silent")
+    make_config(results, "all", mix_rungs(PUBLISHED_MIXES), expected=seven,
+                ran_mixes="silent")
+    out = os.path.join(work, "mixes-silent.json")
+    summarize(results, out)
+    result = gate(out)
+    check(result.returncode == 1 and "never stated" in result.stdout,
+          f"a harness that states no mixes must fail: {result.stdout}")
+
+    # a contention ladder that never ran is missing, not a shorter green run
+    results = os.path.join(work, "mixes-missing")
+    make_config(results, "all", mix_rungs(PUBLISHED_MIXES), expected=nine,
+                ran_mixes=nine["mixes"])
+    out = os.path.join(work, "mixes-missing.json")
+    summarize(results, out)
+    result = gate(out)
+    check(result.returncode == 1 and CONTENTION_MIXES[1] in result.stdout,
+          f"a missing contention ladder must fail: {result.stdout}")
+
+    results = os.path.join(work, "mixes-nine")
+    make_config(results, "all", mix_rungs(nine["mixes"]), expected=nine,
+                ran_mixes=nine["mixes"])
+    out = os.path.join(work, "mixes-nine.json")
+    summarize(results, out)
+    result = gate(out)
+    check(result.returncode == 0,
+          f"control: nine executed, nine promised, nine measured: "
+          f"{result.stdout}")
+
+
+def test_trend_stub_summary_for_every_tier(work):
+    """bench-trend.sh records a stub for a revision that did not build.  The
+    weekly branch used to leave the variable the stub reads unset, which
+    `set -u` turns into a dead script."""
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
+    for tier, names in (("branch", ["srt", "rtmp", "rtmp-srt"]),
+                        ("nightly", ["srt-rtmp", "hls", "mix-srt-share",
+                                     "mix-all-protocols"]),
+                        ("weekly", ["all"])):
+        tree = os.path.join(work, f"trend-{tier}")
+        for relative in ("scripts/bench-trend.sh",
+                         "tests/bench/bench_commit_selection.py"):
+            os.makedirs(os.path.dirname(os.path.join(tree, relative)),
+                        exist_ok=True)
+            shutil.copyfile(os.path.join(ROOT, relative),
+                            os.path.join(tree, relative))
+        write(os.path.join(tree, "scripts", "build-nginx.sh"),
+              "#!/usr/bin/env bash\necho 'stub build failure' >&2\nexit 1\n")
+        os.chmod(os.path.join(tree, "scripts", "build-nginx.sh"), 0o755)
+        for directory in (".build/nginx-1.30.5", ".build/srt-haivision"):
+            os.makedirs(os.path.join(tree, directory))
+        write(os.path.join(tree, ".gitignore"), ".build/\n")
+        check(run(["git", "init", "-q"], cwd=tree).returncode == 0,
+              f"{tier}: git init")
+        run(git + ["add", "-A"], cwd=tree)
+        check(run(git + ["commit", "-q", "-m", "seed"],
+                  cwd=tree).returncode == 0, f"{tier}: seed commit")
+        env = dict(os.environ, GITHUB_RUN_ID="7", GITHUB_RUN_ATTEMPT="1")
+        env.pop("GITHUB_SHA", None)
+        result = run(["bash", os.path.join(tree, "scripts", "bench-trend.sh"),
+                      tier], env=env, cwd=tree)
+        check(result.returncode == 0,
+              f"{tier}: a revision that did not build must still produce a "
+              f"stub sample: {result.stdout}{result.stderr}")
+        samples = os.path.join(tree, ".build", "bench-trend", "samples.jsonl")
+        rows = ([json.loads(line) for line in read_text(samples).splitlines()
+                 if line.strip()] if os.path.exists(samples) else [])
+        check(len(rows) >= 1 and all(list(row["configs"]) == names
+                                     and row["expected_configs"] == names
+                                     and row["complete"] is False
+                                     for row in rows),
+              f"{tier}: the stub must name the tier's configurations: {rows}")
+
+
+def recipe_record(value, tier="branch", recipe=None, provenance=None,
+                  steps=None, mixes=("pure-srt",)):
+    """A published record shaped as summarize writes one: complete, one
+    configuration, one passing rung at 16 destinations."""
+    config_recipe = copy.deepcopy(RECIPE)
+    config_recipe.update(recipe or {})
+    entry = {"fingerprint": RUNNER,
+             "rungs": [{"destinations": 16, "outcome": "pass",
+                        "sender_cpu_per_gbps": value}]}
+    if provenance:
+        entry["provenance"] = provenance
+    if steps is not None:
+        config_recipe["steps"] = steps
+    return {"schema": "nginx-media.bench-history/3", "tier": tier,
+            "sha": f"sha-{value}",
+            "configs": {"srt": {"complete": True,
+                                "recipe": None if recipe is False
+                                else config_recipe,
+                                "mixes": {mix: copy.deepcopy(entry)
+                                          for mix in mixes}}}}
+
+
+def test_regressions_compare_only_equal_recipes():
+    module = load_module(HISTORY, "bench_history_recipe_equality")
+
+    def findings(current, past):
+        return module.regressions(current, past)
+    base = [10, 11, 12]
+    current = recipe_record(14)
+    check(len(findings(current, [recipe_record(v) for v in base])) == 1,
+          "control: three equal-recipe baselines make the regression visible")
+    for label, change in {
+            "PR 10 s against branch 15 s": {"seconds": 10},
+            "a different source rate": {"rate": "20M"},
+            "a different stop-after rule": {"stop_after_failures": 0},
+            "a different judge threshold": {"min_delivery_ratio": 0.9},
+            "a different sender worker setting": {"srt_workers": "1"},
+            "a different harness revision": {"harness": "harness-b"},
+            "a different mix set": {"mixes": ["pure-rtmp"]},
+            "a different first rung": {"steps": [4, 16, 32, 64, 128]},
+    }.items():
+        check(findings(current, [recipe_record(v, recipe=change)
+                                 for v in base]) == [],
+              f"{label} must not be a baseline")
+    check(findings(current, [recipe_record(v, recipe=False) for v in base])
+          == [], "records without a recipe are not comparable with new ones")
+    check(findings(recipe_record(14, recipe=False),
+                   [recipe_record(v) for v in base]) == [],
+          "a current record without a recipe is compared with nothing")
+    # a different ladder is fine if it starts at the same rung: a pull
+    # request runs a prefix of main's ladder
+    pr = recipe_record(14, tier="pr", steps=[1, 16, 32])
+    check(len(findings(pr, [recipe_record(v) for v in base])) == 1,
+          "a subset ladder starting at the same rung is comparable")
+    # incomparable runs are skipped, not counted, and do not crowd out
+    # comparable ones from the window
+    mixed = ([recipe_record(v) for v in base]
+             + [recipe_record(90, recipe={"seconds": 5}) for _ in range(12)])
+    found = findings(current, mixed)
+    check(len(found) == 1 and found[0]["baseline_count"] == 3
+          and found[0]["baseline_median"] == 11,
+          f"only equal-recipe runs form the baseline: {found}")
+    # binary hashes and compiler strings are provenance, never equality
+    built = [recipe_record(v, provenance={"binary_sha256": f"{v:064x}",
+                                          "compiler": f"gcc-{v}"})
+             for v in base]
+    check(len(findings(recipe_record(14, provenance={
+        "binary_sha256": "f" * 64, "compiler": "gcc-99"}), built)) == 1,
+          "a different binary hash or compiler must not stop a comparison")
+
+
+def test_pr_records_compare_with_the_branch_history(work):
+    module = load_module(HISTORY, "bench_history_pr_tier")
+    base = [10, 11, 12]
+    pr = recipe_record(14, tier="pr")
+    check(len(module.regressions(
+        pr, [recipe_record(v) for v in base])) == 1,
+          "a pull request is compared with main's branch records")
+    for tier in ("nightly", "weekly"):
+        check(module.regressions(
+            pr, [recipe_record(v, tier=tier) for v in base]) == [],
+              f"{tier} records are not a pull request's baseline")
+    check(module.regressions(
+        recipe_record(14), [recipe_record(v, tier="pr") for v in base]) == [],
+          "pull request records are not main's baseline")
+
+    # end to end through the CLI the workflow runs: summarize a PR run, load
+    # the branch history file the job fetched, and gate
+    results = os.path.join(work, "pr-cli")
+    make_config(results, "srt", [(1, "pass", srt_delivery(1.0)),
+                                 (16, "pass", srt_delivery(1.0)),
+                                 (32, "pass", srt_delivery(1.0))],
+                host=RUNNER, cpu=140.0)
+    out = os.path.join(work, "pr-cli.json")
+    check(summarize(results, out).returncode == 0, "summarize the PR run")
+    summary = read_json(out)
+
+    def history_file(name, seconds):
+        path = os.path.join(work, name)
+        with open(path, "w", encoding="utf-8") as output:
+            for index in range(3):
+                old = copy.deepcopy(summary)
+                old["tier"] = "branch"
+                old["sha"] = f"main-{index}"
+                config = old["configs"]["srt"]
+                config["recipe"]["seconds"] = seconds
+                for rung in config["mixes"]["pure-srt"]["rungs"]:
+                    rung["sender_cpu_per_gbps"] = 100.0 + index
+                output.write(json.dumps(old) + "\n")
+        return path
+    same = gate(out, history=history_file("branch-same.jsonl", 10))
+    check(same.returncode == 0 and "::warning title=bench efficiency" in
+          same.stdout,
+          f"a PR 1.4x main's CPU at the same recipe must warn: {same.stdout}")
+    other = gate(out, history=history_file("branch-other.jsonl", 15))
+    check(other.returncode == 0 and "bench efficiency" not in other.stdout,
+          f"main's 15 s rungs are not a baseline for 10 s rungs: "
+          f"{other.stdout}")
+
+
+def test_summary_records_recipe_fingerprint_and_provenance(work):
+    module = load_module(HISTORY, "bench_history_recipe_record")
+    host = dict(RUNNER, build={
+        "compiler": "gcc version 15.2.1 20250813 (GCC)",
+        "configure_arguments": "--with-cc-opt=-std=gnu2x -O2",
+        "sha256": "ab" * 32})
+    results = os.path.join(work, "recipe-record")
+    make_config(results, "srt", [(1, "pass", srt_delivery(1.0)),
+                                 (16, "pass", srt_delivery(1.0)),
+                                 (32, "pass", srt_delivery(1.0))],
+                host=host, recipe={"seconds": 10})
+    out = os.path.join(work, "recipe-record.json")
+    check(summarize(results, out).returncode == 0, "summarize must succeed")
+    config = read_json(out)["configs"]["srt"]
+    recipe = config["recipe"] or {}
+    check(recipe.get("seconds") == 10 and recipe.get("rate") == "8M"
+          and recipe.get("steps") == [1, 16, 32]
+          and recipe.get("stop_after_failures") == 2
+          and recipe.get("mixes") == ["pure-srt"],
+          f"the record carries how its rungs were taken: {recipe}")
+    check(recipe.get("harness") == module.harness_revision()
+          and len(recipe.get("harness") or "") == 16,
+          f"the record carries the harness revision: {recipe}")
+    entry = config["mixes"]["pure-srt"]
+    check((entry.get("fingerprint") or {}).get("cpu_model") == "runner-a",
+          f"the run's fingerprint must reach the published record: "
+          f"{entry.get('fingerprint')}")
+    check("build" not in (entry.get("fingerprint") or {}),
+          "binary provenance is not part of the comparison identity")
+    check(entry.get("provenance") == {
+        "compiler": "gcc version 15.2.1 20250813 (GCC)",
+        "configure_arguments": "--with-cc-opt=-std=gnu2x -O2",
+        "binary_sha256": "ab" * 32, "transport": RUNNER["transport"]},
+          f"compiler, flags, binary hash and transport are recorded: {entry}")
+
+    bare = os.path.join(work, "recipe-absent")
+    make_config(bare, "srt", [(1, "pass", srt_delivery(1.0)),
+                              (16, "pass", srt_delivery(1.0)),
+                              (32, "pass", srt_delivery(1.0))], recipe=False)
+    out = os.path.join(work, "recipe-absent.json")
+    summarize(bare, out)
+    check(read_json(out)["configs"]["srt"]["recipe"] is None,
+          "a log without a recipe line yields no recipe, not a default")
+
+    # the harness revision follows the harness files' content
+    copied = os.path.join(work, "harness-copy")
+    os.makedirs(copied)
+    for name in module.HARNESS_FILES:
+        shutil.copyfile(os.path.join(HERE, name), os.path.join(copied, name))
+    before = module.harness_revision(copied)
+    with open(os.path.join(copied, "capacity-mixes.conf"), "a",
+              encoding="utf-8") as output:
+        output.write("pure-extra:srt:0\n")
+    check(before and before != module.harness_revision(copied),
+          "an edited harness is a different revision")
+    os.remove(os.path.join(copied, "srt_fanout_sink.c"))
+    check(module.harness_revision(copied) is None,
+          "a harness revision that cannot be computed is not invented")
+
+
 def main():
     work = tempfile.mkdtemp(prefix="nginx-media-reporting-")
     try:
@@ -1466,6 +2214,18 @@ def main():
         test_per_lane_rate_keeps_workers_apart(work)
         test_per_cpu_busy_separates_idle_from_saturated(work)
         test_matrix_separates_observed_from_threshold(work)
+        test_gate_requires_positive_evidence_of_the_floor_rung(work)
+        test_srt_judge_rejects_non_finite_inputs(work)
+        test_rtmp_judge_rejects_non_finite_inputs(work)
+        test_hls_push_judge_rejects_non_finite_inputs(work)
+        test_calibration_is_stored_only_from_a_passing_positive_rung(work)
+        test_harness_runs_the_mixes_of_the_one_list(work)
+        test_bench_ci_manifest_is_the_harness_mix_list(work)
+        test_gate_rejects_a_manifest_that_differs_from_the_executed_mixes(work)
+        test_trend_stub_summary_for_every_tier(work)
+        test_regressions_compare_only_equal_recipes()
+        test_pr_records_compare_with_the_branch_history(work)
+        test_summary_records_recipe_fingerprint_and_provenance(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(f"test_reporting.py: {checks} checks, {failures} failures")

@@ -450,6 +450,13 @@ def positive_float(value):
     return parsed
 
 
+def finite_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("must be finite")
+    return parsed
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("scrape", "sample"):
         sub = argparse.ArgumentParser()
@@ -472,16 +479,16 @@ def main():
     parser.add_argument("--destinations", type=positive_int, required=True)
     parser.add_argument("--destination-offset", type=nonnegative_int, default=0)
     parser.add_argument("--measurement-s", type=positive_float, required=True)
-    parser.add_argument("--reference-bps", type=float, required=True)
-    parser.add_argument("--min-delivery-ratio", type=float, default=0.95)
+    parser.add_argument("--reference-bps", type=finite_float, required=True)
+    parser.add_argument("--min-delivery-ratio", type=finite_float, default=0.95)
     parser.add_argument("--report", required=True)
     parser.add_argument("--queue-before-prefix")
     parser.add_argument("--queue-after-prefix")
     parser.add_argument("--intervals")
-    parser.add_argument("--interval-floor", type=float, default=0.80)
-    parser.add_argument("--max-low-s", type=float, default=2.0)
-    parser.add_argument("--max-interval-s", type=float, default=2.0)
-    parser.add_argument("--sample-interval-s", type=float, default=1.0)
+    parser.add_argument("--interval-floor", type=finite_float, default=0.80)
+    parser.add_argument("--max-low-s", type=finite_float, default=2.0)
+    parser.add_argument("--max-interval-s", type=positive_float, default=2.0)
+    parser.add_argument("--sample-interval-s", type=positive_float, default=1.0)
     args = parser.parse_args()
     if not math.isfinite(args.reference_bps) or args.reference_bps < 0:
         parser.error("--reference-bps must be finite and nonnegative")

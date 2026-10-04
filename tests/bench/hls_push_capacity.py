@@ -15,6 +15,7 @@ import argparse
 import csv
 import http.server
 import json
+import math
 import os
 import re
 import sys
@@ -417,7 +418,7 @@ def report(args):
         sink_after = json.load(source)
 
     duration = sink_after["monotonic"] - sink_before["monotonic"]
-    if duration <= 0:
+    if not math.isfinite(duration) or duration <= 0:
         raise RuntimeError("HLS push sink snapshots have a nonpositive interval")
     before_active = active_worker_snapshot(args.before_prefix, "hls_upload_pool")
     after_active = active_worker_snapshot(args.after_prefix, "hls_upload_pool")
@@ -442,6 +443,9 @@ def report(args):
         errors = final_metrics.get("transport_errors", 0) - initial_metrics.get(
             "transport_errors", 0
         )
+        if not all(math.isfinite(number)
+                   for number in (delta_bytes, segments, dropped, errors)):
+            raise RuntimeError(f"non-finite HLS push counters for {destination}")
         if min(delta_bytes, segments, dropped, errors) < 0:
             raise RuntimeError(f"HLS push counters regressed for {destination}")
 
@@ -454,6 +458,9 @@ def report(args):
         first_latency = final_sink["first_segment_latency_ms"]
         if first_latency is None:
             raise RuntimeError("HLS push sink has no first-segment start mark")
+        if not math.isfinite(first_latency):
+            raise RuntimeError("HLS push sink first-segment latency is "
+                               f"{first_latency!r} for {destination}")
         records.append({
             "destination": destination,
             "bytes": delta_bytes,
@@ -473,8 +480,13 @@ def report(args):
     reference = args.reference_bps
     if reference <= 0:
         reference = records[0]["rate_bps"]
-    if reference <= 0:
-        raise RuntimeError("single-destination HLS push reference rate is zero")
+    if not math.isfinite(reference) or reference <= 0:
+        raise RuntimeError("HLS push reference rate "
+                           f"{reference!r} is not a finite positive rate")
+    for record in records:
+        if not math.isfinite(record["segment_ratio"]):
+            raise RuntimeError("non-finite segment delivery ratio for "
+                               f"{record['destination']}")
 
     failures = []
     ratios = []
@@ -674,6 +686,20 @@ def segment_accounting(args, sink_before, sink_after, records):
     }
 
 
+def finite_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("must be finite")
+    return parsed
+
+
+def nonnegative_float(value):
+    parsed = finite_float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must not be negative")
+    return parsed
+
+
 def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -702,10 +728,13 @@ def main():
     report_parser.add_argument("--destination-offset", type=int, default=0)
     report_parser.add_argument("--sink-before", required=True)
     report_parser.add_argument("--sink-after", required=True)
-    report_parser.add_argument("--reference-bps", type=float, default=0)
-    report_parser.add_argument("--min-delivery-ratio", type=float, default=0.95)
+    report_parser.add_argument("--reference-bps", type=nonnegative_float,
+                               default=0)
+    report_parser.add_argument("--min-delivery-ratio", type=finite_float,
+                               default=0.95)
     report_parser.add_argument("--report")
-    report_parser.add_argument("--segment-lag-limit-s", type=float, default=0,
+    report_parser.add_argument("--segment-lag-limit-s", type=nonnegative_float,
+                               default=0,
                                help="0: twice the observed segment interval")
     readiness_parser = subparsers.add_parser("readiness-report")
     readiness_parser.add_argument("--metrics-prefix", required=True)
@@ -728,7 +757,8 @@ def main():
                 readiness_report(args)
             else:
                 report(args)
-        except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError,
+                OverflowError) as error:
             print(f"HLS push report failed: {error}", file=sys.stderr)
             return 1
     return 0

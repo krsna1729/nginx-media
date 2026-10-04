@@ -3362,13 +3362,10 @@ PY
                 *) echo "quality analyzer returned no status" >&2; return 1 ;;
             esac
             if [ "$quality_reference_bps" = 0 ]; then
-                CAPACITY_QUALITY_REFERENCE_BPS="$(awk -F= \
+                capacity_store_reference CAPACITY_QUALITY_REFERENCE_BPS \
+                    quality "SRT" "$quality_status" "$(awk -F= \
                     '$1 == "quality_reference_payload_bps" { print $2; exit }' \
-                    "$quality_report_file")"
-                [[ "$CAPACITY_QUALITY_REFERENCE_BPS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
-                    || { echo "quality analyzer returned an invalid reference rate" \
-                         >&2; return 1; }
-                echo "   calibrated_quality_reference_bps=$CAPACITY_QUALITY_REFERENCE_BPS"
+                    "$quality_report_file")" || return 1
             fi
             [ "$quality_status" = yes ] || quality_failed=1
         fi
@@ -3402,13 +3399,10 @@ PY
                 *) echo "RTMP quality analyzer returned no status" >&2; return 1 ;;
             esac
             if [ "$rtmp_reference_bps" = 0 ]; then
-                CAPACITY_QUALITY_REFERENCE_RTMP_BPS="$(awk -F= \
+                capacity_store_reference CAPACITY_QUALITY_REFERENCE_RTMP_BPS \
+                    rtmp_quality "RTMP" "$quality_status" "$(awk -F= \
                     '$1 == "quality_reference_payload_bps" { print $2; exit }' \
-                    "$rtmp_report_file")"
-                [[ "$CAPACITY_QUALITY_REFERENCE_RTMP_BPS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
-                    || { echo "RTMP quality analyzer returned an invalid reference rate" \
-                         >&2; return 1; }
-                echo "   calibrated_rtmp_quality_reference_bps=$CAPACITY_QUALITY_REFERENCE_RTMP_BPS"
+                    "$rtmp_report_file")" || return 1
             fi
             [ "$quality_status" = yes ] || quality_failed=1
         else
@@ -3433,14 +3427,10 @@ PY
         esac
         hls_reference_bps="${CAPACITY_QUALITY_REFERENCE_HLS_BPS:-0}"
         if [ "$hls_reference_bps" = 0 ]; then
-            CAPACITY_QUALITY_REFERENCE_HLS_BPS="$(awk -F= \
-                '$1 == "reference_bps" { print $2; exit }' "$hls_log")"
-            [[ "$CAPACITY_QUALITY_REFERENCE_HLS_BPS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
-                && awk -v b="$CAPACITY_QUALITY_REFERENCE_HLS_BPS" \
-                    'BEGIN { exit !(b > 0) }' \
-                || { echo "HLS quality analyzer returned an invalid reference rate" \
-                     >&2; return 1; }
-            echo "   calibrated_hls_quality_reference_bps=$CAPACITY_QUALITY_REFERENCE_HLS_BPS"
+            capacity_store_reference CAPACITY_QUALITY_REFERENCE_HLS_BPS \
+                hls_quality "HLS" "$quality_status" "$(awk -F= \
+                '$1 == "reference_bps" { print $2; exit }' "$hls_log")" \
+                || return 1
         fi
         [ "$quality_status" = yes ] || quality_failed=1
     fi
@@ -3469,15 +3459,10 @@ PY
             *) echo "HLS push quality analyzer returned no status" >&2; return 1 ;;
         esac
         if [ "$hls_push_reference_bps" = 0 ]; then
-            CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS="$(awk -F= \
+            capacity_store_reference CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS \
+                hls_push_quality "HLS push" "$quality_status" "$(awk -F= \
                 '$1 == "quality_reference_payload_bps" { print $2; exit }' \
-                "$hls_push_quality_report")"
-            [[ "$CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
-                && awk -v b="$CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS" \
-                    'BEGIN { exit !(b > 0) }' \
-                || { echo "HLS push quality analyzer returned an invalid reference rate" \
-                     >&2; return 1; }
-            echo "   calibrated_hls_push_quality_reference_bps=$CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS"
+                "$hls_push_quality_report")" || return 1
         fi
         [ "$quality_status" = yes ] || quality_failed=1
     fi
@@ -3887,6 +3872,33 @@ capacity_write_diagnostics() {   # <case dir> <outcome> [key=value ...]
         || echo "   diagnostics bundle could not be written for $case_dir" >&2
 }
 
+# A one-destination rung calibrates the reference its whole ladder is judged
+# against.  The rate is stored only if it is a finite positive number and the
+# rung that produced it passed its own quality checks: a failed rung's rate
+# (a stalled receiver, a lossy path) would otherwise become the yardstick that
+# every higher rung is measured by, and a zero would make every ratio vanish.
+# A rate that is not a number is an error; a failed rung leaves the reference
+# unset, so the next rung has nothing to be judged against and is refused.
+capacity_positive_rate() {   # <rate>
+    [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+        && awk -v b="$1" 'BEGIN { exit !(b > 0) }'
+}
+
+capacity_store_reference() {   # <variable> <log tag> <label> <quality_pass> <rate>
+    local variable="$1" tag="$2" label="$3" quality_pass="$4" rate="$5"
+
+    capacity_positive_rate "$rate" \
+        || { echo "$label quality analyzer returned an invalid reference rate" \
+                  >&2; return 1; }
+    if [ "$quality_pass" != yes ]; then
+        echo "   $label calibration rung failed its quality checks;" \
+             "its rate $rate is not stored as the reference" >&2
+        return 0
+    fi
+    printf -v "$variable" '%s' "$rate"
+    echo "   calibrated_${tag}_reference_bps=$rate"
+}
+
 # which SRT library the binary under test carries: robotweax/srt links as a
 # static archive and reports libsrt's API version, so ldd alone cannot tell
 capacity_srt_library() {
@@ -4123,24 +4135,16 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
 phase_capacity_quality_ladder() {
     local entry mix protocol srt_share hls_push_share status failures=0 failed_mixes=""
     local requested found
-    local -a mix_specs=(
-        pure-srt:srt:0
-        pure-rtmp:rtmp:0
-        pure-hls:hls:0
-        pure-hls-push:hls-push:0
-        rtmp-95-srt-5:rtmp:5
-        hls-push-95-srt-5:hls-push:5
-        rtmp-50-hls-push-45-srt-5:rtmp-hls-push:5:45
-        # contention: SRT at half the destinations, with RTMP and HLS push
-        # beside it, which the published mixes never exercise (their SRT
-        # share is 5%)
-        srt-50-rtmp-25-hls-push-25:rtmp-hls-push:50:25
-        # the same contention shape with a quarter of the destinations on
-        # SRT: between the published 5% share (where HLS push works) and the
-        # 50% share (where it does not), to find where it stops
-        srt-25-rtmp-25-hls-push-50:rtmp-hls-push:25:50
-    )
-    local -a requested_mixes=() selected_mix_specs=()
+    local -a executed_mixes=() requested_mixes=() selected_mix_specs=()
+    local -a mix_specs=()
+    local mixes_file="$ROOT/tests/bench/capacity-mixes.conf"
+
+    # The workloads are listed once, in capacity-mixes.conf, which the CI
+    # driver reads too: one set of mixes for the manifest and the execution.
+    mapfile -t mix_specs < <(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' \
+                                  "$mixes_file")
+    [ "${#mix_specs[@]}" -gt 0 ] \
+        || { echo "no capacity quality mixes in $mixes_file" >&2; return 1; }
 
     [ -n "$CAPACITY_QUALITY_STEPS" ] \
         || { echo "CAPACITY_QUALITY_STEPS must not be empty" >&2; return 1; }
@@ -4150,9 +4154,7 @@ phase_capacity_quality_ladder() {
             || { echo "CAPACITY_QUALITY_MIXES must not be empty" >&2; return 1; }
         for requested in "${requested_mixes[@]}"; do
             case "$requested" in
-                pure-srt|pure-rtmp|pure-hls|pure-hls-push|rtmp-95-srt-5|hls-push-95-srt-5|rtmp-50-hls-push-45-srt-5|srt-50-rtmp-25-hls-push-25|srt-25-rtmp-25-hls-push-50)
-                    ;;
-                *)
+                *[!A-Za-z0-9-]*)
                     echo "unknown capacity quality mix: $requested" >&2
                     return 1
                     ;;
@@ -4171,17 +4173,18 @@ phase_capacity_quality_ladder() {
         mix_specs=( "${selected_mix_specs[@]}" )
     fi
 
-    if [ "$CAPACITY_QUALITY_MIXES" = all ]; then
-        echo
-        echo "== seven 8 Mbit/s delivery-quality ladders"
-        echo "   each rung uses one program; per-protocol one-destination baselines calibrate before scaling."
-        echo "   mix order: pure SRT, pure RTMP, pure HLS readers, pure HLS push, 95% RTMP/5% SRT, 95% HLS push/5% SRT, and RTMP/HLS push/SRT."
-    else
-        echo
-        echo "== selected 8 Mbit/s delivery-quality ladders"
-        echo "   selected mixes: $CAPACITY_QUALITY_MIXES"
-        echo "   each rung uses one program; per-protocol one-destination baselines calibrate before scaling."
-    fi
+    # What this run executes, in order, stated by the harness itself: the CI
+    # driver's expected-run manifest is checked against this line, so a list
+    # the two disagree on fails the completeness gate instead of being
+    # silently shorter or longer than the manifest.
+    for entry in "${mix_specs[@]}"; do
+        executed_mixes+=( "${entry%%:*}" )
+    done
+    echo
+    echo "== ${#mix_specs[@]} ${CAPACITY_QUALITY_RATE} delivery-quality ladders"
+    echo "   each rung uses one program; per-protocol one-destination baselines calibrate before scaling."
+    echo "quality_mixes=${executed_mixes[*]}"
+    echo "quality_recipe seconds=$CAPACITY_QUALITY_SECONDS rate=$CAPACITY_QUALITY_RATE steps=${CAPACITY_QUALITY_STEPS// /,} stop_after_failures=$CAPACITY_QUALITY_STOP_AFTER_FAILURES min_delivery_ratio=$CAPACITY_QUALITY_MIN_DELIVERY_RATIO interval_floor=$CAPACITY_QUALITY_INTERVAL_FLOOR max_low_seconds=$CAPACITY_QUALITY_MAX_LOW_SECONDS srt_workers=$CAPACITY_FIXED_SRT_WORKERS hls_push_workers=$CAPACITY_FIXED_HLS_PUSH_WORKERS srt_hls=$CAPACITY_SRT_HLS"
     for entry in "${mix_specs[@]}"; do
         IFS=: read -r mix protocol srt_share hls_push_share <<< "$entry"
         if capacity_quality_ladder "$mix" "$protocol" "$srt_share" "$hls_push_share"; then

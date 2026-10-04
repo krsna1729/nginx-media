@@ -12,10 +12,8 @@ TREND_SECONDS="${BENCH_TREND_SECONDS:-10}"
 
 case "$TIER" in
     branch)
-        configs='["srt","rtmp","rtmp-srt"]'
         config_names="srt rtmp rtmp-srt" ;;
     nightly)
-        configs='["srt-rtmp","hls","mix-srt-share","mix-all-protocols"]'
         config_names="srt-rtmp hls mix-srt-share mix-all-protocols" ;;
     weekly)
         config_names="all"
@@ -46,10 +44,10 @@ trap cleanup EXIT
 
 stub_summary() {
     local sha="$1" commit_time="$2" out="$3"
-    python3 - "$sha" "$commit_time" "$out" "$TIER" "$configs" "$RUN_ID" <<'PY'
+    python3 - "$sha" "$commit_time" "$out" "$TIER" "$config_names" "$RUN_ID" <<'PY'
 import datetime, json, os, sys
-sha, commit_time, path, tier, configs, group = sys.argv[1:]
-names = json.loads(configs)
+sha, commit_time, path, tier, config_names, group = sys.argv[1:]
+names = config_names.split()
 record = {
     "schema": "nginx-media.bench-history/3", "tier": tier,
     "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
