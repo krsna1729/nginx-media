@@ -12,6 +12,22 @@ IRQ/NIC topology all move it, so it is compared within one host class.  Every ro
 comes from a rung's `diagnostics.json`; the method is in
 `development.md` ("Per-rung diagnostics and outcomes").
 
+Distributed evidence has a separate qualification boundary. The SSH driver now
+uses fresh explicit receiver roots, native receiver binaries, authenticated SSH
+host keys, owned remote process groups and fetched receiver fingerprints/probes.
+All named SRT/RTMP/HLS workloads use real receivers; RTMP administration remains
+private through SSH forwarding, and HLS-origin readers address the sender.
+Receiver CPU/process snapshots are host-separated rather than attributing a
+local SSH client's CPU to the remote receiver. Configuration manifests and
+logs/statuses use the same completeness contract as local history.
+No external SSH receiver or second physical host is configured in the current
+environment. An isolated loopback sshd can exercise transport, lifecycle and
+actual media, but cannot substantiate a physical-host/network capacity claim.
+Initial admission stops if measured CPU-cost evidence is absent or any probe,
+fingerprint, fetch or judge operation fails. This orchestration repair adds no
+new measured capacity result to the tables below.
+
+
 ## What landed, and why
 
 | Pull request | Root cause | Fix |

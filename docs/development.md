@@ -423,7 +423,7 @@ The measuring side is kept from becoming the measured limit:
   every shared-runner tier uses.  Two other topologies are wired:
   `ip netns exec <ns>` / `nsenter --net=/run/netns/<ns> --no-fork` with the
   namespace's own address puts the traffic over a veth pair, and
-  `ssh <host>` puts the receivers on another machine.  The namespace
+  the distributed driver below puts the receivers on another machine. The namespace
   topology is one command - `eval "$(tests/bench/capacity_veth.sh up)"` -
   and it is the topology to use when the question is whether the software
   depends on loopback; it is not a NIC, so a number from it is a number
@@ -443,16 +443,62 @@ The measuring side is kept from becoming the measured limit:
   that workload's ladder; it is never a quality failure and never a
   statement about nginx.  The bundle keeps the whole preflight under
   `preflight`, and the matrix and history list the rung separately.
-- **Two hosts.**  `tests/bench/capacity_distributed.sh --receiver user@host
-  --addr 10.10.0.2` mirrors the repository to the receiver host at the same
-  absolute path, runs the preflight on both sides, then runs the ladder with
-  the receivers started over ssh.  Artifacts come back through
-  `CAPACITY_RECEIVER_FILE_TEST`/`_FETCH`/`_COLLECT` (a no-op when the
-  receivers share this filesystem), so the same harness and the same
-  diagnostics work for both.  The link between the hosts is the measurement:
-  a 1000 x 8 Mbit/s rung needs about 9.6 Gbit/s of path including overhead,
-  and on anything smaller the preflight says so instead of the run
-  pretending.
+- **Two hosts.** `tests/bench/capacity_distributed.sh --receiver user@host
+  --addr 10.10.0.2 --sender-addr 10.10.0.1 --mixes all` supports every named
+  SRT, sharded RTMP, HLS-origin and HLS-push workload. Each workload gets its
+  own configuration manifest, log, status and diagnostic directories; contention
+  calibration begins at four outputs when the requested first rung is one.
+  `--receiver-root /absolute/isolated/root` explicitly maps sender run paths
+  onto a **new** receiver root (default: a scoped fresh `/tmp` directory).
+  Only source is mirrored: `.build` and `.git` are excluded, no `--delete`
+  is used, and receiver SRT/nginx binaries are compiled natively. Fingerprints
+  record architecture, boot ID, actual binary hash and linked SRT identity.
+  Both host fingerprints and both probe results must arrive before judging;
+  exit 0 admits the ladder, 2 stops as infrastructure-limited, and every other
+  status is fatal. Initial admission requires measured
+  `CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS` and
+  `CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS`, not guessed core-count capacity.
+  `--out` must name a new directory; readiness, probe and snapshot artifacts
+  cannot be inherited from an earlier run.
+  `CAPACITY_RECEIVER_CONFIG` carries serialized SSH argv and path mappings.
+  Receivers publish their own PID, process group, start time and ownership token;
+  liveness and signals verify them on the receiver. Local SSH client CPU is
+  never sampled as receiver CPU. Remote CPU and host snapshots stay in separate
+  `receiver.cpu.*`, `receiver.host.*` and `receiver.processes.tsv` artifacts
+  because numeric PIDs and monotonic clocks can collide across hosts.
+  RTMP administration binds remote loopback and uses a private SSH forward.
+  HLS-origin readers use `--sender-addr`: the sender exposes only `/hls/` on
+  a separate listener, never its unauthenticated administration API.
+  Existing authenticated host keys are required; `--ssh-port`, `--ssh-key`
+  and `--known-hosts` support an isolated loopback sshd without permanent SSH
+  configuration. For example, after independently authenticating its host key:
+
+  ```sh
+  tests/bench/capacity_distributed.sh --receiver \"$USER@127.0.0.1\" \
+    --addr 127.0.0.1 --sender-addr 127.0.0.1 --ssh-port 22222 \
+    --ssh-key \"$PWD/.build/ssh-smoke/client\" \
+    --known-hosts \"$PWD/.build/ssh-smoke/known_hosts\" \
+    --receiver-root \"$PWD/.build/ssh-smoke/receiver-new\" \
+    --out \"$PWD/.build/ssh-smoke/result-new\" \
+    --mixes 'pure-srt pure-rtmp pure-hls pure-hls-push' --steps '1' \
+    --seconds 15 --preflight-only
+  python3 tests/bench/test_capacity_receiver.py \
+    --ssh-config .build/ssh-smoke/result-new/receiver-config.json
+  ```
+
+  Without measured CPU costs, the first command stops with insufficient
+  evidence after native preparation and the actual probe. Its transport config
+  remains usable for the second command's real process/file/signal/teardown
+  smoke. For an actual media smoke (not admission or capacity qualification),
+  use that config with `CAPACITY_RUN` set to its `local_run`,
+  `CAPACITY_RECEIVER_CONFIG` to its path, `CAPACITY_PREFLIGHT=no`,
+  `CAPACITY_RECEIVER_ADDR=127.0.0.1`, `CAPACITY_SENDER_ADDR=127.0.0.1`,
+  `CAPACITY_QUALITY_MIXES='pure-srt pure-rtmp pure-hls pure-hls-push'`,
+  `CAPACITY_QUALITY_STEPS=1`, `CAPACITY_QUALITY_SECONDS=15`, and
+  `PHASES=capacity-quality-ladder` when launching `ingest_egress_fanout.sh`.
+  Loopback SSH proves orchestration only, not a second physical host or NIC
+  capacity. A 1000 × 8 Mbit/s rung needs about 9.6 Gbit/s including overhead;
+  insufficient or invalid evidence must never become a capacity claim.
 - The SRT receiver listens on several ports (`PORT:N`) so no single receiver
   UDP socket and libsrt receive thread carries more than
   `CAPACITY_SRT_RECEIVER_PEERS` destinations (16 by default).

@@ -2419,12 +2419,39 @@ def test_rung_record_keeps_the_preflight_verdict_and_reference():
           "no preflight and no reference are recorded as absent, not as ok")
 
 
+def test_distributed_preflight_rejects_invalid_instrument_before_limits(work):
+    case = os.path.join(work, "distributed-invalid-probe")
+    sender = os.path.join(case, "sender.json")
+    rx = os.path.join(case, "rx.json")
+    tx = os.path.join(case, "tx.json")
+    judged = os.path.join(case, "judge.json")
+    write_json(sender, {"role": "sender", "permitted_cpus": [0]})
+    write_json(tx, {"sent_bytes": 1_000_000, "send_window_s": 1.0})
+    for label, measurement in (
+            ("negative bytes", {"received_bytes": -1, "window_s": 1.0}),
+            ("invalid duration", {"received_bytes": 1, "window_s": float("nan")}),
+            ("missing receiver counter", {"window_s": 1.0}),
+            ("invalid socket drops", {"received_bytes": 1, "window_s": 1.0,
+                                      "socket_drops": -1})):
+        write_json(rx, measurement)
+        result = preflight("judge", "--destinations", "1000", "--bitrate-bps",
+                           "8000000", "--sender", sender, "--network", rx,
+                           "--probe-sender", tx, "--sender-cpu-per-gbps", "1000",
+                           "--json", judged)
+        verdict = read_json(judged)
+        check(result.returncode == 1 and verdict["verdict"] == "setup-failure",
+              f"{label}: invalid probe outranks a real short CPU: {result.stdout}")
+        check(not verdict["limits"],
+              f"{label}: invalid probe cannot substantiate an infrastructure limit")
+
+
 def main():
     work = tempfile.mkdtemp(prefix="nginx-media-reporting-")
     try:
         test_preflight_classifies_a_short_environment(work)
         test_preflight_names_a_foreign_load_on_the_pinned_cpus(work)
         test_preflight_probe_is_measured_at_both_ends(work)
+        test_distributed_preflight_rejects_invalid_instrument_before_limits(work)
         test_reader_percentile_helpers()
         test_reader_reports_observed_not_threshold(os.path.join(work, "readers"))
         test_hls_origin_bundle_uses_observed_ratios(work)
