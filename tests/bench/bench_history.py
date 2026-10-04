@@ -153,6 +153,8 @@ def rung_record(bundle):
         "strict_full_rate": strict,
         # the environment this rung was taken in, and its peak pressure
         "host_fingerprint": bundle.get("host_fingerprint"),
+        "receiver_host_fingerprint": bundle.get("receiver_host_fingerprint"),
+        "receiver_nginx_fingerprint": bundle.get("receiver_nginx_fingerprint"),
         "peak": peak_pressure(bundle),
         "strict_full_rate_pass": (all(v == "yes" for v in strict.values())
                                   if strict else None),

@@ -933,6 +933,12 @@ def build(args):
         "host_fingerprint": (load_json(os.path.join(case_dir,
                                                     "host-fingerprint.json"))
                              or missing("mixed", "no host fingerprint")),
+        "receiver_host_fingerprint": (
+            load_json(os.path.join(case_dir, "preflight.receiver.json"))
+            or missing("mixed", "no native receiver host fingerprint")),
+        "receiver_nginx_fingerprint": (
+            load_json(os.path.join(case_dir, "receiver-nginx-fingerprint.json"))
+            or missing("mixed", "no native receiver nginx fingerprint")),
     }
     bundle["receiver_windows"] = {}
     for proto, filename in (("srt", "receiver.measurement.window"),

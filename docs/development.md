@@ -399,6 +399,9 @@ Every capacity rung leaves `diagnostics.json` in its case directory
   used. Remote CPU/process/network accounting stays under `receiver_host`,
   separate from local PID identities. Controller-side request brackets map
   remote boundaries; native remote monotonic clocks are never assumed shared.
+  `receiver_host_fingerprint` and `receiver_nginx_fingerprint` retain native
+  receiver architecture, boot identity, binary and transport-library provenance
+  from collected receiver artifacts, including below preflight thresholds.
 - **saturation_notes** — plain statements of which side ran out first.
 
 A rung has one of three outcomes: `setup-failure` (receivers, publishers or
