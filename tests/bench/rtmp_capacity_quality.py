@@ -347,19 +347,19 @@ def expected_ids(programs, destinations, offset):
 
 
 def quality_report(args):
+    if not args.intervals:
+        raise ValueError("short-interval receiver evidence is required")
     before = read_snapshot(args.before_prefix)
     after = read_snapshot(args.after_prefix)
     expected = expected_ids(args.programs, args.destinations, args.destination_offset)
     before_ns = read_stamp(args.before_prefix)
     after_ns = read_stamp(args.after_prefix)
-    if before_ns is not None and after_ns is not None:
-        if after_ns <= before_ns:
-            raise ValueError("receiver scrape timestamps did not advance")
-        measurement_s = (after_ns - before_ns) / 1e9
-        timing = "receiver-scrape-monotonic"
-    else:
-        measurement_s = args.measurement_s
-        timing = "shell-window"
+    if before_ns is None or after_ns is None:
+        raise ValueError("interval checks need timestamped snapshots")
+    if after_ns <= before_ns:
+        raise ValueError("receiver scrape timestamps did not advance")
+    measurement_s = (after_ns - before_ns) / 1e9
+    timing = "receiver-scrape-monotonic"
     failures = []
     rows = []
     rates = []
@@ -410,12 +410,8 @@ def quality_report(args):
                          "delivery_bps", "delivery_ratio"))
         writer.writerows(result_rows)
 
-    interval_summary = {}
-    if args.intervals:
-        if before_ns is None or after_ns is None:
-            raise ValueError("interval checks need timestamped snapshots")
-        interval_summary = interval_check(args, expected, reference, before,
-                                          after, before_ns, after_ns, failures)
+    interval_summary = interval_check(args, expected, reference, before,
+                                      after, before_ns, after_ns, failures)
 
     ratios = [float(row[5]) for row in result_rows if row[5] != ""]
     min_ratio = min(ratios, default=0.0)

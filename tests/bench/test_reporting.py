@@ -1783,6 +1783,11 @@ def test_receiver_evidence_is_required(work):
     write_rows(p("intervals.csv"), header, jitter)
     check(judge_passed(run_rtmp_judge(p)),
           "healthy short jitter and zero-byte sample remain valid")
+    p = rtmp_judge_rung(os.path.join(work, "rtmp-no-interval-evidence"))
+    result = run_rtmp_judge(p, "--intervals", "")
+    check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout
+          and not judge_passed(result),
+          f"omitting short-interval evidence cannot bypass validation: {result.stdout}")
     for label in ("missing-shard", "missing-metric", "truncated-queue"):
         p = srt_judge_rung(os.path.join(work, f"srt-{label}"))
         if label == "missing-shard":
@@ -1882,6 +1887,54 @@ def bash_function(name):
                       re.M | re.S)
     check(match is not None, f"the harness must define {name}")
     return match.group(0) if match else None
+
+
+def test_protocol_samplers_stop_independently(work):
+    helper = os.path.join(work, "sampler.py")
+    write(helper, "import signal, sys\n"
+          "signal.signal(signal.SIGTERM, lambda *_: sys.exit(int(sys.argv[2])))\n"
+          "open(sys.argv[1], 'w').write('ready')\n"
+          "signal.pause()\n")
+    function = bash_function("capacity_quality_stop_monitors")
+    if function is None:
+        return
+    script = function + r'''
+set -euo pipefail
+QUALITY_MONITORS=()
+trap 'kill -TERM "${QUALITY_MONITORS[@]}" 2>/dev/null || true; wait || true' EXIT
+ready() {
+    for (( n=0; n<300; n++ )); do
+        [ -s "$1" ] && return 0
+        sleep 0.01
+    done
+    return 1
+}
+"$PYTHON" "$1" "$2/rtmp.ready" 0 &
+rtmp=$!
+QUALITY_MONITORS+=( "$rtmp" )
+"$PYTHON" "$1" "$2/srt.ready" 0 &
+srt=$!
+QUALITY_MONITORS+=( "$srt" )
+ready "$2/rtmp.ready"
+ready "$2/srt.ready"
+capacity_quality_stop_monitors "$rtmp"
+kill -0 "$srt"
+[ "${QUALITY_MONITORS[*]}" = "$srt" ]
+capacity_quality_stop_monitors
+[ "${#QUALITY_MONITORS[@]}" -eq 0 ]
+if kill -0 "$srt" 2>/dev/null; then exit 1; fi
+"$PYTHON" "$1" "$2/failed.ready" 7 &
+failed=$!
+QUALITY_MONITORS+=( "$failed" )
+ready "$2/failed.ready"
+if capacity_quality_stop_monitors "$failed"; then exit 1; fi
+[ "${#QUALITY_MONITORS[@]}" -eq 0 ]
+'''
+    result = run(["bash", "-c", script, "sampler-test", helper, work],
+                 env=dict(os.environ, PYTHON=sys.executable))
+    check(result.returncode == 0,
+          f"stopping RTMP must leave SRT alive and sampler errors must propagate: "
+          f"{result.stdout}{result.stderr}")
 
 
 def test_calibration_is_stored_only_from_a_passing_positive_rung(work):
@@ -2026,15 +2079,18 @@ def test_bench_ci_manifest_is_the_harness_mix_list(work):
                              recipe={"seconds": duration}, steps=manifest["steps"])
     pr = recipe("pr-default", "pr")
     branch = recipe("branch-default", "branch")
-    check(pr["configs"]["srt"]["recipe"]["seconds"] == 15,
-          "the shipped PR recipe uses branch's 15-second default")
-    check(len(module.regressions(pr, [branch] * 3)) == 1,
+    baselines = [recipe_record(value, recipe=branch["configs"]["srt"]["recipe"])
+                 for value in (10, 11, 12)]
+    check(len(module.regressions(pr, baselines)) == 1,
           "real default driver recipes are comparable")
     pr_override = recipe("pr-override", "pr", 7)
     branch_override = recipe("branch-override", "branch", 7)
-    check(len(module.regressions(pr_override, [branch_override] * 3)) == 1,
+    override_baselines = [
+        recipe_record(value, recipe=branch_override["configs"]["srt"]["recipe"])
+        for value in (10, 11, 12)]
+    check(len(module.regressions(pr_override, override_baselines)) == 1,
           "intentionally matching duration overrides are comparable")
-    check(module.regressions(pr_override, [branch] * 3) == [],
+    check(module.regressions(pr_override, baselines) == [],
           "different duration overrides remain incomparable")
     # The separate contention artifact is mandatory, not an optional add-on.
     results = os.path.join(work, "weekly-missing-contention")
@@ -2404,6 +2460,7 @@ def main():
         test_srt_judge_rejects_non_finite_inputs(work)
         test_rtmp_judge_rejects_non_finite_inputs(work)
         test_receiver_evidence_is_required(work)
+        test_protocol_samplers_stop_independently(work)
         test_hls_push_judge_rejects_non_finite_inputs(work)
         test_calibration_is_stored_only_from_a_passing_positive_rung(work)
         test_harness_runs_the_mixes_of_the_one_list(work)
