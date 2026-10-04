@@ -104,7 +104,8 @@ def calibration_references(delivery):
             continue
         for key in ("quality_reference_payload_bps", "reference_bps"):
             number = report.get(key)
-            if (isinstance(number, (int, float)) and not isinstance(number, bool)
+            if (isinstance(number, (int, float))
+                    and not isinstance(number, bool)
                     and math.isfinite(number) and number > 0):
                 references[protocol] = number
                 break
@@ -552,7 +553,9 @@ def recipes_comparable(current, past):
     return bool(now) and bool(then) and now[0] == then[0]
 
 
-FLOOR_OK_OR_REPORTED_ELSEWHERE = ("pass", "quality-failure", "setup-failure")
+# outcomes that need no floor finding of their own: a pass is the evidence,
+# the other two are reported where they are found
+FLOOR_SETTLED = ("pass", "quality-failure", "setup-failure")
 
 
 def floor_errors(name, config, required):
@@ -579,14 +582,15 @@ def floor_errors(name, config, required):
         else:
             outcome = next((r.get("outcome") for r in rungs
                             if r.get("destinations") == floor), None)
-            if outcome not in FLOOR_OK_OR_REPORTED_ELSEWHERE:
+            if outcome not in FLOOR_SETTLED:
                 errors.append(f"{name}/{mix}: no passing result at the "
                               f"{floor}-destination floor rung (outcome: "
                               f"{outcome or 'missing'})")
         for rung in rungs:
             if ((rung.get("destinations") or 0) <= required
-                    and rung.get("outcome") not in FLOOR_OK_OR_REPORTED_ELSEWHERE):
-                errors.append(f"{name}/{mix}: {rung.get('outcome') or 'unknown'}"
+                    and rung.get("outcome") not in FLOOR_SETTLED):
+                errors.append(f"{name}/{mix}: "
+                              f"{rung.get('outcome') or 'unknown'}"
                               f" at {rung.get('destinations')} destinations, "
                               f"at or below the {required}-destination floor "
                               f"which must be measured")

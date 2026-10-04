@@ -9,7 +9,9 @@
 #   branch   the pr recipe plus RTMP 95%/SRT 5%, after a merge to main.
 #   nightly  all seven workloads in four parallel configurations, 30 s
 #            rungs up to the host's boundary.
-#   weekly   the nightly ladders at 120 s, the fixed-vs-adaptive SRT sender
+#   weekly   every mix in tests/bench/capacity-mixes.conf (the nightly seven
+#            plus the two contention ladders) at 120 s, the fixed-vs-adaptive
+#            SRT sender
 #            comparison, HLS preparation on/off, and the transport library
 #            comparison (libsrt vs robotweax/srt) when ROBOTWEAX_NGINX names a
 #            binary built against it.

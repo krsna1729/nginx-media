@@ -54,7 +54,9 @@ with benchmark-runner fingerprints; efficiency series never join different
 fingerprints, and the latest table identifies each benchmark runner rather
 than the separate publisher host. A regression is reported only for passing
 rungs with at least three complete passing baselines from the same runner
-fingerprint and workload. The publisher opens one issue per tier/configuration/
+fingerprint, workload and recipe (duration, source rate, mixes, stop-after rule
+and harness revision; records that predate recipes are not baselines). The
+publisher opens one issue per tier/configuration/
 workload/rung and links the published history.
 
 
