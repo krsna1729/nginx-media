@@ -601,11 +601,18 @@ program_frames() {
     number "program_frames" "$(stream_field program_frames)"
 }
 
-wait_for_active() { # <source> [tries]
-    local want="$1" tries="${2:-100}"
+wait_for_active() { # <source> [tries] [switch-count-before-transition]
+    local want="$1" tries="${2:-100}" before="${3:--1}" observed
 
     for _ in $(seq 1 "$tries"); do
-        if [ "$(active)" = "$want" ]; then
+        # Read active and switches from one snapshot. An already-active
+        # standby is not evidence that the fault caused a new transition.
+        observed="$(stream_json | python3 -c '
+import json, sys
+s = json.load(sys.stdin)
+print(int(s["active"] == sys.argv[1] and s["switches"] > int(sys.argv[2])))
+' "$want" "$before")"
+        if [ "$observed" = 1 ]; then
             return 0
         fi
         sleep 0.1
@@ -883,6 +890,12 @@ echo "   $SEGMENT: $BYTES bytes, sha256 $VIEWER_SHA, pulled in ${VIEWER_MS}ms"
 # 2. hard link failure
 # --------------------------------------------------------------------------
 
+# The viewer transfer above takes time on its impaired link. Loss can move
+# selection during that interval, so establish the fault's starting state
+# again instead of assuming the earlier active-source observation still holds.
+wait_for_active encoder-a 200 \
+    || fail "encoder-a did not recover before the carrier-failure scenario"
+
 # Capture the count first: loss on an impaired link produces the odd container
 # error, and the health model reports that as a brief loss of health, so a
 # link that is merely impaired can move the count on its own.  Every failover
@@ -900,7 +913,7 @@ grep -q 'state DOWN' "$RUN/link-a-down.txt" \
 
 SEGMENT_BEFORE="$(newest_segment)"
 
-wait_for_active encoder-b 250 \
+wait_for_active encoder-b 250 "$SWITCHES_BEFORE" \
     || fail "the selector did not fail over after the active carrier was lost"
 
 SWITCHES="$(switch_count)"

@@ -287,8 +287,8 @@ test_malformed(void)
     /* shorter than a header */
     n = send(ngx_media_ipc_fd(peer), bad, 8, MSG_NOSIGNAL);
     CHECK(n == 8, "short datagram sent");
-    CHECK(ngx_media_ipc_recv(local, &message) == NGX_ERROR,
-          "short datagram rejected");
+    CHECK(ngx_media_ipc_recv(local, &message) == NGX_DECLINED,
+          "short datagram dropped, endpoint still usable");
 
     /* a valid header with a wrong version */
     memset(bad, 0, sizeof(bad));
@@ -296,8 +296,8 @@ test_malformed(void)
     n = send(ngx_media_ipc_fd(peer), bad, sizeof(ngx_media_ipc_header_t),
              MSG_NOSIGNAL);
     CHECK(n > 0, "bad version datagram sent");
-    CHECK(ngx_media_ipc_recv(local, &message) == NGX_ERROR,
-          "bad version rejected");
+    CHECK(ngx_media_ipc_recv(local, &message) == NGX_DECLINED,
+          "bad version dropped, endpoint still usable");
 
     /* a header claiming more payload than the datagram carries */
     memset(bad, 0, sizeof(bad));
@@ -308,11 +308,123 @@ test_malformed(void)
     n = send(ngx_media_ipc_fd(peer), bad, sizeof(ngx_media_ipc_header_t),
              MSG_NOSIGNAL);
     CHECK(n > 0, "truncated datagram sent");
+    CHECK(ngx_media_ipc_recv(local, &message) == NGX_DECLINED,
+          "length mismatch dropped, endpoint still usable");
+
+    /* the valid message behind the bad ones is still delivered */
+    memset(&message, 0, sizeof(message));
+    memset(bad, 0, sizeof(bad));
+    {
+        ngx_media_ipc_header_t  ok;
+
+        memset(&ok, 0, sizeof(ok));
+        ok.version = NGX_MEDIA_IPC_VERSION;
+        ok.type = NGX_MEDIA_IPC_MSG_CLOSE;
+        ok.hash = 77;
+        CHECK(ngx_media_ipc_send_header(peer, &ok) == NGX_OK, "valid sent");
+    }
+    CHECK(ngx_media_ipc_recv(local, &message) == NGX_OK
+          && message.header.hash == 77,
+          "a valid message after malformed ones is received");
+
+    /* only a closed peer makes the endpoint unusable */
+    ngx_media_ipc_close(peer);
     CHECK(ngx_media_ipc_recv(local, &message) == NGX_ERROR,
-          "length mismatch rejected");
+          "a closed peer is reported as an error");
 
     ngx_media_ipc_close(local);
-    ngx_media_ipc_close(peer);
+}
+
+static void
+test_abandoned_frame_and_flow(void)
+{
+    ngx_media_ipc_frame_t      frame;
+    ngx_media_ipc_message_t    message;
+    ngx_media_ipc_flow_t       flow;
+    ngx_media_buf_t           *buf;
+
+    TEST_CASE("a frame abandoned mid-send does not cost the next frame");
+
+    memset(&frame, 0, sizeof(frame));
+    memset(&message, 0, sizeof(message));
+    message.header.total = 100;
+    message.header.flags = NGX_MEDIA_IPC_FLAG_MORE;
+    message.length = 10;
+    buf = payload(10, 1);
+    message.payload = buf;
+    CHECK(ngx_media_ipc_frame_feed(&frame, &message) == NGX_AGAIN,
+          "the first chunk of a large frame is accepted");
+    ngx_media_buf_unref(buf);
+
+    /* the sender hit backpressure and moved on: a new frame starts at 0 */
+    memset(&message, 0, sizeof(message));
+    message.header.total = 20;
+    message.length = 20;
+    buf = payload(20, 2);
+    message.payload = buf;
+    CHECK(ngx_media_ipc_frame_feed(&frame, &message) == NGX_OK,
+          "the next frame is delivered whole");
+    CHECK(frame.restarts == 1, "the abandoned frame was counted: %lu",
+          (unsigned long) frame.restarts);
+    CHECK(frame.payload != NULL && ngx_media_buf_size(frame.payload) == 20,
+          "its payload is the new frame's");
+    ngx_media_buf_unref(buf);
+    ngx_media_ipc_frame_reset(&frame);
+
+    TEST_CASE("a continuation cannot complete a different publisher frame");
+    memset(&frame, 0, sizeof(frame));
+    memset(&message, 0, sizeof(message));
+    message.header.total = 20;
+    message.header.flags = NGX_MEDIA_IPC_FLAG_MORE;
+    message.header.session = 42;
+    message.header.sequence = 7;
+    message.length = 10;
+    buf = payload(10, 3);
+    message.payload = buf;
+    CHECK(ngx_media_ipc_frame_feed(&frame, &message) == NGX_AGAIN,
+          "frame seven starts");
+    message.header.offset = 10;
+    message.header.flags = 0;
+    message.header.sequence = 8;
+    CHECK(ngx_media_ipc_frame_feed(&frame, &message) == NGX_ERROR,
+          "frame eight cannot supply frame seven's continuation");
+    CHECK(frame.payload == NULL && !frame.active,
+          "mismatched continuation discards the partial payload");
+    ngx_media_buf_unref(buf);
+    ngx_media_ipc_frame_reset(&frame);
+
+    TEST_CASE("codec configuration is not a resynchronization boundary");
+    memset(&flow, 0, sizeof(flow));
+    flow.resync = 1;
+    /* Both TS and RTMP mark video config with keyframe=1, config=1. */
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 1, 1) == 1,
+          "configuration is delivered while waiting for a keyframe");
+    ngx_media_ipc_flow_sent(&flow, 1, 1, 1, NGX_OK);
+    CHECK(flow.resync == 1, "video configuration cannot replace the missing IDR");
+
+    TEST_CASE("a failed send drops video up to the next keyframe");
+
+    memset(&flow, 0, sizeof(flow));
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 1, 0) == 1, "a keyframe is sent");
+    ngx_media_ipc_flow_sent(&flow, 1, 1, 0, NGX_OK);
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 0, 0) == 1, "delta frames follow");
+    ngx_media_ipc_flow_sent(&flow, 1, 0, 0, NGX_AGAIN);
+    CHECK(flow.resync == 1 && flow.resyncs == 1, "the failure starts a resync");
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 0, 0) == 0,
+          "delta video is held back");
+    CHECK(ngx_media_ipc_flow_admit(&flow, 0, 0, 0) == 1,
+          "audio is not held back");
+    ngx_media_ipc_flow_sent(&flow, 0, 0, 0, NGX_OK);
+    CHECK(flow.resync == 1, "audio does not end the resync");
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 1, 0) == 1, "the next keyframe goes");
+    ngx_media_ipc_flow_sent(&flow, 1, 1, 0, NGX_OK);
+    CHECK(flow.resync == 0, "a delivered keyframe ends the resync");
+    CHECK(flow.dropped == 1, "one frame was held back: %lu",
+          (unsigned long) flow.dropped);
+    CHECK(flow.sequence == 5, "every frame was numbered: %lu",
+          (unsigned long) flow.sequence);
+    CHECK(ngx_media_ipc_flow_admit(&flow, 1, 0, 0) == 1,
+          "delta video flows again");
 }
 
 int
@@ -324,6 +436,7 @@ main(void)
     test_chunked_frame();
     test_reassembly_rejects();
     test_malformed();
+    test_abandoned_frame_and_flow();
 
     TEST_LEAKS();
     TEST_MAIN_END();

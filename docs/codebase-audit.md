@@ -75,13 +75,13 @@ were not executed during the audit.
   dribbling responses, DNS or shutdown joins.
 - [ ] **S7:** apply the existing credential redactor at lower-level HTTP, HLS
   pull and RTMP destination logging sinks, including reconnect/failure paths.
-- [ ] **S8:** reject non-regular file sources promptly; synchronous FIFO/device
+- [x] **S8:** reject non-regular file sources promptly; synchronous FIFO/device
   open/read can block an nginx worker (`ngx_media_file.c:99-100,173`).
 - [ ] **R3:** align API/graph encoder limits with decoder limits; prevent distinct
   program names colliding after HLS directory sanitization.
 - [ ] **R4:** isolate routing socket pairs between worker generations and test
   owner-directory PID takeover after reload.
-- [ ] **R5:** recover from per-datagram IPC errors without permanently removing
+- [x] **R5:** recover from per-datagram IPC errors without permanently removing
   a peer read event; handle partial frame sends, sequence gaps and backpressure
   at a keyframe boundary.
 - [ ] **R6:** enforce stream/source/destination quotas against runtime and owner
@@ -323,6 +323,51 @@ checkbox above marked only after the behavior is exercised.
   leaves the other feeding. On the pre-fix source the first scenario fails with
   the source deleted and the second (run alone) with the active source
   receiving no media of its own.
+
+### Routing resilience (R5)
+
+- `ngx_media_ipc_recv` returns `NGX_DECLINED` for a malformed or oversized
+  datagram it has already consumed (short, wrong version, length mismatch,
+  transient allocation failure); the route handler counts it, logs at most once
+  a second and keeps reading. `NGX_ERROR` is only a closed peer or a socket
+  error, which still ends the read event, now with a log line.
+- A frame's first chunk arriving while another frame is open discards the open
+  one (`restarts`, exported as `nginx_media_runtime_routed_frame_restarts_total`)
+  instead of refusing both.
+- Each routed publisher has an `ngx_media_ipc_flow_t`: a failed hand-over makes
+  it drop video until the next delivered keyframe (audio keeps flowing) and
+  every frame, sent or dropped, advances `header.sequence`; the owner reports
+  skipped numbers as `nginx_media_runtime_routed_sequence_gaps_total`.
+- `test_ipc` covers the datagram cases, a valid message behind bad ones, a
+  closed peer, an abandoned frame and the flow state machine; `make
+  routed-sources` checks both counters are exported and the gap counter stays 0
+  on a healthy route. Not covered: a real backpressured socket in nginx (no
+  injection point), so the sender-side resync is verified by the state-machine
+  unit test only.
+- The Ubuntu CI namespace scenario assumed encoder-a stayed active during a
+  shaped viewer transfer. It now waits for the preferred source again before
+  taking the carrier down, and waits for active=encoder-b with an increased
+  switch count in one API snapshot. `make netns` passed: carrier failure,
+  recovery, severe-loss failover and bonded-path failure all retained media.
+- Review regressions reproduced three failed assertions: a codec-config frame
+  ended keyframe resync, and a different frame's continuation completed an
+  abandoned payload. Config is now carried separately through the flow API;
+  only a non-config video keyframe ends resync. Reassembly checks frame
+  identity and media metadata before appending each chunk. `test_ipc` passed
+  63 checks, and rebuilt `routed-sources` and `rtmp-workers` scenarios passed.
+
+### File sources are regular files only (S8)
+
+- A file source is opened `O_NONBLOCK` and `fstat`ed; anything but a regular
+  file is refused with a log line and leaves no source behind. `make
+  file-source` creates sources over a FIFO with no writer, `/dev/zero` and a
+  directory: all are refused in under 3 s with the API still answering. On the
+  pre-fix binary the FIFO request blocked the worker past the client's 5 s
+  timeout.
+- Rejection checks require HTTP 400 with `source_open_failed`, then fetch and
+  parse the source list successfully before asserting the rejected id is absent.
+  A failed GET no longer counts as evidence of cleanup. The tightened
+  `make file-source` scenario passed against the rebuilt production binary.
 
 ### Benchmark reporting truth (B2, B3, B5, B6, B8; parts of B9, B10)
 

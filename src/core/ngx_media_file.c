@@ -96,13 +96,35 @@ ngx_media_file_open(ngx_media_stream_t *stream, const ngx_str_t *id,
         return NULL;
     }
 
-    source->file.fd = ngx_open_file(copy->data, NGX_FILE_RDONLY,
+    /*
+     * Opened non-blocking, then checked: open(2) on a FIFO with no writer, or
+     * a device that waits for its hardware, blocks the calling nginx worker -
+     * every connection on it - until something happens on the other end.  The
+     * file is read synchronously on the event loop, so only a regular file
+     * is a source.
+     */
+    source->file.fd = ngx_open_file(copy->data,
+                                    NGX_FILE_RDONLY|NGX_FILE_NONBLOCK,
                                     NGX_FILE_OPEN, 0);
     if (source->file.fd == NGX_INVALID_FILE) {
         ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
                       "media: could not open file source \"%V\"", &source->path);
         ngx_media_file_close(source);
         return NULL;
+    }
+
+    {
+        ngx_file_info_t  fi;
+
+        if (ngx_fd_info(source->file.fd, &fi) == NGX_FILE_ERROR
+            || !ngx_is_file(&fi))
+        {
+            ngx_log_error(NGX_LOG_ERR, log, 0,
+                          "media: file source \"%V\" is not a regular file",
+                          &source->path);
+            ngx_media_file_close(source);
+            return NULL;
+        }
     }
 
     source->file.log = log;

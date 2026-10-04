@@ -177,6 +177,9 @@ typedef struct {
     uint64_t                session;
     /* the routed OPEN created the source, so the last CLOSE deletes it */
     unsigned                created:1;
+    /* the sender's frame numbering, to see what never arrived */
+    unsigned                sequenced:1;
+    uint64_t                next_sequence;
     ngx_media_stream_t     *stream;
     ngx_media_source_t     *source;
     /* reassembly of one publisher's chunked frames, one per routed endpoint */
@@ -2018,6 +2021,7 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         ngx_media_frame_t        frame;
         ngx_uint_t               i;
         ngx_int_t                status;
+        uint64_t                 restarts;
         for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
 
             if (ngx_media_runtime_routed[i].used
@@ -2077,8 +2081,36 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         message.offset = 0;
         message.length = ngx_media_buf_size(payload);
 
+        restarts = ngx_media_runtime_routed[i].frame.restarts;
+
         status = ngx_media_ipc_frame_feed(&ngx_media_runtime_routed[i].frame,
                                           &message);
+
+        if (ngx_media_runtime_routed[i].frame.restarts != restarts) {
+            ngx_media_runtime_stats.routed_frame_restarts++;
+        }
+
+        if (status == NGX_AGAIN || status == NGX_OK) {
+            /*
+             * The sender numbers every frame, sent or not.  Judged at the
+             * frame's first chunk, a number the owner skipped is a frame it
+             * never received.
+             */
+            if (header->offset == 0) {
+                if (ngx_media_runtime_routed[i].sequenced
+                    && header->sequence
+                       > ngx_media_runtime_routed[i].next_sequence)
+                {
+                    ngx_media_runtime_stats.routed_sequence_gaps +=
+                        header->sequence
+                        - ngx_media_runtime_routed[i].next_sequence;
+                }
+
+                ngx_media_runtime_routed[i].sequenced = 1;
+                ngx_media_runtime_routed[i].next_sequence =
+                    header->sequence + 1;
+            }
+        }
 
         if (status == NGX_AGAIN) {
             return NGX_OK;   /* more chunks follow for this frame */

@@ -178,6 +178,22 @@ http {{
             assert {"enc-a", "enc-b"} <= source_ids(), \
                 "a routed close removed a source"
             print("redundant routed sources close independently")
+
+            # the owner numbers what it receives: a healthy route loses nothing
+            def metric(name):
+                values = []
+                for _ in range(12):   # the scrape lands on either worker
+                    with urllib.request.urlopen(api + "/metrics", timeout=2) as r:
+                        for line in r.read().decode().splitlines():
+                            if line.startswith(name + " "):
+                                values.append(int(line.split()[1]))
+                return values
+
+            gaps = metric("nginx_media_runtime_routed_sequence_gaps_total")
+            assert gaps, "the routed sequence gap counter is not exported"
+            assert max(gaps) == 0, f"routed frames were lost on a healthy route: {gaps}"
+            assert metric("nginx_media_runtime_routed_frame_restarts_total"), \
+                "the routed frame restart counter is not exported"
         finally:
             for process in publishers:
                 if process.poll() is None:

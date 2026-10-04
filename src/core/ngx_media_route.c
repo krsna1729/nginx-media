@@ -127,6 +127,9 @@ ngx_media_route_is_owner(ngx_cycle_t *cycle, uint64_t hash)
     return (ngx_media_route_owner(cycle, hash) == (ngx_uint_t) ngx_worker);
 }
 
+static uint64_t   ngx_media_route_bad_datagrams;
+static ngx_msec_t ngx_media_route_bad_logged;
+
 /* feeds frames received from another worker into the local program */
 static void
 ngx_media_route_read_handler(ngx_event_t *ev)
@@ -143,8 +146,28 @@ ngx_media_route_read_handler(ngx_event_t *ev)
             return;
         }
 
+        if (rc == NGX_DECLINED) {
+            /* one malformed datagram: count it, say so at most once a second */
+            ngx_media_route_bad_datagrams++;
+
+            if (ngx_current_msec - ngx_media_route_bad_logged >= 1000
+                || ngx_media_route_bad_logged == 0)
+            {
+                ngx_media_route_bad_logged = ngx_current_msec;
+                ngx_log_error(NGX_LOG_WARN, c->log, 0,
+                              "media: worker %ui dropped a malformed routing "
+                              "datagram (%uL so far)", (ngx_uint_t) ngx_worker,
+                              ngx_media_route_bad_datagrams);
+            }
+
+            continue;
+        }
+
         if (rc != NGX_OK) {
             /* the peer is gone: nothing sensible to do but stop reading */
+            ngx_log_error(NGX_LOG_WARN, c->log, 0,
+                          "media: worker %ui routing endpoint closed",
+                          (ngx_uint_t) ngx_worker);
             (void) ngx_del_event(c->read, NGX_READ_EVENT, 0);
             return;
         }
@@ -482,6 +505,7 @@ ngx_media_route_frame(ngx_cycle_t *cycle, uint64_t hash,
     header.hash = hash;
     header.incarnation = incarnation;
     header.session = session;
+    header.sequence = sequence;
     header.pts = frame->pts;
     header.dts = frame->dts;
     header.media_type = (uint32_t) frame->media_type;
