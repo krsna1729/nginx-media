@@ -98,6 +98,7 @@ http {
         # the body is buffered to a file and renamed into the ingest
         # directory, so the reader never sees a partial segment
         client_body_temp_path $RUN/body;
+        client_body_buffer_size 1k;
 
         location /ingest/ {
             access_log off;
@@ -126,6 +127,16 @@ sleep 0.5
 
 API="http://127.0.0.1:$HTTP_PORT/media/api/v1"
 key_of() { python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])'; }
+
+assert_no_upload_bodies() {
+    python3 - "$RUN/body" <<'PY' || exit 1
+from pathlib import Path
+import sys
+files = [p for p in Path(sys.argv[1]).rglob("*") if p.is_file()]
+if files:
+    raise SystemExit(f"upload left temporary bodies: {files}")
+PY
+}
 
 echo "== a stream and an hls push source"
 curl -fsS -X POST -H 'Content-Type: application/json' \
@@ -163,6 +174,93 @@ CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
     -T "$RUN/incoming/seg-00000.ts" \
     "http://127.0.0.1:$UPLOAD_PORT/ingest/not-a-key/seg-00000.ts")"
 [ "$CODE" = "404" ] || { echo "an unknown key got HTTP $CODE" >&2; exit 1; }
+assert_no_upload_bodies
+
+echo "== unknown keys are rejected before 100 Continue"
+python3 - "$UPLOAD_PORT" <<'PY'
+import socket, sys
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10) as peer:
+    peer.sendall(b"PUT /ingest/not-a-key/early.ts HTTP/1.1\r\n"
+                 b"Host: localhost\r\nContent-Length: 16384\r\n"
+                 b"Expect: 100-continue\r\nConnection: close\r\n\r\n")
+    header = b""
+    while b"\r\n\r\n" not in header:
+        chunk = peer.recv(4096)
+        if not chunk:
+            raise SystemExit("upload admission returned no response")
+        header += chunk
+        if len(header) > 16384:
+            raise SystemExit("upload admission returned oversized headers")
+    status = header.split(b"\r\n", 1)[0].split()
+    if len(status) < 2 or status[1] != b"404":
+        raise SystemExit(f"expected immediate 404, got {header.splitlines()[0]!r}")
+PY
+[ "$?" = 0 ] || exit 1
+assert_no_upload_bodies
+
+echo "== rotation and client abort clean up an admitted body"
+KEY="$(python3 - "$UPLOAD_PORT" "$HTTP_PORT" "$KEY" "$RUN" <<'PY'
+import http.client, json, socket, sys, time
+from pathlib import Path
+upload_port, api_port = map(int, sys.argv[1:3])
+old_key, root = sys.argv[3], Path(sys.argv[4])
+body_dir = root / "body"
+payload = b"x" * 16384
+
+def wait_for_body(present):
+    deadline = time.monotonic() + 10
+    while bool([p for p in body_dir.rglob("*") if p.is_file()]) != present:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"temporary-body presence did not become {present}")
+        time.sleep(0.02)
+
+def begin_upload(key, name):
+    peer = socket.create_connection(("127.0.0.1", upload_port), timeout=10)
+    headers = (f"PUT /ingest/{key}/{name} HTTP/1.1\r\nHost: localhost\r\n"
+               f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n")
+    peer.sendall(headers.encode() + payload[:4096])
+    wait_for_body(True)
+    return peer
+
+with begin_upload(old_key, "rotated.ts") as peer:
+    api = http.client.HTTPConnection("127.0.0.1", api_port, timeout=10)
+    api.request("POST", "/media/api/v1/streams/live/upload/sources/uploader/rotate")
+    response = api.getresponse()
+    document = json.loads(response.read())
+    if response.status != 200:
+        raise RuntimeError(f"key rotation returned {response.status}")
+    new_key = document["key"]
+    if new_key == old_key:
+        raise RuntimeError("key rotation reused the old key")
+    api.close()
+    peer.sendall(payload[4096:])
+    response = http.client.HTTPResponse(peer)
+    response.begin()
+    response.read()
+    if response.status != 404:
+        raise RuntimeError(f"in-flight old-key upload returned {response.status}")
+wait_for_body(False)
+if (root / "uploaded/uploader/rotated.ts").exists():
+    raise RuntimeError("in-flight old-key upload was published")
+
+peer = begin_upload(new_key, "aborted.ts")
+peer.close()
+wait_for_body(False)
+if (root / "uploaded/uploader/aborted.ts").exists():
+    raise RuntimeError("incomplete upload was published")
+print(new_key)
+PY
+)" || exit 1
+assert_no_upload_bodies
+
+echo "== rename failures do not retain temporary bodies"
+mkdir -p "$RUN/uploaded/uploader/blocked.ts"
+CODE="$(curl -sS -o /dev/null -w '%{http_code}' \
+    -T "$RUN/incoming/seg-00000.ts" \
+    "http://127.0.0.1:$UPLOAD_PORT/ingest/$KEY/blocked.ts")"
+[ "$CODE" = "500" ] || { echo "rename failure got HTTP $CODE" >&2; exit 1; }
+rmdir "$RUN/uploaded/uploader/blocked.ts"
+assert_no_upload_bodies
 
 echo "== segments are uploaded"
 UPLOADED=0
@@ -185,6 +283,7 @@ echo "   stored: $(ls "$RUN/uploaded/uploader" | wc -l) of $UPLOADED segments"
 
 [ "$(ls "$RUN/uploaded/uploader" | wc -l)" -eq "$UPLOADED" ] \
     || { echo "not every upload landed" >&2; exit 1; }
+assert_no_upload_bodies
 
 echo "== the source reads them through the normal health model"
 for _ in $(seq 1 300); do
@@ -410,6 +509,7 @@ expect "DELETE a segment"           200 "$(curl -sS -o /dev/null -w '%{http_code
 expect "DELETE it again"            404 "$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "http://127.0.0.1:$UPLOAD_PORT/ingest/$STD_KEY/codes/a1.ts")"
 [ ! -e "$RUN/x.ts" ] && [ ! -e "$RUN/uploaded/x.ts" ] \
     || { echo "a traversal wrote a file" >&2; exit 1; }
+assert_no_upload_bodies
 
 trap - EXIT
 cleanup
