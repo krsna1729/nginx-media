@@ -37,13 +37,13 @@ is not an assertion of an independently reproduced exploit.
   publisher identity (`ngx_media_runtime.c:1710-1735,1896-1906,1960-1963`). Test
   two redundant sources routed through non-owner workers, independent CLOSE,
   and explicit slot-exhaustion feedback.
-- [ ] **S1 / P1: clean up rejected HLS upload bodies and admit before buffering.**
-  `src/api/ngx_media_api_module.c:249` selects persistent file-only buffering;
-  admission occurs after buffering at `:550-555,691`. A real local nginx
-  reproduction sent three 4096-byte uploads using an unknown key: all returned
-  404, but three files totaling 12288 bytes remained. Use nginx clean mode,
-  validate before reading the body, and revalidate after buffering to cover
-  key rotation/source deletion during upload. Preserve atomic rename.
+- [x] **S1 / P1: clean up rejected HLS upload bodies and admit before buffering.**
+  At the baseline, three rejected 4096-byte uploads retained 12288 bytes.
+  The handler now selects nginx clean file-only mode, checks URI/key admission
+  before reading the body, and revalidates at completion. The integration suite
+  verifies unknown/wrong-type keys, rejection before 100 Continue, rotation
+  during an admitted upload, client abort, failed rename and successful atomic
+  creation/replacement, with no retained temporary bodies.
 - [ ] **S2 / P1: close rejected SRT sessions, including idle sessions.** Unknown,
   empty or wrong-type keys only log and leave the OPEN handler
   (`src/srt/ngx_media_srt_module.c:2048-2078`); the transport has 16 slots.
@@ -245,7 +245,7 @@ public-endpoint attack or exhaustive security certification was performed.
 Completed work must be recorded here with verification, and its corresponding
 checkbox above marked only after the behavior is exercised.
 
-### Test-gate repairs
+### Test-gate repairs (`6339dff`)
 
 - Every normal unit suite is automatically discovered; all 34 passed under
   ASan/UBSan with fatal sanitizer diagnostics. The seven existing TSan suites
@@ -258,3 +258,17 @@ checkbox above marked only after the behavior is exercised.
   value reports UB and exits one, rather than allowing a green process.
 - Development documentation links this backlog, describes the restored suite
   set and records the still-unfixed shim-zeroing limitation accurately.
+
+### HLS upload cleanup
+
+- `make nginx` built the production module successfully. `make hls-ingest`
+  exercised the new cleanup/admission regressions and existing media behavior:
+  uploaded H.264 segments reached the program, the standard encoder delivered
+  800 frames, and create/replace/delete responses and confinement still passed.
+- The partial-upload checks waited for an actual spooled file before rotating
+  the key or disconnecting the client, then required cleanup and no published
+  partial object. A forced rename failure returned 500 with no retained body.
+- `make ingest-keys` and `make smoke` passed against the rebuilt binary.
+- Remaining routed-session, SRT/RTMP admission, benchmark comparability, shim
+  fidelity and broader coverage work remains unchecked above; it is not
+  implemented by these first repairs.

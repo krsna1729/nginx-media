@@ -173,10 +173,15 @@ escape, never an authorization.)
   on its own listener behind the authenticating proxy, not in a location beside
   the public site.
 
-`media_hls_ingest` writes uploaded bodies into a directory on disk. It
-requires the bearer key of one `hls_push` source and confines writes to that
-source's configured directory beneath the ingest root. Unknown keys and
-non-HLS-push keys are refused; URI traversal and encoded paths are rejected.
+`media_hls_ingest` requires the bearer key of one `hls_push` source and
+confines writes to that source's directory beneath the ingest root. It checks
+the URI and key before collecting the body, and checks them again after body
+collection so key/source changes observed by the worker are enforced before
+publication. Unknown and non-HLS-push keys, traversal and encoded paths are
+refused. Accepted bodies
+use nginx's clean file-only mode: rejected, interrupted and failed-rename
+uploads leave no temporary files after request cleanup. A successful rename
+still publishes the whole object atomically, including replacement uploads.
 Restrict network access to expected encoders anyway. The key is part of the
 URL: use HTTPS, disable access logging for the ingest location or redact the
 request URI, and ensure upstream proxies do not record it.
