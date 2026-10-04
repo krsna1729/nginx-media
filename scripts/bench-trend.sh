@@ -16,7 +16,7 @@ case "$TIER" in
     nightly)
         config_names="srt-rtmp hls mix-srt-share mix-all-protocols" ;;
     weekly)
-        config_names="all"
+        config_names="all contention"
         TREND_STEPS="${BENCH_TREND_STEPS:-1 32 64}" ;;
     *) echo "unsupported trend tier: $TIER" >&2; exit 2 ;;
 esac

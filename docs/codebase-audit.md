@@ -140,7 +140,7 @@ were not executed during the audit.
   that automatic issue detection was reliable are superseded by this finding.
 - [x] **B2 / P1:** repair PR-to-main comparison: PR jobs fetch branch history,
   but Python filters it out because the tier is not `pr`. Compare only compatible
-  recipes; PR/branch duration currently differs.
+  recipes; PR and branch now share the 15-second default.
 - [ ] **B3:** store seconds, source rate, rungs, mixes, stop rules and harness
   revision; compare compatible recipes. Record compiler/flags, actual SRT
   commit, receiver versions and binary provenance. Binary hashes are evidence,
@@ -156,7 +156,8 @@ were not executed during the audit.
   thresholds, malformed/missing measurement inputs, sampling gaps and failed
   calibration references. Distinguish receiver saturation from nginx failures
   with controlled receiver-capacity evidence. (Floor-rung evidence, non-finite
-  judge inputs and failed calibration references are done; the rest is open.)
+  inputs, failed calibration references and receiver/sender sampling validation
+  are done; controlled receiver-saturation qualification remains open.)
 - [ ] **B7:** repair the distributed path: fetched receiver metadata, remote PID
   and CPU accounting, fresh ready/probe files and fatal preflight errors.
 - [x] **B8:** repair weekly failed-build stubs: the weekly branch leaves `configs`
@@ -381,11 +382,11 @@ checkbox above marked only after the behavior is exercised.
   sample used to pass a half-rate rung. The harness stores a calibration
   reference only from a rung that passed its own quality checks and only if it
   is a finite positive rate (`0.00` matched the old number pattern).
-- B5: the mixes are listed once, in `tests/bench/capacity-mixes.conf`. The
-  harness reads it and `bench-ci.sh` derives `ALL_MIXES` from it and hands the
-  harness the explicit list for `all`, so the manifest (seven names; both
-  contention ladders were unchecked) and execution are one set. The harness
-  prints `quality_mixes=` and `quality_recipe`; `completeness()` requires the
+- B5: `tests/bench/capacity-mixes.conf` is the single categorized workload list.
+  The harness runs all nine for local `all`; CI weekly `all` selects the seven
+  standard workloads and `contention` selects the two supplementary mixes.
+  Contention calibrates at 4 and retains every requested higher rung.
+  The harness prints `quality_mixes=` and `quality_recipe`; `completeness()` requires the
   mixes and recipe steps to equal the manifest. A harness that never states
   its mixes is incomplete.
 - B8: `bench-trend.sh` stub summaries take the single `config_names` list (the
@@ -420,21 +421,16 @@ checkbox above marked only after the behavior is exercised.
   then three comparable recipe-bearing trend fixtures with changed cumulative
   CPU counters and one incompatible-duration fixture. All three scorecard
   sparklines rendered values 110,120,130; the incompatible sample was excluded.
-- Not done: with the current defaults the PR (10 s) and branch (15 s) recipes
-  differ, so a PR is compared with nothing until the two durations are aligned
-  (changing durations was out of scope). B3's actual SRT commit and receiver
-  tool versions are not collected by any bundle. B6's sampling-gap and
-  receiver-saturation evidence, B9's chart series/run selection/mixed-record
-  filters and B10's per-rung artifacts, duplicate publication and pending
-  publishers are not addressed.
-- Found, not changed: the weekly qualification passes `CAPACITY_QUALITY_STEPS`
-  beginning at 1, but the harness refuses a ladder that starts below the
-  smallest rung a mix can form, and the two contention mixes need 4
-  (`capacity_mix_minimum_rung`). `all` therefore stops at the first
-  contention mix before its end marker, so the weekly run was already
-  incomplete; the seven-name manifest only hid which mixes were missing, and
-  the nine-name manifest now names them. Fixing it means choosing a weekly
-  ladder that starts at 4 for those mixes (a ladder decision, not made here).
+- Not done: B3's actual SRT commit and receiver tool versions are not collected
+  by any bundle. B6's controlled receiver-saturation evidence, B9's chart
+  series/run selection/mixed-record filters and B10's per-rung artifacts,
+  duplicate publication and pending publishers remain open.
+- Weekly qualification and trend use a distinct contention manifest and ladder.
+  Rungs below 4 cannot form these mixes and are inapplicable, rather than
+  measured or quality-failure outcomes. Explicit malformed ladders remain
+  harness setup errors; the local `all` selection still includes all nine.
+- PR defaults now use branch's 15-second duration and honor `BENCH_SECONDS`;
+  old 10-second recipes remain incomparable with the 15-second defaults.
 
 ### RTMP pre-admission budget (S3)
 
@@ -451,3 +447,49 @@ checkbox above marked only after the behavior is exercised.
   100000-byte message and six 30000-byte unfinished messages are refused, and a
   handshaken but silent connection is dropped at the deadline; the oversize
   case fails on the pre-fix binary.
+
+### Benchmark recipes and complete sampling evidence
+
+- Weekly keeps all seven established workloads in `all`, and both supplemental
+  mixes in `contention`. Contention calibrates at four destinations, then runs
+  every requested higher rung. Below-four rungs are inapplicable to these
+  proportions; malformed explicit ladders remain errors. Measurement,
+  publication and historical failed-build manifests all name both configs.
+- PR and branch use the same default duration, with matching overrides
+  supported. Actual branch and PR SRT summaries recorded 15-second rungs,
+  prefix ladders and compatible recipes; old unequal-duration recipes are
+  still excluded, not reinterpreted.
+- RTMP validates raw intervals before combining short jitter samples, and
+  requires interval evidence plus timestamped receiver snapshots. SRT requires
+  complete destination, active-shard and queue-window evidence. Invalid data
+  emits `quality_measurement_valid=no` and returns a setup failure; complete
+  zero-delivery evidence remains a quality failure. Invalid SRT evidence cannot
+  claim strict full rate. Existing infrastructure verdicts remain separate;
+  no receiver-saturation conclusion is inferred from CPU usage alone.
+- Each protocol's sampler is joined immediately before its closing snapshot,
+  while publishers still run. Other protocols keep sampling during serial
+  closing work. HLS readers are joined to seal their report, and cleanup
+  stops any remaining monitors.
+- Reproductions: five-second RTMP sampling gaps and empty SRT sender metrics
+  previously passed; both now fail as invalid measurements. Omitting RTMP
+  interval evidence also previously bypassed validation and is now rejected.
+  An actual-process sampler test showed the old stop-all helper killed SRT
+  when asked to stop RTMP; the revised helper preserves SRT and propagates a
+  failed monitor's exit status.
+- Verification: `make bench-reporting` passed 375 checks plus commit-selection
+  checks; the nine workflow permission contracts passed. Actual smoke runs
+  passed the following receiver-verified rungs:
+
+  | Workload | Passing smoke rungs |
+  |---|---|
+  | Pure SRT, branch recipe | 1, 16 |
+  | Pure SRT, shipped PR recipe | 1, 16, 32 |
+  | Pure RTMP | 1, 16 |
+  | Both contention mixes | 4, 8 |
+  | HLS origin and HLS push | 1, 4 |
+
+  Sender CPUs were P-cores 4,6; publisher CPU was P-core 10; receivers used
+  E-cores 12-15. Another benchmark reserved CPU 2 and the governor helper, so
+  these runs used affinity only and made no machine-policy changes. They
+  verify reporting behavior, not a new capacity ceiling or CPU-efficiency
+  comparison. Raw results are under `.build/reliability-*`.

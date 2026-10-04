@@ -87,7 +87,7 @@ jobs:
       tier: weekly
       timeout-minutes: 350
       configs: >-
-        ["all", "srt-senders-1 srt-senders-2",
+        ["all", "contention", "srt-senders-1 srt-senders-2",
          "srt-senders-4 srt-senders-adaptive srt-no-hls", "srt-robotweax"]
     permissions:
       contents: read
@@ -101,7 +101,7 @@ jobs:
     with:
       tier: weekly
       configs: >-
-        ["all", "srt-senders-1 srt-senders-2",
+        ["all", "contention", "srt-senders-1 srt-senders-2",
          "srt-senders-4 srt-senders-adaptive srt-no-hls", "srt-robotweax"]
     permissions:
       contents: write

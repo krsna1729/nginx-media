@@ -109,14 +109,19 @@ def scrape(args):
 def read_stamp(prefix):
     """Midpoint of the scrape that produced a snapshot, or None."""
     stamps = []
-    for path in sorted(glob.glob(prefix + ".*")):
+    paths = sorted(glob.glob(prefix + ".*"))
+    for path in paths:
         with open(path, encoding="utf-8") as source:
             first = source.readline()
         if first.startswith(STAMP_PREFIX):
             start, end = (int(v) for v in first[len(STAMP_PREFIX):].split())
+            if start <= 0 or end < start:
+                raise ValueError(f"invalid scrape timestamp in {path}")
             stamps.append((start + end) // 2)
     if not stamps:
         return None
+    if len(stamps) != len(paths):
+        raise ValueError(f"missing scrape timestamp in {prefix}")
     if max(stamps) - min(stamps) > 1_000_000_000:
         raise ValueError(f"snapshot files for {prefix} are more than 1s apart")
     return sum(stamps) // len(stamps)
@@ -126,12 +131,23 @@ def parse_totals(blob):
     totals = {}
     for line in blob.splitlines():
         match = SAMPLE_RE.match(line.strip())
-        if match is None or match.group(1) != METRIC:
+        if match is None:
+            if line.strip().startswith(METRIC):
+                raise ValueError("malformed receiver payload metric")
+            continue
+        if match.group(1) != METRIC:
             continue
         labels = dict(LABEL_RE.findall(match.group(2) or ""))
+        pairs = LABEL_RE.findall(match.group(2) or "")
+        if (len(pairs) != len(labels)
+                or LABEL_RE.sub("", match.group(2) or "").strip(" ,\t")):
+            raise ValueError("malformed receiver payload metric labels")
+        value = float(match.group(3))
+        if not math.isfinite(value) or value < 0 or not value.is_integer():
+            raise ValueError("invalid receiver payload counter")
         if (labels.get("application") == "live" and labels.get("name")
                 and labels.get("source") == labels.get("name")):
-            totals[labels["name"]] = totals.get(labels["name"], 0) + int(float(match.group(3)))
+            totals[labels["name"]] = totals.get(labels["name"], 0) + int(value)
     return totals
 
 
@@ -161,9 +177,9 @@ def sample(args):
                 for identifier, value in parse_totals(blob).items():
                     current[identifier] = current.get(identifier, 0) + value
             current_ns = (start + end) // 2
+            if set(current) != set(previous):
+                raise ValueError("receiver destination set changed during measurement")
             for identifier in sorted(previous):
-                if identifier not in current:
-                    continue
                 delta = current[identifier] - previous[identifier]
                 if delta < 0:
                     raise ValueError(f"counter decreased for {identifier}")
@@ -179,29 +195,47 @@ def interval_check(args, expected, reference, before, after, before_ns,
     """Short-interval delivery and stall duration, per destination."""
     rows = {}
     with open(args.intervals, newline="", encoding="utf-8") as source:
-        for row in csv.DictReader(source):
-            rows.setdefault(row["destination_id"], []).append(
+        reader = csv.DictReader(source)
+        required = {"destination_id", "start_ns", "end_ns", "bytes_received", "total_bytes"}
+        if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+            raise ValueError("receiver interval CSV has an invalid schema")
+        for row in reader:
+            identifier = row["destination_id"]
+            if identifier not in expected:
+                raise ValueError(f"unknown receiver destination {identifier}")
+            rows.setdefault(identifier, []).append(
                 (int(row["start_ns"]), int(row["end_ns"]),
                  int(row["bytes_received"]), int(row["total_bytes"])))
     summary = {}
-    sampling_gaps = {}
     for identifier in expected:
         if identifier not in before or identifier not in after:
             continue
-        intervals = sorted(rows.get(identifier, []))
+        intervals = rows.get(identifier, [])
         if not intervals:
-            failures.append(f"{identifier}: no short-interval samples")
-            continue
+            raise ValueError(f"{identifier}: no short-interval samples")
         previous_end, previous_total = before_ns, before[identifier]
         low_start = None
         min_ratio = None
         longest_stall = 0.0
         stall_start = None
         raw = list(intervals)
-        if after_ns > intervals[-1][1]:
-            raw.append((intervals[-1][1], after_ns,
-                        after[identifier] - intervals[-1][3],
-                        after[identifier]))
+        for start_ns, end_ns, count, cumulative in raw:
+            if (start_ns != previous_end or end_ns <= start_ns
+                    or start_ns < before_ns or end_ns > after_ns
+                    or count < 0 or cumulative < 0
+                    or cumulative - previous_total != count):
+                raise ValueError(f"{identifier}: invalid interval boundary or counters")
+            if (end_ns - start_ns) / 1e9 > args.max_interval_s:
+                raise ValueError(f"{identifier}: raw sample interval exceeds limit")
+            previous_end, previous_total = end_ns, cumulative
+        residual = after[identifier] - previous_total
+        if residual < 0 or (after_ns == previous_end and residual != 0):
+            raise ValueError(f"{identifier}: final receiver counters do not reconcile")
+        if (after_ns - previous_end) / 1e9 > args.max_interval_s:
+            raise ValueError(f"{identifier}: final sample gap exceeds limit")
+        if after_ns > previous_end:
+            raw.append((previous_end, after_ns, residual, after[identifier]))
+        previous_end, previous_total = before_ns, before[identifier]
         # A scrape that ran late is followed by one that comes early; the
         # short interval between them holds whatever TCP delivered in a
         # fraction of a second and says nothing about the rate.  Intervals
@@ -227,14 +261,9 @@ def interval_check(args, expected, reference, before, after, before_ns,
         for start_ns, end_ns, count, cumulative in spans:
             span = (end_ns - start_ns) / 1e9
             if span <= 0:
-                continue
+                raise ValueError(f"{identifier}: nonpositive interval")
             if start_ns != previous_end or cumulative - previous_total != count:
-                failures.append(f"{identifier}: interval counters do not reconcile")
-            if span > args.max_interval_s:
-                # the sampler, not the stream, was late: counted, and the
-                # floor and stall rules below still apply across the span
-                sampling_gaps[identifier] = max(
-                    sampling_gaps.get(identifier, 0.0), span)
+                raise ValueError(f"{identifier}: interval counters do not reconcile")
             ratio = (count * 8 / span) / reference
             min_ratio = ratio if min_ratio is None else min(min_ratio, ratio)
             if ratio < args.interval_floor:
@@ -251,9 +280,6 @@ def interval_check(args, expected, reference, before, after, before_ns,
                 stall_start = None
             previous_end, previous_total = end_ns, cumulative
         summary[identifier] = (min_ratio or 0.0, longest_stall)
-    if sampling_gaps:
-        summary["__sampling_gap_max__"] = (max(sampling_gaps.values()),
-                                           len(sampling_gaps))
     return summary
 
 
@@ -321,19 +347,19 @@ def expected_ids(programs, destinations, offset):
 
 
 def quality_report(args):
+    if not args.intervals:
+        raise ValueError("short-interval receiver evidence is required")
     before = read_snapshot(args.before_prefix)
     after = read_snapshot(args.after_prefix)
     expected = expected_ids(args.programs, args.destinations, args.destination_offset)
     before_ns = read_stamp(args.before_prefix)
     after_ns = read_stamp(args.after_prefix)
-    if before_ns is not None and after_ns is not None:
-        if after_ns <= before_ns:
-            raise ValueError("receiver scrape timestamps did not advance")
-        measurement_s = (after_ns - before_ns) / 1e9
-        timing = "receiver-scrape-monotonic"
-    else:
-        measurement_s = args.measurement_s
-        timing = "shell-window"
+    if before_ns is None or after_ns is None:
+        raise ValueError("interval checks need timestamped snapshots")
+    if after_ns <= before_ns:
+        raise ValueError("receiver scrape timestamps did not advance")
+    measurement_s = (after_ns - before_ns) / 1e9
+    timing = "receiver-scrape-monotonic"
     failures = []
     rows = []
     rates = []
@@ -345,9 +371,7 @@ def quality_report(args):
                 missing.append("before")
             if identifier not in after:
                 missing.append("after")
-            failures.append(f"{identifier}: missing metric sample in {','.join(missing)} snapshot")
-            rows.append((identifier, before.get(identifier, ""), after.get(identifier, ""), "", "", ""))
-            continue
+            raise ValueError(f"{identifier}: missing metric sample in {','.join(missing)} snapshot")
         start, end = before[identifier], after[identifier]
         if end < start:
             raise ValueError(f"counter decreased for {identifier}: {start} -> {end}")
@@ -386,12 +410,8 @@ def quality_report(args):
                          "delivery_bps", "delivery_ratio"))
         writer.writerows(result_rows)
 
-    interval_summary = {}
-    if args.intervals:
-        if before_ns is None or after_ns is None:
-            raise ValueError("interval checks need timestamped snapshots")
-        interval_summary = interval_check(args, expected, reference, before,
-                                          after, before_ns, after_ns, failures)
+    interval_summary = interval_check(args, expected, reference, before,
+                                      after, before_ns, after_ns, failures)
 
     ratios = [float(row[5]) for row in result_rows if row[5] != ""]
     min_ratio = min(ratios, default=0.0)
@@ -405,6 +425,7 @@ def quality_report(args):
         report_queue_snapshot(args.queue_after_prefix, "end", expected)
 
     unique_failures = list(dict.fromkeys(failures))
+    print("quality_measurement_valid=yes")
     print(f"quality_pass={'no' if unique_failures else 'yes'}")
     print(f"quality_reference_payload_bps={reference:.2f}")
     print(f"quality_min_delivery_ratio={min_ratio:.5f}")
@@ -412,14 +433,10 @@ def quality_report(args):
     print(f"quality_shell_window_s={args.measurement_s:.6f}")
     print(f"quality_timing={timing}")
     if interval_summary:
-        gap = interval_summary.pop("__sampling_gap_max__", None)
         print("quality_interval_delivery_ratio_min="
               f"{min(v[0] for v in interval_summary.values()):.5f}")
         print("quality_longest_stall_s="
               f"{max(v[1] for v in interval_summary.values()):.3f}")
-        if gap is not None:
-            print(f"quality_sampling_gap_max_s={gap[0]:.3f}")
-            print(f"quality_sampling_gap_destinations={gap[1]}")
     print(f"quality_receiver_count={len(rates)}")
     print(f"quality_aggregate_bytes={total_bytes}")
     print(f"quality_aggregate_bps={aggregate_bps:.2f}")
@@ -496,7 +513,10 @@ def main():
         parser.error("--min-delivery-ratio must be between 0 and 1")
     try:
         return quality_report(args)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, TypeError) as error:
+        print("quality_measurement_valid=no")
+        print("quality_pass=no")
+        print(f"quality_setup_failure={error}")
         print(f"rtmp_capacity_quality: {error}", file=sys.stderr)
         return 1
 

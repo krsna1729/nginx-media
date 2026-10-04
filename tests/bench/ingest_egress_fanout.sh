@@ -281,13 +281,7 @@ W_CPU_AFTER_MS=0
 
 cleanup() {
     local p
-    for p in ${QUALITY_MONITORS[@]+"${QUALITY_MONITORS[@]}"}; do
-        kill -TERM "$p" 2>/dev/null
-    done
-    for p in ${QUALITY_MONITORS[@]+"${QUALITY_MONITORS[@]}"}; do
-        wait "$p" 2>/dev/null || true
-    done
-    QUALITY_MONITORS=()
+    capacity_quality_stop_monitors || true
 
 
     for p in ${PUBS[@]+"${PUBS[@]}"} ${SINKS[@]+"${SINKS[@]}"}; do
@@ -2227,16 +2221,23 @@ capacity_srt_measurement_snapshot() {   # <receiver PID> <snapshot> <copy> <star
     cp "$snapshot" "$output"
 }
 
-capacity_quality_stop_monitors() {
+capacity_quality_stop_monitors() {   # [sampler PIDs]; no args stops all
     local pid status=0
+    local -a selected=( "$@" ) remaining=()
 
-    for pid in ${QUALITY_MONITORS[@]+"${QUALITY_MONITORS[@]}"}; do
+    if [ "$#" -eq 0 ]; then
+        selected=( ${QUALITY_MONITORS[@]+"${QUALITY_MONITORS[@]}"} )
+    fi
+    for pid in "${selected[@]}"; do
         kill -TERM "$pid" 2>/dev/null || true
     done
-    for pid in ${QUALITY_MONITORS[@]+"${QUALITY_MONITORS[@]}"}; do
+    for pid in "${selected[@]}"; do
         wait "$pid" 2>/dev/null || status=1
     done
-    QUALITY_MONITORS=()
+    for pid in ${QUALITY_MONITORS[@]+"${QUALITY_MONITORS[@]}"}; do
+        [[ " ${selected[*]} " == *" $pid "* ]] || remaining+=( "$pid" )
+    done
+    QUALITY_MONITORS=( "${remaining[@]}" )
     return "$status"
 }
 
@@ -2462,7 +2463,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     local hls_push_quality_report hls_push_reference_bps
     local quality_reference_bps rtmp_reference_bps hls_reference_bps
     local rtmp_report_file hls_report_file
-    local receiver_sampler_pid queue_sampler_pid
+    local receiver_sampler_pid queue_sampler_pid rtmp_sampler_pid
     local workers="$CAPACITY_WORKERS" case_id source rate_bps offered_in offered_out
     local preflight_note="" preflight_status=0
     local primary_destinations=0 srt_destinations=0 rtmp_destinations=0
@@ -3088,7 +3089,8 @@ PY
             "$case_dir/rtmp-receiver.before" \
             "$case_dir/rtmp-receiver-intervals.csv" --interval 1 \
             >"$case_dir/rtmp-sampler.log" 2>&1 &
-        QUALITY_MONITORS+=( "$!" )
+        rtmp_sampler_pid="$!"
+        QUALITY_MONITORS+=( "$rtmp_sampler_pid" )
     fi
     if [ "$srt_destinations" -gt 0 ]; then
         if [ "$quality_mode" = yes ]; then
@@ -3129,13 +3131,38 @@ PY
     cpu_window "$seconds" "$sink_pid" "$hls_pid" "$hls_push_sink_pid" \
         ${RTMP_SINK_PIDS[@]+"${RTMP_SINK_PIDS[@]}"} "${PUBS[@]}"
     CPU_SNAPSHOT_DIR=""
-    # the receiver's closing scrape belongs to the window, before publishers
-    # stop and before any other bookkeeping stretches the last interval
+    # HLS readers seal their report on shutdown; they are not periodic
+    # SRT/RTMP samplers and must also finish before the report is consumed.
+    if [ "$quality_mode" = yes ] && [ -n "$hls_pid" ]; then
+        capacity_quality_stop_monitors "$hls_pid" \
+            || { echo "the HLS reader failed during the measurement" \
+                 >&2; return 1; }
+    fi
+    # Join only this protocol's sampler before its closing snapshot. Other
+    # protocols keep sampling through the serial closing work below.
+    if [ "$quality_mode" = yes ] && [ "$rtmp_destinations" -gt 0 ]; then
+        capacity_quality_stop_monitors "$rtmp_sampler_pid" \
+            || { echo "the RTMP sampler failed during the measurement" \
+                 >&2; return 1; }
+    fi
+    # The closing scrape belongs to the window while publishers still run.
     capacity_rtmp_sink_metrics "$case_dir/rtmp-receiver.after" || return 1
     if [ "$hls_push_destinations" -gt 0 ]; then
         curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__snapshot" \
             >"$case_dir/hls-push.after.json" \
             || { echo "could not capture HLS push receiver final snapshot" >&2; return 1; }
+    fi
+    if [ "$srt_destinations" -gt 0 ]; then
+        if [ "$quality_mode" = yes ]; then
+            capacity_quality_stop_monitors "$receiver_sampler_pid" "$queue_sampler_pid" \
+                || { echo "an SRT sampler failed during the measurement" \
+                     >&2; return 1; }
+            capacity_srt_measurement_snapshot "$sink_pid" "$sink_csv.snapshot" \
+                "$sink_snapshot_after" stop || return 1
+        else
+            capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
+                "$sink_snapshot_after" || return 1
+        fi
     fi
     if [ "$quality_mode" = yes ]; then
         for publisher_pid in "${PUBS[@]}"; do
@@ -3144,20 +3171,6 @@ PY
                      >&2; return 1; }
         done
         kill_pubs
-    fi
-    if [ "$quality_mode" = yes ]; then
-        capacity_quality_stop_monitors \
-            || { echo "a quality sampler failed during the measurement" \
-                 >&2; return 1; }
-    fi
-    if [ "$srt_destinations" -gt 0 ]; then
-        if [ "$quality_mode" = yes ]; then
-            capacity_srt_measurement_snapshot "$sink_pid" "$sink_csv.snapshot" \
-                "$sink_snapshot_after" stop || return 1
-        else
-            capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
-                "$sink_snapshot_after" || return 1
-        fi
     fi
 
     for publisher_pid in "${PUBS[@]}"; do
@@ -3341,6 +3354,7 @@ PY
                 --destination-report "$case_dir/destination-quality.csv" \
                 --interval-report "$case_dir/interval-throughput.csv" \
                 --destinations "$srt_destinations" \
+                --programs "$programs" \
                 --prepared-source "$source" \
                 --source-duration-s 30 \
                 --reference-bps "$quality_reference_bps" \
@@ -4133,7 +4147,7 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
 }
 
 phase_capacity_quality_ladder() {
-    local entry mix protocol srt_share hls_push_share status failures=0 failed_mixes=""
+    local entry mix protocol srt_share hls_push_share category status failures=0 failed_mixes=""
     local requested found
     local -a executed_mixes=() requested_mixes=() selected_mix_specs=()
     local -a mix_specs=()
@@ -4186,7 +4200,7 @@ phase_capacity_quality_ladder() {
     echo "quality_mixes=${executed_mixes[*]}"
     echo "quality_recipe seconds=$CAPACITY_QUALITY_SECONDS rate=$CAPACITY_QUALITY_RATE steps=${CAPACITY_QUALITY_STEPS// /,} stop_after_failures=$CAPACITY_QUALITY_STOP_AFTER_FAILURES min_delivery_ratio=$CAPACITY_QUALITY_MIN_DELIVERY_RATIO interval_floor=$CAPACITY_QUALITY_INTERVAL_FLOOR max_low_seconds=$CAPACITY_QUALITY_MAX_LOW_SECONDS srt_workers=$CAPACITY_FIXED_SRT_WORKERS hls_push_workers=$CAPACITY_FIXED_HLS_PUSH_WORKERS srt_hls=$CAPACITY_SRT_HLS"
     for entry in "${mix_specs[@]}"; do
-        IFS=: read -r mix protocol srt_share hls_push_share <<< "$entry"
+        IFS=: read -r mix protocol srt_share hls_push_share category <<< "$entry"
         if capacity_quality_ladder "$mix" "$protocol" "$srt_share" "$hls_push_share"; then
             :
         else

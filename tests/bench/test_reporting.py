@@ -1603,11 +1603,21 @@ def srt_judge_rung(directory, delivered=1_250_000, queue_units=0):
                 "feed_drops", "output_queue_units", "output_queue_bytes",
                 "output_drops", "sent_bytes", "blocked_sends",
                 "retransmitted_packets"),
-               [(r, t0 + r * 10**9, 4242, "0", "0", 1, queue_units, 0, 0, 0, 0,
-                 0, r * 1000, 0, 0) for r in range(5)])
-    for name in ("metrics.before.0", "metrics.after.0", "stream.before",
-                 "stream.after"):
-        write(p(name), "")
+               [(r - 1, t0 + r * 10**9, 4242, "0", "0", 1, queue_units, 0, 0, 0, 0,
+                 0, r * 1000, 0, 0) for r in range(1, 10)])
+    metrics = (
+        "destinations", "feed_queue_units", "feed_queue_bytes",
+        "feed_queue_dropped_total", "output_queue_units", "output_queue_bytes",
+        "output_dropped_total", "sent_bytes_total", "blocked_sends_total",
+        "retransmitted_packets_total",
+    )
+    for name in ("metrics.before.0", "metrics.after.0"):
+        write(p(name), "".join(
+            f'nginx_media_srt_egress_shard_{metric}{{worker="0",shard="0"}} '
+            f'{1 if metric == "destinations" else 0}\n' for metric in metrics))
+    for name in ("stream.before", "stream.after"):
+        write(p(name), 'nginx_media_stream_feed_overruns_total{name="live"} 0\n'
+              'nginx_media_stream_feed_evictions_total{name="live"} 0\n')
     with open(p("source.ts"), "wb") as source:
         source.write(bytes(3_750_000))  # 1 Mbit/s over the 30 s it stands for
     return p
@@ -1723,6 +1733,99 @@ def test_rtmp_judge_rejects_non_finite_inputs(work):
         check(not judge_passed(result),
               f"{label} must not make a short rung pass: {result.stdout}")
 
+def test_receiver_evidence_is_required(work):
+    header = ("destination_id", "start_ns", "end_ns", "bytes_received", "total_bytes")
+    t0 = 100 * 10**9
+    normal = [("d0000", t0 + i * 10**9, t0 + (i + 1) * 10**9,
+               125000, (i + 1) * 125000) for i in range(10)]
+    corrupt = {
+        "missing": [],
+        "unknown": [("other", *normal[0][1:])] + normal[1:],
+        "truncated": normal[:5],
+        "duplicate": normal[:1] + normal,
+        "overlap": normal[:1] + [("d0000", t0, t0 + 2 * 10**9, 125000, 250000)] + normal[2:],
+        "gap": normal[:1] + normal[2:],
+        "outside": normal + [("d0000", t0 + 10 * 10**9, t0 + 11 * 10**9, 0, 1250000)],
+        "long-before-jitter": [("d0000", t0, t0 + 2100000000, 262500, 262500),
+                               ("d0000", t0 + 2100000000, t0 + 2200000000, 12500, 275000),
+                               ("d0000", t0 + 2200000000, t0 + 3 * 10**9, 100000, 375000)] + normal[3:],
+        "long-raw": [("d0000", t0, t0 + 3 * 10**9, 375000, 375000)] + normal[3:],
+        "nonpositive": [("d0000", t0, t0, 0, 0)] + normal,
+    }
+    for protocol, fixture, judge in (
+            ("srt", srt_judge_rung, run_srt_judge),
+            ("rtmp", rtmp_judge_rung, run_rtmp_judge)):
+        for label, rows in corrupt.items():
+            p = fixture(os.path.join(work, f"{protocol}-evidence-{label}"))
+            write_rows(p("intervals.csv"), header, rows)
+            result = judge(p)
+            check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout
+                  and not judge_passed(result) and "quality_strict_full_rate=yes" not in result.stdout,
+                  f"{protocol} {label} evidence is setup failure, not delivery quality: {result.stdout}")
+        p = fixture(os.path.join(work, f"{protocol}-missing-snapshot-destination"))
+        if protocol == "srt":
+            write_rows(p("final.csv"), ("destination_id", "bytes_received", "snapshot_ns"),
+                       [("other", 1250000, t0 + 10 * 10**9)])
+        else:
+            write(p("receiver.after.0"),
+                  f"# scrape_monotonic_ns {t0 + 10 * 10**9} {t0 + 10 * 10**9}\n")
+        result = judge(p)
+        check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout,
+              f"{protocol} missing snapshot destination is setup failure: {result.stdout}")
+        p = fixture(os.path.join(work, f"{protocol}-zero-delivery"), delivered=0)
+        result = judge(p)
+        check(result.returncode == 0 and "quality_measurement_valid=yes" in result.stdout
+              and "quality_pass=no" in result.stdout,
+              f"{protocol} complete zero-delivery counters are quality failure: {result.stdout}")
+    p = rtmp_judge_rung(os.path.join(work, "rtmp-jitter-zero"))
+    jitter = [("d0000", t0, t0 + 100000000, 0, 0),
+              ("d0000", t0 + 100000000, t0 + 10**9, 125000, 125000)] + normal[1:]
+    write_rows(p("intervals.csv"), header, jitter)
+    check(judge_passed(run_rtmp_judge(p)),
+          "healthy short jitter and zero-byte sample remain valid")
+    p = rtmp_judge_rung(os.path.join(work, "rtmp-no-interval-evidence"))
+    result = run_rtmp_judge(p, "--intervals", "")
+    check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout
+          and not judge_passed(result),
+          f"omitting short-interval evidence cannot bypass validation: {result.stdout}")
+    for label in ("missing-shard", "missing-metric", "truncated-queue"):
+        p = srt_judge_rung(os.path.join(work, f"srt-{label}"))
+        if label == "missing-shard":
+            # Preserve complete rounds but erase the only active shard.
+            with open(p("queues.csv"), encoding="utf-8") as source:
+                rows = list(csv.reader(source))
+            for row in rows[1:]:
+                row[4] = "1"
+            write_rows(p("queues.csv"), rows[0], rows[1:])
+        elif label == "missing-metric":
+            write(p("metrics.after.0"),
+                  'nginx_media_srt_egress_shard_destinations{worker="0",shard="0"} 1\n')
+        else:
+            with open(p("queues.csv"), encoding="utf-8") as source:
+                rows = list(csv.reader(source))
+            write_rows(p("queues.csv"), rows[0], rows[1:5])
+        result = run_srt_judge(p)
+        check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout
+              and "quality_strict_full_rate=yes" not in result.stdout,
+              f"{label} cannot pass strict qualification: {result.stdout}")
+    # Two real active sender shards, with shard 1 absent from every queue
+    # round: seeing complete rows for shard 0 is not complete evidence.
+    p = srt_judge_rung(os.path.join(work, "srt-whole-shard-vanished"))
+    for name in ("baseline.csv", "final.csv", "intervals.csv", "results.csv"):
+        with open(p(name), encoding="utf-8") as source:
+            rows = list(csv.reader(source))
+        second = [["d0001"] + row[1:] for row in rows[1:]]
+        write_rows(p(name), rows[0], rows[1:] + second)
+    for name in ("metrics.before.0", "metrics.after.0"):
+        with open(p(name), encoding="utf-8") as source:
+            blob = source.read()
+        write(p(name), blob + blob.replace('shard="0"', 'shard="1"'))
+    result = run_srt_judge(p, "--destinations", "2")
+    check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout
+          and "quality_strict_full_rate=yes" not in result.stdout,
+          f"whole missing shard invalidates otherwise healthy rounds: {result.stdout}")
+
+
 
 def hls_push_judge_rung(directory, latency_ms=250.0):
     def p(name):
@@ -1784,6 +1887,54 @@ def bash_function(name):
                       re.M | re.S)
     check(match is not None, f"the harness must define {name}")
     return match.group(0) if match else None
+
+
+def test_protocol_samplers_stop_independently(work):
+    helper = os.path.join(work, "sampler.py")
+    write(helper, "import signal, sys\n"
+          "signal.signal(signal.SIGTERM, lambda *_: sys.exit(int(sys.argv[2])))\n"
+          "open(sys.argv[1], 'w').write('ready')\n"
+          "signal.pause()\n")
+    function = bash_function("capacity_quality_stop_monitors")
+    if function is None:
+        return
+    script = function + r'''
+set -euo pipefail
+QUALITY_MONITORS=()
+trap 'kill -TERM "${QUALITY_MONITORS[@]}" 2>/dev/null || true; wait || true' EXIT
+ready() {
+    for (( n=0; n<300; n++ )); do
+        [ -s "$1" ] && return 0
+        sleep 0.01
+    done
+    return 1
+}
+"$PYTHON" "$1" "$2/rtmp.ready" 0 &
+rtmp=$!
+QUALITY_MONITORS+=( "$rtmp" )
+"$PYTHON" "$1" "$2/srt.ready" 0 &
+srt=$!
+QUALITY_MONITORS+=( "$srt" )
+ready "$2/rtmp.ready"
+ready "$2/srt.ready"
+capacity_quality_stop_monitors "$rtmp"
+kill -0 "$srt"
+[ "${QUALITY_MONITORS[*]}" = "$srt" ]
+capacity_quality_stop_monitors
+[ "${#QUALITY_MONITORS[@]}" -eq 0 ]
+if kill -0 "$srt" 2>/dev/null; then exit 1; fi
+"$PYTHON" "$1" "$2/failed.ready" 7 &
+failed=$!
+QUALITY_MONITORS+=( "$failed" )
+ready "$2/failed.ready"
+if capacity_quality_stop_monitors "$failed"; then exit 1; fi
+[ "${#QUALITY_MONITORS[@]}" -eq 0 ]
+'''
+    result = run(["bash", "-c", script, "sampler-test", helper, work],
+                 env=dict(os.environ, PYTHON=sys.executable))
+    check(result.returncode == 0,
+          f"stopping RTMP must leave SRT alive and sampler errors must propagate: "
+          f"{result.stdout}{result.stderr}")
 
 
 def test_calibration_is_stored_only_from_a_passing_positive_rung(work):
@@ -1870,39 +2021,87 @@ def test_harness_runs_the_mixes_of_the_one_list(work):
 
 
 def test_bench_ci_manifest_is_the_harness_mix_list(work):
-    """bench-ci.sh used to promise seven workloads for `all` while the
-    harness ran nine.  Run the real driver against a harness stub that
-    echoes what it was handed."""
+    """Exercise shipped recipes through the real driver, without media work."""
     tree = os.path.join(work, "ci-tree")
     for relative in ("scripts/bench-ci.sh", "tests/bench/bench_history.py",
                      "tests/bench/capacity-mixes.conf"):
-        source = os.path.join(ROOT, relative)
-        if os.path.exists(source):
-            os.makedirs(os.path.dirname(os.path.join(tree, relative)),
-                        exist_ok=True)
-            shutil.copyfile(source, os.path.join(tree, relative))
+        os.makedirs(os.path.dirname(os.path.join(tree, relative)), exist_ok=True)
+        shutil.copyfile(os.path.join(ROOT, relative), os.path.join(tree, relative))
     stub = os.path.join(tree, "tests", "bench", "ingest_egress_fanout.sh")
     write(stub, '#!/usr/bin/env bash\n'
                 'echo "quality_mixes=$CAPACITY_QUALITY_MIXES"\n'
+                'echo "duration=$CAPACITY_QUALITY_SECONDS"\n'
                 'echo "quality_ladders_with_failures=none"\n')
     os.chmod(stub, 0o755)
-    out = os.path.join(work, "ci-out")
-    env = dict(os.environ, BENCH_TREND="1", BENCH_STEPS="1 16",
-               BENCH_SECONDS="10")
-    env.pop("BENCH_CONFIGS", None)
-    run(["bash", os.path.join(tree, "scripts", "bench-ci.sh"), "weekly", out],
-        env=env)
-    listed = read_mix_conf()
-    manifest = read_json(os.path.join(out, "all", "expected.json"))
-    check(manifest["mixes"] == listed and len(listed) == 9,
-          f"the manifest must list every mix the harness executes: "
-          f"{manifest['mixes']} vs {listed}")
-    log = read_text(os.path.join(out, "all.log"))
-    check(f"quality_mixes={' '.join(manifest['mixes'])}\n" in log,
-          f"the harness must be handed the manifest's explicit list: {log}")
-    config = read_json(os.path.join(out, "summary.json"))["configs"]["all"]
-    check(not any("executed" in message for message in config["missing"]),
-          f"manifest and execution agree, so no mix mismatch: {config}")
+    env = dict(os.environ)
+    for key in ("BENCH_CONFIGS", "BENCH_STEPS", "BENCH_SECONDS", "BENCH_TREND"):
+        env.pop(key, None)
+    def drive(label, tier, **overrides):
+        out = os.path.join(work, label)
+        run(["bash", os.path.join(tree, "scripts", "bench-ci.sh"), tier, out],
+            env=dict(env, **overrides))
+        return out
+    for trend, steps in ((False, [1, 32, 64, 128, 192, 256, 384, 512, 768, 1000]),
+                         (True, [1, 32, 64])):
+        out = drive(f"weekly-{trend}", "weekly", BENCH_TREND=str(int(trend)))
+        observed = []
+        for name, mixes, rungs in (
+                ("all", PUBLISHED_MIXES, steps),
+                ("contention", CONTENTION_MIXES, [4] + steps[1:])):
+            manifest = read_json(os.path.join(out, name, "expected.json"))
+            check(manifest == {"mixes": mixes, "steps": rungs},
+                  f"{name} preserves its applicable ladder: {manifest}")
+            observed += manifest["mixes"]
+            log = read_text(os.path.join(out, name + ".log"))
+            check(f"quality_mixes={' '.join(mixes)}\n" in log,
+                  f"driver hands the harness its manifest: {log}")
+            if name == "contention":
+                minimum = bash_function("capacity_mix_minimum_rung")
+                check(minimum is not None, "contention minimum implementation exists")
+                for share, push in ((50, 25), (25, 50)):
+                    result = run(["bash", "-c", minimum +
+                                  f"\ncapacity_mix_minimum_rung rtmp-hls-push {share} {push}\n"])
+                    check(result.returncode == 0 and int(result.stdout) == rungs[0],
+                          "weekly's calibration rung can form every contention protocol")
+        check(observed == read_mix_conf(), "weekly keeps every established mix")
+    out = drive("weekly-invalid", "weekly", BENCH_STEPS="1 32 16")
+    check(read_json(os.path.join(out, "contention", "expected.json"))["steps"]
+          == [1, 32, 16], "invalid explicit ladders must reach harness validation")
+    module = load_module(HISTORY, "bench_history_driver_recipes")
+    def recipe(label, tier, seconds=None):
+        overrides = {} if seconds is None else {"BENCH_SECONDS": str(seconds)}
+        out = drive(label, tier, **overrides)
+        manifest = read_json(os.path.join(out, "srt", "expected.json"))
+        duration = int(next(line.split("=")[1] for line in
+                            read_text(os.path.join(out, "srt.log")).splitlines()
+                            if line.startswith("duration=")))
+        return recipe_record(14 if tier == "pr" else 10, tier=tier,
+                             recipe={"seconds": duration}, steps=manifest["steps"])
+    pr = recipe("pr-default", "pr")
+    branch = recipe("branch-default", "branch")
+    baselines = [recipe_record(value, recipe=branch["configs"]["srt"]["recipe"])
+                 for value in (10, 11, 12)]
+    check(len(module.regressions(pr, baselines)) == 1,
+          "real default driver recipes are comparable")
+    pr_override = recipe("pr-override", "pr", 7)
+    branch_override = recipe("branch-override", "branch", 7)
+    override_baselines = [
+        recipe_record(value, recipe=branch_override["configs"]["srt"]["recipe"])
+        for value in (10, 11, 12)]
+    check(len(module.regressions(pr_override, override_baselines)) == 1,
+          "intentionally matching duration overrides are comparable")
+    check(module.regressions(pr_override, baselines) == [],
+          "different duration overrides remain incomparable")
+    # The separate contention artifact is mandatory, not an optional add-on.
+    results = os.path.join(work, "weekly-missing-contention")
+    make_config(results, "all", mix_rungs(PUBLISHED_MIXES),
+                expected={"mixes": PUBLISHED_MIXES, "steps": [1, 16, 32]},
+                ran_mixes=PUBLISHED_MIXES)
+    summary = os.path.join(work, "weekly-missing-contention.json")
+    result = run(["python3", HISTORY, "summarize", results, "--tier", "weekly",
+                  "--expected-configs", '["all", "contention"]', "--out", summary])
+    check(result.returncode == 0, f"summarize missing config: {result.stderr}")
+    check(gate(summary).returncode == 1, "missing contention artifact fails gate")
 
 
 def test_gate_rejects_a_manifest_that_differs_from_the_executed_mixes(work):
@@ -1972,7 +2171,7 @@ def test_trend_stub_summary_for_every_tier(work):
     for tier, names in (("branch", ["srt", "rtmp", "rtmp-srt"]),
                         ("nightly", ["srt-rtmp", "hls", "mix-srt-share",
                                      "mix-all-protocols"]),
-                        ("weekly", ["all"])):
+                        ("weekly", ["all", "contention"])):
         tree = os.path.join(work, f"trend-{tier}")
         for relative in ("scripts/bench-trend.sh",
                          "tests/bench/bench_commit_selection.py"):
@@ -2181,7 +2380,7 @@ def test_summary_records_recipe_fingerprint_and_provenance(work):
     before = revision(copied)
     with open(os.path.join(copied, "capacity-mixes.conf"), "a",
               encoding="utf-8") as output:
-        output.write("pure-extra:srt:0\n")
+        output.write("pure-extra:srt:0:0:standard\n")
     check(before and before != revision(copied),
           "an edited harness is a different revision")
     os.remove(os.path.join(copied, "srt_fanout_sink.c"))
@@ -2260,6 +2459,8 @@ def main():
         test_gate_requires_positive_evidence_of_the_floor_rung(work)
         test_srt_judge_rejects_non_finite_inputs(work)
         test_rtmp_judge_rejects_non_finite_inputs(work)
+        test_receiver_evidence_is_required(work)
+        test_protocol_samplers_stop_independently(work)
         test_hls_push_judge_rejects_non_finite_inputs(work)
         test_calibration_is_stored_only_from_a_passing_positive_rung(work)
         test_harness_runs_the_mixes_of_the_one_list(work)
