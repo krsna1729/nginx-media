@@ -78,6 +78,39 @@ def value(field):
     return field.get("value") if isinstance(field, dict) else None
 
 
+def preflight_verdict(preflight):
+    """The rung's preflight verdict and the resources it named, or None when
+    the bundle has none (older bundles, or a rung that never got that far)."""
+    if not isinstance(preflight, dict) or not preflight.get("verdict"):
+        return None
+
+    def named(items):
+        return [f"{item.get('side')}/{item.get('resource')}"
+                if isinstance(item, dict) else str(item)
+                for item in items or []]
+    return {"verdict": preflight["verdict"],
+            "limits": named(preflight.get("limits")),
+            "unknown": named(preflight.get("unknown"))}
+
+
+def calibration_references(delivery):
+    """The reference rate each protocol's rung was judged against: with it a
+    ratio can be read, and two rungs' ratios told apart as the same yardstick
+    or not."""
+    references = {}
+    for protocol in PROTOCOLS:
+        report = value(delivery.get(protocol))
+        if not isinstance(report, dict):
+            continue
+        for key in ("quality_reference_payload_bps", "reference_bps"):
+            number = report.get(key)
+            if (isinstance(number, (int, float)) and not isinstance(number, bool)
+                    and math.isfinite(number) and number > 0):
+                references[protocol] = number
+                break
+    return references
+
+
 def rung_record(bundle):
     delivery = bundle.get("delivery") or {}
     strict = {}
@@ -126,6 +159,10 @@ def rung_record(bundle):
         "receiver_cpu_per_gbps": value(efficiency.get("receiver_cpu_per_gbps")),
         "host_cpu_busy": value(env.get("host_cpu_busy_fraction")),
         "srt_backend": bundle.get("case", {}).get("srt_backend"),
+        # what the preflight concluded about this rung's host, and the
+        # one-destination reference rate each protocol was judged against
+        "preflight": preflight_verdict(bundle.get("preflight")),
+        "reference_bps": calibration_references(delivery),
     }
 
 

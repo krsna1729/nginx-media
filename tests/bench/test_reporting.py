@@ -2102,7 +2102,7 @@ def test_pr_records_compare_with_the_branch_history(work):
                 old["tier"] = "branch"
                 old["sha"] = f"main-{index}"
                 config = old["configs"]["srt"]
-                config["recipe"]["seconds"] = seconds
+                config.setdefault("recipe", {})["seconds"] = seconds
                 for rung in config["mixes"]["pure-srt"]["rungs"]:
                     rung["sender_cpu_per_gbps"] = 100.0 + index
                 output.write(json.dumps(old) + "\n")
@@ -2131,13 +2131,14 @@ def test_summary_records_recipe_fingerprint_and_provenance(work):
     out = os.path.join(work, "recipe-record.json")
     check(summarize(results, out).returncode == 0, "summarize must succeed")
     config = read_json(out)["configs"]["srt"]
-    recipe = config["recipe"] or {}
+    revision = getattr(module, "harness_revision", lambda root=None: None)
+    recipe = config.get("recipe") or {}
     check(recipe.get("seconds") == 10 and recipe.get("rate") == "8M"
           and recipe.get("steps") == [1, 16, 32]
           and recipe.get("stop_after_failures") == 2
           and recipe.get("mixes") == ["pure-srt"],
           f"the record carries how its rungs were taken: {recipe}")
-    check(recipe.get("harness") == module.harness_revision()
+    check(recipe.get("harness") == revision()
           and len(recipe.get("harness") or "") == 16,
           f"the record carries the harness revision: {recipe}")
     entry = config["mixes"]["pure-srt"]
@@ -2158,23 +2159,54 @@ def test_summary_records_recipe_fingerprint_and_provenance(work):
                               (32, "pass", srt_delivery(1.0))], recipe=False)
     out = os.path.join(work, "recipe-absent.json")
     summarize(bare, out)
-    check(read_json(out)["configs"]["srt"]["recipe"] is None,
+    check(read_json(out)["configs"]["srt"].get("recipe", 1) is None,
           "a log without a recipe line yields no recipe, not a default")
 
     # the harness revision follows the harness files' content
     copied = os.path.join(work, "harness-copy")
     os.makedirs(copied)
-    for name in module.HARNESS_FILES:
+    for name in getattr(module, "HARNESS_FILES", ()):
         shutil.copyfile(os.path.join(HERE, name), os.path.join(copied, name))
-    before = module.harness_revision(copied)
+    before = revision(copied)
     with open(os.path.join(copied, "capacity-mixes.conf"), "a",
               encoding="utf-8") as output:
         output.write("pure-extra:srt:0\n")
-    check(before and before != module.harness_revision(copied),
+    check(before and before != revision(copied),
           "an edited harness is a different revision")
     os.remove(os.path.join(copied, "srt_fanout_sink.c"))
-    check(module.harness_revision(copied) is None,
+    check(before and revision(copied) is None,
           "a harness revision that cannot be computed is not invented")
+
+
+def test_rung_record_keeps_the_preflight_verdict_and_reference():
+    """A rung that the preflight called infrastructure-limited, or judged
+    against a calibration rate, has to say so in the record."""
+    module = load_module(HISTORY, "bench_history_rung_preflight")
+    bundle = diagnostics_bundle(128, "infrastructure-limited", {
+        "srt": {"value": {"quality_average_delivery_ratio_min": 1.0,
+                          "quality_reference_payload_bps": 8_000_000.0}},
+        "hls_readers": {"value": {"reference_bps": 4_000_000.0}}})
+    bundle["preflight"] = {
+        "schema": "nginx-media.capacity-preflight/1",
+        "verdict": "infrastructure-limited",
+        "limits": [{"side": "network", "resource": "throughput",
+                    "measured": 4.1, "required": 8.0, "unit": "Gbit/s"}],
+        "unknown": [{"side": "probe", "resource": "receiver-socket-drops",
+                     "reason": "probe receiver dropped datagrams"}]}
+    rung = module.rung_record(bundle)
+    check(rung["preflight"] == {"verdict": "infrastructure-limited",
+                                "limits": ["network/throughput"],
+                                "unknown": ["probe/receiver-socket-drops"]},
+          f"the rung keeps the preflight's verdict and what it named: "
+          f"{rung['preflight']}")
+    check(rung["reference_bps"] == {"srt": 8_000_000.0,
+                                    "hls_readers": 4_000_000.0},
+          f"the rung keeps the rates it was judged against: "
+          f"{rung['reference_bps']}")
+    missing = module.rung_record(diagnostics_bundle(
+        1, "pass", srt_delivery(1.0)))
+    check(missing["preflight"] is None and missing["reference_bps"] == {},
+          "no preflight and no reference are recorded as absent, not as ok")
 
 
 def main():
@@ -2226,6 +2258,7 @@ def main():
         test_regressions_compare_only_equal_recipes()
         test_pr_records_compare_with_the_branch_history(work)
         test_summary_records_recipe_fingerprint_and_provenance(work)
+        test_rung_record_keeps_the_preflight_verdict_and_reference()
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(f"test_reporting.py: {checks} checks, {failures} failures")

@@ -551,6 +551,44 @@ function runnerClass(fp) {
     .filter(Boolean).join(" · ") || "runner fingerprint unavailable";
 }
 
+// The runner identity bench_history.runner_identity publishes: host facts
+// only, so two runs are one series only if they ran on the same class of host.
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${stableJson(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function runnerIdentity(fp) {
+  if (!fp || fp.status === "unavailable") return "";
+  const identity = {};
+  for (const key of ["cpu_model", "kernel", "nproc_online", "permitted_cpus", "governor",
+                     "no_turbo", "numa", "transport", "kernel_udp_limits"]) {
+    const v = fp[key];
+    const empty = v == null || v === "" || (Array.isArray(v) && !v.length)
+      || (typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length);
+    if (!empty) identity[key] = v;
+  }
+  if (fp.cgroup && fp.cgroup.cpu_max) identity.cgroup = {cpu_max: fp.cgroup.cpu_max};
+  return stableJson(identity);
+}
+
+// bench_history.recipes_comparable: every field that decides what a rung
+// measures must match; ladders must begin at the same rung.  Records that
+// predate recipes cannot be compared with ones that carry one, but form one
+// series among themselves so the older history stays visible.
+const RECIPE_MATCH = ["seconds", "rate", "stop_after_failures", "min_delivery_ratio",
+  "interval_floor", "max_low_seconds", "srt_workers", "hls_push_workers", "srt_hls",
+  "mixes", "harness"];
+function recipesComparable(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  if (RECIPE_MATCH.some(k => a[k] == null || stableJson(a[k]) !== stableJson(b[k]))) return false;
+  return Boolean(a.steps?.length && b.steps?.length && a.steps[0] === b.steps[0]);
+}
+
 function statusBadge(complete) {
   const state = complete === true ? "complete"
     : complete === false ? "incomplete" : "unverified";
@@ -987,12 +1025,18 @@ function render(records, selectedHardware = activeHardware) {
           const cpuRate = passRung ? `${passRung.sender_cpu_per_gbps.toFixed(1)}%` : "–";
           const cpuSub = passRung ? `@ ${passRung.destinations} destinations` : "No goodput";
           
-          // Collect sparkline trend points across matching runs with matching hardware
+          // The trend is one rung (the card's own) of runs on the same runner
+          // identity taken with the same recipe; a rung that moves between
+          // runs, or a different host or recipe, is not a trend.
           const trendVals = [];
+          const fixedRung = passRung ? passRung.destinations : null;
           for (const rec of filteredTrendRecords) {
             const entry = rec.configs?.[cName]?.mixes?.[mName];
-            if (!entry || (m.fingerprint && runnerHardware(entry.fingerprint) !== runnerHardware(m.fingerprint))) continue;
-            const p = (entry?.rungs || []).find(g => g.outcome === "pass" && g.destinations > 1 && Number.isFinite(g.sender_cpu_per_gbps));
+            if (!entry || fixedRung === null) continue;
+            if (runnerIdentity(entry.fingerprint) !== runnerIdentity(m.fingerprint)) continue;
+            if (!recipesComparable(rec.configs[cName].recipe, c.recipe)) continue;
+            const p = (entry.rungs || []).find(g => g.outcome === "pass"
+              && g.destinations === fixedRung && Number.isFinite(g.sender_cpu_per_gbps));
             if (p) trendVals.push(p.sender_cpu_per_gbps);
           }
           sparkData[mName] = trendVals;
