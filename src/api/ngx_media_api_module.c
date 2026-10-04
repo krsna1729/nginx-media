@@ -246,7 +246,7 @@ ngx_media_hls_ingest_set(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
      * this handler never holds one.  It also lets the upload be linked into
      * place whole, so a reader never sees a partial segment.
      */
-    clcf->client_body_in_file_only = 1;
+    clcf->client_body_in_file_only = 2; /* nginx's "clean" file-only mode */
 
     return NGX_CONF_OK;
 }
@@ -678,7 +678,10 @@ ngx_media_hls_ingest_delete(ngx_http_request_t *r)
 static ngx_int_t
 ngx_media_hls_ingest_handler(ngx_http_request_t *r)
 {
-    ngx_int_t  rc;
+    ngx_media_api_loc_conf_t  *mlcf;
+    ngx_media_source_t        *source = NULL;
+    ngx_str_t                  key, rel, name;
+    ngx_int_t                  rc;
 
     if (r->method == NGX_HTTP_DELETE) {
         return ngx_media_hls_ingest_delete(r);
@@ -686,6 +689,21 @@ ngx_media_hls_ingest_handler(ngx_http_request_t *r)
 
     if (!(r->method & (NGX_HTTP_PUT|NGX_HTTP_POST))) {
         return NGX_HTTP_NOT_ALLOWED;
+    }
+
+    mlcf = ngx_http_get_module_loc_conf(r, ngx_media_api_module);
+    if (mlcf == NULL || mlcf->ingest_dir.len == 0) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    /* Refuse unprovisioned uploads before nginx spools their bodies. The
+     * ready callback rechecks admission after asynchronous body collection. */
+    rc = ngx_media_hls_ingest_path(r, &key, &rel, &name);
+    if (rc == NGX_OK) {
+        rc = ngx_media_hls_ingest_source(&key, &mlcf->ingest_dir, &source);
+    }
+    if (rc != NGX_OK) {
+        return rc;
     }
 
     rc = ngx_http_read_client_request_body(r, ngx_media_hls_ingest_ready);
