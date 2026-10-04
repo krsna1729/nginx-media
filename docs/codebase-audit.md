@@ -81,7 +81,7 @@ were not executed during the audit.
   program names colliding after HLS directory sanitization.
 - [ ] **R4:** isolate routing socket pairs between worker generations and test
   owner-directory PID takeover after reload.
-- [ ] **R5:** recover from per-datagram IPC errors without permanently removing
+- [x] **R5:** recover from per-datagram IPC errors without permanently removing
   a peer read event; handle partial frame sends, sequence gaps and backpressure
   at a keyframe boundary.
 - [ ] **R6:** enforce stream/source/destination quotas against runtime and owner
@@ -320,3 +320,24 @@ checkbox above marked only after the behavior is exercised.
   leaves the other feeding. On the pre-fix source the first scenario fails with
   the source deleted and the second (run alone) with the active source
   receiving no media of its own.
+
+### Routing resilience (R5)
+
+- `ngx_media_ipc_recv` returns `NGX_DECLINED` for a malformed or oversized
+  datagram it has already consumed (short, wrong version, length mismatch,
+  transient allocation failure); the route handler counts it, logs at most once
+  a second and keeps reading. `NGX_ERROR` is only a closed peer or a socket
+  error, which still ends the read event, now with a log line.
+- A frame's first chunk arriving while another frame is open discards the open
+  one (`restarts`, exported as `nginx_media_runtime_routed_frame_restarts_total`)
+  instead of refusing both.
+- Each routed publisher has an `ngx_media_ipc_flow_t`: a failed hand-over makes
+  it drop video until the next delivered keyframe (audio keeps flowing) and
+  every frame, sent or dropped, advances `header.sequence`; the owner reports
+  skipped numbers as `nginx_media_runtime_routed_sequence_gaps_total`.
+- `test_ipc` covers the datagram cases, a valid message behind bad ones, a
+  closed peer, an abandoned frame and the flow state machine; `make
+  routed-sources` checks both counters are exported and the gap counter stays 0
+  on a healthy route. Not covered: a real backpressured socket in nginx (no
+  injection point), so the sender-side resync is verified by the state-machine
+  unit test only.

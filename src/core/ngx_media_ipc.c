@@ -294,8 +294,14 @@ ngx_media_ipc_recv(ngx_media_ipc_endpoint_t *endpoint,
         return NGX_ERROR;   /* peer closed */
     }
 
+    /*
+     * From here the datagram has been consumed: a bad one is dropped
+     * (NGX_DECLINED) and the caller keeps reading.  NGX_ERROR is reserved for
+     * the endpoint itself being unusable; treating one malformed datagram as
+     * that blinded the worker to its peer for the life of the process.
+     */
     if ((size_t) n < sizeof(ngx_media_ipc_header_t)) {
-        return NGX_ERROR;
+        return NGX_DECLINED;
     }
 
     ngx_memcpy(&header, buf, sizeof(header));
@@ -304,7 +310,7 @@ ngx_media_ipc_recv(ngx_media_ipc_endpoint_t *endpoint,
         || header.length > NGX_MEDIA_IPC_MAX_PAYLOAD
         || (size_t) n != sizeof(header) + header.length)
     {
-        return NGX_ERROR;
+        return NGX_DECLINED;
     }
 
     message->header = header;
@@ -315,7 +321,7 @@ ngx_media_ipc_recv(ngx_media_ipc_endpoint_t *endpoint,
         payload = ngx_media_buf_alloc(header.length);
 
         if (payload == NULL) {
-            return NGX_ERROR;
+            return NGX_DECLINED;   /* a transient allocation failure */
         }
 
         ngx_memcpy(ngx_media_buf_data(payload),
@@ -347,6 +353,17 @@ ngx_media_ipc_frame_feed(ngx_media_ipc_frame_t *frame,
 {
     if (frame == NULL || message == NULL) {
         return NGX_ERROR;
+    }
+
+    /*
+     * A first chunk while a frame is still open means the sender gave up on
+     * the open one (a chunk send hit backpressure partway through).  The
+     * partial frame is discarded and this one starts clean; refusing it too
+     * lost a valid frame for every frame that had been abandoned.
+     */
+    if (frame->active && message->header.offset == 0) {
+        ngx_media_ipc_frame_reset(frame);
+        frame->restarts++;
     }
 
     /* a frame starts with the first chunk that is not a continuation */
@@ -417,4 +434,37 @@ ngx_media_ipc_frame_reset(ngx_media_ipc_frame_t *frame)
     frame->capacity = 0;
     frame->received = 0;
     frame->active = 0;
+}
+
+ngx_uint_t
+ngx_media_ipc_flow_admit(ngx_media_ipc_flow_t *flow, ngx_uint_t video,
+    ngx_uint_t keyframe)
+{
+    if (flow->resync && video && !keyframe) {
+        flow->dropped++;
+        flow->sequence++;
+        return 0;
+    }
+
+    return 1;
+}
+
+void
+ngx_media_ipc_flow_sent(ngx_media_ipc_flow_t *flow, ngx_uint_t video,
+    ngx_uint_t keyframe, ngx_int_t rc)
+{
+    flow->sequence++;
+
+    if (rc != NGX_OK) {
+        if (!flow->resync) {
+            flow->resyncs++;
+        }
+
+        flow->resync = 1;
+        return;
+    }
+
+    if (video && keyframe) {
+        flow->resync = 0;
+    }
 }

@@ -147,6 +147,10 @@ typedef struct {
     uint64_t    routed_no_payload;
     uint64_t    routed_reassembly_errors;
     uint64_t    routed_publish_errors;
+    /* frames the sender numbered but the owner never received */
+    uint64_t    routed_sequence_gaps;
+    /* partial frames discarded because the sender abandoned them */
+    uint64_t    routed_frame_restarts;
 } ngx_media_runtime_stats_t;
 
 

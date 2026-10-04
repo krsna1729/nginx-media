@@ -100,7 +100,7 @@ struct ngx_media_rtmp_session_s {
     unsigned                      routed:1;
     uint64_t                      routed_hash;
     uint64_t                      routed_incarnation;
-    uint64_t                      routed_sequence;
+    ngx_media_ipc_flow_t          routed_flow;
     uint64_t                      routed_session;
     /* playing */
     ngx_media_rtmp_prepare_t     *prepare;
@@ -912,11 +912,22 @@ ngx_media_rtmp_frame_cb(void *ctx, const ngx_media_frame_t *frame)
     ngx_media_rtmp_session_t  *session = ctx;
 
     if (session->routed) {
-        (void) ngx_media_route_frame((ngx_cycle_t *) ngx_cycle,
-                                     session->routed_hash,
-                                     session->routed_incarnation,
-                                     session->routed_session, frame,
-                                     session->routed_sequence++);
+        ngx_uint_t  video = (frame->media_type == NGX_MEDIA_TYPE_VIDEO);
+
+        if (ngx_media_ipc_flow_admit(&session->routed_flow, video,
+                                     frame->keyframe ? 1 : 0))
+        {
+            ngx_int_t  rc;
+
+            rc = ngx_media_route_frame((ngx_cycle_t *) ngx_cycle,
+                                       session->routed_hash,
+                                       session->routed_incarnation,
+                                       session->routed_session, frame,
+                                       session->routed_flow.sequence);
+            ngx_media_ipc_flow_sent(&session->routed_flow, video,
+                                    frame->keyframe ? 1 : 0, rc);
+        }
+
         return NGX_OK;
     }
 

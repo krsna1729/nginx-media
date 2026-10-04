@@ -160,7 +160,7 @@ typedef struct {
     unsigned               closing:1;
     uint64_t               hash;
     uint64_t               routed_incarnation;
-    uint64_t               routed_sequence;
+    ngx_media_ipc_flow_t   routed_flow;
     uint64_t               routed_session;
     ngx_media_ts_demux_t   demux;
     ngx_uint_t             demux_ready;
@@ -403,10 +403,20 @@ ngx_media_srt_sink_frame(void *ctx, const ngx_media_frame_t *frame)
 
     if (session->routed) {
         /* the program lives on another worker: hand the frame over once */
-        (void) ngx_media_route_frame((ngx_cycle_t *) ngx_cycle, session->hash,
-                                     session->routed_incarnation,
-                                     session->routed_session, frame,
-                                     session->routed_sequence);
+        ngx_uint_t  video = (frame->media_type == NGX_MEDIA_TYPE_VIDEO);
+
+        if (ngx_media_ipc_flow_admit(&session->routed_flow, video,
+                                     frame->keyframe ? 1 : 0))
+        {
+            ngx_int_t  rc;
+
+            rc = ngx_media_route_frame((ngx_cycle_t *) ngx_cycle, session->hash,
+                                       session->routed_incarnation,
+                                       session->routed_session, frame,
+                                       session->routed_flow.sequence);
+            ngx_media_ipc_flow_sent(&session->routed_flow, video,
+                                    frame->keyframe ? 1 : 0, rc);
+        }
     }
 
     if (!session->routed && session->stream != NULL && session->source != NULL
@@ -420,10 +430,6 @@ ngx_media_srt_sink_frame(void *ctx, const ngx_media_frame_t *frame)
 
         (void) ngx_media_stream_publish(session->stream, session->source,
                                         frame, ngx_current_msec);
-    }
-
-    if (session->routed) {
-        session->routed_sequence++;
     }
 
     if (frame->config) {
@@ -739,7 +745,7 @@ ngx_media_srt_slot_close(ngx_log_t *log, uint64_t session_id)
 
         ngx_log_error(NGX_LOG_NOTICE, log, 0,
                       "media: routed srt publisher closed hash=%uL frames=%uL",
-                      session->hash, session->routed_sequence);
+                      session->hash, session->routed_flow.sequence);
 
         ngx_memzero(session, sizeof(ngx_media_srt_slot_t));
         return;

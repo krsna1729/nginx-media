@@ -134,7 +134,11 @@ ngx_int_t ngx_media_ipc_send(ngx_media_ipc_endpoint_t *endpoint,
 ngx_int_t ngx_media_ipc_send_header(ngx_media_ipc_endpoint_t *endpoint,
     const ngx_media_ipc_header_t *header);
 
-/* receives at most one message; NGX_AGAIN when nothing is pending */
+/*
+ * Receives at most one message.  NGX_AGAIN: nothing is pending.  NGX_DECLINED:
+ * a malformed datagram was consumed and dropped; read again.  NGX_ERROR: the
+ * endpoint is unusable (peer closed or a socket error).
+ */
 ngx_int_t ngx_media_ipc_recv(ngx_media_ipc_endpoint_t *endpoint,
     ngx_media_ipc_message_t *message);
 
@@ -152,10 +156,34 @@ typedef struct {
     size_t                  capacity;
     size_t                  received;
     unsigned                active:1;
+    /* frames abandoned by the sender mid-send and replaced by a new first chunk */
+    uint64_t                restarts;
 } ngx_media_ipc_frame_t;
 
 ngx_int_t ngx_media_ipc_frame_feed(ngx_media_ipc_frame_t *frame,
     const ngx_media_ipc_message_t *message);
 void ngx_media_ipc_frame_reset(ngx_media_ipc_frame_t *frame);
+
+/*
+ * The send side of one routed publisher connection.  A frame that could not
+ * be handed over leaves the owner without a piece of the program, and video
+ * that follows is undecodable until the next keyframe: it is dropped at the
+ * source instead of being sent into the gap.  The sequence advances for every
+ * frame, sent or dropped, so the owner can see what was lost.
+ */
+typedef struct {
+    uint64_t    sequence;       /* sequence of the next frame */
+    uint64_t    dropped;        /* video frames held back while resyncing */
+    uint64_t    resyncs;        /* sends that failed */
+    unsigned    resync:1;       /* waiting for a video keyframe */
+} ngx_media_ipc_flow_t;
+
+/* 1: send this frame (with flow->sequence); 0: it was dropped */
+ngx_uint_t ngx_media_ipc_flow_admit(ngx_media_ipc_flow_t *flow,
+    ngx_uint_t video, ngx_uint_t keyframe);
+
+/* records the outcome of a send that flow_admit allowed */
+void ngx_media_ipc_flow_sent(ngx_media_ipc_flow_t *flow, ngx_uint_t video,
+    ngx_uint_t keyframe, ngx_int_t rc);
 
 #endif /* NGX_MEDIA_IPC_H */

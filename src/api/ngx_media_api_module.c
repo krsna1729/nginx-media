@@ -1642,6 +1642,14 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "routed frames rejected by source or program publication\n"
                          "# TYPE nginx_media_runtime_routed_publish_errors_total "
                          "counter\n"
+                         "# HELP nginx_media_runtime_routed_sequence_gaps_total "
+                         "routed frames numbered by the sender that never arrived\n"
+                         "# TYPE nginx_media_runtime_routed_sequence_gaps_total "
+                         "counter\n"
+                         "# HELP nginx_media_runtime_routed_frame_restarts_total "
+                         "partial routed frames discarded when the sender abandoned them\n"
+                         "# TYPE nginx_media_runtime_routed_frame_restarts_total "
+                         "counter\n"
                          "nginx_media_worker_service_ms %M\n"
                          "nginx_media_worker_max_service_ms %M\n"
                          "nginx_media_reconnecting_sources %ui\n"
@@ -1651,7 +1659,9 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          "nginx_media_runtime_routed_no_slot_total %uL\n"
                          "nginx_media_runtime_routed_no_payload_total %uL\n"
                          "nginx_media_runtime_routed_reassembly_errors_total %uL\n"
-                         "nginx_media_runtime_routed_publish_errors_total %uL\n",
+                         "nginx_media_runtime_routed_publish_errors_total %uL\n"
+                         "nginx_media_runtime_routed_sequence_gaps_total %uL\n"
+                         "nginx_media_runtime_routed_frame_restarts_total %uL\n",
                          ngx_media_runtime_outputs_active(),
                          ngx_media_registry_draining_count(registry),
                          stats.last_gap, stats.max_gap, stats.late_ticks,
@@ -1666,7 +1676,9 @@ ngx_media_api_metrics(ngx_media_registry_t *registry, u_char **last,
                          stats.routed_no_slot,
                          stats.routed_no_payload,
                          stats.routed_reassembly_errors,
-                         stats.routed_publish_errors);
+                         stats.routed_publish_errors,
+                         stats.routed_sequence_gaps,
+                         stats.routed_frame_restarts);
     *last = ngx_snprintf(*last, end - *last,
                          "# HELP nginx_media_worker_info identity of the "
                          "worker serving this metrics response\n"
