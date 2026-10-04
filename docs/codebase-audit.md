@@ -138,25 +138,28 @@ were not executed during the audit.
   removing counters from copied comparison identities yielded seven findings.
   Keep raw diagnostics and strict comparison_group isolation. Earlier claims
   that automatic issue detection was reliable are superseded by this finding.
-- [ ] **B2 / P1:** repair PR-to-main comparison: PR jobs fetch branch history,
+- [x] **B2 / P1:** repair PR-to-main comparison: PR jobs fetch branch history,
   but Python filters it out because the tier is not `pr`. Compare only compatible
   recipes; PR/branch duration currently differs.
 - [ ] **B3:** store seconds, source rate, rungs, mixes, stop rules and harness
   revision; compare compatible recipes. Record compiler/flags, actual SRT
   commit, receiver versions and binary provenance. Binary hashes are evidence,
   not an equality requirement across the code revisions under comparison.
+  (Recipe, compiler/flags and binary provenance are done; the SRT commit and
+  receiver versions are not collected anywhere yet.)
 - [ ] **B4:** align CPU and receiver byte sampling boundaries and report window
   skew; validate absolute expected workload as well as relative delivery.
-- [ ] **B5:** use one workload set for manifest and execution. bench-ci's
+- [x] **B5:** use one workload set for manifest and execution. bench-ci's
   ALL_MIXES has seven names while harness `all` executes nine. Do not mask
   incomplete results by shortening the ladder or discarding failure evidence.
 - [ ] **B6:** require positive evidence of floor-rung passes; reject non-finite
   thresholds, malformed/missing measurement inputs, sampling gaps and failed
   calibration references. Distinguish receiver saturation from nginx failures
-  with controlled receiver-capacity evidence.
+  with controlled receiver-capacity evidence. (Floor-rung evidence, non-finite
+  judge inputs and failed calibration references are done; the rest is open.)
 - [ ] **B7:** repair the distributed path: fetched receiver metadata, remote PID
   and CPU accounting, fresh ready/probe files and fatal preflight errors.
-- [ ] **B8:** repair weekly failed-build stubs: the weekly branch leaves `configs`
+- [x] **B8:** repair weekly failed-build stubs: the weekly branch leaves `configs`
   unset but stub_summary references it under `set -u`.
 - [ ] **B9:** make viewer series/sparklines use stable identity and a fixed rung;
   fix profile comparability, exact run selection and mixed-record filters.
@@ -320,6 +323,73 @@ checkbox above marked only after the behavior is exercised.
   leaves the other feeding. On the pre-fix source the first scenario fails with
   the source deleted and the second (run alone) with the active source
   receiving no media of its own.
+
+### Benchmark reporting truth (B2, B3, B5, B6, B8; parts of B9, B10)
+
+- B6: the gate needs a passing result at the tier's floor rung (the highest
+  declared rung at or below `REQUIRED_RUNG`) for every expected workload; an
+  infrastructure-limited, unknown, skipped or missing outcome at or below it is
+  an error, not a notice. The SRT, RTMP, HLS push and HLS reader judges reject
+  non-finite thresholds, references, intervals and sink/queue measurements: a
+  NaN comparison is false both ways, so `--min-delivery-ratio nan`,
+  `--interval-floor nan`, `--max-low-s inf`, a NaN reference or a NaN queue
+  sample used to pass a half-rate rung. The harness stores a calibration
+  reference only from a rung that passed its own quality checks and only if it
+  is a finite positive rate (`0.00` matched the old number pattern).
+- B5: the mixes are listed once, in `tests/bench/capacity-mixes.conf`. The
+  harness reads it and `bench-ci.sh` derives `ALL_MIXES` from it and hands the
+  harness the explicit list for `all`, so the manifest (seven names; both
+  contention ladders were unchecked) and execution are one set. The harness
+  prints `quality_mixes=` and `quality_recipe`; `completeness()` requires the
+  mixes and recipe steps to equal the manifest. A harness that never states
+  its mixes is incomplete.
+- B8: `bench-trend.sh` stub summaries take the single `config_names` list (the
+  weekly branch used to leave `configs` unset under `set -u`).
+- B3/B2: each configuration's record carries its recipe (seconds, source rate,
+  rungs, mixes, stop-after rule, judge thresholds, worker settings, harness
+  revision = hash of the harness files). `regressions()` compares only equal
+  recipes (ladders may differ if they start at the same rung; a record without
+  a recipe compares with nothing). A pull request is compared with main's
+  `branch` records (`load_history` and `regressions` both dropped them as
+  `tier != pr`). Compiler, configure arguments, binary sha256 and transport are
+  recorded per workload as provenance and never compared. `summarize()` also
+  discarded `run_environment()`'s lifted copy, so published records never
+  carried the fingerprint or peaks regressions need; it is kept now.
+- B9/B10 (partial): the scorecard sparkline follows the card's rung across
+  runs with the same runner identity and a comparable recipe; `rung_record`
+  keeps the preflight verdict and the per-protocol calibration reference.
+- Evidence: `make bench-reporting` 322 checks, 0 failures. Manifest-step drift
+  failed before the additional check (`bench_gate=pass`) and is now rejected.
+  The cases use judge fixtures, the real `bench-ci.sh` and `bench-trend.sh` in scratch trees
+  and the harness's own mix-selection function with the ladders stubbed. Run
+  against the pre-change tree (`git archive origin/main` plus the new test
+  file) they fail: floor, judges, calibration, mix list, manifest, recipe,
+  PR-history and weekly-stub cases, the weekly one with
+  `bench-trend.sh: line 49: configs: unbound variable`.
+- Real pipeline smoke: `scripts/bench-ci.sh branch` with `BENCH_CONFIGS=srt`,
+  `BENCH_STEPS="1 16"` and `BENCH_SECONDS=10`, run through `omarchy-benchmark`:
+  sender on P-cores 2,4, publisher on P-core 6, receivers on E-cores 12-15.
+  Both receiver-verified rungs passed and `bench_gate=pass`; this verifies
+  reporting, not a new capacity ceiling.
+- Browser smoke used the changed viewer against published legacy records,
+  then three comparable recipe-bearing trend fixtures with changed cumulative
+  CPU counters and one incompatible-duration fixture. All three scorecard
+  sparklines rendered values 110,120,130; the incompatible sample was excluded.
+- Not done: with the current defaults the PR (10 s) and branch (15 s) recipes
+  differ, so a PR is compared with nothing until the two durations are aligned
+  (changing durations was out of scope). B3's actual SRT commit and receiver
+  tool versions are not collected by any bundle. B6's sampling-gap and
+  receiver-saturation evidence, B9's chart series/run selection/mixed-record
+  filters and B10's per-rung artifacts, duplicate publication and pending
+  publishers are not addressed.
+- Found, not changed: the weekly qualification passes `CAPACITY_QUALITY_STEPS`
+  beginning at 1, but the harness refuses a ladder that starts below the
+  smallest rung a mix can form, and the two contention mixes need 4
+  (`capacity_mix_minimum_rung`). `all` therefore stops at the first
+  contention mix before its end marker, so the weekly run was already
+  incomplete; the seven-name manifest only hid which mixes were missing, and
+  the nine-name manifest now names them. Fixing it means choosing a weekly
+  ladder that starts at 4 for those mixes (a ladder decision, not made here).
 
 ### RTMP pre-admission budget (S3)
 

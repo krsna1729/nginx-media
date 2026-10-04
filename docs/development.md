@@ -310,11 +310,15 @@ SRT destination ladder. `capacity-slow-reader`, `capacity-saturated`, and
 `capacity-sustained` each run one scenario without repeating the ladder.
 This is an offered-load curve, not a worker-count sweep.
 
-`bench-capacity-quality` runs seven calibrated delivery-quality ladders,
-including the pairwise RTMP/SRT and HLS-push/SRT mixes and a three-way
-50% RTMP / 45% HLS-push / 5% SRT mix.  The three-way case places all outputs
+`bench-capacity-quality` runs the delivery-quality ladders listed in
+`tests/bench/capacity-mixes.conf` (the one list the harness and
+`scripts/bench-ci.sh` read): seven calibrated ladders, including the pairwise
+RTMP/SRT and HLS-push/SRT mixes and a three-way
+50% RTMP / 45% HLS-push / 5% SRT mix, and two SRT/RTMP/HLS-push contention
+ladders.  The three-way case places all outputs
 on the same program owner and validates each protocol against its calibrated
-single-destination reference. `CAPACITY_QUALITY_MIXES` selects a subset;
+single-destination reference, which is stored only from a calibration rung that
+passed its own checks. `CAPACITY_QUALITY_MIXES` selects a subset;
 `CAPACITY_QUALITY_STEPS` chooses the strictly increasing destination counts
 (starting at one), and `CAPACITY_QUALITY_SECONDS` sets each measurement window.
 
@@ -494,14 +498,26 @@ The gate (`bench_history.py gate`) fails the job on:
 - an incomplete run - before a configuration runs, `bench-ci.sh` writes the
   mixes and rungs it expects (`expected.json`), and every one of them must end
   in a diagnostics bundle or in the harness's own list of rungs skipped after
-  consecutive failures at the capacity boundary; a harness that did not reach
-  its end marker, a mix never started, or a ladder cut short by a crash is
-  incomplete, never a short green run;
-- a quality failure at a rung the tier requires every host to carry.
+  consecutive failures at the capacity boundary; the mixes the harness prints
+  (`quality_mixes=`) must equal the manifest's, so the two cannot describe
+  different workload sets; a harness that did not reach its end marker, a mix
+  never started, or a ladder cut short by a crash is incomplete, never a short
+  green run;
+- a floor that was not shown to work - the tier's floor rung must have been
+  measured and passed for every workload; a quality failure there fails, and
+  so does an infrastructure-limited, unknown, skipped or missing outcome at or
+  below it (an infrastructure limit above the floor is a notice).
 
 The boundary itself is recorded, never gated. A CPU-per-Gbit/s regression is
 only compared for passing rungs in complete configurations with the same
-workload and exact runner fingerprint; it needs at least three baselines and
+workload, exact runner fingerprint and the same recipe (rung duration, source
+rate, mixes, stop-after rule, judge thresholds, worker settings and the hash
+of the harness files; a ladder may be a prefix of the other's, so a pull
+request is compared with main's `branch` records only if its recipe matches
+theirs - 10 s pull-request rungs are not a baseline for 15 s branch rungs - and
+a record without a recipe compares with nothing). Compiler, configure
+arguments, binary sha256 and the linked transport library are recorded per
+workload as provenance, never compared. It needs at least three baselines and
 must exceed their median by 25%. It remains a warning, not a gate, because
 shared runners are noisy. The publisher opens one issue per
 tier/configuration/workload/rung and skips duplicate open issues; each issue

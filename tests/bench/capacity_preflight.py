@@ -44,6 +44,7 @@ unknown - and an unknown is never a pass.
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import platform
@@ -252,6 +253,35 @@ def transport_version(binary):
     return version
 
 
+def nginx_build(binary):
+    """Provenance of the binary under test: its compiler, the configure
+    arguments (which carry the compiler flags) and its content hash.  The
+    hash identifies a binary; it is never something history compares on,
+    because every code revision under comparison is a different binary."""
+    if not binary or not os.path.exists(binary):
+        return None
+    build = {}
+    try:
+        out = subprocess.run([binary, "-V"], capture_output=True, text=True,
+                             timeout=10)
+        for line in out.stderr.splitlines():
+            if line.startswith("built by "):
+                build["compiler"] = line[len("built by "):].strip()
+            elif line.startswith("configure arguments:"):
+                build["configure_arguments"] = line.split(":", 1)[1].strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        digest = hashlib.sha256()
+        with open(binary, "rb") as source:
+            for block in iter(lambda: source.read(1 << 20), b""):
+                digest.update(block)
+        build["sha256"] = digest.hexdigest()
+    except OSError:
+        pass
+    return build or None
+
+
 def host_report(role, binary=None, pid=None):
     busy_start = proc_cpu_sampler.proc_stat_cpu()
     time.sleep(0.5)
@@ -278,6 +308,7 @@ def host_report(role, binary=None, pid=None):
         "kernel_udp_limits": kernel_udp_limits(),
         "softnet": softnet(),
         "transport": transport_version(binary),
+        "build": nginx_build(binary),
     }
     if pid:
         report["process"] = proc_cpu_sampler.process_info(pid)

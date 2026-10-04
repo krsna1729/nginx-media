@@ -338,12 +338,15 @@ def quality_report(args):
         if args.destinations != 1:
             raise ValueError("one-destination quality case is required to calibrate rate")
         reference_bps = (final[next(iter(expected))] - baseline[next(iter(expected))]) * 8 / duration_s
-        if reference_bps <= 0:
+        if not math.isfinite(reference_bps) or reference_bps <= 0:
             raise ValueError("one-destination receiver delivered no calibration payload")
+    if not math.isfinite(reference_bps) or reference_bps <= 0:
+        raise ValueError(f"delivery reference {reference_bps!r} is not a finite "
+                         f"positive rate")
     prepared_source_bps = (
         os.path.getsize(args.prepared_source) * 8 / args.source_duration_s
     )
-    if prepared_source_bps <= 0:
+    if not math.isfinite(prepared_source_bps) or prepared_source_bps <= 0:
         raise ValueError("prepared MPEG-TS source is empty")
     reference_vs_source_ratio = reference_bps / prepared_source_bps
     if reference_vs_source_ratio < args.min_delivery_ratio:
@@ -490,6 +493,8 @@ def quality_report(args):
                     "sent_bytes", "blocked_sends", "retransmitted_packets")}
             except (TypeError, ValueError):
                 raise ValueError("invalid queue sample row")
+            if not all(math.isfinite(number) for number in data.values()):
+                raise ValueError("invalid queue sample row: non-finite counter")
             queue_rows[round_id][(row["worker"], row["shard"])] = (sample_ns, data)
     rounds = sorted(queue_rows)
     if len(rounds) < 3:
@@ -612,6 +617,20 @@ def quality_report(args):
     return 0
 
 
+def finite_float(value):
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("must be finite")
+    return parsed
+
+
+def positive_finite_float(value):
+    parsed = finite_float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
 def main():
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -620,13 +639,13 @@ def main():
     receivers.add_argument("snapshot")
     receivers.add_argument("baseline")
     receivers.add_argument("output")
-    receivers.add_argument("--interval", type=float, default=1.0)
+    receivers.add_argument("--interval", type=finite_float, default=1.0)
     receivers.set_defaults(run=sample_receivers)
     queues = subparsers.add_parser("sample-queues")
     queues.add_argument("port", type=int)
     queues.add_argument("output")
     queues.add_argument("worker_pids", nargs="+")
-    queues.add_argument("--interval", type=float, default=1.0)
+    queues.add_argument("--interval", type=finite_float, default=1.0)
     queues.set_defaults(run=sample_queues)
     report = subparsers.add_parser("report")
     report.add_argument("--baseline", required=True)
@@ -645,17 +664,20 @@ def main():
                         help="programs the rung ran; each owns its own set of "
                              "destinations, numbered pNNNN-dNNNN")
     report.add_argument("--prepared-source", required=True)
-    report.add_argument("--source-duration-s", type=float, default=30.0)
-    report.add_argument("--reference-bps", type=float, default=0.0)
-    report.add_argument("--min-delivery-ratio", type=float, default=0.95)
+    report.add_argument("--source-duration-s", type=positive_finite_float,
+                        default=30.0)
+    report.add_argument("--reference-bps", type=finite_float, default=0.0)
+    report.add_argument("--min-delivery-ratio", type=finite_float, default=0.95)
     # the strict qualification's documented tolerance: full rate means within
     # 0.1% of the reference, and no interval below 90% of it
-    report.add_argument("--strict-ratio", type=float, default=0.999)
-    report.add_argument("--strict-interval-floor", type=float, default=0.90)
-    report.add_argument("--interval-floor", type=float, default=0.80)
-    report.add_argument("--max-low-s", type=float, default=2.0)
-    report.add_argument("--max-interval-s", type=float, default=2.0)
-    report.add_argument("--queue-pressure", type=float, default=0.90)
+    report.add_argument("--strict-ratio", type=finite_float, default=0.999)
+    report.add_argument("--strict-interval-floor", type=finite_float,
+                        default=0.90)
+    report.add_argument("--interval-floor", type=finite_float, default=0.80)
+    report.add_argument("--max-low-s", type=finite_float, default=2.0)
+    report.add_argument("--max-interval-s", type=positive_finite_float,
+                        default=2.0)
+    report.add_argument("--queue-pressure", type=finite_float, default=0.90)
     report.add_argument("--pressure-samples", type=int, default=3)
     report.add_argument("--blocked-samples", type=int, default=3)
     report.set_defaults(run=quality_report)

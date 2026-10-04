@@ -9,7 +9,9 @@
 #   branch   the pr recipe plus RTMP 95%/SRT 5%, after a merge to main.
 #   nightly  all seven workloads in four parallel configurations, 30 s
 #            rungs up to the host's boundary.
-#   weekly   the nightly ladders at 120 s, the fixed-vs-adaptive SRT sender
+#   weekly   every mix in tests/bench/capacity-mixes.conf (the nightly seven
+#            plus the two contention ladders) at 120 s, the fixed-vs-adaptive
+#            SRT sender
 #            comparison, HLS preparation on/off, and the transport library
 #            comparison (libsrt vs robotweax/srt) when ROBOTWEAX_NGINX names a
 #            binary built against it.
@@ -38,23 +40,34 @@ OUT="$(cd "$OUT" && pwd)"
 # run a tier's configurations as parallel jobs and merge their results.
 BENCH_CONFIGS="${BENCH_CONFIGS:-}"
 
-ALL_MIXES="pure-srt pure-rtmp pure-hls pure-hls-push rtmp-95-srt-5 hls-push-95-srt-5 rtmp-50-hls-push-45-srt-5"
+# every workload the harness knows, from the file the harness reads
+ALL_MIXES="$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' \
+                 "$ROOT/tests/bench/capacity-mixes.conf" \
+             | cut -d: -f1 | paste -sd' ')"
+[ -n "$ALL_MIXES" ] || { echo "no mixes in capacity-mixes.conf" >&2; exit 1; }
 
 # config name, then environment assignments for the harness
 run_config() {
     local name="$1" status arg mixes="" steps=""
+    local -a harness_env=()
     shift
 
     if [ -n "$BENCH_CONFIGS" ] && [[ " $BENCH_CONFIGS " != *" $name "* ]]; then
         return 0
     fi
     for arg in "$@"; do
+        # `all` is resolved here, to the harness's own list, and the harness
+        # is handed that explicit list: what the manifest below promises and
+        # what the harness executes are then one set by construction (and the
+        # gate checks the harness's own statement of what it ran).
+        [ "$arg" = CAPACITY_QUALITY_MIXES=all ] \
+            && arg="CAPACITY_QUALITY_MIXES=$ALL_MIXES"
+        harness_env+=( "$arg" )
         case "$arg" in
             CAPACITY_QUALITY_MIXES=*) mixes="${arg#*=}" ;;
             CAPACITY_QUALITY_STEPS=*) steps="${arg#*=}" ;;
         esac
     done
-    [ "$mixes" = all ] && mixes="$ALL_MIXES"
     mkdir -p "$OUT/$name"
     # What this configuration must account for, written before it runs: the
     # gate compares it with what the run produced, so a harness that dies
@@ -66,7 +79,7 @@ json.dump({"mixes": mixes.split(), "steps": [int(s) for s in steps.split()]},
           open(path, "w"))
 PYEOF
     echo "== bench-ci $TIER/$name"
-    env "$@" PHASES=capacity-quality-ladder \
+    env "${harness_env[@]}" PHASES=capacity-quality-ladder \
         CAPACITY_QUALITY_STOP_AFTER_FAILURES="${BENCH_STOP_AFTER_FAILURES:-2}" \
         "$ROOT/tests/bench/ingest_egress_fanout.sh" > "$OUT/$name.log" 2>&1
     status=$?

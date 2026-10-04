@@ -23,6 +23,7 @@ import argparse
 import copy
 import datetime
 import glob
+import hashlib
 import json
 import math
 import os
@@ -77,6 +78,40 @@ def value(field):
     return field.get("value") if isinstance(field, dict) else None
 
 
+def preflight_verdict(preflight):
+    """The rung's preflight verdict and the resources it named, or None when
+    the bundle has none (older bundles, or a rung that never got that far)."""
+    if not isinstance(preflight, dict) or not preflight.get("verdict"):
+        return None
+
+    def named(items):
+        return [f"{item.get('side')}/{item.get('resource')}"
+                if isinstance(item, dict) else str(item)
+                for item in items or []]
+    return {"verdict": preflight["verdict"],
+            "limits": named(preflight.get("limits")),
+            "unknown": named(preflight.get("unknown"))}
+
+
+def calibration_references(delivery):
+    """The reference rate each protocol's rung was judged against: with it a
+    ratio can be read, and two rungs' ratios told apart as the same yardstick
+    or not."""
+    references = {}
+    for protocol in PROTOCOLS:
+        report = value(delivery.get(protocol))
+        if not isinstance(report, dict):
+            continue
+        for key in ("quality_reference_payload_bps", "reference_bps"):
+            number = report.get(key)
+            if (isinstance(number, (int, float))
+                    and not isinstance(number, bool)
+                    and math.isfinite(number) and number > 0):
+                references[protocol] = number
+                break
+    return references
+
+
 def rung_record(bundle):
     delivery = bundle.get("delivery") or {}
     strict = {}
@@ -125,6 +160,10 @@ def rung_record(bundle):
         "receiver_cpu_per_gbps": value(efficiency.get("receiver_cpu_per_gbps")),
         "host_cpu_busy": value(env.get("host_cpu_busy_fraction")),
         "srt_backend": bundle.get("case", {}).get("srt_backend"),
+        # what the preflight concluded about this rung's host, and the
+        # one-destination reference rate each protocol was judged against
+        "preflight": preflight_verdict(bundle.get("preflight")),
+        "reference_bps": calibration_references(delivery),
     }
 
 
@@ -175,24 +214,97 @@ def peak_pressure(bundle):
     }
 
 
+# The harness files whose content defines what a rung measures.  Their
+# combined hash is the "harness revision" of a recipe: a run taken by a
+# changed harness is not comparable with one taken by the earlier harness,
+# whatever the nginx binary under test was.  (Not the binary: every code
+# revision under comparison is a different binary by definition.)
+HARNESS_FILES = (
+    "ingest_egress_fanout.sh", "capacity-mixes.conf",
+    "capacity_diagnostics.py", "capacity_preflight.py",
+    "hls_capacity_readers.py", "hls_push_capacity.py",
+    "proc_cpu_sampler.py", "rtmp_capacity_quality.py",
+    "srt_capacity_quality.py", "srt_fanout_sink.c")
+
+# What the harness prints on its `quality_recipe` line, and how each value is
+# read back.  Everything on it describes how a rung was taken.
+RECIPE_FIELDS = {
+    "seconds": float, "rate": str, "steps": "ints",
+    "stop_after_failures": int, "min_delivery_ratio": float,
+    "interval_floor": float, "max_low_seconds": float,
+    "srt_workers": str, "hls_push_workers": str, "srt_hls": str}
+
+# A rung's number depends on what was offered, for how long, how it was
+# judged and which harness measured it; it does not depend on which other
+# rungs the ladder happened to contain.  So every recipe field must match
+# except the rung list, which only has to start at the same rung (the
+# calibration reference comes from the first rung).
+RECIPE_MATCH = ("seconds", "rate", "stop_after_failures", "min_delivery_ratio",
+                "interval_floor", "max_low_seconds", "srt_workers",
+                "hls_push_workers", "srt_hls", "mixes", "harness")
+
+# History a record may be compared with.  A pull request runs a subset of the
+# branch recipe, so main's published branch records are its baseline (the
+# recipe check still decides whether any one of them is comparable).
+COMPARABLE_TIERS = {"pr": ("pr", "branch")}
+
+
+def harness_revision(root=None):
+    """A short hash of the harness files, or None if any is unreadable."""
+    root = root or os.path.dirname(os.path.abspath(__file__))
+    digest = hashlib.sha256()
+    for name in HARNESS_FILES:
+        try:
+            with open(os.path.join(root, name), "rb") as source:
+                digest.update(name.encode() + b"\0" + source.read() + b"\0")
+        except OSError:
+            return None
+    return digest.hexdigest()[:16]
+
+
+def parse_recipe(tokens):
+    recipe = {}
+    for token in tokens:
+        key, _, text = token.partition("=")
+        kind = RECIPE_FIELDS.get(key)
+        try:
+            if kind == "ints":
+                recipe[key] = [int(n) for n in text.split(",") if n]
+            elif kind is not None:
+                recipe[key] = kind(text)
+        except ValueError:
+            return None
+    if set(recipe) != set(RECIPE_FIELDS) or not recipe["steps"]:
+        return None
+    if recipe["seconds"] == int(recipe["seconds"]):
+        recipe["seconds"] = int(recipe["seconds"])
+    return recipe
+
+
 def harness_log(results, name):
     """what the harness said about its own run: whether it reached its end,
-    and the rungs it skipped on purpose after the capacity boundary"""
-    finished, stopped = False, {}
+    the rungs it skipped on purpose after the capacity boundary, the mixes it
+    executed and the recipe it ran them with"""
+    log = {"finished": False, "stopped": {}, "mixes": None, "recipe": None}
     try:
         with open(os.path.join(results, name + ".log"), encoding="utf-8",
                   errors="replace") as source:
             for line in source:
                 line = line.strip()
                 if line.startswith("quality_ladders_with_failures="):
-                    finished = True
+                    log["finished"] = True
+                elif line.startswith("quality_mixes=") and log["mixes"] is None:
+                    log["mixes"] = line.split("=", 1)[1].split()
+                elif (line.startswith("quality_recipe ")
+                        and log["recipe"] is None):
+                    log["recipe"] = parse_recipe(line.split()[1:])
                 elif line.startswith("mix=") and " unmeasured_rungs=" in line:
                     mix, _, rest = line[4:].partition(" unmeasured_rungs=")
                     rungs = rest.split(" (", 1)[0].split()
-                    stopped[mix] = [int(r) for r in rungs if r.isdigit()]
+                    log["stopped"][mix] = [int(r) for r in rungs if r.isdigit()]
     except OSError:
         pass
-    return finished, stopped
+    return log
 
 
 def completeness(results, name, mixes):
@@ -202,16 +314,29 @@ def completeness(results, name, mixes):
     diagnostics bundle (pass, quality failure or setup failure), or a rung
     the harness skipped on purpose after consecutive failures at the
     capacity boundary.  Anything else - a mix never started, a ladder cut
-    short by a crash - is missing, and the run is incomplete."""
+    short by a crash - is missing, and the run is incomplete.
+
+    The manifest is also checked against the harness's own statement of the
+    mixes it executed, so the two cannot describe different workload sets:
+    a mix the harness ran that the manifest omits, or the reverse, is an
+    incomplete run, not a shorter green one."""
     try:
         with open(os.path.join(results, name, "expected.json"),
                   encoding="utf-8") as source:
             expected = json.load(source)
     except (OSError, ValueError):
         return {"complete": False, "finished": False,
-                "missing": ["no expected-run manifest"], "stopped": {}}
-    finished, stopped = harness_log(results, name)
+                "missing": ["no expected-run manifest"], "stopped": {},
+                "recipe": None}
+    log = harness_log(results, name)
+    finished, stopped = log["finished"], log["stopped"]
     missing = []
+    manifest = sorted(expected.get("mixes", []))
+    if log["mixes"] is None:
+        missing.append("the harness never stated the mixes it executed")
+    elif sorted(log["mixes"]) != manifest:
+        missing.append(f"the harness executed {sorted(log['mixes'])} but the "
+                       f"manifest expects {manifest}")
     for mix in expected.get("mixes", []):
         measured = {r["destinations"] for r in
                     (mixes.get(mix) or {}).get("rungs", [])}
@@ -221,8 +346,18 @@ def completeness(results, name, mixes):
         if absent:
             missing.append(f"{mix}: rungs {absent} neither measured nor "
                            f"skipped at the boundary")
+    recipe = log["recipe"]
+    if recipe is not None and recipe["steps"] != expected.get("steps", []):
+        missing.append(f"the harness steps {recipe['steps']} differ from the "
+                       f"manifest steps {expected.get('steps', [])}")
+    if recipe is not None:
+        recipe = dict(recipe, mixes=sorted(log["mixes"] or []),
+                      harness=harness_revision())
+        if recipe["harness"] is None:
+            recipe = None
     return {"complete": finished and not missing, "finished": finished,
-            "missing": missing, "stopped": stopped, "expected": expected}
+            "missing": missing, "stopped": stopped, "expected": expected,
+            "recipe": recipe}
 
 
 
@@ -246,6 +381,31 @@ def runner_identity(fingerprint):
     return copy.deepcopy(identity) if identity else None
 
 
+def build_provenance(rungs):
+    """How the binary under test was built, from the first rung that says:
+    compiler, configure arguments (which carry the compiler flags), the
+    hash of the binary and the transport library it links.  Evidence for a
+    reader asking why two runs differ; never an equality requirement,
+    because a different revision is a different binary by definition."""
+    for rung in rungs:
+        fingerprint = rung.get("host_fingerprint")
+        if not isinstance(fingerprint, dict):
+            continue
+        build = fingerprint.get("build")
+        provenance = {}
+        if isinstance(build, dict):
+            for key, label in (("compiler", "compiler"),
+                               ("configure_arguments", "configure_arguments"),
+                               ("sha256", "binary_sha256")):
+                if build.get(key):
+                    provenance[label] = build[key]
+        if fingerprint.get("transport"):
+            provenance["transport"] = fingerprint["transport"]
+        if provenance:
+            return provenance
+    return None
+
+
 def run_environment(entry):
     """The environment a workload's rungs were taken in, and the highest
     pressure any of them reached - lifted from the rungs themselves, so the
@@ -262,6 +422,9 @@ def run_environment(entry):
                 peaks[key] = max(peaks.get(key, value), value)
     if peaks:
         entry["peak"] = peaks
+    provenance = build_provenance(entry.get("rungs", []))
+    if provenance:
+        entry["provenance"] = provenance
     return entry
 
 
@@ -309,7 +472,9 @@ def summarize(args):
             entry["infrastructure_limited"] = [
                 r["destinations"] for r in entry["rungs"]
                 if r["outcome"] == "infrastructure-limited"]
-            entry = run_environment(entry)
+            # run_environment returns a lifted copy; keeping it is what puts
+            # the fingerprint and peaks into the published record
+            mixes[mix] = run_environment(entry)
         configs[name] = {"harness_status": statuses.get(name), "mixes": mixes}
         configs[name].update(completeness(args.results, name, mixes))
     expected = parse_expected_configs(getattr(args, "expected_configs", None))
@@ -361,6 +526,8 @@ def summarize(args):
 
 
 def load_history(path, tier):
+    """The published records a record of `tier` may be compared with."""
+    tiers = COMPARABLE_TIERS.get(tier, (tier,))
     records = []
     if not path or not os.path.exists(path):
         return records
@@ -369,9 +536,68 @@ def load_history(path, tier):
             line = line.strip()
             if line:
                 record = json.loads(line)
-                if record.get("tier") == tier:
+                if record.get("tier") in tiers:
                     records.append(record)
     return records
+
+
+def recipes_comparable(current, past):
+    """Whether two runs of one configuration were taken the same way.
+
+    Everything that decides what a rung measures must match; the rung lists
+    may differ (a pull request runs a subset of main's ladder) but must begin
+    at the same rung.  A missing recipe is comparable with nothing."""
+    if not isinstance(current, dict) or not isinstance(past, dict):
+        return False
+    if any(current.get(key) is None or current.get(key) != past.get(key)
+           for key in RECIPE_MATCH):
+        return False
+    now, then = current.get("steps"), past.get("steps")
+    return bool(now) and bool(then) and now[0] == then[0]
+
+
+# outcomes that need no floor finding of their own: a pass is the evidence,
+# the other two are reported where they are found
+FLOOR_SETTLED = ("pass", "quality-failure", "setup-failure")
+
+
+def floor_errors(name, config, required):
+    """Positive evidence that the floor works.
+
+    The rung every host must carry has to have been measured and passed;
+    that nothing failed is not evidence.  An infrastructure-limited, unknown
+    or missing outcome at or below the floor means the floor was never
+    shown to work, which a green gate must not paper over.  (A quality or
+    setup failure is reported separately, where it is found.)"""
+    if not required:
+        return []
+    expected = config.get("expected") or {}
+    steps = [s for s in expected.get("steps", []) if isinstance(s, int)]
+    floor = (max((s for s in steps if s <= required), default=None)
+             if steps else required)
+    errors = []
+    for mix in expected.get("mixes") or list(config["mixes"]):
+        rungs = (config["mixes"].get(mix) or {}).get("rungs", [])
+        if floor is None:
+            errors.append(f"{name}/{mix}: the ladder {steps} has no rung at "
+                          f"or below the {required}-destination floor, so "
+                          f"nothing shows the floor works")
+        else:
+            outcome = next((r.get("outcome") for r in rungs
+                            if r.get("destinations") == floor), None)
+            if outcome not in FLOOR_SETTLED:
+                errors.append(f"{name}/{mix}: no passing result at the "
+                              f"{floor}-destination floor rung (outcome: "
+                              f"{outcome or 'missing'})")
+        for rung in rungs:
+            if ((rung.get("destinations") or 0) <= required
+                    and rung.get("outcome") not in FLOOR_SETTLED):
+                errors.append(f"{name}/{mix}: "
+                              f"{rung.get('outcome') or 'unknown'}"
+                              f" at {rung.get('destinations')} destinations, "
+                              f"at or below the {required}-destination floor "
+                              f"which must be measured")
+    return errors
 
 
 def gate(args):
@@ -402,6 +628,8 @@ def gate(args):
             errors.append(f"{name}: incomplete - {message}")
         for mix, entry in config["mixes"].items():
             for rung in entry.get("infrastructure_limited") or []:
+                if (rung or 0) <= required:
+                    continue  # an error below: the floor was not measured
                 # Not a failure and not a result: the environment could not
                 # carry the offered load, so the rung was never measured.
                 print(f"::notice title=bench infrastructure::"
@@ -417,7 +645,9 @@ def gate(args):
                     errors.append(f"{name}/{mix}: quality failure at "
                                   f"{rung['destinations']} destinations, "
                                   f"which every host must carry")
-    for finding in regressions(record, load_history(args.history, args.tier)):
+        errors.extend(floor_errors(name, config, required))
+    history = load_history(args.history, args.tier)
+    for finding in regressions(record, history):
         print(f"::warning title=bench efficiency::"
               f"{finding['config']}/{finding['mix']} at "
               f"{finding['destinations']} destinations: sender CPU "
@@ -434,13 +664,17 @@ def gate(args):
 
 
 def regressions(record, history, window=10, tolerance=1.25):
-    """Return regressions against complete passing runs with the same host."""
+    """Return regressions against complete passing runs with the same host
+    and the same recipe: a number taken for 10 s rungs is not a baseline for
+    one taken for 15 s rungs, and a record that predates recipes has no way
+    to say which it was."""
     supported = {SCHEMA, "nginx-media.bench-history/2"}
     if record.get("schema") not in supported:
         return []
+    tiers = COMPARABLE_TIERS.get(record.get("tier"), (record.get("tier"),))
     recent = [old for old in history
               if old.get("schema") in supported
-              and old.get("tier") == record.get("tier")]
+              and old.get("tier") in tiers]
     if record.get("comparison_group"):
         recent = [old for old in recent
                   if old.get("comparison_group") == record["comparison_group"]
@@ -449,7 +683,9 @@ def regressions(record, history, window=10, tolerance=1.25):
         recent = [old for old in recent if not old.get("comparison_group")]
     findings = []
     for name, config in record.get("configs", {}).items():
-        if config.get("complete") is not True:
+        # a run with no recipe cannot say what it measured, so it is
+        # compared with nothing (and nothing without one is compared to it)
+        if config.get("complete") is not True or not config.get("recipe"):
             continue
         for mix, entry in config.get("mixes", {}).items():
             fingerprint = runner_identity(entry.get("fingerprint"))
@@ -470,6 +706,8 @@ def regressions(record, history, window=10, tolerance=1.25):
                     old_config = old.get("configs", {}).get(name, {})
                     old_entry = old_config.get("mixes", {}).get(mix, {})
                     if (old_config.get("complete") is not True
+                            or not recipes_comparable(
+                                config.get("recipe"), old_config.get("recipe"))
                             or runner_identity(old_entry.get("fingerprint"))
                             != fingerprint):
                         continue
