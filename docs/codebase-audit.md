@@ -374,7 +374,8 @@ checkbox above marked only after the behavior is exercised.
 - Found, not changed: the weekly qualification passes `CAPACITY_QUALITY_STEPS`
   beginning at 1, but the harness refuses a ladder that starts below the
   smallest rung a mix can form, and the two contention mixes need 4
-  (`capacity_mix_minimum_rung`). `all` therefore aborts at the first
-  contention mix; before this change the seven-name manifest hid that mix, and
-  now it is reported as an incomplete configuration. Fixing it means choosing
-  a weekly ladder that starts at 4 for those mixes (a ladder decision).
+  (`capacity_mix_minimum_rung`). `all` therefore stops at the first
+  contention mix before its end marker, so the weekly run was already
+  incomplete; the seven-name manifest only hid which mixes were missing, and
+  the nine-name manifest now names them. Fixing it means choosing a weekly
+  ladder that starts at 4 for those mixes (a ladder decision, not made here).
