@@ -32,6 +32,15 @@ ngx_media_route_master_init(ngx_cycle_t *cycle, ngx_log_t *log)
 
     workers = ngx_media_owner_worker_count(cycle);
 
+    /* Reject before touching the active cycle's endpoints. Configuration
+     * validation normally catches this; the master keeps its own guard. */
+    if (workers > NGX_MEDIA_ROUTE_MAX_WORKERS) {
+        ngx_log_error(NGX_LOG_EMERG, log, 0,
+                      "media: worker_processes %ui exceeds routing limit %ui",
+                      workers, (ngx_uint_t) NGX_MEDIA_ROUTE_MAX_WORKERS);
+        return NGX_ERROR;
+    }
+
     if (ngx_media_route_workers == workers) {
         return NGX_OK;   /* already configured for this worker count */
     }
@@ -40,11 +49,11 @@ ngx_media_route_master_init(ngx_cycle_t *cycle, ngx_log_t *log)
         /* close stale socket pairs when worker count changes on reload */
         for (i = 0; i < ngx_media_route_workers; i++) {
             for (j = i + 1; j < ngx_media_route_workers; j++) {
-                if (ngx_media_route_fds[i][j] > 0) {
+                if (ngx_media_route_fds[i][j] >= 0) {
                     (void) close(ngx_media_route_fds[i][j]);
                     ngx_media_route_fds[i][j] = -1;
                 }
-                if (ngx_media_route_fds[j][i] > 0) {
+                if (ngx_media_route_fds[j][i] >= 0) {
                     (void) close(ngx_media_route_fds[j][i]);
                     ngx_media_route_fds[j][i] = -1;
                 }
@@ -53,7 +62,9 @@ ngx_media_route_master_init(ngx_cycle_t *cycle, ngx_log_t *log)
         ngx_media_route_workers = 0;
     }
 
-    if (workers < 2 || workers > NGX_MEDIA_ROUTE_MAX_WORKERS) {
+    ngx_memset(ngx_media_route_fds, -1, sizeof(ngx_media_route_fds));
+
+    if (workers < 2) {
         /* a single worker needs no routing at all */
         ngx_media_route_workers = workers;
         return NGX_OK;

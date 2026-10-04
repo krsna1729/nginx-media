@@ -24,6 +24,7 @@
 #include <openssl/rand.h>
 
 static void *ngx_media_core_create_conf(ngx_cycle_t *cycle);
+static char *ngx_media_core_init_conf(ngx_cycle_t *cycle, void *conf);
 static ngx_int_t ngx_media_core_init_module(ngx_cycle_t *cycle);
 
 /*
@@ -380,7 +381,7 @@ static ngx_command_t ngx_media_core_commands[] = {
 static ngx_core_module_t ngx_media_core_module_ctx = {
     ngx_string("media"),
     ngx_media_core_create_conf,
-    NULL
+    ngx_media_core_init_conf
 };
 
 ngx_module_t ngx_media_core_module = {
@@ -409,6 +410,23 @@ ngx_media_core_create_conf(ngx_cycle_t *cycle)
     }
 
     return ngx_media_policy_init(policy);
+}
+
+static char *
+ngx_media_core_init_conf(ngx_cycle_t *cycle, void *conf)
+{
+    ngx_uint_t  workers;
+
+    (void) conf;
+    workers = ngx_media_owner_worker_count(cycle);
+    if (workers > NGX_MEDIA_ROUTE_MAX_WORKERS) {
+        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
+                      "media: worker_processes %ui exceeds routing limit %ui",
+                      workers, (ngx_uint_t) NGX_MEDIA_ROUTE_MAX_WORKERS);
+        return NGX_CONF_ERROR;
+    }
+
+    return NGX_CONF_OK;
 }
 
 static char *

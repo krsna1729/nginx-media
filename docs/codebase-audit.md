@@ -44,7 +44,7 @@ is not an assertion of an independently reproduced exploit.
   verifies unknown/wrong-type keys, rejection before 100 Continue, rotation
   during an admitted upload, client abort, failed rename and successful atomic
   creation/replacement, with no retained temporary bodies.
-- [ ] **S2 / P1: close rejected SRT sessions, including idle sessions.** Unknown,
+- [x] **S2 / P1: close rejected SRT sessions, including idle sessions.** Unknown,
   empty or wrong-type keys only log and leave the OPEN handler
   (`src/srt/ngx_media_srt_module.c:2048-2078`); the transport has 16 slots.
   Process close requests independently of another incoming data event. Test
@@ -55,7 +55,7 @@ is not an assertion of an independently reproduced exploit.
   Potential allocated capacity is about 1 GiB per connection, not necessarily
   resident until data arrives. Add aggregate/pre-admission budgets and
   handshake/incomplete-message deadlines; test interleaved incomplete messages.
-- [ ] **S4 / P1: enforce the 64-worker routing ceiling before fixed-array loops.**
+- [x] **S4 / P1: enforce the 64-worker routing ceiling before fixed-array loops.**
   `ngx_media_route.c:56-59` accepts a larger count; worker initialization and
   shutdown iterate that count at `:170-202,218`. Reject unsupported counts
   consistently, including `worker_processes auto` on large hosts.
@@ -127,7 +127,7 @@ were not executed during the audit.
 
 ## Benchmark validity and critical-section performance
 
-- [ ] **B1 / P1: separate stable comparison identity from pressure counters.**
+- [x] **B1 / P1: separate stable comparison identity from pressure counters.**
   `bench_history.py:235-240` copies the entire cgroup object, including
   cumulative cpu.stat; exact equality at `:456` rejects comparable runs.
   Real branch cohort `36882115060-attempt-1` had eight complete samples, eight
@@ -272,3 +272,28 @@ checkbox above marked only after the behavior is exercised.
 - Remaining routed-session, SRT/RTMP admission, benchmark comparability, shim
   fidelity and broader coverage work remains unchecked above; it is not
   implemented by these first repairs.
+
+### SRT rejection teardown, routing worker bound, comparison identity
+
+- S2: rejected sessions (empty, unknown or wrong-type key) are now closed by
+  the ingest thread; close requests are processed every loop iteration rather
+  than only when the session's socket is readable, and the session table lock
+  is held only for fixed-size state handoff. `tests/integration/srt_admission_nginx.py`
+  (`make srt-admission`) holds sixteen rejected idle callers open and requires
+  a valid publisher to be admitted; it fails on the pre-fix binary with the
+  valid source never coming up and passes now. It also covers source deletion
+  of a zero-payload session, slot reuse, shutdown with an idle session, and
+  credential redaction. A packet capture showed the server sends SRT shutdown
+  within about a millisecond of each rejection; libsrt callers that receive it
+  before their own connect completes stay `CONNECTED`, so the test deliberately
+  does not use the caller's view as evidence.
+- S4: `worker_processes` above 64 is rejected at configuration time and again
+  in `ngx_media_route_master_init` before any array loop; the stale-fd close
+  loops now treat fd 0 as valid and the matrix is initialized to -1.
+  `make routing-bounds` rejects 65 and 128 workers and shows an invalid reload
+  leaves the running master and workers serving.
+- B1: `runner_identity()` keeps stable host facts (CPU, kernel, CPUs, governor,
+  turbo, NUMA, transport, UDP limits, cgroup `cpu_max`) and excludes
+  cumulative cgroup counters, for new and previously published fingerprints.
+  `make bench-reporting` covers real-shape fingerprints with differing
+  counters.

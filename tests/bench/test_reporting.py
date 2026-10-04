@@ -18,6 +18,7 @@ Run it with plain python3 - no pytest, no network, no nginx:
 """
 
 import argparse
+import copy
 import csv
 import importlib.util
 import io
@@ -943,6 +944,137 @@ def test_regressions_require_complete_passing_same_runner_baselines():
               "all 3 same-runner runs found despite intervening runs")
 
 
+def test_regression_identity_ignores_pressure_but_preserves_environment():
+    module = load_module(HISTORY, "bench_history_stable_identity")
+
+    def record(value, index):
+        host = {
+            "role": "sender",
+            "cpu_model": "AMD EPYC 7763 64-Core Processor",
+            "kernel": "6.11.0-1018-azure",
+            "nproc_online": 4,
+            "permitted_cpus": [0, 1],
+            "cgroup": {
+                "cpu_max": "200000 100000",
+                "cpu_stat": {"usage_usec": 1000000 * index,
+                             "user_usec": 900000 * index,
+                             "system_usec": 100000 * index,
+                             "nr_periods": 1000 * index,
+                             "nr_throttled": 10 * index,
+                             "throttled_usec": 5000 * index},
+            },
+            "governor": "performance",
+            "no_turbo": "0",
+            "numa": {"node0": "0-3"},
+            "transport": "libsrt.so.1.5 1.5.4 (/usr/lib/libsrt.so.1.5)",
+            "kernel_udp_limits": {"net.core.rmem_max": "212992",
+                                  "net.core.wmem_max": "212992"},
+            "loadavg": f"{index}.00 0.10 0.20 1/100 1000",
+            "host_busy_fraction": index / 10,
+            "cpu_freq_khz": {"0": 2200000 + index},
+            "softnet": {"dropped": index},
+        }
+        # Published summaries before the fix kept the entire cgroup in
+        # their identity, while rung diagnostics retained the raw host.
+        fingerprint = {key: copy.deepcopy(host[key]) for key in
+                       ("cpu_model", "kernel", "nproc_online",
+                        "permitted_cpus", "cgroup", "governor", "no_turbo",
+                        "numa", "transport", "kernel_udp_limits")}
+        return {
+            "schema": "nginx-media.bench-history/3",
+            "tier": "branch",
+            "sha": f"sampled-revision-{index}",
+            "comparison_group": "36882115060-attempt-1",
+            "configs": {"srt": {
+                "complete": True,
+                "mixes": {"pure-srt": {
+                    "fingerprint": fingerprint,
+                    "rungs": [{"destinations": 16, "outcome": "pass",
+                               "sender_cpu_per_gbps": value,
+                               "host_fingerprint": host}],
+                }},
+            }},
+        }
+
+    history = [record(10, index) for index in range(1, 4)]
+    history[0]["schema"] = "nginx-media.bench-history/2"
+    current = record(15, 4)
+    old_current = copy.deepcopy(current)
+    raw_entry = current["configs"]["srt"]["mixes"]["pure-srt"]
+    del raw_entry["fingerprint"]
+    before_lift = copy.deepcopy(raw_entry)
+    entry = module.run_environment(raw_entry)
+    current["configs"]["srt"]["mixes"]["pure-srt"] = entry
+    check(raw_entry == before_lift,
+          "lifting stable identity must not mutate the caller's entry")
+    check(entry["rungs"][0]["host_fingerprint"]
+          == before_lift["rungs"][0]["host_fingerprint"],
+          "cumulative counters and raw host pressure stay in diagnostics")
+    check(entry["fingerprint"]["cgroup"] == {"cpu_max": "200000 100000"},
+          "new summaries retain the quota, not cumulative cgroup pressure")
+
+    before_compare = copy.deepcopy((current, history, old_current))
+    findings = module.regressions(current, history)
+    check(len(findings) == 1,
+          f"same quota and environment compare across cpu_stat changes: {findings}")
+    if findings:
+        check_close(findings[0]["factor"], 1.5,
+                    "same-runner pressure changes cannot hide a 50% regression")
+        check(findings[0]["baseline_count"] == 3,
+              "three published baselines with different counters all contribute")
+    check(len(module.regressions(old_current, history)) == 1,
+          "old-shaped current and historical fingerprints normalize equally")
+    check((current, history, old_current) == before_compare,
+          "comparison cannot rewrite published history or raw diagnostics")
+
+    changes = {
+        "cpu_model": "Intel Xeon Platinum 8370C",
+        "kernel": "6.12.0-azure",
+        "nproc_online": 8,
+        "permitted_cpus": [2, 3],
+        "cgroup": {"cpu_max": "100000 100000"},
+        "governor": "powersave",
+        "no_turbo": "1",
+        "numa": {"node0": "0-1", "node1": "2-3"},
+        "transport": "libsrt.so.1.5 1.5.3 (/usr/lib/libsrt.so.1.5)",
+        "kernel_udp_limits": {"net.core.rmem_max": "425984",
+                              "net.core.wmem_max": "212992"},
+    }
+    for key, value in changes.items():
+        changed = copy.deepcopy(current)
+        changed["configs"]["srt"]["mixes"]["pure-srt"]["fingerprint"][key] = value
+        check(module.regressions(changed, history) == [],
+              f"a changed {key} must isolate a different runner environment")
+
+    for unknown in (None, {}, {"status": "unavailable", "value": None},
+                    {"cgroup": {"cpu_stat": {"usage_usec": 100}}},
+                    {"cpu_model": None, "kernel": None},
+                    {"cpu_model": "", "numa": {}, "kernel_udp_limits": {},
+                     "cgroup": {"cpu_max": None}}):
+        unknown_current = copy.deepcopy(current)
+        unknown_entry = unknown_current["configs"]["srt"]["mixes"]["pure-srt"]
+        unknown_entry["fingerprint"] = unknown
+        unknown_history = copy.deepcopy(history)
+        for old in unknown_history:
+            old["configs"]["srt"]["mixes"]["pure-srt"]["fingerprint"] = unknown
+        check(module.regressions(unknown_current, unknown_history) == [],
+              f"unknown identities must not become comparable: {unknown!r}")
+        check(module.regressions(current, unknown_history + history[:2]) == [],
+              f"unknown history cannot supply the third baseline: {unknown!r}")
+        unknown_source = {"rungs": [{"host_fingerprint": unknown}]}
+        check("fingerprint" not in module.run_environment(unknown_source),
+              f"an unavailable raw host must not acquire an identity: {unknown!r}")
+
+    at_threshold = copy.deepcopy(current)
+    threshold_rung = at_threshold["configs"]["srt"]["mixes"]["pure-srt"]["rungs"][0]
+    threshold_rung["sender_cpu_per_gbps"] = 12.5
+    check(module.regressions(at_threshold, history) == [],
+          "exactly 25% higher is not a regression")
+    threshold_rung["sender_cpu_per_gbps"] = 12.5001
+    check(len(module.regressions(at_threshold, history)) == 1,
+          "strictly more than 25% higher is a regression")
+
+
 def test_regression_cohorts_do_not_mix_with_qualification_history():
     module = load_module(HISTORY, "bench_history_cohorts")
     host = {"cpu_model": "runner-a", "kernel": "7.2", "transport": "libsrt"}
@@ -1317,6 +1449,7 @@ def main():
         test_summary_marks_uncollected_expected_configs(work)
         test_summary_persists_same_runner_comparison_metadata(work)
         test_regressions_require_complete_passing_same_runner_baselines()
+        test_regression_identity_ignores_pressure_but_preserves_environment()
         test_regression_cohorts_do_not_mix_with_qualification_history()
         test_publish_appends_same_runner_samples(work)
         test_parse_expected_configs_validation()
