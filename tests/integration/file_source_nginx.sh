@@ -128,6 +128,33 @@ UNSUPPORTED_STATUS="$(curl -sS -o "$RUN/empty-key.json" -w '%{http_code}' \
 grep -q '"error":"key_not_supported"' "$RUN/empty-key.json" \
     || { echo "file source key was not rejected" >&2; exit 1; }
 
+echo "== a FIFO or device is refused promptly instead of blocking the worker"
+mkfifo "$RUN/blocker.fifo"
+for NONREG in "$RUN/blocker.fifo" /dev/zero "$RUN"; do
+    START="$(date +%s.%N)"
+    NR_STATUS="$(curl -sS --max-time 5 -o "$RUN/nonreg.json" -w '%{http_code}' \
+        -X POST -H 'Content-Type: application/json' \
+        -d "{\"id\":\"nonreg\",\"type\":\"file\",\"path\":\"$NONREG\"}" \
+        "$API/streams/live/slate/sources")" || NR_STATUS=timeout
+    ELAPSED="$(python3 -c "import sys,time; print(round(time.time()-float(sys.argv[1]),2))" "$START")"
+    [ "$NR_STATUS" = "400" ] \
+        || { echo "$NONREG returned HTTP $NR_STATUS instead of 400 (${ELAPSED}s)" >&2; exit 1; }
+    grep -q '"error":"source_open_failed"' "$RUN/nonreg.json" \
+        || { echo "$NONREG did not report source_open_failed" >&2; exit 1; }
+    python3 -c "import sys; assert float(sys.argv[1]) < 3" "$ELAPSED" \
+        || { echo "$NONREG took ${ELAPSED}s to refuse" >&2; exit 1; }
+    curl -fsS --max-time 3 -o "$RUN/nonreg-sources.json" \
+        "$API/streams/live/slate/sources" \
+        || { echo "the API did not answer after rejecting $NONREG" >&2; exit 1; }
+    python3 - "$RUN/nonreg-sources.json" <<'PY' \
+        || { echo "$NONREG left a source behind" >&2; exit 1; }
+import json, sys
+assert all(source["id"] != "nonreg"
+           for source in json.load(open(sys.argv[1]))["sources"])
+PY
+done
+echo "   FIFO, device and directory sources refused"
+
 
 curl -fsS "$API/streams/live/slate/sources" | grep -q '"id":"slate-file"' \
     || { echo "the file source is not listed" >&2; exit 1; }
