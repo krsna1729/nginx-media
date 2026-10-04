@@ -20,6 +20,7 @@ unit:
 # The reporting pipeline's own tests: no nginx, no network, plain python3.
 bench-reporting:
 	python3 tests/bench/test_reporting.py
+	python3 tests/bench/test_commit_selection.py
 
 # The receiver topologies for capacity runs, and the two-host orchestrator.
 # veth-up/veth-down need root (sudo -n is used for the ip commands only).
@@ -193,7 +194,7 @@ BASE ?= debian:trixie
 # type=gha), which only exists where ACTIONS_RUNTIME_TOKEN does; passing those
 # flags locally would fail, so they stay out of the default.
 DOCKER_CACHE_ARGS ?=
-TEST_TARGETS ?= unit srt-ingest srt-ingest-nginx ts-fixture source-switch \
+TEST_TARGETS ?= unit ingest-keys srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
     hls-profile hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
     graph-conflict churn \

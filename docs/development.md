@@ -6,6 +6,9 @@ working half: how to build the module, how to run its tests, the conventions
 the code follows without being told to, the procedure for adding an input or an
 output, and the mistakes that have already cost this codebase time.
 
+The [codebase audit and implementation backlog](codebase-audit.md) records
+the remaining correctness, test, benchmark and hardening work.
+
 ## Build
 
 ### The module build
@@ -145,13 +148,13 @@ The portable core is compiled against `tests/unit/shim/ngx_shim.h` and
 `shim/ngx_shim.c` instead of nginx.  The shim supplies the nginx types the core
 uses (`ngx_str_t`, `ngx_pool_t`, `ngx_queue_t` and its macros, the atomic
 macros, the status codes) plus a pool that tracks every allocation so a leak is
-visible and frees everything on destroy.  Unlike `ngx_palloc()`, the shim pool
-zeroes memory, which can only make a test stricter than production.  Two hooks
-exist beyond that: `ngx_media_test_fail_alloc` makes every allocation fail so
-callers' NULL handling is exercised, and `NGX_MEDIA_TEST_POISON=1` fills
-allocations with `0xAA` and a poisoned tail, so a buffer handed to a syscall
-without a terminator reads as a visibly wrong filename instead of a plausible
-one.
+visible and frees everything on destroy. The shim currently zeroes pool
+allocations, unlike nginx's `ngx_palloc()`/`ngx_pnalloc()`; this can mask
+uninitialized-memory defects and remains an audit item. Two hooks exist:
+`ngx_media_test_fail_alloc` makes every allocation fail so callers' NULL
+handling is exercised, and `NGX_MEDIA_TEST_POISON=1` fills direct allocations
+with `0xAA` and a poisoned tail. Pool allocations currently overwrite the
+poisoned contents with zeros.
 
 Each suite is a standalone binary (`tests/unit/test_*.c`) using the macros in
 `tests/unit/ngx_media_test.h`: `TEST_ASSERT*`, `TEST_LEAKS()` at the end of a
@@ -165,23 +168,25 @@ make -C tests/unit tsan                      # threaded suites under TSan
 ```
 
 `make unit` is `make -C tests/unit test`: it builds the binaries into
-`tests/unit/build/` and runs the 25 suites in the Makefile's `TESTS` list, with
-AddressSanitizer and UndefinedBehaviorSanitizer on by default (`SAN`).  There
-is no per-suite make target; the pattern rule `build/%: %.c` means one suite is
-built by naming its binary, and run directly.  The suites that drive threads
-(`test_record`, `test_lifecycle`, `test_feed`, `test_stream`, `test_owner`,
-`test_srt_output`) are rebuilt into `build/tsan/` under ThreadSanitizer, which
-is a separate directory so a normal build never mixes instrumentation.
+`tests/unit/build/` and discovers every `test_*.c` suite (34 at this revision).
+AddressSanitizer and UndefinedBehaviorSanitizer are enabled by default (`SAN`);
+sanitizer errors are fatal and frame pointers are retained. Source/shim headers
+are build dependencies, so a header-only change rebuilds the affected suites.
+There is no per-suite make target; name its `build/test_*` binary to build it.
+The existing TSan subset (`test_record`, `test_lifecycle`, `test_feed`,
+`test_stream`, `test_owner`, `test_srt_output`, `test_hls_ingest`) is rebuilt into
+`build/tsan/`, separate from the normal ASan/UBSan binaries. TSan is additional
+coverage, not a replacement for a suite's normal sanitizer run.
 `tests/unit/test_fuzz.c` scales its work with `NGX_MEDIA_FUZZ_SCALE` (the
 nightly workflow runs it at 25).  The scale multiplies the number of inputs,
 never the length of one: a generator's depth comes from the buffer that holds
 it, and `FUZZ_BUF_WRITE` fails the suite if a hand-assembled write would pass
 the end, so a larger nightly scale cannot overflow the harness itself.
 
-`make bench-reporting` runs `tests/bench/test_reporting.py`: the tests for the
-capacity reporting pipeline (observed versus configured delivery ratios, which
-bytes count as delivered, and the benchmark completeness gate).  Plain
-`python3`, no nginx, no network, a few seconds.
+`make bench-reporting` runs `tests/bench/test_reporting.py` and
+`tests/bench/test_commit_selection.py`: receiver measurement, delivery ratios,
+completeness, regression baselines and historical commit-selection behavior.
+Plain `python3`, no nginx or network.
 
 ### Integration scripts: `tests/integration`
 

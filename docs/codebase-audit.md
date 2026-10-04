@@ -93,19 +93,16 @@ were not executed during the audit.
 
 ## Unit, integration and fuzz testing
 
-- [ ] **T1 / P1: restore missing normal suites.** `tests/unit/Makefile:49-51`
-  includes 23 suites. Eight existing suites are absent: `test_codec`,
-  `test_compat`, `test_health`, `test_selector`, `test_srt_streamid`,
-  `test_ts_demux`, `test_ts_ingest`, `test_ts_mux`. All eight were manually
-  compiled/run under ASan/UBSan during the audit: 484 checks, zero failures.
-  `test_record`, `test_stream`, `test_hls_ingest` are TSan-only and also need
-  normal ASan/UBSan coverage. Prevent new standalone suites being orphaned.
-- [ ] **T2 / P1: make UBSan reports fatal.** The current `SAN` flags allow a
-  signed-overflow diagnostic to exit zero. The same throwaway program with
-  `-fno-sanitize-recover=all` exits one. Preserve ASan/UBSan instrumentation.
-- [ ] **T3:** track source/shim header dependencies. A simulated update of
-  `ngx_media_buffer.h` left `build/test_buffer` up to date. Keep instrumentation
-  variants separate and eventually reuse common compiled objects.
+- [x] **T1 / P1: restore missing normal suites.** At the audit baseline, eight
+  suites were omitted and three were TSan-only. The normal target now discovers
+  all 34 standalone `test_*.c` suites, including record, stream and HLS ingest,
+  under ASan/UBSan. TSan remains an additional separate run.
+- [x] **T2 / P1: make UBSan reports fatal.** The configured default sanitizer
+  flags now include `-fno-sanitize-recover=all` and retain frame pointers. A
+  throwaway signed-overflow program using those actual flags exits one.
+- [x] **T3:** track source/shim header dependencies in normal and TSan rules.
+  A simulated `ngx_media_buffer.h` change now schedules recompilation.
+  Instrumentation variants remain separate; common-object reuse is O5.
 - [ ] **T4:** match nginx allocator semantics in the shim: palloc/pnalloc do not
   zero memory, pcalloc does. Current zeroing also overwrites pool poison mode;
   the documentation's "stricter than production" claim is incorrect.
@@ -113,8 +110,8 @@ were not executed during the audit.
   with production behavioral tests. For example, finding `SSL_set1_host` in
   source does not prove actual wrong-host rejection. Delete replaced pins;
   do not repin wording after refactors.
-- [ ] **T6:** wire `test_commit_selection.py` into benchmark verification and
-  `ingest-keys` into the shared integration targets used by CI.
+- [x] **T6:** `make bench-reporting` now runs commit-selection tests, and
+  `ingest-keys` is in the shared integration targets used by container CI.
 - [ ] **T7:** add per-file branch coverage plus an explicit inventory of production
   files excluded from unit builds. Establish a baseline before coverage floors.
 - [ ] **T8:** test routed session/graph/registry/owner-directory state transitions,
@@ -188,6 +185,8 @@ finished, but full qualification failed. This is not a successful weekly result.
   in the 4287-line benchmark harness, preserving one recipe/manifest contract.
 - [ ] **O4:** consolidate teardown, reader counts and feed defaults; share HTTP
   framing and stable benchmark identity rather than maintaining parallel rules.
+- [ ] **O5:** reuse compiled common test objects within each compiler/sanitizer
+  variant instead of recompiling the portable core separately for every suite.
 
 Keep existing platform and transport seams. A generic plugin system, message
 bus abstraction or build-system replacement is not justified by this audit.
@@ -245,3 +244,17 @@ public-endpoint attack or exhaustive security certification was performed.
 
 Completed work must be recorded here with verification, and its corresponding
 checkbox above marked only after the behavior is exercised.
+
+### Test-gate repairs
+
+- Every normal unit suite is automatically discovered; all 34 passed under
+  ASan/UBSan with fatal sanitizer diagnostics. The seven existing TSan suites
+  also passed, including the HLS reader's separate implementation linkage.
+- `make bench-reporting` passed 168 reporting checks and the commit-selection
+  suite. The shared integration set now includes ingest-key verification;
+  `make ingest-keys` passed against actual nginx.
+- A dry-run simulated header update schedules `test_buffer` recompilation.
+  A disposable signed-overflow executable built with the configured `SAN`
+  value reports UB and exits one, rather than allowing a green process.
+- Development documentation links this backlog, describes the restored suite
+  set and records the still-unfixed shim-zeroing limitation accurately.

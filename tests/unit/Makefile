@@ -1,6 +1,6 @@
 CC      ?= cc
 CFLAGS  ?= -O1 -g
-SAN     ?= -fsanitize=address,undefined
+SAN     ?= -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 WARN     = -Wall -Wextra -Werror -std=c2x
 
 INCLUDES = -I../../src/core -I../../src/codec -I../../src/srt -I../../src/mpegts -I../../src/hls -I../../src/record -I../../src/rtmp -Ishim -I.
@@ -45,17 +45,18 @@ CORE := ../../src/core/ngx_media_key.c \
         ../../src/rtmp/ngx_media_rtmp_adapter.c
 
 SHIM := shim/ngx_shim.c
+HEADERS := $(wildcard ../../src/*/*.h shim/*.h)
+HLS_INGEST := ../../src/core/ngx_media_hls_ingest.c
 
-TESTS := test_key test_buffer test_destination test_egress_manager test_frame test_feed test_track test_timeline \
-         test_rtmp_wire test_rtmp_flv test_srt_output test_owner test_ipc test_lifecycle test_fuzz test_bounds test_srt_udp test_security test_tombstone test_transform test_executor \
-         test_hls_playlist test_hls
+# Every standalone suite belongs to the normal sanitizer run.
+TESTS := $(basename $(wildcard test_*.c))
 BINS  := $(addprefix build/,$(TESTS))
 
 .PHONY: all test tsan clean
 
 all: $(BINS)
 
-build/%: %.c ngx_media_test.h $(CORE) $(SHIM)
+build/%: %.c ngx_media_test.h $(HEADERS) $(CORE) $(SHIM) Makefile
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) $(SAN) -o $@ $< $(CORE) $(SHIM) -lpthread -lcrypto
 
@@ -71,18 +72,20 @@ TSAN_BINS  := $(addprefix build/tsan/,$(TSAN_TESTS))
 tsan: $(TSAN_BINS)
 	@fail=0; for t in $(TSAN_TESTS); do ./build/tsan/$$t || fail=1; done; exit $$fail
 
-build/tsan/%: %.c ngx_media_test.h $(CORE) $(SHIM)
+build/tsan/%: %.c ngx_media_test.h $(HEADERS) $(CORE) $(SHIM) Makefile
 	@mkdir -p build/tsan
 	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) -fsanitize=thread -o $@ $< $(CORE) $(SHIM) -lpthread -lcrypto
 
-# The HLS ingest reader is host-side code - it reads a directory, demuxes and
-# sleeps - and no other suite links it, so it gets its own rule instead of a
-# place in CORE.  Without it the queue the reader thread fills and the worker
-# drains is the one threaded path under a sanitizer that is never run.
-build/tsan/test_hls_ingest: test_hls_ingest.c ngx_media_test.h $(CORE) $(SHIM)
+# The reader needs its host-side implementation in both sanitizer variants.
+build/test_hls_ingest: test_hls_ingest.c ngx_media_test.h $(HEADERS) $(CORE) $(SHIM) $(HLS_INGEST) Makefile
+	@mkdir -p build
+	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) $(SAN) -o $@ $< \
+	    $(HLS_INGEST) $(CORE) $(SHIM) -lpthread -lcrypto
+
+build/tsan/test_hls_ingest: test_hls_ingest.c ngx_media_test.h $(HEADERS) $(CORE) $(SHIM) $(HLS_INGEST) Makefile
 	@mkdir -p build/tsan
 	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) -fsanitize=thread -o $@ $< \
-	    ../../src/core/ngx_media_hls_ingest.c $(CORE) $(SHIM) -lpthread -lcrypto
+	    $(HLS_INGEST) $(CORE) $(SHIM) -lpthread -lcrypto
 
 clean:
 	rm -rf build
