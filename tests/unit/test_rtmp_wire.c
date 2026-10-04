@@ -586,6 +586,65 @@ test_chunks(void)
         ngx_media_rtmp_reader_reset(&r);
     }
 
+    TEST_CASE("unfinished messages on many chunk streams are bounded together");
+
+    {
+        /* fmt 0 on csid N, type 9, stream 1, announcing `len` bytes */
+        u_char  open[12 + 128];   /* header and one whole chunk */
+        u_char  msg[400];
+        ngx_uint_t  csid;
+
+        ngx_media_rtmp_reader_reset(&r);
+        r.max_buffered = 100000;
+        memset(&c, 0, sizeof(c));
+
+        for (csid = 3; csid <= 4; csid++) {
+            memset(open, 0, sizeof(open));
+            open[0] = (u_char) csid;
+            open[4] = 0x00; open[5] = 0x9C; open[6] = 0x40;   /* 40000 */
+            open[7] = 9;
+            open[11] = 1;
+
+            CHECK(ngx_media_rtmp_reader_feed(&r, open, sizeof(open), &consumed,
+                                             collect, &c) == NGX_OK,
+                  "an open message within the budget is accepted");
+        }
+
+        CHECK(r.buffered == 80000, "both messages are counted: %lu",
+              (unsigned long) r.buffered);
+
+        memset(open, 0, sizeof(open));
+        open[0] = 5;
+        open[4] = 0x00; open[5] = 0x9C; open[6] = 0x40;
+        open[7] = 9;
+        open[11] = 1;
+
+        CHECK(ngx_media_rtmp_reader_feed(&r, open, sizeof(open), &consumed,
+                                         collect, &c) == NGX_ERROR,
+              "a third open message past the aggregate budget is refused");
+
+        /* a message that completes returns its bytes */
+        ngx_media_rtmp_reader_reset(&r);
+        r.max_buffered = 100000;
+        memset(&c, 0, sizeof(c));
+        memset(msg, 0, sizeof(msg));
+        msg[0] = 3;
+        msg[6] = 200;           /* length 200, chunked at 128 */
+        msg[7] = 9;
+        msg[11] = 1;
+        msg[12 + 128] = 0xC3;   /* fmt 3 continuation on csid 3 */
+
+        CHECK(ngx_media_rtmp_reader_feed(&r, msg, 12 + 128 + 1 + 72,
+                                         &consumed, collect, &c) == NGX_OK,
+              "a complete message is accepted");
+        CHECK(c.count == 1, "the message was delivered: %lu",
+              (unsigned long) c.count);
+        CHECK(r.buffered == 0, "a delivered message is not counted: %lu",
+              (unsigned long) r.buffered);
+
+        ngx_media_rtmp_reader_reset(&r);
+    }
+
     ngx_media_rtmp_reader_reset(&r);
 
     ngx_media_buf_unref(payload);

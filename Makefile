@@ -8,7 +8,7 @@ NGINX_VERSION ?= 1.30.5
     srt-ingest srt-ingest-nginx srt-admission ts-fixture source-switch api-switch api-graph \
     failover hls hls-push hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
     file-source transform \
-    stream-delete churn rtmp rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
+    stream-delete churn rtmp rtmp-preauth rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux \
     srt-lane-isolation srt-lane-isolation-fanout srt-crypto srt-shared-port ingest-keys \
     srt-worker-ports multi-worker soak fault netns srt-qualify bench-hls \
     bench-hls-fanout bench-push-fanout bench-fanout-delay \
@@ -134,6 +134,9 @@ graph-conflict:
 rtmp:
 	tests/integration/rtmp_nginx.sh
 
+rtmp-preauth:
+	python3 tests/integration/rtmp_preauth_nginx.py
+
 rtmp-hevc:
 	tests/integration/rtmp_hevc_nginx.sh
 
@@ -203,7 +206,7 @@ BASE ?= debian:trixie
 # type=gha), which only exists where ACTIONS_RUNTIME_TOKEN does; passing those
 # flags locally would fail, so they stay out of the default.
 DOCKER_CACHE_ARGS ?=
-TEST_TARGETS ?= unit ingest-keys routing-bounds routed-sources srt-admission srt-ingest srt-ingest-nginx ts-fixture source-switch \
+TEST_TARGETS ?= unit ingest-keys routing-bounds routed-sources srt-admission rtmp-preauth srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
     hls-profile hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
     graph-conflict churn \
