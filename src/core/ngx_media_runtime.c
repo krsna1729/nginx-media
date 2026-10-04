@@ -173,6 +173,10 @@ typedef struct {
      */
     uint64_t                hash;
     uint64_t                incarnation;
+    /* the publisher connection this slot serves; see ngx_media_ipc.h */
+    uint64_t                session;
+    /* the routed OPEN created the source, so the last CLOSE deletes it */
+    unsigned                created:1;
     ngx_media_stream_t     *stream;
     ngx_media_source_t     *source;
     /* reassembly of one publisher's chunked frames, one per routed endpoint */
@@ -1571,6 +1575,7 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
     ngx_media_registry_t  *registry;
     ngx_media_stream_t    *stream;
     ngx_media_source_t    *source;
+    ngx_uint_t             created;
     ngx_str_t              application, name, source_id;
     u_char                *p, *slash;
     ngx_media_feed_conf_t  feed_conf;
@@ -1674,19 +1679,44 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
             return NGX_ERROR;
         }
 
+        /*
+         * A provisioned source already exists here - the graph reaches every
+         * worker - with the key, type and priority the operator configured.
+         * A routed publisher attaches to it exactly as a publisher that
+         * landed on this worker would: nothing is recreated, so nothing the
+         * operator set is lost and the same key works after a reconnect.
+         * Only a source the graph has not delivered yet is created here.
+         */
         source = ngx_media_stream_source_find(stream, &source_id);
-
-        if (source != NULL) {
-            ngx_media_stream_source_remove(stream, source);
-        }
-
-        source = ngx_media_stream_source_add(stream, &source_id,
-                                             header->source_type,
-                                             header->priority,
-                                             ngx_cycle->log);
+        created = 0;
 
         if (source == NULL) {
-            return NGX_ERROR;
+            source = ngx_media_stream_source_add(stream, &source_id,
+                                                 header->source_type,
+                                                 header->priority,
+                                                 ngx_cycle->log);
+
+            if (source == NULL) {
+                return NGX_ERROR;
+            }
+
+            created = 1;
+        }
+
+        /*
+         * What a publisher that landed on this worker would do: the stream
+         * takes the deployment's selection policy, and the source's health is
+         * bound to that selector, so a source that goes quiet is failed over
+         * from after the configured timeouts.
+         */
+        {
+            ngx_media_policy_t  *policy;
+
+            policy = ngx_media_policy_get((ngx_cycle_t *) ngx_cycle);
+
+            if (policy != NULL) {
+                ngx_media_stream_set_policy(stream, policy);
+            }
         }
 
         ngx_media_health_init(&source->health, &stream->selector,
@@ -1698,11 +1728,13 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         }
 
         /*
-         * One slot per hash.  Frame lookups resolve to the oldest match, so a
-         * repeated OPEN that took a second slot would leave every frame of
-         * the new publisher pointed at the old, dead source for the life of
-         * its session.  The source this OPEN replaces was already removed
-         * above, so the slot is dropped without touching it.
+         * One slot per publisher connection, and one connection per source:
+         * a later connection for the same source supersedes the earlier one
+         * (its remaining frames and CLOSE no longer match any slot), while
+         * connections for other sources of the same program are untouched.
+         * A slot inherits whether the source was created by a routed OPEN
+         * from the connection it supersedes, so only a source that no
+         * operator provisioned is deleted when the last connection closes.
          */
         {
             ngx_uint_t  i;
@@ -1710,12 +1742,12 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
             for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
 
                 if (ngx_media_runtime_routed[i].used
-                    && ngx_media_runtime_routed[i].hash == hash)
+                    && ngx_media_runtime_routed[i].source == source)
                 {
+                    created |= ngx_media_runtime_routed[i].created;
                     ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
                     ngx_memzero(&ngx_media_runtime_routed[i],
                                 sizeof(ngx_media_runtime_routed_t));
-                    break;
                 }
             }
         }
@@ -1728,9 +1760,11 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
 
                 if (!ngx_media_runtime_routed[i].used) {
                     ngx_media_runtime_routed[i].used = 1;
+                    ngx_media_runtime_routed[i].created = created;
                     ngx_media_runtime_routed[i].hash = hash;
                     ngx_media_runtime_routed[i].incarnation =
                         header->incarnation;
+                    ngx_media_runtime_routed[i].session = header->session;
                     ngx_media_runtime_routed[i].stream = stream;
                     ngx_media_runtime_routed[i].source = source;
                     break;
@@ -1739,7 +1773,15 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
 
             if (i == NGX_MEDIA_RUNTIME_MAX_ROUTED) {
                 ngx_media_runtime_stats.routed_slot_overflows++;
-                ngx_media_stream_source_remove(stream, source);
+
+                if (created) {
+                    ngx_media_stream_source_remove(stream, source);
+
+                } else {
+                    ngx_media_health_transport(&source->health, 0,
+                                               ngx_current_msec);
+                }
+
                 return NGX_OK;
             }
         }
@@ -1751,14 +1793,15 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         }
 
         /*
-         * A publisher creates its stream here, on the owner, not through the
-         * API - so the other workers hear about it the way they hear about any
-         * other mutation: a replica of the graph, carrying the source as
-         * desired state.  Without this the stream a publisher is feeding would
-         * be invisible to a control request that landed elsewhere.
+         * A source this OPEN had to create is published to the other workers
+         * as desired state, so a control request that landed elsewhere sees
+         * the stream a publisher is feeding.  A provisioned source is already
+         * in every replica and is left exactly as the operator wrote it.
          */
-        (void) ngx_media_graph_stream_set(stream);
-        (void) ngx_media_graph_source_set(stream, source, NULL, NULL);
+        if (created) {
+            (void) ngx_media_graph_stream_set(stream);
+            (void) ngx_media_graph_source_set(stream, source, NULL, NULL);
+        }
 
         ngx_log_error(NGX_LOG_NOTICE, ngx_cycle->log, 0,
                       "media: routed source opened stream=%V/%V source=%V",
@@ -1855,7 +1898,10 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
             if (ngx_media_runtime_routed[i2].used
                 && ngx_media_runtime_routed[i2].hash == hash
                 && ngx_media_runtime_routed[i2].incarnation
-                   == header->incarnation)
+                   == header->incarnation
+                && ngx_media_runtime_routed[i2].session == header->session
+                && ngx_media_runtime_routed[i2].source->stream
+                   == ngx_media_runtime_routed[i2].stream)
             {
                 (void) ngx_media_source_tracks_set(
                     ngx_media_runtime_routed[i2].source, &set, ngx_cycle->log);
@@ -1890,29 +1936,46 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
     if (header->type == NGX_MEDIA_IPC_MSG_CLOSE) {
         ngx_uint_t  i;
 
-        /* the owning source disappears with its publisher */
+        /* the connection's source is released with it */
         for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
 
             if (ngx_media_runtime_routed[i].used
                 && ngx_media_runtime_routed[i].hash == hash
                 && ngx_media_runtime_routed[i].incarnation
-                   == header->incarnation)
+                   == header->incarnation
+                && ngx_media_runtime_routed[i].session == header->session)
             {
                 ngx_media_stream_t  *gone_stream =
                     ngx_media_runtime_routed[i].stream;
                 ngx_media_source_t  *gone_source =
                     ngx_media_runtime_routed[i].source;
 
-                ngx_media_stream_source_remove(gone_stream, gone_source);
+                if (gone_source->stream != gone_stream) {
+                    /* the control plane already deleted the source */
 
-                /*
-                 * The replicas drop the same source: the publisher that
-                 * created it is gone, and a replica that kept it would answer
-                 * with a source nothing feeds.
-                 */
-                (void) ngx_media_graph_source_delete(gone_stream,
-                                                     &gone_source->id,
-                                                     gone_stream->revision);
+                } else if (ngx_media_runtime_routed[i].created) {
+                    ngx_media_stream_source_remove(gone_stream, gone_source);
+
+                    /*
+                     * The replicas drop the same source: no operator
+                     * provisioned it, the publisher that created it is gone,
+                     * and a replica that kept it would answer with a source
+                     * nothing feeds.
+                     */
+                    (void) ngx_media_graph_source_delete(gone_stream,
+                                                         &gone_source->id,
+                                                         gone_stream->revision);
+
+                } else {
+                    /*
+                     * A provisioned source stays, with its key: a publisher
+                     * that disconnects is not a source the operator deleted.
+                     * Only its transport goes down, as for a publisher that
+                     * landed on this worker.
+                     */
+                    ngx_media_health_transport(&gone_source->health, 0,
+                                               ngx_current_msec);
+                }
 
                 ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
 
@@ -1960,7 +2023,8 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
             if (ngx_media_runtime_routed[i].used
                 && ngx_media_runtime_routed[i].hash == hash
                 && ngx_media_runtime_routed[i].incarnation
-                   == header->incarnation)
+                   == header->incarnation
+                && ngx_media_runtime_routed[i].session == header->session)
             {
                 break;
             }
@@ -1981,6 +2045,16 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
             }
 
             ngx_media_runtime_stats.routed_no_slot++;
+            return NGX_OK;
+        }
+
+        if (ngx_media_runtime_routed[i].source->stream
+            != ngx_media_runtime_routed[i].stream)
+        {
+            /* the control plane deleted the source this connection feeds */
+            ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
+            ngx_memzero(&ngx_media_runtime_routed[i],
+                        sizeof(ngx_media_runtime_routed_t));
             return NGX_OK;
         }
 

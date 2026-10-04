@@ -25,18 +25,20 @@ is not an assertion of an independently reproduced exploit.
 
 ## Priority correctness and safety findings
 
-- [ ] **R1 / P1: preserve provisioned sources across routed connections.**
+- [x] **R1 / P1: preserve provisioned sources across routed connections.**
   `src/core/ngx_media_runtime.c:1677-1686` removes and recreates an existing
   source on OPEN; `ngx_media_stream.c:177-193` initializes a fresh source with
   zeroed credential/configuration fields and `enabled=1`. Routed CLOSE also
   removes the source and broadcasts deletion. Separate desired graph state
   from transport-session lifetime. Verify key, enabled state and revision
   survive routed reconnects and subsequent direct-owner connections.
-- [ ] **R2 / P1: use source/session-scoped routed identities.** Slot replacement,
+- [x] **R2 / P1: use source/session-scoped routed identities.** Slot replacement,
   frame and CLOSE matching use program hash and stream incarnation, not
   publisher identity (`ngx_media_runtime.c:1710-1735,1896-1906,1960-1963`). Test
-  two redundant sources routed through non-owner workers, independent CLOSE,
-  and explicit slot-exhaustion feedback.
+  two redundant sources routed through non-owner workers and independent CLOSE.
+- [ ] **R2b / P2: explicit routed slot-exhaustion feedback.** The owner counts
+  `routed_slot_overflows` but the publisher is neither refused nor told; its
+  frames are silently ignored.
 - [x] **S1 / P1: clean up rejected HLS upload bodies and admit before buffering.**
   At the baseline, three rejected 4096-byte uploads retained 12288 bytes.
   The handler now selects nginx clean file-only mode, checks URI/key admission
@@ -297,3 +299,24 @@ checkbox above marked only after the behavior is exercised.
   cumulative cgroup counters, for new and previously published fingerprints.
   `make bench-reporting` covers real-shape fingerprints with differing
   counters.
+
+### Routed publisher identity and provisioned sources (R1, R2)
+
+- IPC header version 3 carries `session`, a cross-worker-unique identity for
+  one publisher connection (`ngx_media_route_session_id`: process id and the
+  transport's session number). The owner's routed slot is keyed by program
+  hash, stream incarnation and session; OPEN replaces only the slot of the same
+  source, CLOSE and frames of a superseded connection match nothing, and a slot
+  whose source the control plane deleted is dropped instead of dereferenced.
+- A routed OPEN attaches to the provisioned source instead of removing and
+  recreating it, applies the deployment selection policy and binds the source's
+  health to the stream selector as a direct publisher does. CLOSE marks a
+  provisioned source's transport down and keeps the source and key; only a
+  source created by a routed OPEN (graph not yet delivered) is deleted.
+- `make routed-sources` (`routed_sources_nginx.py`, two workers, publishers
+  retried until they land on the non-owner): the provisioned source and key
+  survive a routed disconnect and publish again; with two redundant routed
+  sources the higher-priority one stays active on its own media and closing one
+  leaves the other feeding. On the pre-fix source the first scenario fails with
+  the source deleted and the second (run alone) with the active source
+  receiving no media of its own.

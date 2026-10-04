@@ -1,7 +1,7 @@
 NGINX_VERSION ?= 1.30.5
 
 .PHONY: unit tsan bench-reporting bench-veth-up bench-veth-down bench-preflight \
-    nginx graph-conflict incarnation smoke routing-bounds bench-worker-scaling \
+    nginx graph-conflict incarnation smoke routing-bounds routed-sources bench-worker-scaling \
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
     bench-capacity-curve bench-capacity-quality bench-burst-sizing test-image test-in-container \
     test-integration \
@@ -175,6 +175,9 @@ netns:
 routing-bounds:
 	tests/integration/routing_bounds_nginx.sh
 
+routed-sources:
+	python3 tests/integration/routed_sources_nginx.py
+
 srt-admission:
 	python3 tests/integration/srt_admission_nginx.py
 
@@ -200,7 +203,7 @@ BASE ?= debian:trixie
 # type=gha), which only exists where ACTIONS_RUNTIME_TOKEN does; passing those
 # flags locally would fail, so they stay out of the default.
 DOCKER_CACHE_ARGS ?=
-TEST_TARGETS ?= unit ingest-keys routing-bounds srt-admission srt-ingest srt-ingest-nginx ts-fixture source-switch \
+TEST_TARGETS ?= unit ingest-keys routing-bounds routed-sources srt-admission srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph failover hls hls-push hls-pull hls-ingest \
     hls-profile hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
     graph-conflict churn \

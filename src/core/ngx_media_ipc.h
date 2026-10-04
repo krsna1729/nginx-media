@@ -22,7 +22,7 @@
  * that does not fit the bound is rejected instead of being truncated.
  */
 
-#define NGX_MEDIA_IPC_VERSION        2
+#define NGX_MEDIA_IPC_VERSION        3
 
 #define NGX_MEDIA_IPC_MSG_OPEN       1
 #define NGX_MEDIA_IPC_MSG_CLOSE      2
@@ -93,6 +93,7 @@ typedef struct {
     uint32_t    config;
     uint32_t    source_type;
     uint32_t    priority;
+    uint64_t    session;        /* publisher connection identity, 0 if none */
 } ngx_media_ipc_header_t;
 
 #define NGX_MEDIA_IPC_FLAG_MORE      1   /* more chunks follow for this frame */

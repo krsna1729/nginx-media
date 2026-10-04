@@ -101,6 +101,7 @@ struct ngx_media_rtmp_session_s {
     uint64_t                      routed_hash;
     uint64_t                      routed_incarnation;
     uint64_t                      routed_sequence;
+    uint64_t                      routed_session;
     /* playing */
     ngx_media_rtmp_prepare_t     *prepare;
     uint64_t                      cursor;
@@ -173,6 +174,9 @@ static void ngx_media_rtmp_listener_stop(void);
  */
 static ngx_media_rtmp_session_t  ngx_media_rtmp_sessions[
     NGX_MEDIA_RTMP_MAX_SESSIONS];
+
+/* local numbers for routed publisher connections; see ngx_media_route.h */
+static uint64_t  ngx_media_rtmp_route_seq;
 
 static ngx_connection_t  *ngx_media_rtmp_listener;
 static ngx_uint_t         ngx_media_rtmp_started;
@@ -417,7 +421,8 @@ ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
     if (session->routed) {
         (void) ngx_media_route_close((ngx_cycle_t *) ngx_cycle,
                                      session->routed_hash,
-                                     session->routed_incarnation);
+                                     session->routed_incarnation,
+                                     session->routed_session);
 
         ngx_log_error(NGX_LOG_NOTICE, session->log, 0,
                       "media: routed rtmp publisher closed hash=%uL",
@@ -909,7 +914,8 @@ ngx_media_rtmp_frame_cb(void *ctx, const ngx_media_frame_t *frame)
     if (session->routed) {
         (void) ngx_media_route_frame((ngx_cycle_t *) ngx_cycle,
                                      session->routed_hash,
-                                     session->routed_incarnation, frame,
+                                     session->routed_incarnation,
+                                     session->routed_session, frame,
                                      session->routed_sequence++);
         return NGX_OK;
     }
@@ -938,7 +944,8 @@ ngx_media_rtmp_tracks_cb(void *ctx, const ngx_media_trackset_t *tracks)
     if (session->routed) {
         (void) ngx_media_route_tracks((ngx_cycle_t *) ngx_cycle,
                                       session->routed_hash,
-                                      session->routed_incarnation, tracks);
+                                      session->routed_incarnation,
+                                      session->routed_session, tracks);
         return NGX_OK;
     }
 
@@ -1115,6 +1122,9 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
         session->routed_incarnation = ngx_media_stream_incarnation_next();
     }
 
+    session->routed_session =
+        ngx_media_route_session_id(++ngx_media_rtmp_route_seq);
+
     if (!ngx_media_route_is_owner((ngx_cycle_t *) ngx_cycle,
                                   session->routed_hash))
     {
@@ -1127,7 +1137,8 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
 
         if (ngx_media_route_open((ngx_cycle_t *) ngx_cycle,
                                  session->routed_hash,
-                                 session->routed_incarnation, app, name,
+                                 session->routed_incarnation,
+                                 session->routed_session, app, name,
                                  &source->id, NGX_MEDIA_SOURCE_RTMP,
                                  source->priority) != NGX_OK)
         {
