@@ -202,6 +202,15 @@ def read_threads(path, processes=None):
     return clk, stamp, rows
 
 
+def snapshot_bracket(path):
+    with open(path, encoding="ascii") as source:
+        for line in source:
+            if "monotonic_ns=" in line:
+                start, end = map(int, line.split("monotonic_ns=", 1)[1].split()[:2])
+                return ((start + end) / 2, (end - start) / 2)
+    return None, None
+
+
 def cpu_deltas(before_path, after_path, window_s=None):
     """Return ({(pid, role): pct}, accounting dict)."""
     procs_b, procs_a = {}, {}
@@ -216,6 +225,12 @@ def cpu_deltas(before_path, after_path, window_s=None):
     acct = {"threads_both": 0, "threads_born": 0, "threads_exited": 0,
             "tid_reused": 0, "negative_rejected": 0,
             "clk_tck": clk, "window_s": window_s}
+    start, start_uncertainty = snapshot_bracket(before_path)
+    end, end_uncertainty = snapshot_bracket(after_path)
+    acct["window"] = {"clock_domain": "controller-monotonic",
+                      "start_ns": start, "end_ns": end,
+                      "start_uncertainty_ns": start_uncertainty,
+                      "end_uncertainty_ns": end_uncertainty}
     for key, (role, ticks, start) in after.items():
         prior = before.get(key)
         if prior is None:
@@ -502,6 +517,19 @@ def extended_snapshot(pids, affinity, started_ns):
     return snap
 
 
+def boundary(args, phase):
+    if not args.boundary_dir:
+        return
+    from pathlib import Path
+    directory = Path(args.boundary_dir)
+    (directory / f"cpu.ready.{phase}").touch()
+    deadline = time.monotonic() + 60
+    while not (directory / f"cpu.release.{phase}").exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"controller did not release CPU {phase} boundary")
+        time.sleep(0.001)
+
+
 def sample(args):
     if args.sleep < 0:
         raise SystemExit("--sleep must be non-negative")
@@ -516,11 +544,15 @@ def sample(args):
             json.dump(extended_snapshot(args.pids, aff, b_start), out)
     overhead_before = time.process_time_ns() - cpu0
 
+    boundary(args, "before")
+
     time.sleep(args.sleep)
 
     cpu1 = time.process_time_ns()
     a_start, a_end, rows, aff = thread_snapshot(args.pids, roles, extended)
     write_threads(args.after, a_start, a_end, rows)
+    boundary(args, "after")
+
     if extended:
         snap = extended_snapshot(args.pids, aff, a_start)
         snap["sampler_cpu_ms"] = {
@@ -557,6 +589,7 @@ def main():
     s.add_argument("--after", required=True)
     s.add_argument("--extended-before")
     s.add_argument("--extended-after")
+    s.add_argument("--boundary-dir")
     s.add_argument("pids", nargs="+")
 
     r = sub.add_parser("report")

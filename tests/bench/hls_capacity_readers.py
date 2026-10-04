@@ -4,12 +4,14 @@
 import argparse
 import asyncio
 import csv
+import json
 import math
 import signal
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from capacity_media_offer import prepared_rate, production
 
 REQUEST_TIMEOUT = 8.0
 SEGMENT_CONCURRENCY_LIMIT = 32
@@ -146,6 +148,8 @@ class ReaderStats:
     ts_sync_errors: int = 0
     rate_bps: float = 0.0
     ready: bool = False
+    sealed: bool = False
+    delivered_segments: dict = field(default_factory=dict)
 
 
 def parse_playlist(body):
@@ -254,9 +258,10 @@ async def _fetch_segment(client, url, stats, warmup):
         if not validate_ts(response.body):
             stats.ts_sync_errors += 1
             raise HTTPError("segment MPEG-TS sync or packet length error")
-        if not warmup:
+        if not warmup and not stats.sealed:
             stats.bytes_received += len(response.body)
             stats.segments += 1
+            stats.delivered_segments[urlsplit(url).path.rsplit("/", 1)[-1]] = len(response.body)
         return True
     except (HTTPError, ValueError):
         if not warmup:
@@ -333,11 +338,17 @@ async def async_main(args):
                                             args.poll_interval, segment_semaphore,
                                             concurrency))
              for item, client in zip(stats, clients)]
+    start_ns = end_ns = None
 
     def on_signal(sig):
+        nonlocal start_ns, end_ns
         if sig == signal.SIGUSR1:
+            start_ns = time.monotonic_ns()
             measurement_event.set()
         else:
+            end_ns = time.monotonic_ns()
+            for item in stats:
+                item.sealed = True
             stop_event.set()
 
     for sig in (signal.SIGUSR1, signal.SIGTERM):
@@ -367,12 +378,16 @@ async def async_main(args):
         await asyncio.gather(*pending, return_exceptions=True)
         if stop_event.is_set() and not measurement_event.is_set():
             raise MeasurementError("received SIGTERM before measurement started")
-        start_ns = time.monotonic_ns()
+        if start_ns is None:
+            raise MeasurementError("measurement start has no timestamp")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=args.duration)
         except asyncio.TimeoutError:
             stop_event.set()
-        elapsed = (time.monotonic_ns() - start_ns) / 1e9
+            end_ns = time.monotonic_ns()
+            for item in stats:
+                item.sealed = True
+        elapsed = (end_ns - start_ns) / 1e9
         for item in stats:
             item.rate_bps = item.bytes_received * 8 / elapsed if elapsed > 0 else 0.0
         try:
@@ -397,11 +412,11 @@ async def async_main(args):
         receiver_bytes = sum(item.bytes_received for item in stats)
         delivered_gbps = receiver_bytes * 8 / elapsed / 1e9 if elapsed > 0 else 0.0
         write_report(args.report, stats, elapsed, reference, args.min_delivery_ratio,
-                     SEGMENT_CONCURRENCY_LIMIT, concurrency[1])
-        print(f"quality_pass={'yes' if quality_pass else 'no'}")
+                     SEGMENT_CONCURRENCY_LIMIT, concurrency[1], start_ns, end_ns)
+        print(f"relative_quality_pass={'yes' if quality_pass else 'no'}")
         print(f"readers={args.readers}")
         print(f"duration_s={elapsed:.6f}")
-        print(f"reference_bps={reference:.2f}")
+        print(f"reader_window_reference_bps={reference:.2f}")
         # The gate and the measurement are different numbers: the threshold is
         # what the run was asked to accept, the observed values are what the
         # readers counted.  min_delivery_ratio keeps its original meaning - the
@@ -417,6 +432,11 @@ async def async_main(args):
         print(f"observed_ratio_basis=reader-counted-bytes")
         print(f"receiver_bytes_total={receiver_bytes}")
         print(f"receiver_measurement_s={elapsed:.6f}")
+        print(f"receiver_window_start_ns={start_ns}")
+        print(f"receiver_window_end_ns={end_ns}")
+        print(f"receiver_clock_domain={args.clock_domain}")
+        print("receiver_start_uncertainty_ns=0")
+        print("receiver_end_uncertainty_ns=0")
         print(f"delivered_gbps={delivered_gbps:.6f}")
         print(f"total_bytes={receiver_bytes}")
         print(f"total_segments={sum(item.segments for item in stats)}")
@@ -437,14 +457,16 @@ async def async_main(args):
             loop.remove_signal_handler(sig)
 
 
-def write_report(path, stats, duration, reference, ratio, segment_limit, concurrency_max):
+def write_report(path, stats, duration, reference, ratio, segment_limit, concurrency_max,
+                 start_ns, end_ns):
     with open(path, "w", newline="", encoding="utf-8") as report:
         writer = csv.writer(report)
         writer.writerow(("reader_id", "bytes_received", "successful_segments",
                          "playlist_errors", "segment_errors", "sequence_gaps",
                          "ts_sync_errors", "rate_bps", "reference_ratio",
                          "duration_s", "min_delivery_ratio",
-                         "segment_concurrency_limit", "segment_concurrency_max"))
+                         "segment_concurrency_limit", "segment_concurrency_max",
+                         "window_start_ns", "window_end_ns", "delivered_segments"))
         for item in stats:
             comparison = item.rate_bps / reference if reference > 0 else 0.0
             writer.writerow((item.reader_id, item.bytes_received, item.segments,
@@ -452,7 +474,73 @@ def write_report(path, stats, duration, reference, ratio, segment_limit, concurr
                              item.sequence_gaps, item.ts_sync_errors,
                              f"{item.rate_bps:.2f}", f"{comparison:.6f}",
                              f"{duration:.6f}", f"{ratio:.6f}",
-                             segment_limit, concurrency_max))
+                             segment_limit, concurrency_max, start_ns, end_ns,
+                             json.dumps(item.delivered_segments)))
+
+
+def judge_readers(argv):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--report", required=True)
+    parser.add_argument("--prepared-media", required=True)
+    parser.add_argument("--produced-segments", required=True)
+    parser.add_argument("--measurement-window", nargs=2, required=True)
+    parser.add_argument("--reference-bps", type=float, required=True)
+    parser.add_argument("--min-delivery-ratio", type=float, required=True)
+    args = parser.parse_args(argv)
+    if (not math.isfinite(args.reference_bps) or args.reference_bps < 0
+            or not math.isfinite(args.min_delivery_ratio)
+            or not 0 < args.min_delivery_ratio <= 1):
+        raise MeasurementError("invalid HLS reference or delivery threshold")
+    from proc_cpu_sampler import read_threads
+    start = read_threads(args.measurement_window[0])[1] / 1e9
+    end = read_threads(args.measurement_window[1])[1] / 1e9
+    cuts, offered, span = production(args.produced_segments, start, end)
+    interval = span / (len(cuts) - 1)
+    window = {name: entry for name, entry in cuts.items()
+              if entry["at"] <= end - 2 * interval}
+    if not window:
+        raise MeasurementError("no HLS production cuts have delivery grace inside the window")
+    prepared, provenance = prepared_rate(args.prepared_media)
+    reference = args.reference_bps or offered
+    if not math.isfinite(reference) or reference <= 0:
+        raise MeasurementError("invalid HLS reference rate")
+    with open(args.report, newline="", encoding="utf-8") as source:
+        rows = list(csv.DictReader(source))
+    if not rows:
+        raise MeasurementError("no HLS reader delivery rows")
+    ratios = []
+    errors = 0
+    for row in rows:
+        delivered = json.loads(row["delivered_segments"])
+        duration = float(row["duration_s"])
+        observed_span = (int(row["window_end_ns"]) - int(row["window_start_ns"])) / 1e9
+        if (not math.isfinite(duration) or duration <= 0 or observed_span <= 0
+                or abs(duration - observed_span) > 0.000001
+                or any(not isinstance(size, int) or size <= 0 for size in delivered.values())
+                or int(row["bytes_received"]) != sum(delivered.values())
+                or int(row["successful_segments"]) != len(delivered)):
+            raise MeasurementError("reader counters, identities and native interval do not reconcile")
+        ratios.append(sum(entry["bytes"] for name, entry in window.items()
+                          if delivered.get(name) == entry["bytes"])
+                      / sum(entry["bytes"] for entry in window.values()))
+        errors += sum(int(row[key]) for key in
+                      ("playlist_errors", "segment_errors", "sequence_gaps", "ts_sync_errors"))
+    passed = (offered / prepared >= args.min_delivery_ratio
+              and reference / offered >= args.min_delivery_ratio
+              and offered / reference >= args.min_delivery_ratio
+              and min(ratios) * offered / prepared >= args.min_delivery_ratio
+              and min(ratios) >= args.min_delivery_ratio and not errors)
+    print("quality_measurement_valid=yes")
+    print(f"quality_pass={'yes' if passed else 'no'}")
+    print(f"reference_bps={reference:.2f}")
+    print(f"quality_offered_payload_bps={offered:.2f}")
+    print("quality_offered_rate_provenance=identified final segment sizes / local cut timestamp span")
+    print(f"quality_prepared_source_payload_bps={prepared:.2f}")
+    print(f"quality_prepared_rate_provenance={provenance}")
+    print(f"quality_identified_delivery_ratio_min={min(ratios):.6f}")
+    print(f"quality_absolute_delivery_ratio_min={min(ratios) * offered / prepared:.6f}")
+    print("quality_ratio_basis=identified-produced-segments")
+    return 0
 
 
 def parse_args(argv=None):
@@ -465,6 +553,8 @@ def parse_args(argv=None):
     parser.add_argument("--reference-bps", type=float, required=True)
     parser.add_argument("--min-delivery-ratio", type=float, default=0.95)
     parser.add_argument("--poll-interval", type=float, default=1.0)
+    parser.add_argument("--clock-domain", required=True,
+                        choices=("controller-monotonic", "receiver-monotonic"))
     args = parser.parse_args(argv)
     parts = urlsplit(args.url)
     if parts.scheme != "http" or not parts.hostname or parts.username or parts.password:
@@ -486,6 +576,14 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    if (argv or sys.argv[1:])[:1] == ["judge"]:
+        try:
+            return judge_readers((argv or sys.argv[1:])[1:])
+        except (OSError, MeasurementError, ValueError, KeyError, TypeError) as exc:
+            print("quality_measurement_valid=no")
+            print("quality_pass=no")
+            print(f"quality_setup_failure={exc}")
+            return 1
     args = parse_args(argv)
     try:
         return asyncio.run(async_main(args))

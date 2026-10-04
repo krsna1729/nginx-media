@@ -620,6 +620,13 @@ def quality_report(args):
     print(f"quality_prepared_source_payload_bps={prepared_source_bps:.2f}")
     print(f"quality_reference_vs_prepared_ratio={reference_vs_source_ratio:.5f}")
     print(f"quality_measurement_s={duration_s:.3f}")
+    print(f"quality_window_start_ns={baseline_ns}")
+    print(f"quality_window_end_ns={final_ns}")
+    print(f"quality_clock_domain={args.clock_domain}")
+    print("quality_start_uncertainty_ns=0")
+    print("quality_end_uncertainty_ns=0")
+    print(f"quality_offered_payload_bps={prepared_source_bps:.2f}")
+    print("quality_offered_rate_provenance=prepared MPEG-TS bytes / source preparation duration")
     print(f"quality_total_receiver_bytes={sum(row[1] for row in rows)}")
     print(f"quality_average_delivery_ratio_min={min(row[3] for row in rows):.5f}")
     print(f"quality_interval_delivery_ratio_min={min(row[4] for row in rows):.5f}")
@@ -710,6 +717,8 @@ def main():
                         help="programs the rung ran; each owns its own set of "
                              "destinations, numbered pNNNN-dNNNN")
     report.add_argument("--prepared-source", required=True)
+    report.add_argument("--clock-domain", required=True,
+                        choices=("controller-monotonic", "receiver-monotonic"))
     report.add_argument("--source-duration-s", type=positive_finite_float,
                         default=30.0)
     report.add_argument("--reference-bps", type=finite_float, default=0.0)

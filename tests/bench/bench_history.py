@@ -42,9 +42,10 @@ SCHEMA = "nginx-media.bench-history/3"
 # they are left as they are and their basis says so.
 OBSERVED_RATIO_KEYS = {
     "srt": ("quality_average_delivery_ratio_min",),
-    "rtmp": ("quality_min_delivery_ratio",),
-    "hls_push": ("quality_average_delivery_ratio_min",),
-    "hls_readers": ("observed_min_delivery_ratio",),
+    "rtmp": ("quality_min_delivery_ratio", "quality_absolute_delivery_ratio_min"),
+    "hls_push": ("quality_average_delivery_ratio_min", "quality_absolute_delivery_ratio_min"),
+    "hls_readers": ("observed_min_delivery_ratio", "quality_identified_delivery_ratio_min",
+                    "quality_absolute_delivery_ratio_min"),
 }
 
 THRESHOLD_RATIO_KEYS = {
@@ -164,6 +165,16 @@ def rung_record(bundle):
         # one-destination reference rate each protocol was judged against
         "preflight": preflight_verdict(bundle.get("preflight")),
         "reference_bps": calibration_references(delivery),
+        "offered_media": {
+            protocol: {key: report[key] for key in (
+                "quality_offered_payload_bps", "quality_offered_rate_provenance",
+                "quality_prepared_source_payload_bps", "quality_prepared_rate_provenance")
+                if key in report}
+            for protocol in PROTOCOLS
+            if isinstance((report := value(delivery.get(protocol))), dict)},
+        "window_alignment": efficiency.get("window_alignment"),
+        "receiver_cpu_alignment": efficiency.get("receiver_cpu_alignment"),
+        "receiver_host": bundle.get("receiver_host"),
     }
 
 
@@ -221,7 +232,7 @@ def peak_pressure(bundle):
 # revision under comparison is a different binary by definition.)
 HARNESS_FILES = (
     "ingest_egress_fanout.sh", "capacity-mixes.conf",
-    "capacity_diagnostics.py", "capacity_preflight.py",
+    "capacity_diagnostics.py", "capacity_preflight.py", "capacity_media_offer.py",
     "hls_capacity_readers.py", "hls_push_capacity.py",
     "proc_cpu_sampler.py", "rtmp_capacity_quality.py",
     "srt_capacity_quality.py", "srt_fanout_sink.c")

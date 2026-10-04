@@ -23,6 +23,8 @@ import threading
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from capacity_media_offer import prepared_rate, production
+from proc_cpu_sampler import read_threads
 
 
 class HlsPushSink(http.server.BaseHTTPRequestHandler):
@@ -479,7 +481,7 @@ def report(args):
 
     reference = args.reference_bps
     if reference <= 0:
-        reference = records[0]["rate_bps"]
+        reference = segment_summary["offered_bps"]
     if not math.isfinite(reference) or reference <= 0:
         raise RuntimeError("HLS push reference rate "
                            f"{reference!r} is not a finite positive rate")
@@ -489,6 +491,14 @@ def report(args):
                                f"{record['destination']}")
 
     failures = []
+    prepared_bps, prepared_provenance = prepared_rate(args.prepared_media)
+    offered_bps = segment_summary["offered_bps"]
+    if offered_bps / prepared_bps < args.min_delivery_ratio:
+        failures.append("HLS production below prepared elementary payload rate")
+    if reference / offered_bps < args.min_delivery_ratio:
+        failures.append("HLS reference below independently produced segment rate")
+    if offered_bps / reference < args.min_delivery_ratio:
+        failures.append("HLS production below calibrated reference rate")
     ratios = []
     window_ratios = []
     for record in records:
@@ -497,6 +507,8 @@ def report(args):
         ratio = record["rate_bps"] / reference
         record["window_byte_ratio"] = ratio
         ratio = record["segment_ratio"]
+        if ratio * offered_bps / prepared_bps < args.min_delivery_ratio:
+            failures.append(f"{record['destination']}: absolute delivered segment rate below prepared media")
         record["ratio"] = ratio
         ratios.append(ratio)
         window_ratios.append(record["window_byte_ratio"])
@@ -572,9 +584,24 @@ def report(args):
     if http_errors:
         failures.append(f"sink returned {http_errors} HTTP errors")
 
+    print("quality_measurement_valid=yes")
     print(f"quality_pass={'no' if failures else 'yes'}")
     print(f"quality_destinations={len(records)}")
     print(f"quality_measurement_s={duration:.3f}")
+    print(f"quality_window_start_ns={sink_before['monotonic'] * 1e9:.0f}")
+    print(f"quality_window_end_ns={sink_after['monotonic'] * 1e9:.0f}")
+    print(f"quality_clock_domain={args.clock_domain}")
+    print("quality_start_uncertainty_ns=0")
+    print("quality_end_uncertainty_ns=0")
+    print(f"quality_offered_payload_bps={offered_bps:.2f}")
+    print("quality_offered_rate_provenance=identified final segment sizes / local cut timestamp span")
+    print(f"quality_prepared_source_payload_bps={prepared_bps:.2f}")
+    print(f"quality_prepared_rate_provenance={prepared_provenance}")
+    print(f"quality_total_receiver_bytes={sum(record['bytes'] for record in records)}")
+    print(f"quality_absolute_delivery_ratio_min={min(ratios) * offered_bps / prepared_bps:.6f}")
+    print(f"quality_identified_window_start_ns={segment_summary['start'] * 1e9:.0f}")
+    print(f"quality_identified_window_end_ns={segment_summary['end'] * 1e9:.0f}")
+    print(f"quality_identified_measurement_s={segment_summary['end'] - segment_summary['start']:.6f}")
     print(f"quality_reference_payload_bps={reference:.2f}")
     print(f"quality_average_delivery_ratio_min={min(ratios):.5f}")
     print("quality_ratio_basis=identified-segments")
@@ -616,26 +643,29 @@ def report(args):
 
 def segment_accounting(args, sink_before, sink_after, records):
     """Per-destination delivery of the exact segment set of the window."""
-    start = sink_before["monotonic"]
-    end = sink_after["monotonic"]
+    start = read_threads(args.measurement_window[0])[1] / 1e9
+    end = read_threads(args.measurement_window[1])[1] / 1e9
     first_at = {}
-    sizes = {}
+    # Receiver first-arrival clocks measure relative destination lag only;
+    # independent producer cuts below define the offered set and absolute rate.
     for record in records:
         detail = sink_after["destinations"][record["destination"]].get(
             "segment_detail", {})
         for name, entry in detail.items():
             if name not in first_at or entry["at"] < first_at[name]:
                 first_at[name] = entry["at"]
-            sizes.setdefault(name, []).append(entry["bytes"])
-    produced = sorted(t for t in first_at.values())
+            if entry["bytes"] <= 0:
+                raise ValueError("nonpositive receiver segment size")
+    cuts, offered_bps, cut_span = production(args.produced_segments, start, end)
+    produced = sorted(entry["at"] for entry in cuts.values())
     gaps = [b - a for a, b in zip(produced, produced[1:]) if b > a]
     interval = sorted(gaps)[len(gaps) // 2] if gaps else 0.0
     # A segment first seen within the last lag limit of the window may still
     # be on its way to slower destinations: it is outside the judged set.
     lag_limit = args.segment_lag_limit_s or max(2 * interval, 2.0)
-    window = sorted(name for name, at in first_at.items()
-                    if start <= at <= end - lag_limit)
-    canonical = {name: max(set(v), key=v.count) for name, v in sizes.items()}
+    window = sorted(name for name, entry in cuts.items()
+                    if start <= entry["at"] <= end - lag_limit)
+    canonical = {name: entry["bytes"] for name, entry in cuts.items()}
     window_bytes = sum(canonical[name] for name in window)
     lags = []
     delivered = 0
@@ -676,6 +706,10 @@ def segment_accounting(args, sink_before, sink_after, records):
                            "window; lengthen the measurement")
     lags.sort()
     return {
+        "start": start,
+        "end": end - lag_limit,
+        "offered_bps": offered_bps,
+        "cut_span_s": cut_span,
         "window_segments": len(window),
         "window_bytes": window_bytes,
         "segment_interval_s": interval,
@@ -728,6 +762,11 @@ def main():
     report_parser.add_argument("--destination-offset", type=int, default=0)
     report_parser.add_argument("--sink-before", required=True)
     report_parser.add_argument("--sink-after", required=True)
+    report_parser.add_argument("--prepared-media", required=True)
+    report_parser.add_argument("--produced-segments", required=True)
+    report_parser.add_argument("--measurement-window", nargs=2, required=True)
+    report_parser.add_argument("--clock-domain", required=True,
+                               choices=("controller-monotonic", "receiver-monotonic"))
     report_parser.add_argument("--reference-bps", type=nonnegative_float,
                                default=0)
     report_parser.add_argument("--min-delivery-ratio", type=finite_float,
@@ -759,6 +798,9 @@ def main():
                 report(args)
         except (OSError, RuntimeError, ValueError, KeyError, TypeError,
                 OverflowError) as error:
+            print("quality_measurement_valid=no")
+            print("quality_pass=no")
+            print(f"quality_setup_failure={error}")
             print(f"HLS push report failed: {error}", file=sys.stderr)
             return 1
     return 0

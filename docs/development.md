@@ -389,6 +389,16 @@ Every capacity rung leaves `diagnostics.json` in its case directory
   number to compare across commits and SRT libraries - within one host class,
   since CPU model and frequency, kernel, library version, compiler and NIC
   topology still move it.
+  CPU/Gbit comparisons additionally require proven boundary alignment:
+  `efficiency.window_alignment` records each protocol's start/end brackets,
+  overlap coverage and maximum endpoint skew. Both endpoint displacement
+  (including capture uncertainty) and duration error must be at most **2% of
+  the CPU window**. Equally long shifted windows do not pass. Missing old
+  timestamps or missing remote-clock mapping leave CPU/Gbit unavailable while
+  receiver-counted throughput remains visible; no shell-duration fallback is
+  used. Remote CPU/process/network accounting stays under `receiver_host`,
+  separate from local PID identities. Controller-side request brackets map
+  remote boundaries; native remote monotonic clocks are never assumed shared.
 - **saturation_notes** — plain statements of which side ran out first.
 
 A rung has one of three outcomes: `setup-failure` (receivers, publishers or
@@ -481,10 +491,24 @@ HLS output fail with them.
 RTMP delivery divides by the interval between two receiver scrapes stamped
 with the monotonic clock around each request, not by a shell-measured window,
 and a 1 s receiver sampler provides the short-interval floor and the longest
-stall.  HLS push is judged on identified segments: the segments first
-delivered inside the window, each checked per destination for arrival,
-exactly-once upload, size, lag behind the first destination, and a playlist
-that referenced it before its upload completed.
+stall. RTMP also checks every receiver and calibration against prepared
+elementary media: `prepared-media.json` records ffprobe packet payload sizes
+divided by the source's presentation span, not nominal bitrate or TS overhead.
+HLS production is observed independently on the sender: playlist-identified
+final segment sizes and filesystem last-write cut timestamps mapped to the
+local monotonic clock are retained in `hls-production.json`. At least two cuts
+inside the measurement interval are required; the production rate excludes the
+first cut's bytes and divides subsequent bytes by the first-to-last cut span.
+HLS production must itself meet the prepared elementary rate, so a common-mode
+half-rate producer/reference is not calibration evidence. HLS push and readers
+then check the exact produced segment set, with trailing grace of twice the
+observed cut interval. Push checks arrival, exactly-once upload, size, relative
+destination lag and playlist ordering; readers retain fetched identities for
+local post-collection judging. Identified-window bytes and end-minus-grace
+coverage are separate from raw receiver snapshot bytes and their full window;
+only the latter enter efficiency. Relative and absolute gates both apply.
+References are reset for every mix and persisted only after their own checks
+pass. Offered/prepared rates and provenance travel into diagnostics and history.
 
 `bench-burst-sizing` runs the in-process demux/mux/remux fixture at each
 capacity in `CAPACITIES` (bytes).  It reports burst count, observed byte range,

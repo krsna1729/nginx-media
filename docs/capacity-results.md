@@ -21,6 +21,27 @@ comes from a rung's `diagnostics.json`; the method is in
 | [#8](https://github.com/krsna1729/nginx-media/pull/8) | A lane is a shard of one worker, so two workers' shard 0 are two lanes; the report compared shard numbers across workers and merged unrelated queues | The lane key is the worker plus the shard, and the report's lane totals are per worker |
 | [#9](https://github.com/krsna1729/nginx-media/pull/9) | Loopback softirq collapses onto one CPU when the receiver CPUs are too few, so a boundary read from that topology is the host's, not the software's; and the SRT-heavy contention mix failed its first rung for want of an RTMP reference | Receiver topologies are named and recorded per rung, a preflight classifies the host before a run, `capacity_mix_minimum_rung` derives the first rung a mix can actually calibrate from, and a two-host orchestrator exists for the runs this host cannot carry |
 
+## Measurement-window and absolute-rate corrections (2026-10-04)
+
+New runs retain CPU and receiver start/end brackets, overlap coverage and
+endpoint skew. CPU per delivered Gbit/s is unavailable unless all protocol
+windows and CPU accounting align within 2% of the CPU interval, including
+capture uncertainty. Receiver-counted throughput is retained independently.
+Native remote monotonic clocks require controller request-bracket mapping;
+remote process identities and CPU accounting are not merged into local PIDs.
+Historical records without these boundaries are not retroactively aligned,
+and these changes do not constitute fresh capacity evidence for the tables.
+
+RTMP calibration and delivery now use prepared elementary packet payload rate,
+not configured bitrate or TS overhead. HLS uses independently identified
+produced segment sizes and local cut timestamps, checks production against
+prepared elementary media, then checks receiver delivery of the produced set.
+Half-rate source/reference calibration cannot satisfy the absolute gate.
+HLS end-minus-grace identified coverage is reported separately from full-window
+raw receiver bytes; only raw bytes over their actual snapshot interval enter
+efficiency. References are scoped to a mix and stored only after all checks
+pass. Offered-rate provenance is preserved in diagnostics and history.
+
 ## Reporting corrections (2026-09-26)
 
 Two reporting defects were fixed in the pipeline that produces these tables.

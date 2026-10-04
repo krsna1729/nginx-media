@@ -338,7 +338,7 @@ def test_reader_reports_observed_not_threshold(work):
         args = [sys.executable, READERS, "--url", url, "--readers", "2",
                 "--duration", "2", "--report", report, "--ready-file", ready,
                 "--reference-bps", "1", "--min-delivery-ratio", "0.95",
-                "--poll-interval", str(POLL)]
+                "--poll-interval", str(POLL), "--clock-domain", "controller-monotonic"]
         process = subprocess.Popen(args, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
         deadline = time.monotonic() + 30
@@ -419,12 +419,24 @@ def test_reader_percentile_helpers():
 
 # --- diagnostics bundles -----------------------------------------------------
 
+def measured_window(start=100.0, end=110.0):
+    return {"clock_domain": "controller-monotonic", "start_ns": start * 1e9,
+            "end_ns": end * 1e9, "start_uncertainty_ns": 1000,
+            "end_uncertainty_ns": 1000}
+
+
+def report_window(prefix="quality", start=100.0, end=110.0):
+    return {f"{prefix}_{key if key not in ('start_ns', 'end_ns') else 'window_' + key}": value
+            for key, value in measured_window(start, end).items()}
+
+
 def srt_case(work):
     write_kv(os.path.join(work, "quality-report.txt"), {
         "quality_pass": "yes",
         "quality_measurement_s": "10.000",
         "quality_total_receiver_bytes": "5000000",
         "quality_average_delivery_ratio_min": "0.998",
+        **report_window(),
     })
 
 
@@ -434,6 +446,7 @@ def rtmp_case(work):
         "quality_measurement_s": "10.000",
         "quality_aggregate_bytes": "2500000",
         "quality_min_delivery_ratio": "0.995",
+        **report_window(),
     })
 
 
@@ -441,8 +454,9 @@ def hls_push_case(work):
     write_kv(os.path.join(work, "hls-push-quality.txt"), {
         "quality_pass": "yes",
         "quality_measurement_s": "10.000",
-        "quality_total_bytes": "1000000",
+        "quality_total_receiver_bytes": "1000000",
         "quality_average_delivery_ratio_min": "0.990",
+        **report_window(),
     })
 
 
@@ -454,7 +468,7 @@ def hls_reader_case(work, ratios=(0.99, 0.97, 0.93), threshold=0.95,
            "duration_s": "10.000", "reference_bps": "2000000.00",
            "delivery_ratio_threshold": f"{threshold:.6f}",
            "min_delivery_ratio": f"{threshold:.6f}",
-           "total_bytes": "6000000"}
+           "total_bytes": "6000000", **report_window("receiver")}
     if log_observed:
         log["observed_min_delivery_ratio"] = f"{min(ratios):.6f}"
     write_kv(os.path.join(work, "hls-reader.log"), log)
@@ -480,9 +494,10 @@ def bundle_for(case_dir):
     module = load_module(DIAGNOSTICS, "capacity_diagnostics_under_test")
     delivery = module.delivery_section(case_dir)
     bundle = {"intervals": {"media_measurement": {"value": 30.0}},
-              "cpu": {"by_kind_pct_of_core": {"value": {"worker": 100.0,
-                                                        "hls-readers": 20.0,
-                                                        "srt-receiver": 10.0}}},
+              "cpu": {"interval": {"value": 10.0}, "window": measured_window(),
+                      "by_kind_pct_of_core": {"value": {"worker": 100.0,
+                                                      "hls-readers": 20.0,
+                                                      "srt-receiver": 10.0}}},
               "delivery": delivery}
     bundle["efficiency"] = module.efficiency_section(bundle)
     return module, bundle
@@ -1636,6 +1651,7 @@ def run_srt_judge(p, *extra):
                 "--destination-report", p("destination.csv"),
                 "--interval-report", p("interval.csv"),
                 "--destinations", "1", "--prepared-source", p("source.ts"),
+                "--clock-domain", "controller-monotonic",
                 "--reference-bps", "1000000"] + list(extra))
 
 
@@ -1697,6 +1713,9 @@ def rtmp_judge_rung(directory, delivered=1_250_000):
                 "total_bytes"),
                [("d0000", t0 + i * 10**9, t0 + (i + 1) * 10**9, step,
                  step * (i + 1)) for i in range(seconds)])
+    write_json(p("prepared-media.json"), {
+        "payload_bytes": 1_250_000, "duration_s": 10,
+        "provenance": "ffprobe elementary packet sizes / packet presentation span"})
     return p
 
 
@@ -1707,6 +1726,7 @@ def run_rtmp_judge(p, *extra):
                 "--programs", "1", "--destinations", "1",
                 "--measurement-s", "10", "--intervals", p("intervals.csv"),
                 "--report", p("report.csv"),
+                "--prepared-media", p("prepared-media.json"),
                 "--reference-bps", "1000000"] + list(extra))
 
 
@@ -1848,6 +1868,14 @@ def hls_push_judge_rung(directory, latency_ms=250.0):
     write(p("workers.after.0"), pool
           + f"nginx_media_egress_dropped_units_total{{{labels}}} 0\n"
           + f"nginx_media_egress_transport_errors_total{{{labels}}} 0\n")
+    write_json(p("prepared-media.json"), {
+        "payload_bytes": 1_000_000, "duration_s": 10,
+        "provenance": "ffprobe elementary packet sizes / packet presentation span"})
+    write_json(p("hls-production.json"), {
+        "segments": segments, "clock_domain": "controller-monotonic",
+        "provenance": "playlist-identified final segment sizes / local last-write cut timestamps"})
+    write(p("cpu.before"), "# clk_tck=100 monotonic_ns=100000000000 100000000000\n")
+    write(p("cpu.after"), "# clk_tck=100 monotonic_ns=110000000000 110000000000\n")
     return p
 
 
@@ -1858,7 +1886,11 @@ def run_hls_push_judge(p, *extra):
                 "--destinations", "1", "--sink-before", p("sink.before.json"),
                 "--sink-after", p("sink.after.json"),
                 "--report", p("report.csv"),
-                "--reference-bps", "480000"] + list(extra))
+                "--reference-bps", "800000",
+                "--prepared-media", p("prepared-media.json"),
+                "--produced-segments", p("hls-production.json"),
+                "--measurement-window", p("cpu.before"), p("cpu.after"),
+                "--clock-domain", "controller-monotonic"] + list(extra))
 
 
 def test_hls_push_judge_rejects_non_finite_inputs(work):
@@ -2419,6 +2451,105 @@ def test_rung_record_keeps_the_preflight_verdict_and_reference():
           "no preflight and no reference are recorded as absent, not as ok")
 
 
+def test_delivery_window_alignment(work):
+    case = os.path.join(work, "window-alignment")
+    srt_case(case)
+    rtmp_case(case)
+    hls_push_case(case)
+    module, bundle = bundle_for(case)
+    check(bundle["efficiency"]["sender_cpu_per_gbps"]["status"] == "ok",
+          "control: aligned multi-protocol windows permit CPU/Gbit comparison")
+    baseline = bundle["efficiency"]["delivered"]["value"]
+    for label, update in (
+            ("equally long shifted window", report_window(start=101, end=111)),
+            ("different protocol coverage", report_window(start=100, end=109)),
+            ("unmapped remote clock", {"quality_clock_domain": "receiver-monotonic"}),
+            ("old missing timestamps", {"quality_window_start_ns": None})):
+        original = dict(bundle["delivery"]["rtmp"]["value"])
+        bundle["delivery"]["rtmp"]["value"].update(update)
+        result = module.efficiency_section(bundle)
+        check(result["sender_cpu_per_gbps"]["status"] == "unavailable",
+              f"{label} must not produce cheap comparable efficiency")
+        if label != "different protocol coverage":
+            check_close(result["delivered"]["value"], baseline,
+                        f"{label} preserves receiver throughput")
+        bundle["delivery"]["rtmp"]["value"] = original
+    bundle["receiver_host"] = {"cpu": {
+        "interval": {"value": 10.0}, "window": measured_window(),
+        "by_kind_pct_of_core": {"value": {"srt-receiver": 40.0}}}}
+    result = module.efficiency_section(bundle)
+    check_close(result["receiver_cpu_per_gbps"]["value"], 50.0 / baseline,
+                "remote receiver CPU is attributed separately despite colliding native PIDs",
+                tolerance=0.01)
+    bundle["receiver_host"]["cpu"]["window"] = {"clock_domain": "receiver-monotonic"}
+    check(module.efficiency_section(bundle)["receiver_cpu_per_gbps"]["status"] == "unavailable",
+          "native remote CPU without controller mapping cannot be compared")
+    push = hls_push_judge_rung(os.path.join(work, "push-lag-window"))
+    result = run_hls_push_judge(push)
+    values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    check(judge_passed(result), "control: independently produced complete HLS segments pass")
+    check_close(float(values["quality_identified_measurement_s"]), 8.0,
+                "HLS quality excludes trailing delivery grace")
+    check_close(float(values["quality_measurement_s"]), 10.0,
+                "HLS raw receiver throughput retains full snapshot interval")
+    check(int(values["quality_total_receiver_bytes"]) == 600000,
+          "HLS efficiency uses raw receiver delta, not end-lag identified bytes")
+
+
+def test_absolute_media_calibration(work):
+    p = rtmp_judge_rung(os.path.join(work, "absolute-rtmp-half"), delivered=625000)
+    result = run_rtmp_judge(p, "--reference-bps", "0")
+    check(result.returncode == 0 and not judge_passed(result),
+          "common-mode half-rate RTMP calibration is measured quality failure")
+    p = rtmp_judge_rung(os.path.join(work, "absolute-rtmp-good"))
+    check(judge_passed(run_rtmp_judge(p, "--reference-bps", "0")),
+          "control: full-rate RTMP calibration passes absolute and relative checks")
+    p = hls_push_judge_rung(os.path.join(work, "absolute-hls-good"))
+    check(judge_passed(run_hls_push_judge(p, "--reference-bps", "0")),
+          "control: full-rate HLS push calibration passes")
+    with open(p("hls-production.json"), encoding="utf-8") as source:
+        produced = json.load(source)
+    with open(p("sink.after.json"), encoding="utf-8") as source:
+        sink = json.load(source)
+    for entry in produced["segments"].values():
+        entry["bytes"] //= 2
+    for entry in sink["destinations"]["d0000"]["segment_detail"].values():
+        entry["bytes"] //= 2
+    sink["destinations"]["d0000"]["ts_bytes"] //= 2
+    write_json(p("hls-production.json"), produced)
+    write_json(p("sink.after.json"), sink)
+    check(not judge_passed(run_hls_push_judge(p, "--reference-bps", "0")),
+          "common-mode half-rate producer and every HLS push destination cannot calibrate")
+    def reader_judge():
+        return run([sys.executable, READERS, "judge", "--report", p("readers.csv"),
+                    "--prepared-media", p("prepared-media.json"),
+                    "--produced-segments", p("hls-production.json"),
+                    "--measurement-window", p("cpu.before"), p("cpu.after"),
+                    "--reference-bps", "0", "--min-delivery-ratio", "0.95"])
+    delivered = {name: entry["bytes"] for name, entry in produced["segments"].items()}
+    header = ("reader_id", "delivered_segments", "playlist_errors",
+              "segment_errors", "sequence_gaps", "ts_sync_errors", "duration_s",
+              "window_start_ns", "window_end_ns", "bytes_received", "successful_segments")
+    def reader_row():
+        return (0, json.dumps(delivered), 0, 0, 0, 0, 10, 100000000000,
+                110000000000, sum(delivered.values()), len(delivered))
+    write_rows(p("readers.csv"), header, [reader_row()])
+    check(not judge_passed(reader_judge()),
+          "common-mode half-rate HLS production and reader cannot calibrate")
+    for entry in produced["segments"].values():
+        entry["bytes"] *= 2
+    write_json(p("hls-production.json"), produced)
+    delivered = {name: entry["bytes"] for name, entry in produced["segments"].items()}
+    write_rows(p("readers.csv"), header, [reader_row()])
+    check(judge_passed(reader_judge()), "control: full-rate identified HLS reader calibration passes")
+    write_rows(p("readers.csv"), header, [
+        (0, json.dumps(delivered), 0, 0, 0, 0, 10, 100000000000,
+         100000000000, sum(delivered.values()), len(delivered))])
+    result = reader_judge()
+    check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout,
+          "unknown native reader interval is setup failure, never fabricated alignment")
+
+
 def main():
     work = tempfile.mkdtemp(prefix="nginx-media-reporting-")
     try:
@@ -2433,6 +2564,8 @@ def main():
         test_bundle_carries_the_host_fingerprint(work)
         test_efficiency_uses_receiver_bytes_for_every_protocol(work)
         test_efficiency_refuses_a_sender_only_counter(work)
+        test_delivery_window_alignment(work)
+        test_absolute_media_calibration(work)
         test_history_carries_the_environment_and_peak_pressure(work)
         test_history_carries_the_strict_result_separately(work)
         test_history_separates_observed_from_threshold(work)

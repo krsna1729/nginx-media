@@ -26,6 +26,7 @@ import sys
 import time
 import urllib.request
 from threading import Event
+from capacity_media_offer import prepared_rate
 
 STAMP_PREFIX = "# scrape_monotonic_ns "
 
@@ -125,6 +126,14 @@ def read_stamp(prefix):
     if max(stamps) - min(stamps) > 1_000_000_000:
         raise ValueError(f"snapshot files for {prefix} are more than 1s apart")
     return sum(stamps) // len(stamps)
+
+
+def stamp_uncertainty(prefix, midpoint):
+    bounds = []
+    for path in sorted(glob.glob(prefix + ".*")):
+        with open(path, encoding="utf-8") as source:
+            bounds.extend(int(value) for value in source.readline()[len(STAMP_PREFIX):].split())
+    return max(abs(value - midpoint) for value in bounds)
 
 
 def parse_totals(blob):
@@ -392,6 +401,13 @@ def quality_report(args):
     else:
         reference = args.reference_bps
 
+    offered_bps, offered_provenance = prepared_rate(args.prepared_media)
+    if reference / offered_bps < args.min_delivery_ratio:
+        failures.append("RTMP reference below prepared elementary payload rate")
+    for identifier, rate in zip(expected, rates):
+        if rate / offered_bps < args.min_delivery_ratio:
+            failures.append(f"{identifier}: delivery below prepared elementary payload rate")
+
     result_rows = []
     for row in rows:
         identifier, start, end, delta, raw_rate, _ = row
@@ -410,7 +426,7 @@ def quality_report(args):
                          "delivery_bps", "delivery_ratio"))
         writer.writerows(result_rows)
 
-    interval_summary = interval_check(args, expected, reference, before,
+    interval_summary = interval_check(args, expected, max(reference, offered_bps), before,
                                       after, before_ns, after_ns, failures)
 
     ratios = [float(row[5]) for row in result_rows if row[5] != ""]
@@ -432,6 +448,14 @@ def quality_report(args):
     print(f"quality_measurement_s={measurement_s:.6f}")
     print(f"quality_shell_window_s={args.measurement_s:.6f}")
     print(f"quality_timing={timing}")
+    print(f"quality_window_start_ns={before_ns:.0f}")
+    print(f"quality_window_end_ns={after_ns:.0f}")
+    print("quality_clock_domain=controller-monotonic")
+    print(f"quality_start_uncertainty_ns={stamp_uncertainty(args.before_prefix, before_ns)}")
+    print(f"quality_end_uncertainty_ns={stamp_uncertainty(args.after_prefix, after_ns)}")
+    print(f"quality_offered_payload_bps={offered_bps:.2f}")
+    print(f"quality_offered_rate_provenance={offered_provenance}")
+    print(f"quality_absolute_delivery_ratio_min={min(rates, default=0) / offered_bps:.6f}")
     if interval_summary:
         print("quality_interval_delivery_ratio_min="
               f"{min(v[0] for v in interval_summary.values()):.5f}")
@@ -497,6 +521,7 @@ def main():
     parser.add_argument("--destination-offset", type=nonnegative_int, default=0)
     parser.add_argument("--measurement-s", type=positive_float, required=True)
     parser.add_argument("--reference-bps", type=finite_float, required=True)
+    parser.add_argument("--prepared-media", required=True)
     parser.add_argument("--min-delivery-ratio", type=finite_float, default=0.95)
     parser.add_argument("--report", required=True)
     parser.add_argument("--queue-before-prefix")
@@ -513,7 +538,7 @@ def main():
         parser.error("--min-delivery-ratio must be between 0 and 1")
     try:
         return quality_report(args)
-    except (OSError, ValueError, TypeError) as error:
+    except (OSError, ValueError, TypeError, KeyError) as error:
         print("quality_measurement_valid=no")
         print("quality_pass=no")
         print(f"quality_setup_failure={error}")

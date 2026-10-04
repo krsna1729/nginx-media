@@ -149,6 +149,11 @@ were not executed during the audit.
   receiver versions are not collected anywhere yet.)
 - [ ] **B4:** align CPU and receiver byte sampling boundaries and report window
   skew; validate absolute expected workload as well as relative delivery.
+  Boundary handshakes, explicit endpoint/skew/coverage diagnostics, a 2% CPU
+  comparison bound and prepared/produced media anchors are implemented.
+  Remote mappings use controller request brackets; native receiver clocks and
+  PID identities remain separate. Integrated runtime qualification must confirm
+  the fifteen-second SRT/RTMP/HLS controls before closing this item.
 - [x] **B5:** use one workload set for manifest and execution. bench-ci's
   ALL_MIXES has seven names while harness `all` executes nine. Do not mask
   incomplete results by shortening the ladder or discarding failure evidence.

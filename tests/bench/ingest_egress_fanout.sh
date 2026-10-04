@@ -235,10 +235,6 @@ CAPACITY_RECEIVER_MKDIR="${CAPACITY_RECEIVER_MKDIR:-}"
 # against and capacity_case refuses it rather than reporting a ratio that
 # means nothing.  Multi-program behaviour is measured by the saturated case.
 CAPACITY_QUALITY_PROGRAMS="${CAPACITY_QUALITY_PROGRAMS:-1}"
-CAPACITY_QUALITY_REFERENCE_RTMP_BPS="${CAPACITY_QUALITY_REFERENCE_RTMP_BPS:-0}"
-CAPACITY_QUALITY_REFERENCE_HLS_BPS="${CAPACITY_QUALITY_REFERENCE_HLS_BPS:-0}"
-CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS="${CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS:-0}"
-CAPACITY_QUALITY_REFERENCE_BPS="${CAPACITY_QUALITY_REFERENCE_BPS:-0}"
 CAPACITY_QUALITY_MIXES="${CAPACITY_QUALITY_MIXES:-all}"
 CAPACITY_QUALITY_MIN_DELIVERY_RATIO="${CAPACITY_QUALITY_MIN_DELIVERY_RATIO:-0.95}"
 CAPACITY_QUALITY_INTERVAL_FLOOR="${CAPACITY_QUALITY_INTERVAL_FLOOR:-0.80}"
@@ -2464,6 +2460,9 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     local quality_reference_bps rtmp_reference_bps hls_reference_bps
     local rtmp_report_file hls_report_file
     local receiver_sampler_pid queue_sampler_pid rtmp_sampler_pid
+    local offer_pid="" receiver_clock=controller-monotonic
+    [ -z "$CAPACITY_RECEIVER_FETCH" ] && [ -z "$CAPACITY_RECEIVER_COLLECT" ] \
+        || receiver_clock=receiver-monotonic
     local workers="$CAPACITY_WORKERS" case_id source rate_bps offered_in offered_out
     local preflight_note="" preflight_status=0
     local primary_destinations=0 srt_destinations=0 rtmp_destinations=0
@@ -2615,6 +2614,8 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     rm -rf "$case_dir"
     mkdir -p "$case_dir"
     receiver_mkdir "$case_dir" || return 1
+    python3 "$ROOT/tests/bench/capacity_media_offer.py" prepare \
+        "$source" "$case_dir/prepared-media.json" || return 1
 
     # A capacity case is a claim about the software, so it refuses to measure
     # beside a competing job on its own CPUs: the same preflight the quality
@@ -2857,6 +2858,13 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
             >"$case_dir/hls-push.mark.json" \
             || { echo "could not mark HLS push first-segment timing" >&2; return 1; }
     fi
+    if [ "$hls_readers" -gt 0 ] || [ "$hls_push_destinations" -gt 0 ]; then
+        python3 "$ROOT/tests/bench/capacity_media_offer.py" observe \
+            "$RUN/hls/live/${names[0]}/index.m3u8" "$case_dir/hls-production.json" \
+            >"$case_dir/hls-production.log" 2>&1 &
+        offer_pid="$!"
+        QUALITY_MONITORS+=( "$offer_pid" )
+    fi
     for (( index = 0; index < programs; index++ )); do
         publish "${SRT_PORTS[${owners[$index]}]}" "${names[$index]}" "$source"
         PUBS+=( "$!" )
@@ -2942,6 +2950,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
             --readers "$hls_readers" --duration "$(( seconds + 60 ))" \
             --report "$hls_report_file" --ready-file "$hls_ready" \
             --reference-bps "${CAPACITY_QUALITY_REFERENCE_HLS_BPS:-0}" \
+            --clock-domain "$receiver_clock" \
             --min-delivery-ratio "$CAPACITY_QUALITY_MIN_DELIVERY_RATIO" \
             >"$hls_log" 2>&1 &
         hls_pid="$!"
@@ -3082,6 +3091,8 @@ PY
     capacity_socket_snapshot "$case_dir/before" || return 1
     capacity_memory_snapshot "$case_dir/memory.before" || return 1
     capacity_worker_metrics "$case_dir/workers.before" || return 1
+    capacity_window_boundary() {
+        if [ "$1" = start ]; then
     capacity_rtmp_sink_metrics "$case_dir/rtmp-receiver.before" || return 1
     if [ "$rtmp_destinations" -gt 0 ] && [ "$quality_mode" = yes ]; then
         python3 "$ROOT/tests/bench/rtmp_capacity_quality.py" sample \
@@ -3125,19 +3136,12 @@ PY
         receiver_kill -USR1 "$hls_pid" \
             || { echo "could not start HLS reader measurement" >&2; return 1; }
     fi
-    capacity_write_processes "$case_dir/processes.tsv" "$sink_pid" \
-        "$hls_pid" "$hls_push_sink_pid"
-    CPU_SNAPSHOT_DIR="$case_dir"
-    cpu_window "$seconds" "$sink_pid" "$hls_pid" "$hls_push_sink_pid" \
-        ${RTMP_SINK_PIDS[@]+"${RTMP_SINK_PIDS[@]}"} "${PUBS[@]}"
-    CPU_SNAPSHOT_DIR=""
-    # HLS readers seal their report on shutdown; they are not periodic
-    # SRT/RTMP samplers and must also finish before the report is consumed.
-    if [ "$quality_mode" = yes ] && [ -n "$hls_pid" ]; then
-        capacity_quality_stop_monitors "$hls_pid" \
-            || { echo "the HLS reader failed during the measurement" \
-                 >&2; return 1; }
-    fi
+        else
+            # Seal the reader's accounting at the boundary, but defer joining
+            # its in-flight HTTP work until other protocols close their windows.
+            if [ -n "$hls_pid" ]; then
+                receiver_kill -TERM "$hls_pid" || return 1
+            fi
     # Join only this protocol's sampler before its closing snapshot. Other
     # protocols keep sampling through the serial closing work below.
     if [ "$quality_mode" = yes ] && [ "$rtmp_destinations" -gt 0 ]; then
@@ -3164,6 +3168,23 @@ PY
                 "$sink_snapshot_after" || return 1
         fi
     fi
+            if [ -n "$hls_pid" ]; then
+                capacity_quality_stop_monitors "$hls_pid" || return 1
+            fi
+            if [ -n "$offer_pid" ]; then
+                capacity_quality_stop_monitors "$offer_pid" || return 1
+            fi
+        fi
+    }
+    capacity_write_processes "$case_dir/processes.tsv" "$sink_pid" \
+        "$hls_pid" "$hls_push_sink_pid"
+    CPU_SNAPSHOT_DIR="$case_dir"
+    CPU_BOUNDARY_CALLBACK=capacity_window_boundary
+    cpu_window "$seconds" "$sink_pid" "$hls_pid" "$hls_push_sink_pid" \
+        ${RTMP_SINK_PIDS[@]+"${RTMP_SINK_PIDS[@]}"} "${PUBS[@]}" || return 1
+    CPU_SNAPSHOT_DIR=""
+    CPU_BOUNDARY_CALLBACK=""
+    unset -f capacity_window_boundary
     if [ "$quality_mode" = yes ]; then
         for publisher_pid in "${PUBS[@]}"; do
             kill -0 "$publisher_pid" 2>/dev/null \
@@ -3342,6 +3363,7 @@ PY
             quality_report_file="$case_dir/quality-report.txt"
             quality_reference_bps="${CAPACITY_QUALITY_REFERENCE_BPS:-0}"
             python3 "$ROOT/tests/bench/srt_capacity_quality.py" report \
+                --clock-domain "$receiver_clock" \
                 --baseline "$sink_snapshot_before" \
                 --final "$sink_snapshot_after" \
                 --intervals "$case_dir/receiver-intervals.csv" \
@@ -3401,6 +3423,7 @@ PY
                 --interval-floor "$CAPACITY_QUALITY_INTERVAL_FLOOR" \
                 --max-low-s "$CAPACITY_QUALITY_MAX_LOW_SECONDS" \
                 --reference-bps "$rtmp_reference_bps" \
+                --prepared-media "$case_dir/prepared-media.json" \
                 --min-delivery-ratio "$CAPACITY_QUALITY_MIN_DELIVERY_RATIO" \
                 --report "$case_dir/rtmp-quality.csv" \
                 > "$rtmp_report_file" || return 1
@@ -3429,6 +3452,14 @@ PY
         fi
     fi
     if [ "$hls_readers" -gt 0 ]; then
+        python3 "$ROOT/tests/bench/hls_capacity_readers.py" judge \
+            --report "$hls_report_file" \
+            --prepared-media "$case_dir/prepared-media.json" \
+            --produced-segments "$case_dir/hls-production.json" \
+            --measurement-window "$case_dir/cpu.before" "$case_dir/cpu.after" \
+            --reference-bps "${CAPACITY_QUALITY_REFERENCE_HLS_BPS:-0}" \
+            --min-delivery-ratio "$CAPACITY_QUALITY_MIN_DELIVERY_RATIO" \
+            >>"$hls_log" || return 1
         [ -s "$hls_report_file" ] \
             || { cat "$hls_log" >&2; echo "HLS reader quality report is missing" >&2; return 1; }
         cat "$hls_log"
@@ -3461,6 +3492,10 @@ PY
             --sink-before "$case_dir/hls-push.before.json" \
             --sink-after "$case_dir/hls-push.after.json" \
             --reference-bps "$hls_push_reference_bps" \
+            --prepared-media "$case_dir/prepared-media.json" \
+            --produced-segments "$case_dir/hls-production.json" \
+            --measurement-window "$case_dir/cpu.before" "$case_dir/cpu.after" \
+            --clock-domain "$receiver_clock" \
             --min-delivery-ratio "$CAPACITY_QUALITY_MIN_DELIVERY_RATIO" \
             --report "$case_dir/hls-push-quality.csv" \
             >"$hls_push_quality_report" || return 1
@@ -4004,11 +4039,12 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
     local consecutive=0 skipped=""
     local srt_count primary_count rtmp_count hls_count hls_push_count
     local actual_srt_share actual_rtmp_share actual_hls_push_share
+    local CAPACITY_QUALITY_REFERENCE_BPS=0 CAPACITY_QUALITY_REFERENCE_RTMP_BPS=0
+    local CAPACITY_QUALITY_REFERENCE_HLS_BPS=0 CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS=0
 
     CAPACITY_CURRENT_MIX="$mix"
-    # A mix's SRT share is judged against the one-destination SRT reference.
-    # The pure-SRT ladder calibrates it when it runs first; a mix run on its
-    # own calibrates it here, since its first rung has no SRT destination.
+    # References belong to this mix, not to another workload's earlier rung.
+    # Mixed SRT outputs get their own one-destination source-rate calibration.
     if [ "$protocol" != srt ] && [ "$srt_share" -gt 0 ] \
         && [ "${CAPACITY_QUALITY_REFERENCE_BPS:-0}" = 0 ]; then
         echo
