@@ -381,11 +381,11 @@ checkbox above marked only after the behavior is exercised.
   sample used to pass a half-rate rung. The harness stores a calibration
   reference only from a rung that passed its own quality checks and only if it
   is a finite positive rate (`0.00` matched the old number pattern).
-- B5: the mixes are listed once, in `tests/bench/capacity-mixes.conf`. The
-  harness reads it and `bench-ci.sh` derives `ALL_MIXES` from it and hands the
-  harness the explicit list for `all`, so the manifest (seven names; both
-  contention ladders were unchecked) and execution are one set. The harness
-  prints `quality_mixes=` and `quality_recipe`; `completeness()` requires the
+- B5: `tests/bench/capacity-mixes.conf` is the single categorized workload list.
+  The harness runs all nine for local `all`; CI weekly `all` selects the seven
+  standard workloads and `contention` selects the two supplementary mixes.
+  Contention calibrates at 4 and retains every requested higher rung.
+  The harness prints `quality_mixes=` and `quality_recipe`; `completeness()` requires the
   mixes and recipe steps to equal the manifest. A harness that never states
   its mixes is incomplete.
 - B8: `bench-trend.sh` stub summaries take the single `config_names` list (the
@@ -420,21 +420,17 @@ checkbox above marked only after the behavior is exercised.
   then three comparable recipe-bearing trend fixtures with changed cumulative
   CPU counters and one incompatible-duration fixture. All three scorecard
   sparklines rendered values 110,120,130; the incompatible sample was excluded.
-- Not done: with the current defaults the PR (10 s) and branch (15 s) recipes
-  differ, so a PR is compared with nothing until the two durations are aligned
-  (changing durations was out of scope). B3's actual SRT commit and receiver
-  tool versions are not collected by any bundle. B6's sampling-gap and
+- Not done: B3's actual SRT commit and receiver tool versions are not collected
+  by any bundle. B6's sampling-gap and
   receiver-saturation evidence, B9's chart series/run selection/mixed-record
   filters and B10's per-rung artifacts, duplicate publication and pending
   publishers are not addressed.
-- Found, not changed: the weekly qualification passes `CAPACITY_QUALITY_STEPS`
-  beginning at 1, but the harness refuses a ladder that starts below the
-  smallest rung a mix can form, and the two contention mixes need 4
-  (`capacity_mix_minimum_rung`). `all` therefore stops at the first
-  contention mix before its end marker, so the weekly run was already
-  incomplete; the seven-name manifest only hid which mixes were missing, and
-  the nine-name manifest now names them. Fixing it means choosing a weekly
-  ladder that starts at 4 for those mixes (a ladder decision, not made here).
+- Weekly qualification and trend use a distinct contention manifest and ladder.
+  Rungs below 4 cannot form these mixes and are inapplicable, rather than
+  measured or quality-failure outcomes. Explicit malformed ladders remain
+  harness setup errors; the local `all` selection still includes all nine.
+- PR defaults now use branch's 15-second duration and honor `BENCH_SECONDS`;
+  old 10-second recipes remain incomparable with the 15-second defaults.
 
 ### RTMP pre-admission budget (S3)
 

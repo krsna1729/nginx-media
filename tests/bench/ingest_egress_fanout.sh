@@ -4133,7 +4133,7 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
 }
 
 phase_capacity_quality_ladder() {
-    local entry mix protocol srt_share hls_push_share status failures=0 failed_mixes=""
+    local entry mix protocol srt_share hls_push_share category status failures=0 failed_mixes=""
     local requested found
     local -a executed_mixes=() requested_mixes=() selected_mix_specs=()
     local -a mix_specs=()
@@ -4186,7 +4186,7 @@ phase_capacity_quality_ladder() {
     echo "quality_mixes=${executed_mixes[*]}"
     echo "quality_recipe seconds=$CAPACITY_QUALITY_SECONDS rate=$CAPACITY_QUALITY_RATE steps=${CAPACITY_QUALITY_STEPS// /,} stop_after_failures=$CAPACITY_QUALITY_STOP_AFTER_FAILURES min_delivery_ratio=$CAPACITY_QUALITY_MIN_DELIVERY_RATIO interval_floor=$CAPACITY_QUALITY_INTERVAL_FLOOR max_low_seconds=$CAPACITY_QUALITY_MAX_LOW_SECONDS srt_workers=$CAPACITY_FIXED_SRT_WORKERS hls_push_workers=$CAPACITY_FIXED_HLS_PUSH_WORKERS srt_hls=$CAPACITY_SRT_HLS"
     for entry in "${mix_specs[@]}"; do
-        IFS=: read -r mix protocol srt_share hls_push_share <<< "$entry"
+        IFS=: read -r mix protocol srt_share hls_push_share category <<< "$entry"
         if capacity_quality_ladder "$mix" "$protocol" "$srt_share" "$hls_push_share"; then
             :
         else

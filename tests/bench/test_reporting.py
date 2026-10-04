@@ -1870,39 +1870,84 @@ def test_harness_runs_the_mixes_of_the_one_list(work):
 
 
 def test_bench_ci_manifest_is_the_harness_mix_list(work):
-    """bench-ci.sh used to promise seven workloads for `all` while the
-    harness ran nine.  Run the real driver against a harness stub that
-    echoes what it was handed."""
+    """Exercise shipped recipes through the real driver, without media work."""
     tree = os.path.join(work, "ci-tree")
     for relative in ("scripts/bench-ci.sh", "tests/bench/bench_history.py",
                      "tests/bench/capacity-mixes.conf"):
-        source = os.path.join(ROOT, relative)
-        if os.path.exists(source):
-            os.makedirs(os.path.dirname(os.path.join(tree, relative)),
-                        exist_ok=True)
-            shutil.copyfile(source, os.path.join(tree, relative))
+        os.makedirs(os.path.dirname(os.path.join(tree, relative)), exist_ok=True)
+        shutil.copyfile(os.path.join(ROOT, relative), os.path.join(tree, relative))
     stub = os.path.join(tree, "tests", "bench", "ingest_egress_fanout.sh")
     write(stub, '#!/usr/bin/env bash\n'
                 'echo "quality_mixes=$CAPACITY_QUALITY_MIXES"\n'
+                'echo "duration=$CAPACITY_QUALITY_SECONDS"\n'
                 'echo "quality_ladders_with_failures=none"\n')
     os.chmod(stub, 0o755)
-    out = os.path.join(work, "ci-out")
-    env = dict(os.environ, BENCH_TREND="1", BENCH_STEPS="1 16",
-               BENCH_SECONDS="10")
-    env.pop("BENCH_CONFIGS", None)
-    run(["bash", os.path.join(tree, "scripts", "bench-ci.sh"), "weekly", out],
-        env=env)
-    listed = read_mix_conf()
-    manifest = read_json(os.path.join(out, "all", "expected.json"))
-    check(manifest["mixes"] == listed and len(listed) == 9,
-          f"the manifest must list every mix the harness executes: "
-          f"{manifest['mixes']} vs {listed}")
-    log = read_text(os.path.join(out, "all.log"))
-    check(f"quality_mixes={' '.join(manifest['mixes'])}\n" in log,
-          f"the harness must be handed the manifest's explicit list: {log}")
-    config = read_json(os.path.join(out, "summary.json"))["configs"]["all"]
-    check(not any("executed" in message for message in config["missing"]),
-          f"manifest and execution agree, so no mix mismatch: {config}")
+    env = dict(os.environ)
+    for key in ("BENCH_CONFIGS", "BENCH_STEPS", "BENCH_SECONDS", "BENCH_TREND"):
+        env.pop(key, None)
+    def drive(label, tier, **overrides):
+        out = os.path.join(work, label)
+        run(["bash", os.path.join(tree, "scripts", "bench-ci.sh"), tier, out],
+            env=dict(env, **overrides))
+        return out
+    for trend, steps in ((False, [1, 32, 64, 128, 192, 256, 384, 512, 768, 1000]),
+                         (True, [1, 32, 64])):
+        out = drive(f"weekly-{trend}", "weekly", BENCH_TREND=str(int(trend)))
+        observed = []
+        for name, mixes, rungs in (
+                ("all", PUBLISHED_MIXES, steps),
+                ("contention", CONTENTION_MIXES, [4] + steps[1:])):
+            manifest = read_json(os.path.join(out, name, "expected.json"))
+            check(manifest == {"mixes": mixes, "steps": rungs},
+                  f"{name} preserves its applicable ladder: {manifest}")
+            observed += manifest["mixes"]
+            log = read_text(os.path.join(out, name + ".log"))
+            check(f"quality_mixes={' '.join(mixes)}\n" in log,
+                  f"driver hands the harness its manifest: {log}")
+            if name == "contention":
+                minimum = bash_function("capacity_mix_minimum_rung")
+                check(minimum is not None, "contention minimum implementation exists")
+                for share, push in ((50, 25), (25, 50)):
+                    result = run(["bash", "-c", minimum +
+                                  f"\ncapacity_mix_minimum_rung rtmp-hls-push {share} {push}\n"])
+                    check(result.returncode == 0 and int(result.stdout) == rungs[0],
+                          "weekly's calibration rung can form every contention protocol")
+        check(observed == read_mix_conf(), "weekly keeps every established mix")
+    out = drive("weekly-invalid", "weekly", BENCH_STEPS="1 32 16")
+    check(read_json(os.path.join(out, "contention", "expected.json"))["steps"]
+          == [1, 32, 16], "invalid explicit ladders must reach harness validation")
+    module = load_module(HISTORY, "bench_history_driver_recipes")
+    def recipe(label, tier, seconds=None):
+        overrides = {} if seconds is None else {"BENCH_SECONDS": str(seconds)}
+        out = drive(label, tier, **overrides)
+        manifest = read_json(os.path.join(out, "srt", "expected.json"))
+        duration = int(next(line.split("=")[1] for line in
+                            read_text(os.path.join(out, "srt.log")).splitlines()
+                            if line.startswith("duration=")))
+        return recipe_record(14 if tier == "pr" else 10, tier=tier,
+                             recipe={"seconds": duration}, steps=manifest["steps"])
+    pr = recipe("pr-default", "pr")
+    branch = recipe("branch-default", "branch")
+    check(pr["configs"]["srt"]["recipe"]["seconds"] == 15,
+          "the shipped PR recipe uses branch's 15-second default")
+    check(len(module.regressions(pr, [branch] * 3)) == 1,
+          "real default driver recipes are comparable")
+    pr_override = recipe("pr-override", "pr", 7)
+    branch_override = recipe("branch-override", "branch", 7)
+    check(len(module.regressions(pr_override, [branch_override] * 3)) == 1,
+          "intentionally matching duration overrides are comparable")
+    check(module.regressions(pr_override, [branch] * 3) == [],
+          "different duration overrides remain incomparable")
+    # The separate contention artifact is mandatory, not an optional add-on.
+    results = os.path.join(work, "weekly-missing-contention")
+    make_config(results, "all", mix_rungs(PUBLISHED_MIXES),
+                expected={"mixes": PUBLISHED_MIXES, "steps": [1, 16, 32]},
+                ran_mixes=PUBLISHED_MIXES)
+    summary = os.path.join(work, "weekly-missing-contention.json")
+    result = run(["python3", HISTORY, "summarize", results, "--tier", "weekly",
+                  "--expected-configs", '["all", "contention"]', "--out", summary])
+    check(result.returncode == 0, f"summarize missing config: {result.stderr}")
+    check(gate(summary).returncode == 1, "missing contention artifact fails gate")
 
 
 def test_gate_rejects_a_manifest_that_differs_from_the_executed_mixes(work):
@@ -1972,7 +2017,7 @@ def test_trend_stub_summary_for_every_tier(work):
     for tier, names in (("branch", ["srt", "rtmp", "rtmp-srt"]),
                         ("nightly", ["srt-rtmp", "hls", "mix-srt-share",
                                      "mix-all-protocols"]),
-                        ("weekly", ["all"])):
+                        ("weekly", ["all", "contention"])):
         tree = os.path.join(work, f"trend-{tier}")
         for relative in ("scripts/bench-trend.sh",
                          "tests/bench/bench_commit_selection.py"):
@@ -2181,7 +2226,7 @@ def test_summary_records_recipe_fingerprint_and_provenance(work):
     before = revision(copied)
     with open(os.path.join(copied, "capacity-mixes.conf"), "a",
               encoding="utf-8") as output:
-        output.write("pure-extra:srt:0\n")
+        output.write("pure-extra:srt:0:0:standard\n")
     check(before and before != revision(copied),
           "an edited harness is a different revision")
     os.remove(os.path.join(copied, "srt_fanout_sink.c"))

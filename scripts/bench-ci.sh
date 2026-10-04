@@ -40,11 +40,19 @@ OUT="$(cd "$OUT" && pwd)"
 # run a tier's configurations as parallel jobs and merge their results.
 BENCH_CONFIGS="${BENCH_CONFIGS:-}"
 
-# every workload the harness knows, from the file the harness reads
-ALL_MIXES="$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' \
-                 "$ROOT/tests/bench/capacity-mixes.conf" \
-             | cut -d: -f1 | paste -sd' ')"
-[ -n "$ALL_MIXES" ] || { echo "no mixes in capacity-mixes.conf" >&2; exit 1; }
+# Categories and workload names come from the same file the harness reads.
+STANDARD_MIXES=""
+CONTENTION_MIXES=""
+while IFS=: read -r mix protocol srt_share hls_push_share category; do
+    case "$mix" in ""|\#*) continue ;; esac
+    case "$category" in
+        standard) STANDARD_MIXES="${STANDARD_MIXES:+$STANDARD_MIXES }$mix" ;;
+        contention) CONTENTION_MIXES="${CONTENTION_MIXES:+$CONTENTION_MIXES }$mix" ;;
+        *) echo "unknown mix category: $category" >&2; exit 1 ;;
+    esac
+done < "$ROOT/tests/bench/capacity-mixes.conf"
+[ -n "$STANDARD_MIXES" ] && [ -n "$CONTENTION_MIXES" ] \
+    || { echo "missing mix category in capacity-mixes.conf" >&2; exit 1; }
 
 # config name, then environment assignments for the harness
 run_config() {
@@ -56,12 +64,11 @@ run_config() {
         return 0
     fi
     for arg in "$@"; do
-        # `all` is resolved here, to the harness's own list, and the harness
-        # is handed that explicit list: what the manifest below promises and
-        # what the harness executes are then one set by construction (and the
-        # gate checks the harness's own statement of what it ran).
-        [ "$arg" = CAPACITY_QUALITY_MIXES=all ] \
-            && arg="CAPACITY_QUALITY_MIXES=$ALL_MIXES"
+        # Resolve categories before writing the expected-run manifest.
+        case "$arg" in
+            CAPACITY_QUALITY_MIXES=standard) arg="CAPACITY_QUALITY_MIXES=$STANDARD_MIXES" ;;
+            CAPACITY_QUALITY_MIXES=contention) arg="CAPACITY_QUALITY_MIXES=$CONTENTION_MIXES" ;;
+        esac
         harness_env+=( "$arg" )
         case "$arg" in
             CAPACITY_QUALITY_MIXES=*) mixes="${arg#*=}" ;;
@@ -102,10 +109,11 @@ PYEOF
 # Gbit/s can be compared with the history main has recorded.
 case "$TIER" in
     pr)
+        seconds="${BENCH_SECONDS:-15}"
         run_config srt CAPACITY_QUALITY_MIXES=pure-srt \
-            CAPACITY_QUALITY_STEPS="1 16 32" CAPACITY_QUALITY_SECONDS=10
+            CAPACITY_QUALITY_STEPS="1 16 32" CAPACITY_QUALITY_SECONDS="$seconds"
         run_config rtmp CAPACITY_QUALITY_MIXES=pure-rtmp \
-            CAPACITY_QUALITY_STEPS="1 16 32" CAPACITY_QUALITY_SECONDS=10
+            CAPACITY_QUALITY_STEPS="1 16 32" CAPACITY_QUALITY_SECONDS="$seconds"
         ;;
     branch)
         steps="${BENCH_STEPS:-1 16 32 64 128}"
@@ -135,13 +143,31 @@ case "$TIER" in
         ;;
     weekly)
         if [ "${BENCH_TREND:-0}" = 1 ]; then
-            run_config all CAPACITY_QUALITY_MIXES=all \
-                CAPACITY_QUALITY_STEPS="${BENCH_STEPS:-1 32 128}" \
-                CAPACITY_QUALITY_SECONDS="${BENCH_SECONDS:-10}"
+            steps="${BENCH_STEPS:-1 32 64}"
+            seconds="${BENCH_SECONDS:-10}"
         else
             steps="${BENCH_STEPS:-1 32 64 128 192 256 384 512 768 1000}"
-            run_config all CAPACITY_QUALITY_MIXES=all \
-                CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=120
+            seconds="${BENCH_SECONDS:-120}"
+        fi
+        # Below four destinations these contention proportions cannot form.
+        # Only canonical positive ordered ladders are transformed; malformed
+        # explicit ladders go unchanged to the harness's setup validation.
+        contention_steps="$(python3 - "$steps" <<'PYEOF'
+import sys
+values = sys.argv[1].split()
+valid = (bool(values) and all(v.isdecimal() and str(int(v)) == v and int(v) > 0
+                             for v in values))
+rungs = [int(v) for v in values] if valid else []
+valid = valid and all(a < b for a, b in zip(rungs, rungs[1:]))
+print(" ".join(map(str, [4] + [r for r in rungs if r > 4]))
+      if valid else sys.argv[1])
+PYEOF
+)"
+        run_config all CAPACITY_QUALITY_MIXES=standard \
+            CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS="$seconds"
+        run_config contention CAPACITY_QUALITY_MIXES=contention \
+            CAPACITY_QUALITY_STEPS="$contention_steps" CAPACITY_QUALITY_SECONDS="$seconds"
+        if [ "${BENCH_TREND:-0}" != 1 ]; then
             for senders in 1 2 4 adaptive; do
                 run_config "srt-senders-$senders" CAPACITY_QUALITY_MIXES=pure-srt \
                     CAPACITY_QUALITY_STEPS="$steps" CAPACITY_QUALITY_SECONDS=30 \

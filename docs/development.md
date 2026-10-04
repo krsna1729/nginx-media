@@ -492,6 +492,18 @@ and libsrt vs robotweax/srt (both built from source at the pins in
 `scripts/srt-pins.sh` and recorded in each run, so a shift is ours and not the
 library's).
 
+PR rungs remain 1, 16 and 32, at 15 seconds by default, matching branch's
+15-second default. `BENCH_SECONDS` overrides both tiers consistently. Their
+nominal measurement lower bounds are 1.5 runner-minutes for PR
+(`2 × 3 × 15 s`) and 3.75 for branch (`3 × 5 × 15 s`), excluding calibration,
+startup and builds. Weekly's `all` configuration keeps the seven standard
+workloads and the full ladder 1, 32, 64, 128, 192, 256, 384, 512, 768, 1000.
+Its separate `contention` configuration runs both supplementary mixes with
+calibration at 4 followed by every requested rung above 4. Rungs below 4 are
+inapplicable to those proportions, not measured failures. Local harness
+`CAPACITY_QUALITY_MIXES=all` still runs all nine and rejects explicit ladders
+below a mix's minimum; malformed CI ladders likewise remain setup errors.
+
 The gate (`bench_history.py gate`) fails the job on:
 
 - a setup failure - the rung was never measured;
@@ -514,8 +526,8 @@ workload, exact runner fingerprint and the same recipe (rung duration, source
 rate, mixes, stop-after rule, judge thresholds, worker settings and the hash
 of the harness files; a ladder may be a prefix of the other's, so a pull
 request is compared with main's `branch` records only if its recipe matches
-theirs - 10 s pull-request rungs are not a baseline for 15 s branch rungs - and
-a record without a recipe compares with nothing). Compiler, configure
+theirs; historical 10 s pull-request rungs are not a baseline for the new
+15 s defaults, and a record without a recipe compares with nothing). Compiler, configure
 arguments, binary sha256 and the linked transport library are recorded per
 workload as provenance, never compared. It needs at least three baselines and
 must exceed their median by 25%. It remains a warning, not a gate, because
@@ -552,7 +564,8 @@ workflow-scoped `comparison_group`; regressions compare only samples from that
 group and same-runner fingerprint. The sampled profile uses rungs 1, 32 and
 128 for 10 seconds each in branch/nightly and 1, 32 and 64 in weekly: 128 was
 infrastructure-limited in the single-runner weekly probe, so 64 is the highest
-weekly trend rung. The full weekly qualification profile is unchanged. Trend
+weekly trend rung. Its contention ladder is 4, 32, 64; qualification retains
+every higher rung of the full ladder. Trend
 probes are appended to history and shown as such in the matrix, but never count
 as qualification runs or as capacity-boundary diagnostics. The chart uses
 commit time, and its highest passing sampled rung is explicitly not a capacity
@@ -560,7 +573,7 @@ limit.
 
 The trend job's nominal receiver-measurement lower bound is 15 runner-minutes
 for branch (`10 commits × 3 workloads × 3 rungs × 10 s`), 28 for nightly
-(`8 × 7 × 3 × 10 s`), and 31.5 for weekly (`9 × 7 × 3 × 10 s`). These are
+(`8 × 7 × 3 × 10 s`), and 40.5 for weekly (`9 × 9 × 3 × 10 s`). These are
 derived from the current recipe, not observed wall-clock costs; they exclude
 per-revision builds, mixed-workload calibration, startup and retries. The
 trend job has a 180-minute ceiling, separate from the full qualification job.
