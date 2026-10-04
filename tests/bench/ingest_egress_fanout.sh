@@ -3129,26 +3129,19 @@ PY
     cpu_window "$seconds" "$sink_pid" "$hls_pid" "$hls_push_sink_pid" \
         ${RTMP_SINK_PIDS[@]+"${RTMP_SINK_PIDS[@]}"} "${PUBS[@]}"
     CPU_SNAPSHOT_DIR=""
-    # the receiver's closing scrape belongs to the window, before publishers
-    # stop and before any other bookkeeping stretches the last interval
+    # Stop and join samplers before closing snapshots: an in-flight scrape
+    # must finish inside the measured counter window, never past its end.
+    if [ "$quality_mode" = yes ]; then
+        capacity_quality_stop_monitors \
+            || { echo "a quality sampler failed during the measurement" \
+                 >&2; return 1; }
+    fi
+    # The closing scrape belongs to the window while publishers still run.
     capacity_rtmp_sink_metrics "$case_dir/rtmp-receiver.after" || return 1
     if [ "$hls_push_destinations" -gt 0 ]; then
         curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__snapshot" \
             >"$case_dir/hls-push.after.json" \
             || { echo "could not capture HLS push receiver final snapshot" >&2; return 1; }
-    fi
-    if [ "$quality_mode" = yes ]; then
-        for publisher_pid in "${PUBS[@]}"; do
-            kill -0 "$publisher_pid" 2>/dev/null \
-                || { echo "a capacity publisher exited during the window" \
-                     >&2; return 1; }
-        done
-        kill_pubs
-    fi
-    if [ "$quality_mode" = yes ]; then
-        capacity_quality_stop_monitors \
-            || { echo "a quality sampler failed during the measurement" \
-                 >&2; return 1; }
     fi
     if [ "$srt_destinations" -gt 0 ]; then
         if [ "$quality_mode" = yes ]; then
@@ -3158,6 +3151,14 @@ PY
             capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
                 "$sink_snapshot_after" || return 1
         fi
+    fi
+    if [ "$quality_mode" = yes ]; then
+        for publisher_pid in "${PUBS[@]}"; do
+            kill -0 "$publisher_pid" 2>/dev/null \
+                || { echo "a capacity publisher exited during the window" \
+                     >&2; return 1; }
+        done
+        kill_pubs
     fi
 
     for publisher_pid in "${PUBS[@]}"; do
@@ -3341,6 +3342,7 @@ PY
                 --destination-report "$case_dir/destination-quality.csv" \
                 --interval-report "$case_dir/interval-throughput.csv" \
                 --destinations "$srt_destinations" \
+                --programs "$programs" \
                 --prepared-source "$source" \
                 --source-duration-s 30 \
                 --reference-bps "$quality_reference_bps" \
