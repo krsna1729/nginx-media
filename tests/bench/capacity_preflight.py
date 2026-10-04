@@ -46,6 +46,7 @@ import argparse
 import glob
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -288,6 +289,10 @@ def host_report(role, binary=None, pid=None):
     busy_end = proc_cpu_sampler.proc_stat_cpu()
     report = {
         "role": role,
+        "hostname": platform.node(),
+        "architecture": platform.machine(),
+        "boot_id": read_first_line("/proc/sys/kernel/random/boot_id"),
+        "binary": os.path.realpath(binary) if binary else None,
         "kernel": platform.release(),
         "cpu_model": cpu_model(),
         "nproc_online": os.cpu_count(),
@@ -402,11 +407,6 @@ def probe_listen(port, seconds, packet_bytes, bind, threads=1):
                 continue
             except OSError:
                 break
-            now = time.monotonic_ns()
-            if counter["first_ns"] is None:
-                counter["first_ns"] = now
-            counter["last_ns"] = now
-            counter["largest"] = max(counter["largest"], len(data))
             if data.startswith(MAGIC) and len(data) >= HEADER.size:
                 _, kind, sequence = HEADER.unpack_from(data)
                 if kind == PING:
@@ -418,6 +418,15 @@ def probe_listen(port, seconds, packet_bytes, bind, threads=1):
                     except OSError:
                         pass
                     continue
+            if not data.startswith(MAGIC) or len(data) != packet_bytes:
+                continue
+            if HEADER.unpack_from(data)[1] != FLOOD:
+                continue
+            now = time.monotonic_ns()
+            if counter["first_ns"] is None:
+                counter["first_ns"] = now
+            counter["last_ns"] = now
+            counter["largest"] = max(counter["largest"], len(data))
             counter["bytes"] += len(data)
             counter["packets"] += 1
 
@@ -605,6 +614,43 @@ def foreign_cpu_consumers(window_s=0.5, limit=5):
 
 
 def judge(args):
+    # Invalid measurements outrank hardware limits: a broken instrument cannot
+    # identify an infrastructure boundary, even when another resource is short.
+    errors = []
+    for label, path in (("sender", args.sender), ("network", args.network),
+                        ("probe-sender", args.probe_sender),
+                        *((f"receiver-{i}", p) for i, p in enumerate(args.receiver or []))):
+        if not path:
+            continue
+        try:
+            document = load(path)
+            if not isinstance(document, dict):
+                raise ValueError("expected a JSON object")
+            fields = (("received_bytes", "window_s") if label == "network" else
+                      ("sent_bytes", "send_window_s") if label == "probe-sender" else ())
+            for field in fields:
+                value = document.get(field)
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value < 0
+                        or (field.endswith("_s") and value == 0)):
+                    raise ValueError(f"invalid or missing {field}")
+            if "socket_drops" in document and document["socket_drops"] is not None:
+                drops = document["socket_drops"]
+                if isinstance(drops, bool) or not isinstance(drops, int) or drops < 0:
+                    raise ValueError("invalid socket_drops")
+        except (OSError, ValueError) as error:
+            errors.append(f"{label}: {error}")
+    if errors:
+        result = {"schema": "nginx-media.capacity-preflight/1",
+                  "verdict": "setup-failure", "errors": errors,
+                  "limits": [], "unknown": []}
+        if args.json:
+            with open(args.json, "w", encoding="utf-8") as output:
+                json.dump(result, output, indent=1)
+        print("preflight_verdict=setup-failure")
+        for error in errors:
+            print(f"preflight_error={error}")
+        return 1
     sender = load(args.sender)
     network = load(args.network)
     if args.probe_sender:
@@ -914,6 +960,8 @@ def main():
     args = parser.parse_args()
 
     if args.command == "host":
+        if args.binary and not os.path.isfile(args.binary):
+            parser.error("--binary must name the actual existing binary")
         report = host_report(args.role, args.binary, args.pid)
         with open(args.json, "w", encoding="utf-8") as output:
             json.dump(report, output, indent=1, default=str)
