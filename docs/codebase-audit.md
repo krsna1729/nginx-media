@@ -341,6 +341,11 @@ checkbox above marked only after the behavior is exercised.
   on a healthy route. Not covered: a real backpressured socket in nginx (no
   injection point), so the sender-side resync is verified by the state-machine
   unit test only.
+- The Ubuntu CI namespace scenario assumed encoder-a stayed active during a
+  shaped viewer transfer. It now waits for the preferred source again before
+  taking the carrier down, and waits for active=encoder-b with an increased
+  switch count in one API snapshot. `make netns` passed: carrier failure,
+  recovery, severe-loss failover and bonded-path failure all retained media.
 
 ### RTMP pre-admission budget (S3)
 
