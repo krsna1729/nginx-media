@@ -137,12 +137,21 @@ for NONREG in "$RUN/blocker.fifo" /dev/zero "$RUN"; do
         -d "{\"id\":\"nonreg\",\"type\":\"file\",\"path\":\"$NONREG\"}" \
         "$API/streams/live/slate/sources")" || NR_STATUS=timeout
     ELAPSED="$(python3 -c "import sys,time; print(round(time.time()-float(sys.argv[1]),2))" "$START")"
-    [ "$NR_STATUS" != "201" ] && [ "$NR_STATUS" != "timeout" ] \
-        || { echo "$NONREG was accepted or blocked the worker ($NR_STATUS, ${ELAPSED}s)" >&2; exit 1; }
+    [ "$NR_STATUS" = "400" ] \
+        || { echo "$NONREG returned HTTP $NR_STATUS instead of 400 (${ELAPSED}s)" >&2; exit 1; }
+    grep -q '"error":"source_open_failed"' "$RUN/nonreg.json" \
+        || { echo "$NONREG did not report source_open_failed" >&2; exit 1; }
     python3 -c "import sys; assert float(sys.argv[1]) < 3" "$ELAPSED" \
         || { echo "$NONREG took ${ELAPSED}s to refuse" >&2; exit 1; }
-    curl -fsS --max-time 3 "$API/streams/live/slate/sources" | grep -q '"id":"nonreg"' \
-        && { echo "$NONREG left a source behind" >&2; exit 1; }
+    curl -fsS --max-time 3 -o "$RUN/nonreg-sources.json" \
+        "$API/streams/live/slate/sources" \
+        || { echo "the API did not answer after rejecting $NONREG" >&2; exit 1; }
+    python3 - "$RUN/nonreg-sources.json" <<'PY' \
+        || { echo "$NONREG left a source behind" >&2; exit 1; }
+import json, sys
+assert all(source["id"] != "nonreg"
+           for source in json.load(open(sys.argv[1]))["sources"])
+PY
 done
 echo "   FIFO, device and directory sources refused"
 

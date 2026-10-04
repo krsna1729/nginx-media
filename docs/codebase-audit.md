@@ -329,6 +329,10 @@ checkbox above marked only after the behavior is exercised.
   directory: all are refused in under 3 s with the API still answering. On the
   pre-fix binary the FIFO request blocked the worker past the client's 5 s
   timeout.
+- Rejection checks require HTTP 400 with `source_open_failed`, then fetch and
+  parse the source list successfully before asserting the rejected id is absent.
+  A failed GET no longer counts as evidence of cleanup. The tightened
+  `make file-source` scenario passed against the rebuilt production binary.
 
 ### RTMP pre-admission budget (S3)
 
