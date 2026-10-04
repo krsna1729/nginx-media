@@ -75,7 +75,7 @@ were not executed during the audit.
   dribbling responses, DNS or shutdown joins.
 - [ ] **S7:** apply the existing credential redactor at lower-level HTTP, HLS
   pull and RTMP destination logging sinks, including reconnect/failure paths.
-- [ ] **S8:** reject non-regular file sources promptly; synchronous FIFO/device
+- [x] **S8:** reject non-regular file sources promptly; synchronous FIFO/device
   open/read can block an nginx worker (`ngx_media_file.c:99-100,173`).
 - [ ] **R3:** align API/graph encoder limits with decoder limits; prevent distinct
   program names colliding after HLS directory sanitization.
@@ -320,3 +320,12 @@ checkbox above marked only after the behavior is exercised.
   leaves the other feeding. On the pre-fix source the first scenario fails with
   the source deleted and the second (run alone) with the active source
   receiving no media of its own.
+
+### File sources are regular files only (S8)
+
+- A file source is opened `O_NONBLOCK` and `fstat`ed; anything but a regular
+  file is refused with a log line and leaves no source behind. `make
+  file-source` creates sources over a FIFO with no writer, `/dev/zero` and a
+  directory: all are refused in under 3 s with the API still answering. On the
+  pre-fix binary the FIFO request blocked the worker past the client's 5 s
+  timeout.
