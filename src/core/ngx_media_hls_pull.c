@@ -1,6 +1,7 @@
 #include "ngx_media_hls_pull.h"
 #include "ngx_media_health.h"
 #include "ngx_media_http.h"
+#include "ngx_media_hls_profile.h"
 #include "ngx_media_runtime.h"
 #include "ngx_media_stream.h"
 #ifndef NGX_MEDIA_UNIT_TEST
@@ -106,6 +107,7 @@ typedef struct ngx_media_hls_pull_s {
     pthread_t                thread;
     ngx_uint_t               thread_started;
     ngx_atomic_t             stopping;
+    ngx_media_http_conn_t    http;
 
     /*
      * Set by the reader thread as its last act, after the loop and before it
@@ -715,8 +717,8 @@ ngx_media_hls_pull_thread(void *data)
             break;
         }
 
-        if (ngx_media_http_get(&pull->url, &pull->ca_file, playlist,
-                               NGX_MEDIA_HLS_PULL_PLAYLIST_MAX,
+        if (ngx_media_http_get(&pull->http, &pull->url, &pull->ca_file,
+                               playlist, NGX_MEDIA_HLS_PULL_PLAYLIST_MAX,
                                &playlist_len, pull->log) != NGX_OK)
         {
             pull->failures++;
@@ -782,15 +784,21 @@ ngx_media_hls_pull_thread(void *data)
                     continue;
                 }
 
-                if (ngx_media_http_get(&segment_url, &pull->ca_file, segment,
+                if (ngx_media_http_get(&pull->http, &segment_url,
+                                       &pull->ca_file, segment,
                                        NGX_MEDIA_HLS_PULL_SEGMENT_MAX,
                                        &segment_len, pull->log) != NGX_OK)
                 {
+                    u_char     safe[512];
+                    ngx_str_t  redacted;
+
+                    ngx_media_redact_url(&segment_url, safe, sizeof(safe),
+                                         &redacted);
                     pull->failures++;
 
                     ngx_log_error(NGX_LOG_INFO, pull->log,
                                   0, "media: hls pull %V could not fetch %V "
-                                  "(failures=%ui)", &pull->id, &segment_url,
+                                  "(failures=%ui)", &pull->id, &redacted,
                                   pull->failures);
                     continue;
                 }
@@ -812,15 +820,23 @@ ngx_media_hls_pull_thread(void *data)
                 if (!pull->input_reported && !pull->demux.tracks_ready
                     && pull->demux.stats.unsupported_streams > 0)
                 {
+                    u_char    redacted[640];
+                    ngx_str_t display;
+
                     pull->input_reported = 1;
+                    if (pull->source != NULL) {
+                        display = pull->source->id;
+                    } else {
+                        ngx_media_redact_url(&pull->url, redacted,
+                                             sizeof(redacted), &display);
+                    }
 
                     ngx_log_error(NGX_LOG_WARN, pull->log, 0,
                                   "media: hls pull source %V carries no stream "
                                   "type this build can carry (MPEG-TS with "
                                   "H.264, H.265 or AAC); it will not become "
                                   "healthy",
-                                  pull->source != NULL ? &pull->source->id
-                                                       : &pull->url);
+                                  &display);
                 }
 
                 ngx_media_hls_pull_record(pull, line, len);
@@ -881,6 +897,7 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     if (pull == NULL) {
         return NULL;
     }
+    ngx_media_http_conn_init(&pull->http);
 #ifndef NGX_MEDIA_UNIT_TEST
     pull->notify_fd = -1;
 #endif
@@ -1063,9 +1080,15 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
 
     pull->thread_started = 1;
 
-    ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                  "media: hls pull source %V opened for %V/%V from %V", id,
-                  &stream->application, &stream->name, &pull->url);
+    {
+        u_char     safe[512];
+        ngx_str_t  redacted;
+
+        ngx_media_redact_url(&pull->url, safe, sizeof(safe), &redacted);
+        ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                      "media: hls pull source %V opened for %V/%V from %V", id,
+                      &stream->application, &stream->name, &redacted);
+    }
 
     return pull;
 }
@@ -1092,11 +1115,13 @@ ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull)
      * about to lose this source.
      */
     (void) ngx_atomic_fetch_add(&pull->stopping, 1);
+    ngx_media_http_conn_cancel(&pull->http);
 
     if (pull->thread_started) {
         (void) pthread_join(pull->thread, NULL);
         pull->thread_started = 0;
     }
+    ngx_media_http_conn_close(&pull->http);
 #ifndef NGX_MEDIA_UNIT_TEST
     ngx_media_hls_pull_notify_stop(pull);
 #endif
@@ -1169,9 +1194,8 @@ ngx_media_hls_pull_stream_readers(const ngx_media_stream_t *stream)
  * A removed source has to take its reader with it: the reader holds a thread,
  * a demuxer and an 8 MiB segment buffer, and frames it publishes are dropped
  * once the source is detached, so leaving it running leaks all of that once
- * per create/delete cycle.  The reader notices the removal in its own loop and
- * exits; this collects it.  Only exited readers are closed, so the join in
- * close() cannot block the periodic visit on an origin that is slow to answer.
+ * per create/delete cycle. The visit cancels active fetches without joining;
+ * only exited readers are closed, so the periodic visit does not block.
  */
 void
 ngx_media_hls_pull_reap(ngx_log_t *log)
@@ -1184,10 +1208,12 @@ ngx_media_hls_pull_reap(ngx_log_t *log)
         (void) pthread_mutex_lock(&ngx_media_hls_pull_mutex);
 
         for (pull = ngx_media_hls_pull_all; pull != NULL; pull = pull->next) {
-            if (ngx_atomic_fetch_add(&pull->exited, 0)
-                && ngx_media_hls_pull_source_removed(pull))
-            {
-                break;
+            if (ngx_media_hls_pull_source_removed(pull)) {
+                (void) ngx_atomic_cmp_set(&pull->stopping, 0, 1);
+                ngx_media_http_conn_cancel(&pull->http);
+                if (ngx_atomic_fetch_add(&pull->exited, 0)) {
+                    break;
+                }
             }
         }
 
@@ -1197,9 +1223,21 @@ ngx_media_hls_pull_reap(ngx_log_t *log)
             return;
         }
 
-        ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                      "media: hls pull source %V removed, closing its reader",
-                      pull->source != NULL ? &pull->source->id : &pull->url);
+        {
+            u_char     safe[512];
+            ngx_str_t  redacted;
+            const ngx_str_t *identity;
+
+            if (pull->source != NULL) {
+                identity = &pull->source->id;
+            } else {
+                ngx_media_redact_url(&pull->url, safe, sizeof(safe), &redacted);
+                identity = &redacted;
+            }
+            ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                          "media: hls pull source %V removed, closing its reader",
+                          identity);
+        }
 
         /* unlinks the reader, so the next pass cannot see it again */
         ngx_media_hls_pull_close(pull);
@@ -1231,6 +1269,7 @@ ngx_media_hls_pull_stop_all(void)
 
     for (pull = ngx_media_hls_pull_all; pull != NULL; pull = pull->next) {
         (void) ngx_atomic_fetch_add(&pull->stopping, 1);
+        ngx_media_http_conn_cancel(&pull->http);
     }
 
     (void) pthread_mutex_unlock(&ngx_media_hls_pull_mutex);
@@ -1240,6 +1279,7 @@ ngx_media_hls_pull_stop_all(void)
             (void) pthread_join(pull->thread, NULL);
             pull->thread_started = 0;
         }
+        ngx_media_http_conn_close(&pull->http);
 #ifndef NGX_MEDIA_UNIT_TEST
         ngx_media_hls_pull_notify_stop(pull);
 #endif

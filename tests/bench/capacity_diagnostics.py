@@ -242,6 +242,25 @@ def _role(role_map, role, reason):
     return missing("%core", reason)
 
 
+def host_interval(before, after, clock_domain="controller-monotonic"):
+    snapshots = (before or {}, after or {})
+    keys = ("capture_start_ns", "monotonic_ns", "capture_end_ns")
+    if any(not isinstance(snapshot.get(key), (int, float))
+           or not math.isfinite(snapshot[key])
+           for snapshot in snapshots for key in keys):
+        return missing("s", "actual extended host capture brackets are unavailable")
+    if any(not snapshot["capture_start_ns"] <= snapshot["monotonic_ns"]
+           <= snapshot["capture_end_ns"] for snapshot in snapshots):
+        return missing("s", "extended host capture midpoint is outside its bracket")
+    start, end = (snapshot["monotonic_ns"] for snapshot in snapshots)
+    if end <= start:
+        return missing("s", "extended host measurement interval is nonpositive")
+    return ok((end - start) / 1e9, "s", window={
+        "clock_domain": clock_domain, "start_ns": start, "end_ns": end,
+        "start_uncertainty_ns": (before["capture_end_ns"] - before["capture_start_ns"]) / 2,
+        "end_uncertainty_ns": (after["capture_end_ns"] - after["capture_start_ns"]) / 2})
+
+
 def environment_section(host_before, host_after, processes):
     if not host_after:
         return {"status": "unavailable",
@@ -708,7 +727,7 @@ def parse_cpu_list(text):
     return cpus
 
 
-def run_queue_pressure(host_before, host_after, window_s):
+def run_queue_pressure(host_before, host_after):
     """What the run queue did over the window.
 
     The CPU counters say how busy the CPUs were; the PSI "some" total says how
@@ -719,6 +738,7 @@ def run_queue_pressure(host_before, host_after, window_s):
     before = ((host_before or {}).get("host") or {})
     after = ((host_after or {}).get("host") or {})
     result = {}
+    window_s = host_interval(host_before, host_after)["value"]
     pressure_before = (before.get("cpu_pressure") or {}).get("some_total")
     pressure_after = (after.get("cpu_pressure") or {}).get("some_total")
     if pressure_before is not None and pressure_after is not None and window_s:
@@ -859,6 +879,7 @@ def efficiency_section(bundle):
     result = {"delivered": ok(round(gbps, 4), "Gbit/s", sources=sources),
               "window_alignment": alignments}
     comparable = bool(alignments) and all(row["status"] == "ok" for row in alignments.values())
+    receiver_comparable = comparable
     receivers = sum(v for k, v in kinds.items() if k.endswith("receiver") or k == "hls-readers")
     remote = bundle.get("receiver_host") or {}
     if remote:
@@ -866,10 +887,10 @@ def efficiency_section(bundle):
         remote_kinds = (remote_cpu.get("by_kind_pct_of_core") or {}).get("value") or {}
         remote_alignment = alignment(cpu_window, remote_cpu.get("window"), cpu_seconds)
         result["receiver_cpu_alignment"] = remote_alignment
-        comparable = comparable and remote_alignment["status"] == "ok"
+        receiver_comparable = receiver_comparable and remote_alignment["status"] == "ok"
         native_duration = (remote_cpu.get("interval") or {}).get("value")
         if not native_duration or abs(native_duration - cpu_seconds) > cpu_seconds * 0.02:
-            comparable = False
+            receiver_comparable = False
             result["receiver_cpu_alignment"] = missing(
                 "mixed", "controller CPU mapping disagrees with native receiver CPU duration")
         receivers += sum(v for k, v in remote_kinds.items()
@@ -880,7 +901,7 @@ def efficiency_section(bundle):
                                          if comparable else missing("%core per Gbit/s", reason))
     if receivers:
         result["receiver_cpu_per_gbps"] = (ok(round(receivers / gbps, 2), "%core per Gbit/s")
-                                           if comparable else missing("%core per Gbit/s", reason))
+                                           if receiver_comparable else missing("%core per Gbit/s", reason))
     return result
 
 
@@ -911,7 +932,11 @@ def build(args):
         "case": meta,
         "outcome": meta.get("outcome", "unknown"),
         "intervals": {
-            "media_measurement": ok(meta.get("measurement_s"), "s"),
+            "stream_counter_measurement": ok(
+                meta.get("measurement_s"), "s",
+                provenance=meta.get("measurement_provenance"),
+                window=load_json(os.path.join(case_dir, "stream.measurement.window"))),
+            "extended_host": host_interval(host_before, host_after),
             "cpu": cpu.get("interval", missing("s", "no CPU window"))
             if isinstance(cpu, dict) else missing("s", "no CPU window"),
             "requested": ok(meta.get("requested_s"), "s"),
@@ -940,6 +965,10 @@ def build(args):
             load_json(os.path.join(case_dir, "receiver-nginx-fingerprint.json"))
             or missing("mixed", "no native receiver nginx fingerprint")),
     }
+    bundle["counter_windows"] = {
+        kind: load_json(os.path.join(case_dir, f"{kind}.measurement.window"))
+        or missing("mixed", f"no {kind} counter collection brackets")
+        for kind in ("stream", "workers")}
     bundle["receiver_windows"] = {}
     for proto, filename in (("srt", "receiver.measurement.window"),
                             ("hls_push", "hls-push.measurement.window"),
@@ -957,12 +986,11 @@ def build(args):
             "clock_domain": "receiver-monotonic"}
         bundle["receiver_host"] = {
             "cpu": receiver_cpu,
+            "extended_host_interval": host_interval(
+                receiver_before, receiver_after, "receiver-monotonic"),
             "cpu_environment": environment_section(receiver_before, receiver_after, receiver_processes),
             "network": network_section(receiver_before, receiver_after, receiver_processes)}
-    window_s = (meta.get("measurement_s")
-                if isinstance(meta.get("measurement_s"), (int, float))
-                else None)
-    pressure = run_queue_pressure(host_before, host_after, window_s)
+    pressure = run_queue_pressure(host_before, host_after)
     if pressure:
         env["run_queue_pressure"] = ok(
             pressure, "share of the window and queue depth")

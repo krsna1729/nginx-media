@@ -92,6 +92,15 @@ typedef struct {
     ngx_log_t *log;
 } ngx_media_hls_t;
 
+/*
+ * Injective identity-to-directory mapping. Short [A-Za-z0-9_-] identities keep
+ * their spelling. Other identities use ~<byte-length>/<lowercase hex>, split
+ * every 120 input bytes so every filesystem component fits NAME_MAX.
+ * The length label makes application/name boundaries unambiguous.
+ */
+ngx_str_t *ngx_media_hls_program_dir(ngx_pool_t *pool, const ngx_str_t *root,
+    const ngx_str_t *application, const ngx_str_t *name);
+
 void ngx_media_hls_conf_default(ngx_media_hls_conf_t *conf);
 ngx_int_t ngx_media_hls_init(ngx_media_hls_t *hls,
     const ngx_media_hls_conf_t *conf, ngx_log_t *log);

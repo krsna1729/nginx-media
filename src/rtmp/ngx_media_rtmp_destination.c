@@ -1498,9 +1498,9 @@ ngx_media_rtmp_dest_on_command(ngx_media_rtmp_dest_t *d, ngx_media_buf_t *payloa
             ngx_media_rtmp_dest_schedule(d);
 
             ngx_log_error(NGX_LOG_NOTICE, d->log, 0,
-                          "media: rtmp destination %V published %V/%V to "
+                          "media: rtmp destination %V published for %V/%V to "
                           "%V:%ui (attempts=%uL)",
-                          &d->id, &d->application, &d->stream_name, &d->host,
+                          &d->id, &d->application, &d->stream->name, &d->host,
                           d->port, d->reconnects);
 
             return;
@@ -2143,8 +2143,8 @@ ngx_media_rtmp_destination_add(ngx_media_stream_t *stream,
         ngx_memzero(d, sizeof(ngx_media_rtmp_dest_t));
 
         ngx_log_error(NGX_LOG_WARN, log, 0,
-                      "media: rtmp destination %V host \"%V\" is not an IPv4 "
-                      "address", &destination->id, &destination->host);
+                      "media: rtmp destination %V host is not an IPv4 address",
+                      &destination->id);
 
         return NGX_ERROR;
     }
@@ -2164,7 +2164,7 @@ ngx_media_rtmp_destination_add(ngx_media_stream_t *stream,
 
     ngx_log_error(NGX_LOG_NOTICE, d->log, 0,
                   "media: rtmp destination %V started for %V/%V -> %V:%ui",
-                  &d->id, &d->application, &d->stream_name, &d->host,
+                  &d->id, &d->application, &d->stream->name, &d->host,
                   d->port);
 
     return NGX_OK;

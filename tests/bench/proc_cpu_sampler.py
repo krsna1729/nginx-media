@@ -4,11 +4,10 @@
 Two subcommands:
 
   sample   take a "before" snapshot, sleep, take an "after" snapshot.  Each
-           snapshot is a text file of thread rows plus, when --extended-before
-           and --extended-after are given, a JSON document with the host,
-           cgroup, affinity, kernel network counters and per-socket UDP drop
-           counters captured at the same instant.  Prints
-           "<window_s> <before_ms> <after_ms>" for the shell harness.
+           snapshot is a text file of thread rows. Optional JSON documents
+           retain the extended host/network captures outside the CPU window,
+           with their own actual capture brackets rather than CPU timestamps.
+           Prints "<window_s> <before_ms> <after_ms>" for the shell harness.
 
   report   per (pid, role) CPU between two thread snapshots, as a percentage
            of one core.  Threads that exist in only one snapshot, or whose TID
@@ -488,10 +487,11 @@ def process_info(pid):
     return info
 
 
-def extended_snapshot(pids, affinity, started_ns):
+def extended_snapshot(pids, affinity, thread_started_ns, thread_finished_ns):
     begin = time.monotonic_ns()
     snap = {
-        "monotonic_ns": started_ns,
+        "thread_capture_start_ns": thread_started_ns,
+        "thread_capture_end_ns": thread_finished_ns,
         "clk_tck": CLK_TCK,
         "host": {
             "nproc_online": os.cpu_count(),
@@ -513,7 +513,11 @@ def extended_snapshot(pids, affinity, started_ns):
         "processes": {str(pid): process_info(pid) for pid in pids},
         "threads": affinity,
     }
-    snap["capture_ms"] = (time.monotonic_ns() - begin) / 1e6
+    end = time.monotonic_ns()
+    snap["monotonic_ns"] = (begin + end) // 2
+    snap["capture_start_ns"] = begin
+    snap["capture_end_ns"] = end
+    snap["capture_ms"] = (end - begin) / 1e6
     return snap
 
 
@@ -530,6 +534,17 @@ def boundary(args, phase):
         time.sleep(0.001)
 
 
+def captured(args, phase, started, finished):
+    if not args.boundary_dir:
+        return
+    from pathlib import Path
+    path = Path(args.boundary_dir) / f"cpu.captured.{phase}.json"
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"capture_start_ns": started,
+                                     "capture_end_ns": finished}))
+    os.replace(temporary, path)
+
+
 def sample(args):
     if args.sleep < 0:
         raise SystemExit("--sleep must be non-negative")
@@ -537,24 +552,28 @@ def sample(args):
     extended = bool(args.extended_before and args.extended_after)
     cpu0 = time.process_time_ns()
 
-    b_start, b_end, rows, aff = thread_snapshot(args.pids, roles, extended)
-    write_threads(args.before, b_start, b_end, rows)
     if extended:
+        host_start, host_end, _, affinity = thread_snapshot(args.pids, roles, True)
         with open(args.extended_before, "w", encoding="utf-8") as out:
-            json.dump(extended_snapshot(args.pids, aff, b_start), out)
+            json.dump(extended_snapshot(args.pids, affinity, host_start, host_end), out)
+    boundary(args, "before")
+    b_start, b_end, rows, _ = thread_snapshot(args.pids, roles, False)
+    write_threads(args.before, b_start, b_end, rows)
+    captured(args, "before", b_start, b_end)
     overhead_before = time.process_time_ns() - cpu0
 
-    boundary(args, "before")
-
-    time.sleep(args.sleep)
-
-    cpu1 = time.process_time_ns()
-    a_start, a_end, rows, aff = thread_snapshot(args.pids, roles, extended)
-    write_threads(args.after, a_start, a_end, rows)
+    # Both hosts wait at the closing barrier before capturing. SSH readiness,
+    # receiver signals and joining monitors never become part of a CPU sample.
+    time.sleep(max(0.0, (b_start + b_end) / 2e9 + args.sleep - time.monotonic()))
     boundary(args, "after")
+    cpu1 = time.process_time_ns()
+    a_start, a_end, rows, _ = thread_snapshot(args.pids, roles, False)
+    write_threads(args.after, a_start, a_end, rows)
+    captured(args, "after", a_start, a_end)
 
     if extended:
-        snap = extended_snapshot(args.pids, aff, a_start)
+        host_start, host_end, _, affinity = thread_snapshot(args.pids, roles, True)
+        snap = extended_snapshot(args.pids, affinity, host_start, host_end)
         snap["sampler_cpu_ms"] = {
             "before": overhead_before / 1e6,
             "after": (time.process_time_ns() - cpu1) / 1e6,

@@ -8,11 +8,11 @@ instructions are tested rather than believed.
 ## 1. From source
 
 Prerequisites (Debian/Ubuntu; on Arch, `base-devel pkgconf pcre2 zlib openssl
-srt ffmpeg`):
+c-ares srt ffmpeg`):
 
 ```sh
 sudo apt-get install -y build-essential pkg-config curl ca-certificates \
-    python3 libpcre2-dev zlib1g-dev libssl-dev libsrt-openssl-dev ffmpeg
+    python3 libpcre2-dev zlib1g-dev libssl-dev libc-ares-dev libsrt-openssl-dev ffmpeg
 ```
 
 `ffmpeg` is what the examples publish with; `python3` is what they parse the

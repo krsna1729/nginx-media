@@ -415,14 +415,14 @@ ngx_media_core_create_conf(ngx_cycle_t *cycle)
 static char *
 ngx_media_core_init_conf(ngx_cycle_t *cycle, void *conf)
 {
-    ngx_uint_t  workers;
-
     (void) conf;
-    workers = ngx_media_owner_worker_count(cycle);
-    if (workers > NGX_MEDIA_ROUTE_MAX_WORKERS) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                      "media: worker_processes %ui exceeds routing limit %ui",
-                      workers, (ngx_uint_t) NGX_MEDIA_ROUTE_MAX_WORKERS);
+
+    /*
+     * init_module failures terminate the master; configuration failures keep
+     * its active cycle.  Allocate the new routing matrix here so descriptor
+     * exhaustion rejects a reload without retiring the old generation.
+     */
+    if (ngx_media_route_master_init(cycle, cycle->log) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
 
@@ -703,11 +703,6 @@ ngx_media_core_init_module(ngx_cycle_t *cycle)
      */
     if (ngx_media_owner_dir_shm_create(cycle, NGX_MEDIA_OWNER_DIR_SLOTS,
                                        cycle->log) != NGX_OK) {
-        return NGX_ERROR;
-    }
-
-    /* worker-to-worker routing pairs are inherited across the fork */
-    if (ngx_media_route_master_init(cycle, cycle->log) != NGX_OK) {
         return NGX_ERROR;
     }
 

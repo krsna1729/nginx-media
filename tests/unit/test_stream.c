@@ -1,5 +1,6 @@
 #include "ngx_media_test.h"
 #include "ngx_media_stream.h"
+#include "ngx_media_graph.h"
 
 #define STREAM_UNITS 64
 
@@ -506,6 +507,64 @@ main(void)
         TEST_ASSERT_EQ_U64(stream.revision, 102);
 
         ngx_media_stream_source_remove(&stream, source);
+    }
+
+    TEST_CASE("graph admission bounds do not mutate the stream");
+    {
+        u_char               bytes[NGX_MEDIA_GRAPH_MAX_NAME + 1];
+        ngx_str_t            maximum = { NGX_MEDIA_GRAPH_MAX_NAME, bytes };
+        ngx_str_t            excess = { sizeof(bytes), bytes };
+        ngx_media_source_t  *source;
+        ngx_media_stream_t   boundary;
+        ngx_int_t            rc;
+        ngx_uint_t           count;
+        uint64_t             revision;
+        size_t               allocations;
+
+        memset(bytes, 'x', sizeof(bytes));
+        rc = ngx_media_stream_init(&boundary, pool, NULL, &maximum, &maximum,
+                                   &feed_conf);
+        TEST_ASSERT_EQ_INT(rc, NGX_OK);
+        if (rc == NGX_OK) {
+            ngx_media_stream_touch(&boundary);
+            revision = boundary.revision;
+            allocations = ngx_media_test_allocs;
+            TEST_ASSERT_EQ_INT(ngx_media_stream_init(&boundary, pool, NULL,
+                                                     &excess, &maximum,
+                                                     &feed_conf), NGX_ERROR);
+            TEST_ASSERT_EQ_INT(ngx_media_stream_init(&boundary, pool, NULL,
+                                                     &maximum, &excess,
+                                                     &feed_conf), NGX_ERROR);
+            TEST_ASSERT_EQ_U64(boundary.revision, revision);
+            TEST_ASSERT_EQ_U64(boundary.application.len, maximum.len);
+            TEST_ASSERT_EQ_U64(boundary.name.len, maximum.len);
+            TEST_ASSERT_EQ_U64(ngx_media_test_allocs, allocations);
+            ngx_media_stream_destroy(&boundary);
+        }
+        source = ngx_media_stream_source_add(&stream, &maximum,
+                                            NGX_MEDIA_SOURCE_SRT,
+                                            UINT32_MAX, NULL);
+        TEST_ASSERT_NOT_NULL(source);
+        count = ngx_media_stream_source_count(&stream);
+        revision = stream.revision;
+        allocations = ngx_media_test_allocs;
+        TEST_ASSERT_NULL(ngx_media_stream_source_add(&stream, &excess,
+                                                     NGX_MEDIA_SOURCE_SRT,
+                                                     0, NULL));
+        TEST_ASSERT_EQ_U64(ngx_media_stream_source_count(&stream), count);
+        TEST_ASSERT_EQ_U64(stream.revision, revision);
+        TEST_ASSERT_EQ_U64(ngx_media_test_allocs, allocations);
+#if UINTPTR_MAX > UINT32_MAX
+        TEST_ASSERT_NULL(ngx_media_stream_source_add(&stream, S("overflow"),
+                                                     NGX_MEDIA_SOURCE_SRT,
+                                                     (ngx_uint_t) UINT32_MAX + 1,
+                                                     NULL));
+        TEST_ASSERT_EQ_U64(ngx_media_stream_source_count(&stream), count);
+        TEST_ASSERT_EQ_U64(stream.revision, revision);
+#endif
+        if (source != NULL) {
+            ngx_media_stream_source_remove(&stream, source);
+        }
     }
 
     TEST_CASE("teardown");

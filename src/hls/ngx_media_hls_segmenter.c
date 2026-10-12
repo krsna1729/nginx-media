@@ -1,5 +1,6 @@
 #include "ngx_media_hls_segmenter.h"
 #include "ngx_media_hls_push.h"
+#include "ngx_media_graph.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -8,6 +9,103 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+
+static ngx_uint_t
+ngx_media_hls_plain_name(const ngx_str_t *name)
+{
+    size_t  i;
+    u_char  c;
+
+    if (name->len == 0 || name->len > 255) {
+        return 0;
+    }
+    for (i = 0; i < name->len; i++) {
+        c = name->data[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+              || (c >= '0' && c <= '9') || c == '-' || c == '_'))
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static size_t
+ngx_media_hls_identity_size(const ngx_str_t *name, ngx_uint_t plain)
+{
+    size_t  digits = 1, n;
+
+    if (plain) {
+        return 1 + name->len;
+    }
+    for (n = name->len; n >= 10; n /= 10) {
+        digits++;
+    }
+    return 2 + digits + (name->len ? 1 + name->len * 2
+                                      + (name->len - 1) / 120 : 0);
+}
+
+static u_char *
+ngx_media_hls_identity_write(u_char *p, const ngx_str_t *name, ngx_uint_t plain)
+{
+    static const u_char  hex[] = "0123456789abcdef";
+    size_t              i;
+
+    *p++ = '/';
+    if (plain) {
+        ngx_memcpy(p, name->data, name->len);
+        return p + name->len;
+    }
+    p += sprintf((char *) p, "~%zu", name->len);
+    for (i = 0; i < name->len; i++) {
+        if (i % 120 == 0) {
+            *p++ = '/';
+        }
+        *p++ = hex[name->data[i] >> 4];
+        *p++ = hex[name->data[i] & 15];
+    }
+    return p;
+}
+
+ngx_str_t *
+ngx_media_hls_program_dir(ngx_pool_t *pool, const ngx_str_t *root,
+    const ngx_str_t *application, const ngx_str_t *name)
+{
+    ngx_str_t  *path;
+    size_t      extra;
+    u_char     *p;
+    ngx_uint_t  app_plain, name_plain;
+
+    /* Program identities have the graph's 256-byte admission ceiling. */
+    if (pool == NULL || root == NULL || application == NULL || name == NULL
+        || application->len > NGX_MEDIA_GRAPH_MAX_NAME
+        || name->len == 0 || name->len > NGX_MEDIA_GRAPH_MAX_NAME)
+    {
+        return NULL;
+    }
+    app_plain = ngx_media_hls_plain_name(application);
+    name_plain = ngx_media_hls_plain_name(name);
+    extra = ngx_media_hls_identity_size(application, app_plain)
+            + ngx_media_hls_identity_size(name, name_plain);
+    if (root->len > SIZE_MAX - extra - 1) {
+        return NULL;
+    }
+    path = ngx_pcalloc(pool, sizeof(*path));
+    if (path == NULL) {
+        return NULL;
+    }
+    path->len = root->len + extra;
+    path->data = ngx_pnalloc(pool, path->len + 1);
+    if (path->data == NULL) {
+        return NULL;
+    }
+    p = path->data;
+    ngx_memcpy(p, root->data, root->len);
+    p = ngx_media_hls_identity_write(p + root->len, application, app_plain);
+    p = ngx_media_hls_identity_write(p, name, name_plain);
+    *p = '\0';
+    return path;
+}
 #define NGX_MEDIA_HLS_MS(dts)  ((ngx_msec_t) ((dts) / 90))
 
 static ngx_int_t ngx_media_hls_write_file(ngx_media_hls_t *hls,

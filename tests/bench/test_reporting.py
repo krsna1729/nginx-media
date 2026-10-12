@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -395,6 +396,140 @@ def test_reader_reports_observed_not_threshold(work):
         server.server_close()
 
 
+def test_reader_delayed_start_preserves_in_window_segments(work):
+    """Expire the ready tail, then hold a refresh across the start boundary."""
+    functions = [bash_function(name) for name in
+                 ("receiver_kill", "receiver_file_ready", "receiver_fetch",
+                  "capacity_capture_gate", "capacity_hls_reader_boundary")]
+    if any(function is None for function in functions):
+        return
+    boundary_script = "\n".join(functions) + r'''
+set -euo pipefail
+CAPACITY_RECEIVER_CONFIG=""
+CAPACITY_RECEIVER_KILL=""
+CAPACITY_RECEIVER_FILE_TEST=""
+CAPACITY_RECEIVER_FETCH=""
+capacity_hls_reader_boundary "$1" "$2" "$3"
+'''
+    across_start = threading.Event()
+    release = threading.Event()
+    delivered = threading.Event()
+    seen_segments = []
+
+    class DelayedPlaylistHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        playlist_requests = 0
+
+        def do_GET(self):
+            if self.path.startswith("/media/seg"):
+                name = self.path.split("?", 1)[0].rsplit("/", 1)[-1]
+                seen_segments.append(name)
+                payload = SEGMENT
+            else:
+                type(self).playlist_requests += 1
+                request = self.playlist_requests
+                if request == 1:
+                    first, last = 0, 0
+                elif request == 2:
+                    first, last = 3, 5
+                else:
+                    first, last = 4, 7
+                    if request == 3:
+                        across_start.set()
+                        release.wait(10)
+                    else:
+                        # The next playlist request follows completed receipt
+                        # accounting for both measured segments.
+                        delivered.set()
+                body = ["#EXTM3U", f"#EXT-X-MEDIA-SEQUENCE:{first}"]
+                for index in range(first, last + 1):
+                    body.extend(("#EXTINF:0.100,", f"seg{index:05d}.ts"))
+                payload = ("\n".join(body) + "\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    os.makedirs(work, exist_ok=True)
+    report = os.path.join(work, "hls-readers.csv")
+    ready = os.path.join(work, "hls.ready")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DelayedPlaylistHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    process = subprocess.Popen(
+        [sys.executable, READERS, "--url",
+         f"http://127.0.0.1:{server.server_port}/media/playlist.m3u8",
+         "--readers", "1", "--duration", "10", "--report", report,
+         "--ready-file", ready, "--reference-bps", "1",
+         "--poll-interval", "0.05", "--clock-domain", "receiver-monotonic"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not os.path.exists(ready) and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        check(os.path.exists(ready), "delayed-start HLS reader must finish warmup")
+        refreshed = across_start.wait(5)
+        check(refreshed, "HLS reader must refresh an expired tail before measurement")
+        if not refreshed:
+            return
+        check(seen_segments == ["seg00000.ts"],
+              f"pre-start playlist refresh must not count delivery: {seen_segments}")
+        boundaries = {}
+        for phase in ("start", "end"):
+            if phase == "end":
+                release.set()
+                check(delivered.wait(5), "HLS reader must deliver segments from the cross-start playlist")
+            begin = time.monotonic_ns()
+            result = run(["bash", "-c", boundary_script, "hls-boundary",
+                          str(process.pid), report, phase], timeout=10)
+            end = time.monotonic_ns()
+            check(result.returncode == 0,
+                  f"nonconfig reader-clock {phase} boundary failed: {result.stderr}")
+            if result.returncode != 0:
+                return
+            ack = read_json(report + "." + phase + ".json")
+            bracket = read_json(report + "." + phase + ".json.request.json")
+            check(begin <= bracket["request_ns"] <= ack["native_ns"]
+                  <= bracket["reply_ns"] <= end,
+                  f"{phase} must record its actual signal/acknowledgment bracket")
+            boundaries[phase] = (ack, bracket)
+        check(process.poll() is None,
+              "sealed HLS reader must remain alive for the closing CPU capture")
+        process.terminate()
+        out, err = process.communicate(timeout=15)
+        check(process.returncode == 0, f"delayed-start HLS reader failed: {err}")
+        window = read_json(os.path.join(work, "hls-readers.measurement.window"))
+        check(window["clock_domain"] == "controller-monotonic",
+              "nonconfig reader-clock boundaries must map onto the controller clock")
+        for phase, (ack, bracket) in boundaries.items():
+            check(window[phase + "_ns"] == (bracket["request_ns"] + bracket["reply_ns"]) // 2
+                  and window[phase + "_uncertainty_ns"] ==
+                  (bracket["reply_ns"] - bracket["request_ns"]) // 2
+                  and window["native_" + phase + "_ns"] == ack["native_ns"],
+                  f"{phase} must preserve native time and map the actual request bracket")
+        values = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+        check(values.get("relative_quality_pass") == "yes",
+              f"delayed-start HLS must pass without false sequence gaps: {out}")
+        with open(report, newline="", encoding="utf-8") as source:
+            row, = csv.DictReader(source)
+        check(row["sequence_gaps"] == "0", "expired pre-start tails must not create sequence gaps")
+        expected = {"seg00006.ts": len(SEGMENT), "seg00007.ts": len(SEGMENT)}
+        check(json.loads(row["delivered_segments"]) == expected,
+              "a playlist fetched across start must not skip either in-window segment")
+        check(int(row["bytes_received"]) == 2 * len(SEGMENT)
+              and seen_segments == ["seg00000.ts", "seg00006.ts", "seg00007.ts"],
+              "raw throughput must count only actual in-window network receipts")
+    finally:
+        release.set()
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=10)
+        server.shutdown()
+        server.server_close()
+
+
 def test_reader_percentile_helpers():
     module = load_module(READERS, "hls_capacity_readers_under_test")
     check(module.percentile([], 0.5) is None, "empty percentile is None")
@@ -493,7 +628,7 @@ def hls_reader_case(work, ratios=(0.99, 0.97, 0.93), threshold=0.95,
 def bundle_for(case_dir):
     module = load_module(DIAGNOSTICS, "capacity_diagnostics_under_test")
     delivery = module.delivery_section(case_dir)
-    bundle = {"intervals": {"media_measurement": {"value": 30.0}},
+    bundle = {"intervals": {"stream_counter_measurement": {"value": 30.0}},
               "cpu": {"interval": {"value": 10.0}, "window": measured_window(),
                       "by_kind_pct_of_core": {"value": {"worker": 100.0,
                                                       "hls-readers": 20.0,
@@ -669,7 +804,7 @@ def test_efficiency_refuses_a_sender_only_counter(work):
         "quality_average_delivery_ratio_min": "0.998",
     })
     module = load_module(DIAGNOSTICS, "capacity_diagnostics_sender_only")
-    bundle = {"intervals": {"media_measurement": {"value": 30.0}},
+    bundle = {"intervals": {"stream_counter_measurement": {"value": 30.0}},
               "cpu": {"by_kind_pct_of_core": {"value": {"worker": 100.0}}},
               "delivery": module.delivery_section(case)}
     efficiency = module.efficiency_section(bundle)
@@ -1382,10 +1517,14 @@ def test_run_queue_pressure_is_recorded(work):
     before = {"host": {"cpu_pressure": {"some_total": 1_000_000.0,
                                         "full_total": 500_000.0},
                        "procs_running": 3}}
+    before.update(capture_start_ns=900_000_000, monotonic_ns=1_000_000_000,
+                  capture_end_ns=1_100_000_000)
     after = {"host": {"cpu_pressure": {"some_total": 1_500_000.0,
                                        "full_total": 700_000.0},
                       "procs_running": 9}}
-    pressure = module.run_queue_pressure(before, after, 2.0)
+    after.update(capture_start_ns=2_900_000_000, monotonic_ns=3_000_000_000,
+                 capture_end_ns=3_100_000_000)
+    pressure = module.run_queue_pressure(before, after)
     check_close(pressure["some_stalled_pct"], 25.0,
                 "a quarter of the window stalled on CPU")
     check_close(pressure["some_stalled_s"], 0.5, "stalled seconds")
@@ -1393,8 +1532,14 @@ def test_run_queue_pressure_is_recorded(work):
     check(pressure["procs_running_before"] == 3
           and pressure["procs_running_after"] == 9,
           f"queue depth at both edges: {pressure}")
-    check(module.run_queue_pressure({}, {}, 2.0) == {},
+    check(module.run_queue_pressure({}, {}) == {},
           "a host without PSI reports nothing, never zero")
+    unbracketed = dict(after)
+    del unbracketed["capture_start_ns"]
+    pressure = module.run_queue_pressure(before, unbracketed)
+    check("some_stalled_pct" not in pressure
+          and pressure["procs_running_after"] == 9,
+          "unavailable host duration retains queue depth, not an invented pressure share")
 
 
 def test_per_lane_rate_keeps_workers_apart(work):
@@ -1583,8 +1728,11 @@ def test_gate_requires_positive_evidence_of_the_floor_rung(work):
 
 
 def write_rows(path, header, rows):
-    write(path, ",".join(header) + "\n"
-          + "".join(",".join(str(v) for v in row) + "\n" for row in rows))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as output:
+        writer = csv.writer(output)
+        writer.writerow(header)
+        writer.writerows(rows)
 
 
 def judge_passed(result):
@@ -1655,12 +1803,123 @@ def run_srt_judge(p, *extra):
                 "--reference-bps", "1000000"] + list(extra))
 
 
+def test_srt_queue_sampler_waits_for_baseline(work):
+    """The real CLI must stay ready but idle until the opening release."""
+    module = load_module(SRT_JUDGE, "srt_queue_sampler_metrics")
+
+    class QueueHandler(BaseHTTPRequestHandler):
+        requests = 0
+
+        def do_GET(self):
+            type(self).requests += 1
+            payload = ('nginx_media_worker_info{pid="4242"} 1\n' + "".join(
+                f'{name}{{worker="0",shard="0"}} '
+                f'{1 if name.endswith("_destinations") else 0}\n'
+                for name in sorted(module.QUEUE_METRICS))).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), QueueHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        for start in (False, True):
+            case = os.path.join(work, "queue-released" if start else "queue-aborted")
+            os.makedirs(case, exist_ok=True)
+            output = os.path.join(case, "queues.csv")
+            ready = os.path.join(case, "queue.ready")
+            baseline = os.path.join(case, "queue.baseline")
+            process = subprocess.Popen(
+                [sys.executable, SRT_JUDGE, "sample-queues", str(server.server_port),
+                 output, "4242", "--ready-file", ready, "--baseline-ready", baseline],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+            def rows():
+                with open(output, newline="", encoding="utf-8") as source:
+                    return list(csv.DictReader(source))
+
+            try:
+                deadline = time.monotonic() + 10
+                while not os.path.exists(ready) and process.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                check(os.path.exists(ready), "queue sampler must be ready before release")
+                if not os.path.exists(ready):
+                    continue
+                time.sleep(0.25)
+                check(process.poll() is None and QueueHandler.requests == 0 and rows() == [],
+                      "ready queue sampler must do no queue accounting before baseline release")
+                release_ns = time.monotonic_ns()
+                if start:
+                    write(baseline, "")
+                    deadline = time.monotonic() + 10
+                    while len(rows()) < 3 and process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                closing_ns = time.monotonic_ns()
+                process.send_signal(signal.SIGTERM)
+                out, err = process.communicate(timeout=10)
+                check(process.returncode == 0, f"queue sampler termination failed: {out}{err}")
+                sampled = rows()
+                if not start:
+                    check(sampled == [] and QueueHandler.requests == 0,
+                          "closing before release must leave queue evidence empty")
+                    continue
+                check(len(sampled) >= 3, "released queue sampler must cover a complete measurement")
+                if len(sampled) < 3:
+                    continue
+                stamps = [int(row["sample_ns"]) for row in sampled]
+                check([int(row["round_id"]) for row in sampled] == list(range(len(sampled)))
+                      and all(row["worker_pid"] == "4242" and float(row["destinations"]) == 1
+                              for row in sampled),
+                      "released samples must retain complete contiguous worker/shard rounds")
+                check(0 <= stamps[0] - release_ns <= 2_000_000_000
+                      and 0 <= closing_ns - stamps[-1] <= 2_000_000_000,
+                      "queue timestamps must cover opening release and closing within the unchanged bound")
+                check(all(0 < right - left <= 2_000_000_000
+                          for left, right in zip(stamps, stamps[1:])),
+                      "queue sampling cadence must retain positive bounded intervals")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=10)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_srt_judge_rejects_non_finite_inputs(work):
     """A comparison with NaN is false both ways, so a NaN threshold,
     reference or measurement used to make every check beneath it pass."""
     good = srt_judge_rung(os.path.join(work, "srt-good"))
     check(judge_passed(run_srt_judge(good)),
           "control: a full-rate rung must pass the judge")
+    remote = srt_judge_rung(os.path.join(work, "srt-independent-clock"))
+    for name in ("baseline.csv", "final.csv", "intervals.csv"):
+        with open(remote(name), newline="", encoding="utf-8") as source:
+            reader = csv.DictReader(source)
+            fields, rows = reader.fieldnames, list(reader)
+        for row in rows:
+            for field in ("snapshot_ns", "start_ns", "end_ns"):
+                if field in row:
+                    row[field] = int(row[field]) + 1000 * 10**9
+        write_rows(remote(name), fields, [[row[field] for field in fields] for row in rows])
+    check(run_srt_judge(remote, "--clock-domain", "receiver-monotonic").returncode != 0,
+          "native receiver epoch is never compared directly with controller queue clocks")
+    mapped = {"clock_domain": "controller-monotonic", "start_ns": 100 * 10**9,
+              "end_ns": 110 * 10**9, "start_uncertainty_ns": 0, "end_uncertainty_ns": 0,
+              "native_start_ns": 1100 * 10**9, "native_end_ns": 1110 * 10**9}
+    write_json(remote("receiver.window.json"), mapped)
+    check(judge_passed(run_srt_judge(remote, "--clock-domain", "receiver-monotonic",
+                                   "--queue-window", remote("receiver.window.json"))),
+          "acknowledged controller mapping permits independent receiver epoch queue coverage")
+    mapped["native_end_ns"] += 1
+    write_json(remote("receiver.window.json"), mapped)
+    check(run_srt_judge(remote, "--clock-domain", "receiver-monotonic",
+                        "--queue-window", remote("receiver.window.json")).returncode != 0,
+          "sender queue mapping must identify actual native receiver boundaries")
     short = srt_judge_rung(os.path.join(work, "srt-short"), delivered=625_000)
     check(not judge_passed(run_srt_judge(short, "--interval-floor", "0")),
           "control: half the reference rate must fail the average ratio")
@@ -1915,8 +2174,8 @@ def test_hls_push_judge_rejects_non_finite_inputs(work):
 
 
 def bash_function(name):
-    match = re.search(rf"^{name}\(\) \{{.*?^\}}\n", read_text(HARNESS),
-                      re.M | re.S)
+    match = re.search(rf"^(?P<indent> *){name}\(\) \{{.*?^(?P=indent)\}}\n",
+                      read_text(HARNESS), re.M | re.S)
     check(match is not None, f"the harness must define {name}")
     return match.group(0) if match else None
 
@@ -1927,13 +2186,16 @@ def test_protocol_samplers_stop_independently(work):
           "signal.signal(signal.SIGTERM, lambda *_: sys.exit(int(sys.argv[2])))\n"
           "open(sys.argv[1], 'w').write('ready')\n"
           "signal.pause()\n")
-    function = bash_function("capacity_quality_stop_monitors")
-    if function is None:
+    functions = [bash_function(name) for name in
+                 ("receiver_kill", "receiver_wait", "capacity_quality_stop_monitors")]
+    if any(function is None for function in functions):
         return
-    script = function + r'''
+    script = "\n".join(functions) + r'''
 set -euo pipefail
 QUALITY_MONITORS=()
-trap 'kill -TERM "${QUALITY_MONITORS[@]}" 2>/dev/null || true; wait || true' EXIT
+OWNED_MONITORS=()
+CAPACITY_RECEIVER_KILL=""
+trap 'kill -TERM "${OWNED_MONITORS[@]}" 2>/dev/null || true; wait || true' EXIT
 ready() {
     for (( n=0; n<300; n++ )); do
         [ -s "$1" ] && return 0
@@ -1944,9 +2206,11 @@ ready() {
 "$PYTHON" "$1" "$2/rtmp.ready" 0 &
 rtmp=$!
 QUALITY_MONITORS+=( "$rtmp" )
+OWNED_MONITORS+=( "$rtmp" )
 "$PYTHON" "$1" "$2/srt.ready" 0 &
 srt=$!
 QUALITY_MONITORS+=( "$srt" )
+OWNED_MONITORS+=( "$srt" )
 ready "$2/rtmp.ready"
 ready "$2/srt.ready"
 capacity_quality_stop_monitors "$rtmp"
@@ -1958,15 +2222,164 @@ if kill -0 "$srt" 2>/dev/null; then exit 1; fi
 "$PYTHON" "$1" "$2/failed.ready" 7 &
 failed=$!
 QUALITY_MONITORS+=( "$failed" )
+OWNED_MONITORS+=( "$failed" )
 ready "$2/failed.ready"
 if capacity_quality_stop_monitors "$failed"; then exit 1; fi
 [ "${#QUALITY_MONITORS[@]}" -eq 0 ]
 '''
-    result = run(["bash", "-c", script, "sampler-test", helper, work],
+    result = run(["timeout", "--kill-after=2", "10", "bash", "-c", script,
+                  "sampler-test", helper, work],
                  env=dict(os.environ, PYTHON=sys.executable))
     check(result.returncode == 0,
           f"stopping RTMP must leave SRT alive and sampler errors must propagate: "
           f"{result.stdout}{result.stderr}")
+
+
+def test_cpu_window_prepares_every_capture_before_release(work):
+    """Actual CPU/sink captures stay parked through preparation and aborts."""
+    functions = [bash_function(name) for name in (
+        "cpu_window", "capacity_capture_gate", "capacity_window_boundary",
+        "capacity_hls_push_snapshot", "capacity_sampler_ready",
+        "capacity_rtmp_sink_metrics")]
+    if any(function is None for function in functions):
+        return
+    local_gate = functions[1].replace("capacity_capture_gate", "local_capture_gate", 1)
+    script = "\n".join(functions + [local_gate]) + r'''
+set -euo pipefail
+case_dir="$1"
+mode="$2"
+ROOT="$3"
+RUN="$case_dir"
+CPU_SNAPSHOT_DIR="$case_dir"
+CPU_BOUNDARY_CALLBACK=capacity_window_boundary
+CAPACITY_RECEIVER_CONFIG=""
+CAPACITY_RECEIVER_ADDR=127.0.0.1
+srt_destinations=0
+rtmp_destinations=0
+hls_push_destinations=1
+hls_push_sink_port="$4"
+hls_push_sink_pid="$5"
+hls_pid=""
+quality_mode=no
+RTMP_SINK_WORKER_PID=""
+worker_pids() { printf '%s\n' "$hls_push_sink_pid"; }
+write_cpu_roles() { : >"$RUN/roles"; }
+capacity_capture_gate() {
+    local suffix=before
+    [[ "$CPU_CAPTURE_READY_DIR" != *.after ]] || suffix=after
+    if [[ "$CAPTURE_READY_FILE" == */hls_push.ready ]] \
+        && { [ "$mode" = success ] || [ "$mode" = "fail-$suffix" ]; }; then
+        printf '%s\n' "$BASHPID" >"$case_dir/preparation.pid.$suffix"
+        : >"$case_dir/preparing.$suffix"
+        until [ -f "$case_dir/preparation.release.$suffix" ]; do sleep 0.005; done
+        [ "$mode" != "fail-$suffix" ] || return 7
+    fi
+    local_capture_gate "$@"
+}
+cpu_window 0.25 "$hls_push_sink_pid"
+'''
+    # Run the production sink in its own process, with an ephemeral port.
+    launcher = (
+        "import socket,sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from hls_push_capacity import serve\n"
+        "with socket.socket() as sock:\n"
+        "    sock.bind(('127.0.0.1', 0))\n"
+        "    port = sock.getsockname()[1]\n"
+        "open(sys.argv[2], 'w').write(str(port))\n"
+        "serve(port)\n")
+    os.makedirs(work, exist_ok=True)
+    port_file = os.path.join(work, "sink.port")
+    sink = subprocess.Popen([sys.executable, "-c", launcher, HERE, port_file],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    def wait_for(path, process):
+        deadline = time.monotonic() + 10
+        while not os.path.exists(path) and process.poll() is None:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.005)
+        return os.path.exists(path)
+
+    try:
+        check(wait_for(port_file, sink), "production HLS push sink must publish its port")
+        if not os.path.exists(port_file):
+            return
+        port = read_text(port_file)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if run(["curl", "-fsS", f"http://127.0.0.1:{port}/__health"]).returncode == 0:
+                break
+            time.sleep(0.01)
+        else:
+            check(False, "production HLS push sink must become reachable")
+            return
+        for mode in ("success", "fail-before", "fail-after"):
+            case = os.path.join(work, mode)
+            os.makedirs(case, exist_ok=True)
+            process = subprocess.Popen(
+                ["bash", "-c", script, "capture-window", case, mode, ROOT,
+                 port, str(sink.pid)], stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True,
+                env=dict(os.environ, PYTHON=sys.executable), start_new_session=True)
+            try:
+                released = {}
+                phases = ("before", "after") if mode == "success" else (mode[5:],)
+                for phase in phases:
+                    preparing = os.path.join(case, f"preparing.{phase}")
+                    check(wait_for(preparing, process),
+                          f"{mode}: native preparation must be observed before release")
+                    if not os.path.exists(preparing):
+                        break
+                    if mode != "success":
+                        check(wait_for(os.path.join(case, f"cpu.ready.{phase}"), process),
+                              f"{mode}: the CPU sampler must already be parked")
+                    time.sleep(0.1)
+                    check(not os.path.exists(os.path.join(case, f"cpu.captured.{phase}.json"))
+                          and not os.path.exists(os.path.join(case, f"hls-push.{phase}.json"))
+                          and not os.path.exists(os.path.join(case, f"cpu.release.{phase}")),
+                          f"{mode}: neither CPU nor native counters may capture during preparation")
+                    released[phase] = time.monotonic_ns()
+                    write(os.path.join(case, f"preparation.release.{phase}"), "")
+                out, err = process.communicate(timeout=10)
+                check((process.returncode == 0) == (mode == "success"),
+                      f"{mode}: preparation failure must abort accounting: {out}{err}")
+                if mode == "success" and process.returncode == 0:
+                    window = read_json(os.path.join(case, "hls-push.measurement.window"))
+                    for phase, edge in (("before", "start"), ("after", "end")):
+                        cpu = read_json(os.path.join(case, f"cpu.captured.{phase}.json"))
+                        native = window[f"native_{edge}_ns"]
+                        check(native >= released[phase]
+                              and cpu["capture_start_ns"] >= released[phase],
+                              f"{edge}: CPU/native timestamps must follow actual preparation release")
+                    check(window["native_end_ns"] - window["native_start_ns"] >= 250_000_000,
+                          "native HLS push interval must retain the requested quarter-second")
+                elif mode != "success":
+                    phase = mode[5:]
+                    check(not os.path.exists(os.path.join(case, f"cpu.release.{phase}"))
+                          and not os.path.exists(os.path.join(
+                              case, f"capture.{phase}", "protocols.ready")),
+                          f"{mode}: a failed child must not open its accounting boundary")
+                    pid_file = os.path.join(case, f"preparation.pid.{phase}")
+                    if os.path.exists(pid_file):
+                        parked_pid = int(read_text(pid_file))
+                        try:
+                            os.kill(parked_pid, 0)
+                        except ProcessLookupError:
+                            pass
+                        else:
+                            check(False, f"{mode}: prepared native child was not reaped")
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate()
+    finally:
+        sink.terminate()
+        try:
+            sink.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            sink.kill()
+            sink.communicate()
 
 
 def test_calibration_is_stored_only_from_a_passing_positive_rung(work):
@@ -2520,12 +2933,12 @@ def test_absolute_media_calibration(work):
     write_json(p("sink.after.json"), sink)
     check(not judge_passed(run_hls_push_judge(p, "--reference-bps", "0")),
           "common-mode half-rate producer and every HLS push destination cannot calibrate")
-    def reader_judge():
+    def reader_judge(*extra):
         return run([sys.executable, READERS, "judge", "--report", p("readers.csv"),
                     "--prepared-media", p("prepared-media.json"),
                     "--produced-segments", p("hls-production.json"),
                     "--measurement-window", p("cpu.before"), p("cpu.after"),
-                    "--reference-bps", "0", "--min-delivery-ratio", "0.95"])
+                    "--reference-bps", "0", "--min-delivery-ratio", "0.95", *extra])
     delivered = {name: entry["bytes"] for name, entry in produced["segments"].items()}
     header = ("reader_id", "delivered_segments", "playlist_errors",
               "segment_errors", "sequence_gaps", "ts_sync_errors", "duration_s",
@@ -2548,6 +2961,37 @@ def test_absolute_media_calibration(work):
     result = reader_judge()
     check(result.returncode != 0 and "quality_measurement_valid=no" in result.stdout,
           "unknown native reader interval is setup failure, never fabricated alignment")
+    delivered = {name: entry["bytes"] for name, entry in produced["segments"].items()
+                 if entry["at"] >= 102.5}
+    write_rows(p("readers.csv"), header, [
+        (0, json.dumps(delivered), 0, 0, 0, 0, 7.5, 102500000000,
+         110000000000, sum(delivered.values()), len(delivered))])
+    check(judge_passed(reader_judge()),
+          "cuts before actual reader start are not missing in-window deliveries")
+    missing = dict(delivered)
+    del missing["seg2.ts"]
+    write_rows(p("readers.csv"), header, [
+        (0, json.dumps(missing), 0, 0, 0, 0, 7.5, 102500000000,
+         110000000000, sum(missing.values()), len(missing))])
+    check(not judge_passed(reader_judge()), "actual in-window segment loss still fails HLS quality")
+    write_rows(p("readers.csv"), header, [
+        (0, json.dumps(delivered), 0, 0, 0, 0, 7.5, 1102500000000,
+         1110000000000, sum(delivered.values()), len(delivered))])
+    result = reader_judge("--clock-domain", "receiver-monotonic")
+    check(result.returncode != 0, "unmapped remote HLS clock is setup failure")
+    mapping = {"clock_domain": "controller-monotonic", "start_ns": 102500000000,
+               "end_ns": 110000000000, "start_uncertainty_ns": 50000000,
+               "end_uncertainty_ns": 50000000, "native_start_ns": 1102500000000,
+               "native_end_ns": 1110000000000}
+    write_json(p("reader.window.json"), mapping)
+    check(judge_passed(reader_judge("--clock-domain", "receiver-monotonic",
+                                   "--receiver-window", p("reader.window.json"))),
+          "independent remote monotonic epoch uses acknowledged controller brackets")
+    mapping["native_start_ns"] += 1
+    write_json(p("reader.window.json"), mapping)
+    check(reader_judge("--clock-domain", "receiver-monotonic",
+                       "--receiver-window", p("reader.window.json")).returncode != 0,
+          "native counters cannot use a different receiver boundary acknowledgment")
 
 def test_distributed_preflight_rejects_invalid_instrument_before_limits(work):
     case = os.path.join(work, "distributed-invalid-probe")
@@ -2584,6 +3028,7 @@ def main():
         test_distributed_preflight_rejects_invalid_instrument_before_limits(work)
         test_reader_percentile_helpers()
         test_reader_reports_observed_not_threshold(os.path.join(work, "readers"))
+        test_reader_delayed_start_preserves_in_window_segments(os.path.join(work, "delayed-readers"))
         test_hls_origin_bundle_uses_observed_ratios(work)
         test_old_bundle_threshold_is_never_a_measurement(work)
         test_absent_and_malformed_inputs(work)
@@ -2616,10 +3061,13 @@ def main():
         test_per_cpu_busy_separates_idle_from_saturated(work)
         test_matrix_separates_observed_from_threshold(work)
         test_gate_requires_positive_evidence_of_the_floor_rung(work)
+        test_srt_queue_sampler_waits_for_baseline(work)
         test_srt_judge_rejects_non_finite_inputs(work)
         test_rtmp_judge_rejects_non_finite_inputs(work)
         test_receiver_evidence_is_required(work)
         test_protocol_samplers_stop_independently(work)
+        test_cpu_window_prepares_every_capture_before_release(
+            os.path.join(work, "prepared-captures"))
         test_hls_push_judge_rejects_non_finite_inputs(work)
         test_calibration_is_stored_only_from_a_passing_positive_rung(work)
         test_harness_runs_the_mixes_of_the_one_list(work)

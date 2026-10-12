@@ -13,8 +13,8 @@ ARG SRT_REPO=https://github.com/Haivision/srt
 ARG SRT_REF
 
 RUN apk add --no-cache \
-        bash build-base cmake ninja git linux-headers pkgconf curl \
-        openssl-dev openssl-libs-static \
+        bash build-base cmake ninja git linux-headers pkgconf curl python3 \
+        openssl-dev openssl-libs-static c-ares-dev \
         pcre2-dev pcre2-static \
         zlib-dev zlib-static
 

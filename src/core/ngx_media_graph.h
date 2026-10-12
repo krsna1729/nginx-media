@@ -71,10 +71,10 @@
 #define NGX_MEDIA_GRAPH_SOURCE_DELETE   4
 
 /*
- * Bounds on what a replica will accept from a peer.  A stream name is a URL
- * segment and a source path is a file, a directory or a URL; both are checked
- * before anything is allocated, so a malformed or hostile message cannot ask a
- * worker for an unbounded string.
+ * Shared admission and wire bounds.  Mutations are checked before desired
+ * state or revisions change; encoders and replicas enforce the same budgets.
+ * Operations carry individual objects, not arrays, so there is no wire count
+ * limit on the total graph.
  */
 #define NGX_MEDIA_GRAPH_MAX_NAME      256
 #define NGX_MEDIA_GRAPH_MAX_PATH      4096

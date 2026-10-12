@@ -34,7 +34,10 @@ done
 # be authenticated (a supplied temporary known_hosts works for loopback smoke).
 [[ "$RECEIVER" =~ ^([a-zA-Z0-9_.-]+@)?[a-zA-Z0-9_.-]+$ ]] || die 'invalid --receiver'
 [[ "$RECEIVER" != -* ]] || die 'invalid --receiver'
-[[ "$ADDR" =~ ^[a-zA-Z0-9_.-]+$ ]] || die 'invalid --addr (IPv4 or DNS name)'
+python3 - "$ADDR" <<'PY' || die 'invalid --addr (literal IPv4 required by the SRT receiver)'
+import ipaddress, sys
+ipaddress.IPv4Address(sys.argv[1])
+PY
 [[ "$SSH_PORT" =~ ^[0-9]+$ ]] && (( SSH_PORT >= 1 && SSH_PORT <= 65535 )) || die 'invalid SSH port'
 [[ "$SECONDS_PER_RUNG" =~ ^[0-9]+$ ]] && (( SECONDS_PER_RUNG >= 1 && SECONDS_PER_RUNG <= 3600 )) || die 'invalid duration'
 # Share the complete workload vocabulary with the local harness.
@@ -90,6 +93,7 @@ python3 - "$CONFIG" "$RECEIVER" "$ROOT" "$RUN" "$REMOTE_SOURCE" "$REMOTE_RUN" "$
 import json, os, sys
 path, host, local_root, local_run, remote_root, remote_run, *options = sys.argv[1:]
 json.dump(dict(host=host, local_root=local_root, local_run=local_run,
+               remote_workspace=os.path.dirname(remote_root),
                remote_root=remote_root, remote_run=remote_run, ssh_options=options,
                receiver_fingerprint=os.path.join(os.path.dirname(path), 'preflight/receiver.json'),
                native_nginx_fingerprint=os.path.join(os.path.dirname(path), 'preflight/receiver-nginx.json')),
@@ -113,15 +117,20 @@ PY
 rsync -a --protect-args --exclude=.git --exclude=.build -e "$RSYNC_SSH" \
     "$ROOT/" "$RECEIVER:$REMOTE_SOURCE/" || die 'source mirror failed'
 # Receiver binaries are compiled natively, never copied from the sender.
-remote bash -c 'set -e; command -v cc; command -v pkg-config; pkg-config --exists srt; cc -O2 -g -Wall -Wextra -Werror -std=c2x $(pkg-config --cflags srt) "$1/tests/bench/srt_fanout_sink.c" -o "$2/srt_fanout_sink" $(pkg-config --libs srt)' \
-    receiver-build "$REMOTE_SOURCE" "$REMOTE_RUN" >"$OUT/preflight/native-srt-build.log" 2>&1 \
+build_prefix=()
+[ -z "$RECEIVER_CPUS" ] || build_prefix=(taskset -c "$RECEIVER_CPUS")
+remote "${build_prefix[@]}" python3 "$REMOTE_SOURCE/scripts/build-capacity-receiver.py" \
+    --source "$REMOTE_SOURCE/tests/bench/srt_fanout_sink.c" --binary "$REMOTE_RUN/srt_fanout_sink" \
+    >"$OUT/preflight/native-srt-build.log" 2>&1 \
     || die 'native receiver SRT build failed; see native-srt-build.log'
+transport fetch "$RUN/srt_fanout_sink.provenance.json" || die 'native receiver provenance fetch failed'
+cp "$RUN/srt_fanout_sink.provenance.json" "$OUT/preflight/native-srt-build.json"
 need_rtmp=no
 for mix in $MIXES; do
     case "$mix" in *rtmp*|mixed-*) need_rtmp=yes;; esac
 done
 if [ "$need_rtmp" = yes ]; then
-    remote bash "$REMOTE_SOURCE/scripts/build-nginx.sh" >"$OUT/preflight/native-nginx-build.log" 2>&1 \
+    remote "${build_prefix[@]}" bash "$REMOTE_SOURCE/scripts/build-nginx.sh" >"$OUT/preflight/native-nginx-build.log" 2>&1 \
         || die 'native receiver nginx build failed; see native-nginx-build.log'
 fi
 # Host and binary fingerprints are fetched before judging, including the
@@ -145,11 +154,15 @@ fi
 probe_port="${PROBE_PORT:-$(( 30000 + RANDOM % 20000 ))}"
 probe_seconds="${PROBE_SECONDS:-8}" probe_threads="${PROBE_THREADS:-4}"
 [[ "$probe_seconds" =~ ^[0-9]+$ ]] && (( probe_seconds >= 3 )) || die 'probe seconds must be >=3'
-transport start "$RUN/preflight/probe.identity.json" python3 "$ROOT/tests/bench/capacity_preflight.py" probe \
+python3 "$ROOT/tests/bench/capacity_receiver.py" --config "$CONFIG" --owner-pid "$$" \
+    start "$RUN/preflight/probe.identity.json" python3 "$ROOT/tests/bench/capacity_preflight.py" probe \
     --listen --port "$probe_port" --seconds "$probe_seconds" --threads "$probe_threads" \
     --json "$RUN/preflight/rx.json" >"$OUT/preflight/rx.log" 2>&1 &
 probe_client=$!
-cleanup_probe() { transport signal "$RUN/preflight/probe.identity.json" -KILL 2>/dev/null || true; wait "$probe_client" 2>/dev/null || true; }
+cleanup_probe() {
+    kill -KILL "$probe_client" 2>/dev/null || true
+    wait "$probe_client" 2>/dev/null || true
+}
 trap cleanup_probe EXIT
 sleep 1
 python3 "$ROOT/tests/bench/capacity_preflight.py" probe --peer "$ADDR" --port "$probe_port" \
@@ -204,7 +217,8 @@ config.update(local_run=sys.argv[3], remote_run=sys.argv[4])
 json.dump(config, open(sys.argv[2], 'w'))
 PY
     remote mkdir -p "$REMOTE_RUN/$mix"
-    remote cp "$REMOTE_RUN/srt_fanout_sink" "$REMOTE_RUN/$mix/srt_fanout_sink"
+    remote cp "$REMOTE_RUN/srt_fanout_sink" "$REMOTE_RUN/srt_fanout_sink.provenance.json" \
+        "$REMOTE_RUN/$mix/"
     mkdir -p "$OUT/results/$mix"
     python3 - "$OUT/results/$mix/expected.json" "$mix" "$mix_steps" <<'PY'
 import json, sys

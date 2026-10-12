@@ -83,17 +83,17 @@ source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${CAPACITY_NGINX:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="${CAPACITY_RUN:-$ROOT/.build/ingest-egress-fanout}"
 
-# Each run owns a 256-wide port block: HTTP +0, RTMP sink +1, SRT endpoints
-# +2..+17, HLS push receiver +30, the SRT receiver's listeners +64..+127, the
-# RTMP sinks' listeners +128..+191 and their APIs +192..+255.
+# Each run owns a 512-wide port block: HTTP +0, RTMP sink +1, SRT endpoints
+# +2..+17, HLS push receiver +30, the SRT receiver's listeners +64..+127,
+# RTMP listeners +128..+191, private APIs +192..+255 and SSH forwards +256..+319.
 # CAPACITY_BASE may select another block when the PID-derived block is occupied.
 # The blocks sit below the kernel's ephemeral range (32768 and up by
 # default): an outgoing socket - the SRT destinations of the previous run
 # while libsrt tears them down, for one - is given ports from that range, and
 # a listener placed there can find its port briefly taken ("Address already
-# in use" on a run that follows another).  10240-17919 also stays clear of the
+# in use" on a run that follows another).  The blocks also stay clear of the
 # fixed ports the integration suites use (18000 and up).
-BASE="${CAPACITY_BASE:-$(( 10240 + ($$ % 30) * 256 ))}"
+BASE="${CAPACITY_BASE:-$(( 10240 + ($$ % 15) * 512 ))}"
 HTTP_PORT="$BASE"
 RTMP_PORT="$(( BASE + 1 ))"
 RTMP_SINK_RUN="$RUN/rtmp-sink"
@@ -292,7 +292,11 @@ cleanup() {
         kill -KILL "$p" 2>/dev/null
     done
     for p in "${!RECEIVER_IDENTITIES[@]}" ${SINKS[@]+"${SINKS[@]}"}; do
-        receiver_kill -KILL "$p" 2>/dev/null || true
+        if [[ "$p" == r* ]]; then
+            receiver_stop_owner "$p"
+        else
+            receiver_kill -KILL "$p" 2>/dev/null || true
+        fi
     done
 
     [ "$STORM" != "0" ] && kill -KILL "$STORM" 2>/dev/null
@@ -372,19 +376,50 @@ receiver_transport() {
         --config "$CAPACITY_RECEIVER_CONFIG" "$@"
 }
 
+# Prepared captures expose the transport client's PID, not a shell wrapper.
+# Only the transport publishes READY after the native capture is prepared.
+receiver_capture() {
+    (
+        local client="" status=0
+        local -a gate=()
+        if [ -n "${CAPTURE_READY_FILE:-}" ]; then
+            gate=( --capture-ready-file "$CAPTURE_READY_FILE"
+                   --capture-release-file "$CPU_CAPTURE_RELEASE_FILE" )
+        fi
+        trap '[ -z "$client" ] || { kill "$client" 2>/dev/null || true; wait "$client" 2>/dev/null || true; }' EXIT
+        trap 'exit 1' TERM INT
+        python3 "$ROOT/tests/bench/capacity_receiver.py" \
+            --config "$CAPACITY_RECEIVER_CONFIG" "${gate[@]}" "$@" &
+        client="$!"
+        if [ -n "${CAPTURE_READY_FILE:-}" ]; then
+            printf '%s\n' "$client" >"$CAPTURE_READY_FILE.pid" || exit 1
+        fi
+        wait "$client" || status=$?
+        client=""
+        exit "$status"
+    )
+}
+
+# Local and namespace captures use the same release as the prepared RPCs.
+capacity_capture_gate() {
+    local attempt pid
+    [ -n "${CAPTURE_READY_FILE:-}" ] || return 0
+    printf '%s\n' "$BASHPID" >"$CAPTURE_READY_FILE.pid" || return 1
+    : >"$CAPTURE_READY_FILE" || return 1
+    for (( attempt=0; attempt<60000; attempt++ )); do
+        for pid in "$@"; do
+            kill -0 "$pid" 2>/dev/null || return 1
+        done
+        [ ! -f "$CPU_CAPTURE_RELEASE_FILE" ] || return 0
+        sleep 0.001
+    done
+    echo "controller did not release $CAPTURE_READY_FILE" >&2
+    return 1
+}
+
 receiver_path() {
     if [ -n "$CAPACITY_RECEIVER_CONFIG" ]; then
-        python3 - "$CAPACITY_RECEIVER_CONFIG" "$1" <<'PY'
-import json, sys
-config = json.load(open(sys.argv[1]))
-value = sys.argv[2]
-for local, remote in ((config["local_run"], config["remote_run"]),
-                      (config["local_root"], config["remote_root"])):
-    value = value.replace(local + "/", remote + "/")
-    if value == local:
-        value = remote
-print(value)
-PY
+        receiver_transport path "$1"
     else
         printf '%s' "$1"
     fi
@@ -402,31 +437,53 @@ receiver_start() {   # <identity file> <log> <argv...>; sets RECEIVER_PID
         return 0
     fi
     receiver_mkdir "$(dirname "$identity")" || return 1
-    receiver_transport start "$identity" "$@" >"$log" 2>&1 &
+    python3 "$ROOT/tests/bench/capacity_receiver.py" --config "$CAPACITY_RECEIVER_CONFIG" \
+        --owner-pid "$$" start "$identity" "$@" >"$log" 2>&1 &
     client="$!"
     for attempt in $(seq 1 100); do
         if receiver_file_ready "$identity"; then
-            receiver_fetch "$identity" || return 1
-            pid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$identity")" \
-                || return 1
+            if ! receiver_fetch "$identity"; then
+                kill -KILL "$client" 2>/dev/null || true
+                wait "$client" 2>/dev/null || true
+                return 1
+            fi
+            if ! pid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' "$identity")"; then
+                kill -KILL "$client" 2>/dev/null || true
+                wait "$client" 2>/dev/null || true
+                return 1
+            fi
             RECEIVER_PID="r$pid"
             RECEIVER_IDENTITIES["$RECEIVER_PID"]="$identity"
             RECEIVER_CLIENTS["$RECEIVER_PID"]="$client"
-            receiver_alive "$RECEIVER_PID" || return 1
+            if ! receiver_alive "$RECEIVER_PID"; then
+                receiver_stop_owner "$RECEIVER_PID"
+                return 1
+            fi
             return 0
         fi
-        kill -0 "$client" 2>/dev/null || { wait "$client"; cat "$log" >&2; return 1; }
+        kill -0 "$client" 2>/dev/null || { wait "$client" || true; cat "$log" >&2; return 1; }
         sleep 0.05
     done
-    kill "$client" 2>/dev/null || true
+    kill -KILL "$client" 2>/dev/null || true
+    wait "$client" 2>/dev/null || true
     echo "receiver did not publish its process identity" >&2
     return 1
 }
 
 receiver_kill() {   # -SIGNAL PID
     if [[ "${2:-}" == r* ]]; then
+        local status=0 client
         [ -n "${RECEIVER_IDENTITIES[$2]:-}" ] || return 1
-        receiver_transport signal "${RECEIVER_IDENTITIES[$2]}" "$1"
+        receiver_transport signal "${RECEIVER_IDENTITIES[$2]}" "$1" || status=$?
+        if [ "$status" -ne 0 ]; then
+            case "$1" in
+                -KILL|-TERM|-QUIT)
+                    client="${RECEIVER_CLIENTS[$2]:-}"
+                    [ -z "$client" ] || kill -KILL "$client" 2>/dev/null || true
+                    ;;
+            esac
+        fi
+        return "$status"
     elif [ -n "$CAPACITY_RECEIVER_KILL" ]; then
         $CAPACITY_RECEIVER_KILL "$@"
     else
@@ -437,11 +494,26 @@ receiver_kill() {   # -SIGNAL PID
 receiver_alive() { receiver_kill -0 "$1" 2>/dev/null; }
 
 receiver_wait() {
-    if [[ "$1" == r* ]]; then
-        wait "${RECEIVER_CLIENTS[$1]}"
+    local pid="$1" client status=0
+    if [[ "$pid" == r* ]]; then
+        client="${RECEIVER_CLIENTS[$pid]:-}"
+        [ -n "$client" ] || return 127
+        wait "$client" || status=$?
+        unset "RECEIVER_CLIENTS[$pid]" "RECEIVER_IDENTITIES[$pid]"
+        return "$status"
     else
-        wait "$1"
+        wait "$pid"
     fi
+}
+
+receiver_stop_owner() {   # <host-qualified PID>; close its owned SSH pipe
+    local pid="$1" client
+    [[ "$pid" == r* ]] || return 0
+    client="${RECEIVER_CLIENTS[$pid]:-}"
+    [ -n "$client" ] || return 0
+    kill -KILL "$client" 2>/dev/null || true
+    wait "$client" 2>/dev/null || true
+    unset "RECEIVER_CLIENTS[$pid]" "RECEIVER_IDENTITIES[$pid]"
 }
 
 receiver_remove() {
@@ -492,12 +564,12 @@ stop_rtmp_sink_instance() {
         for m in "${RTMP_REMOTE_MASTERS[@]:-}"; do
             [ -n "$m" ] || continue
             receiver_kill -QUIT "$m" 2>/dev/null || true
-            receiver_wait "$m" 2>/dev/null || true
+            receiver_stop_owner "$m"
         done
         RTMP_REMOTE_MASTERS=()
         for p in "${RECEIVER_TUNNELS[@]:-}"; do
             [ -n "$p" ] || continue
-            kill "$p" 2>/dev/null || true
+            kill -KILL "$p" 2>/dev/null || true
             wait "$p" 2>/dev/null || true
         done
         RECEIVER_TUNNELS=()
@@ -538,6 +610,8 @@ start_rtmp_sink_instance() {   # [count]
         dir="$RTMP_SINK_RUN-$k"
         rm -rf "$dir/logs"
         mkdir -p "$dir/conf" "$dir/logs"
+        [ ! -f "$RUN/active-capacity-case" ] \
+            || cp "$RUN/active-capacity-case" "$dir/active-case"
         cat > "$dir/conf/nginx.conf" <<EOF
 worker_processes 1;
 daemon $daemon;
@@ -569,10 +643,12 @@ EOF
             python3 - "$(( BASE + 256 + k ))" <<'PY' || return 1
 import socket, sys
 with socket.socket() as listener:
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", int(sys.argv[1])))
 PY
-            receiver_transport tunnel "$(( BASE + 256 + k ))" \
-                "$(rtmp_sink_http_port "$k")" >"$dir/tunnel.log" 2>&1 &
+            python3 "$ROOT/tests/bench/capacity_receiver.py" --config "$CAPACITY_RECEIVER_CONFIG" \
+                --owner-pid "$$" tunnel "$(( BASE + 256 + k ))" "$(rtmp_sink_http_port "$k")" \
+                >"$dir/tunnel.log" 2>&1 &
             RECEIVER_TUNNELS+=( "$!" )
         else
             "$NGINX" -p "$dir" -c conf/nginx.conf -t >"$dir/conf.log" 2>&1 \
@@ -677,11 +753,11 @@ write_cpu_roles() {
 # directory once per sample. Optional extra PIDs expose receiver-side CPU.
 # CPU_SNAPSHOT_DIR, when set (a capacity case sets it to its own directory),
 # keeps the raw snapshots with the case instead of in shared $RUN files that
-# the next window overwrites, and adds the extended host/network snapshot
-# taken at the same two instants.
+# the next window overwrites. Extended host/network captures keep their own
+# collection brackets outside the synchronized CPU accounting boundaries.
 cpu_window() {   # <seconds> [extra PID ...]
     local result extra dir="${CPU_SNAPSHOT_DIR:-$RUN}" local_sampler remote_sampler=""
-    local begin_ns before_ns release_ns=0 after_ns boundary attempt status=0
+    local remote_request="" callback_pid="" boundary attempt status=0 action gate_dir ready_file capture_pid
     local -a pids=() remote_pids=() extended=() boundaries=()
     W_BEFORE="$dir/cpu.before"
     W_AFTER="$dir/cpu.after"
@@ -703,14 +779,16 @@ cpu_window() {   # <seconds> [extra PID ...]
     fi
     if [ -n "${CPU_BOUNDARY_CALLBACK:-}" ] || [ "${#remote_pids[@]}" -gt 0 ]; then
         boundaries=( --boundary-dir "$dir" )
-        rm -f "$dir"/cpu.ready.* "$dir"/cpu.release.*
+        rm -f "$dir"/cpu.ready.* "$dir"/cpu.release.* "$dir"/cpu.captured.*
+        rm -rf "$dir/capture.before" "$dir/capture.after"
     fi
-    begin_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
     if [ "${#remote_pids[@]}" -gt 0 ]; then
+        mkdir -p "$dir/receiver-boundary" || return 1
         receiver_mkdir "$dir/receiver-boundary" || return 1
         for boundary in before after; do
             receiver_remove "$dir/receiver-boundary/cpu.ready.$boundary" || return 1
             receiver_remove "$dir/receiver-boundary/cpu.release.$boundary" || return 1
+            receiver_remove "$dir/receiver-boundary/cpu.captured.$boundary.json" || return 1
         done
         python3 - "$dir/cpu.roles" "$dir/receiver.roles" <<'PY'
 import sys
@@ -736,56 +814,96 @@ PY
     local_sampler="$!"
     if [ "${#boundaries[@]}" -gt 0 ]; then
         for boundary in before after; do
+            # Local readiness ends the requested sleep. Receiver RPC startup,
+            # native preparation and sampler quiescence precede shared release.
             for attempt in $(seq 1 1200); do
-                if [ -f "$dir/cpu.ready.$boundary" ] \
-                    && { [ -z "$remote_sampler" ] \
-                         || receiver_file_ready "$dir/receiver-boundary/cpu.ready.$boundary"; }; then
-                    break
-                fi
+                [ ! -f "$dir/cpu.ready.$boundary" ] || break
                 kill -0 "$local_sampler" 2>/dev/null || { status=1; break; }
                 sleep 0.05
             done
             [ -f "$dir/cpu.ready.$boundary" ] || status=1
-            if [ -n "$remote_sampler" ]; then
-                receiver_file_ready "$dir/receiver-boundary/cpu.ready.$boundary" || status=1
-            fi
             [ "$status" -eq 0 ] || break
-            if [ "$boundary" = before ]; then
-                before_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
-                [ -z "${CPU_BOUNDARY_CALLBACK:-}" ] || "$CPU_BOUNDARY_CALLBACK" start || { status=1; break; }
-            else
-                after_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
-                [ -z "${CPU_BOUNDARY_CALLBACK:-}" ] || "$CPU_BOUNDARY_CALLBACK" stop || { status=1; break; }
-            fi
+            action=start
+            [ "$boundary" = before ] || action=stop
+            gate_dir="$dir/capture.$boundary"
+            mkdir -p "$gate_dir" || { status=1; break; }
+            remote_request=""
+            callback_pid=""
             if [ -n "$remote_sampler" ]; then
-                if [ "$boundary" = before ]; then
-                    release_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
-                fi
-                : >"$dir/receiver-boundary/cpu.release.$boundary"
-                receiver_transport push "$dir/receiver-boundary/cpu.release.$boundary" || { status=1; break; }
+                python3 "$ROOT/tests/bench/capacity_receiver.py" \
+                    --config "$CAPACITY_RECEIVER_CONFIG" \
+                    --capture-ready-file "$gate_dir/cpu.ready" \
+                    --capture-release-file "$dir/cpu.release.$boundary" \
+                    cpu-boundary "${RECEIVER_IDENTITIES[$remote_sampler]}" \
+                    "$dir/receiver-boundary" "$boundary" \
+                    "$dir/receiver.cpu.$boundary.capture.json" \
+                    >"$dir/receiver.cpu.$boundary.boundary.log" 2>&1 &
+                remote_request="$!"
             fi
+            if [ -n "${CPU_BOUNDARY_CALLBACK:-}" ]; then
+                CPU_CAPTURE_READY_DIR="$gate_dir" \
+                    CPU_CAPTURE_RELEASE_FILE="$dir/cpu.release.$boundary" \
+                    "$CPU_BOUNDARY_CALLBACK" "$action" &
+                callback_pid="$!"
+            fi
+            for attempt in $(seq 1 1200); do
+                [ -z "$remote_request" ] || kill -0 "$remote_request" 2>/dev/null \
+                    || { status=1; break; }
+                [ -z "$callback_pid" ] || kill -0 "$callback_pid" 2>/dev/null \
+                    || { status=1; break; }
+                if { [ -z "$remote_request" ] || [ -f "$gate_dir/cpu.ready" ]; } \
+                    && { [ -z "$callback_pid" ] || [ -f "$gate_dir/protocols.ready" ]; }; then
+                    break
+                fi
+                kill -0 "$local_sampler" 2>/dev/null || { status=1; break; }
+                sleep 0.005
+            done
+            [ -z "$remote_request" ] || [ -f "$gate_dir/cpu.ready" ] || status=1
+            [ -z "$callback_pid" ] || [ -f "$gate_dir/protocols.ready" ] || status=1
+            for ready_file in "$gate_dir"/*.ready.pid; do
+                [ -f "$ready_file" ] || continue
+                read -r capture_pid <"$ready_file" || { status=1; break; }
+                kill -0 "$capture_pid" 2>/dev/null || { status=1; break; }
+            done
+            [ "$status" -eq 0 ] || break
             : >"$dir/cpu.release.$boundary"
+            [ -z "$callback_pid" ] || wait "$callback_pid" || status=1
+            [ -z "$remote_request" ] || wait "$remote_request" || status=1
+            [ "$status" -eq 0 ] || break
         done
     fi
     if [ "$status" -ne 0 ]; then
+        [ -z "$callback_pid" ] || kill "$callback_pid" 2>/dev/null || true
+        [ -z "$remote_request" ] || kill "$remote_request" 2>/dev/null || true
+        [ -z "$callback_pid" ] || wait "$callback_pid" 2>/dev/null || true
+        [ -z "$remote_request" ] || wait "$remote_request" 2>/dev/null || true
         kill "$local_sampler" 2>/dev/null || true
         [ -z "$remote_sampler" ] || receiver_kill -KILL "$remote_sampler" 2>/dev/null || true
     fi
     wait "$local_sampler" || status=1
     if [ -n "$remote_sampler" ]; then
         receiver_wait "$remote_sampler" || status=1
+        [ "$status" -eq 0 ] || return 1
         for extra in receiver.cpu.before receiver.cpu.after receiver.host.before.json receiver.host.after.json; do
             receiver_fetch "$dir/$extra" || status=1
         done
-        python3 - "$dir/receiver.cpu.window" "$begin_ns" "${before_ns:-0}" "${after_ns:-0}" "$release_ns" "$1" <<'PY'
-import json, sys
-path = sys.argv[1]
-begin, before, after, release = map(int, sys.argv[2:6])
-end_lower = release + int(float(sys.argv[6]) * 1e9)
-# Conservative controller bounds, never remote/local monotonic subtraction.
-json.dump(dict(clock_domain="controller-monotonic", start_ns=(begin + before)//2,
-               end_ns=(end_lower + after)//2, start_uncertainty_ns=(before-begin)//2,
-               end_uncertainty_ns=max(0, (after-end_lower)//2)), open(path, "w"))
+        python3 - "$dir/receiver.cpu.window" "$dir" <<'PY' || return 1
+import json, pathlib, sys
+window = {"clock_domain": "controller-monotonic"}
+for boundary, phase in (("before", "start"), ("after", "end")):
+    path = pathlib.Path(sys.argv[2]) / f"receiver.cpu.{boundary}.capture.json"
+    native = json.loads(path.read_text())
+    bracket = json.loads(path.with_name(path.name + ".request.json").read_text())
+    begin, end = bracket["request_ns"], bracket["reply_ns"]
+    window[phase + "_ns"] = (begin + end) // 2
+    window[phase + "_uncertainty_ns"] = (end - begin) // 2
+    window[phase + "_request_ns"] = begin
+    window[phase + "_reply_ns"] = end
+    window["native_" + phase + "_ns"] = (
+        native["capture_start_ns"] + native["capture_end_ns"]) // 2
+    window["native_" + phase + "_capture_start_ns"] = native["capture_start_ns"]
+    window["native_" + phase + "_capture_end_ns"] = native["capture_end_ns"]
+pathlib.Path(sys.argv[1]).write_text(json.dumps(window))
 PY
     fi
     [ "$status" -eq 0 ] || return 1
@@ -1145,7 +1263,11 @@ kill_pubs() {
 kill_one() {   # <pid> ; the same, for a single publisher or receiver
     [ -n "${1:-}" ] || return 0
     receiver_kill -KILL "$1" 2>/dev/null || true
-    receiver_wait "$1" 2>/dev/null || true
+    if [[ "$1" == r* ]]; then
+        receiver_stop_owner "$1"
+    else
+        receiver_wait "$1" 2>/dev/null || true
+    fi
     return 0
 }
 
@@ -2133,7 +2255,8 @@ capacity_worker_metrics() {   # <file prefix>; one response from every worker
 capacity_rtmp_sink_metrics() {   # <file prefix>
     local prefix="$1"
 
-    local k
+    local k pid status=0
+    local -a requests=()
 
     [ -n "$RTMP_SINK_WORKER_PID" ] || return 0
     # stamped with the monotonic clock around each request, so the rate
@@ -2142,9 +2265,14 @@ capacity_rtmp_sink_metrics() {   # <file prefix>
     for (( k = 0; k < RTMP_SINK_COUNT; k++ )); do
         python3 "$ROOT/tests/bench/rtmp_capacity_quality.py" scrape \
             "$(rtmp_sink_api "$k")/metrics" \
-            "$prefix.${RTMP_SINK_PIDS[$k]}" \
-            || { echo "could not scrape RTMP sink $k metrics" >&2; return 1; }
+            "$prefix.${RTMP_SINK_PIDS[$k]}" &
+        requests+=( "$!" )
     done
+    for pid in "${requests[@]}"; do
+        wait "$pid" || status=1
+    done
+    [ "$status" -eq 0 ] || echo "could not scrape every RTMP sink" >&2
+    return "$status"
 }
 
 capacity_socket_snapshot() {   # <file prefix>
@@ -2389,8 +2517,15 @@ PY
 capacity_srt_receiver_snapshot() {   # <receiver PID> <snapshot path> <copy path>
     local pid="$1" snapshot="$2" output="$3" attempt
 
+    if [ -n "$CAPACITY_RECEIVER_CONFIG" ]; then
+        receiver_capture snapshot "${RECEIVER_IDENTITIES[$pid]}" -USR1 \
+            "$snapshot" "$output"
+        return "$?"
+    fi
+
     receiver_remove "$snapshot" || return 1
     rm -f "$output" || return 1
+    capacity_capture_gate || return 1
     receiver_kill -USR1 "$pid" 2>/dev/null \
         || { echo "could not request SRT receiver snapshot" >&2; return 1; }
     for attempt in $(seq 1 100); do
@@ -2405,40 +2540,195 @@ capacity_srt_receiver_snapshot() {   # <receiver PID> <snapshot path> <copy path
     cp "$snapshot" "$output"
 }
 
-capacity_srt_measurement_snapshot() {   # <receiver PID> <snapshot> <copy> <start|stop>
-    local pid="$1" snapshot="$2" output="$3" action="$4" attempt request_ns reply_ns
+capacity_srt_measurement_snapshot() {   # <PID> <snapshot> <copy> <start|stop> <sampler or empty> <clock>
+    local pid="$1" snapshot="$2" output="$3" action="$4" sampler="$5" clock="$6"
+    local attempt request_ns=0 reply_ns=0 paused="$(dirname "$3")/receiver-sampler.ready.paused"
+    local -a quiesce=()
 
-    receiver_remove "$snapshot" || return 1
-    rm -f "$output" || return 1
-    request_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
-    receiver_kill -USR2 "$pid" 2>/dev/null \
-        || { echo "could not toggle SRT receiver measurement $action" >&2; return 1; }
-    for attempt in $(seq 1 1000); do
-        receiver_file_ready "$snapshot" && break
-        receiver_alive "$pid" \
-            || { echo "SRT receiver exited before $action snapshot" >&2; return 1; }
-        sleep 0.01
-    done
-    receiver_fetch "$snapshot" || return 1
-    [ -s "$snapshot" ] \
-        || { echo "SRT receiver $action snapshot was not written" >&2; return 1; }
-    cp "$snapshot" "$output"
     if [ -n "$CAPACITY_RECEIVER_CONFIG" ]; then
-        # The interval sampler runs beside the receiver and reads this baseline.
-        receiver_transport push "$output" || return 1
+        if [ -n "$sampler" ]; then
+            quiesce=( "${RECEIVER_IDENTITIES[$sampler]}" "$paused" )
+        fi
+        receiver_capture snapshot "${RECEIVER_IDENTITIES[$pid]}" -USR2 \
+            "$snapshot" "$output" "${quiesce[@]}" || return 1
+    else
+        if [ -n "$sampler" ]; then
+            kill -USR2 "$sampler" || return 1
+            for attempt in $(seq 1 1000); do
+                [ ! -f "$paused" ] || break
+                sleep 0.001
+            done
+            [ -f "$paused" ] || return 1
+        fi
+        receiver_remove "$snapshot" || return 1
+        rm -f "$output" || return 1
+        capacity_capture_gate || return 1
+        request_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
+        receiver_kill -USR2 "$pid" 2>/dev/null \
+            || { echo "could not toggle SRT receiver measurement $action" >&2; return 1; }
+        for attempt in $(seq 1 1000); do
+            receiver_file_ready "$snapshot" && break
+            receiver_alive "$pid" \
+                || { echo "SRT receiver exited before $action snapshot" >&2; return 1; }
+            sleep 0.001
+        done
         reply_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
-        python3 - "$(dirname "$output")/receiver.measurement.window" "$action" "$request_ns" "$reply_ns" <<'PY'
-import json, pathlib, sys
+        receiver_fetch "$snapshot" || return 1
+        [ -s "$snapshot" ] \
+            || { echo "SRT receiver $action snapshot was not written" >&2; return 1; }
+        cp "$snapshot" "$output.tmp" && mv "$output.tmp" "$output" || return 1
+    fi
+    python3 - "$(dirname "$output")/receiver.measurement.window" "$action" \
+        "$request_ns" "$reply_ns" "$output" "$CAPACITY_RECEIVER_CONFIG" "$clock" <<'PY'
+import csv, json, pathlib, sys
 path, action = pathlib.Path(sys.argv[1]), sys.argv[2]
-begin, end = map(int, sys.argv[3:])
+begin, end = map(int, sys.argv[3:5])
+if sys.argv[6]:
+    bracket = json.loads(pathlib.Path(sys.argv[5] + ".request.json").read_text())
+    begin, end = bracket["request_ns"], bracket["reply_ns"]
 window = {} if action == "start" else json.loads(path.read_text())
 window.update(clock_domain="controller-monotonic")
 prefix = "start" if action == "start" else "end"
-window[prefix + "_ns"] = (begin + end) // 2
-window[prefix + "_uncertainty_ns"] = (end - begin) // 2
+window[prefix + "_request_ns"] = begin
+window[prefix + "_reply_ns"] = end
+with open(sys.argv[5], newline="", encoding="utf-8") as source:
+    stamps = {int(row["snapshot_ns"]) for row in csv.DictReader(source)}
+if len(stamps) != 1:
+    raise ValueError("receiver snapshot boundaries disagree")
+native = stamps.pop()
+window["native_" + prefix + "_ns"] = native
+remote = sys.argv[7] == "receiver-monotonic"
+if sys.argv[7] not in ("controller-monotonic", "receiver-monotonic"):
+    raise ValueError("unknown SRT receiver clock")
+window[prefix + "_ns"] = (begin + end) // 2 if remote else native
+window[prefix + "_uncertainty_ns"] = (end - begin) // 2 if remote else 0
+if not sys.argv[6]:
+    pathlib.Path(sys.argv[5] + ".request.json").write_text(
+        json.dumps({"request_ns": begin, "reply_ns": end}))
 path.write_text(json.dumps(window))
 PY
+}
+
+capacity_hls_reader_boundary() {   # <receiver PID> <report> <start|end>
+    local pid="$1" report="$2" phase="$3" acknowledgment="$2.$3.json"
+    local request_ns=0 reply_ns=0 attempt signo=-USR2
+    [ "$phase" != start ] || signo=-USR1
+    if [ -n "$CAPACITY_RECEIVER_CONFIG" ]; then
+        receiver_capture snapshot "${RECEIVER_IDENTITIES[$pid]}" "$signo" \
+            "$acknowledgment" "$acknowledgment" || return 1
+    else
+        capacity_capture_gate || return 1
+        request_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
+        receiver_kill "$signo" "$pid" || return 1
+        for attempt in $(seq 1 1000); do
+            receiver_file_ready "$acknowledgment" && break
+            sleep 0.001
+        done
+        receiver_fetch "$acknowledgment" || return 1
+        reply_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
     fi
+    python3 - "$acknowledgment" "$(dirname "$report")/hls-readers.measurement.window" \
+        "$phase" "$request_ns" "$reply_ns" <<'PY'
+import json, pathlib, sys
+ack = json.loads(pathlib.Path(sys.argv[1]).read_text())
+path, phase = pathlib.Path(sys.argv[2]), sys.argv[3]
+begin, end = map(int, sys.argv[4:])
+if begin == 0 and end == 0:
+    bracket = json.loads(pathlib.Path(sys.argv[1] + ".request.json").read_text())
+    begin, end = bracket["request_ns"], bracket["reply_ns"]
+else:
+    pathlib.Path(sys.argv[1] + ".request.json").write_text(
+        json.dumps({"request_ns": begin, "reply_ns": end}))
+window = {} if phase == "start" else json.loads(path.read_text())
+native = ack["native_ns"]
+if ack["clock_domain"] == "controller-monotonic":
+    at, uncertainty = native, 0
+elif ack["clock_domain"] == "receiver-monotonic":
+    at, uncertainty = (begin + end) // 2, (end - begin) // 2
+else:
+    raise ValueError("unknown HLS reader acknowledgment clock")
+window.update(clock_domain="controller-monotonic")
+window[phase + "_ns"] = at
+window[phase + "_uncertainty_ns"] = uncertainty
+window["native_" + phase + "_ns"] = native
+window[phase + "_request_ns"] = begin
+window[phase + "_reply_ns"] = end
+path.write_text(json.dumps(window))
+PY
+}
+
+capacity_hls_push_snapshot() {   # <port> <output> <start|end> <sink PID>
+    local port="$1" output="$2" phase="$3" pid="$4" request_ns=0 reply_ns=0
+    if [ -n "$CAPACITY_RECEIVER_CONFIG" ]; then
+        receiver_capture command-capture "${RECEIVER_IDENTITIES[$pid]}" "$output" \
+            curl -fsS -o "$output" "http://$CAPACITY_RECEIVER_ADDR:$port/__snapshot" || return 1
+    else
+        capacity_capture_gate || return 1
+        request_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
+        curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$port/__snapshot" >"$output" || return 1
+        reply_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
+    fi
+    python3 - "$output" "$(dirname "$output")/hls-push.measurement.window" \
+        "$phase" "$request_ns" "$reply_ns" "$CAPACITY_RECEIVER_CONFIG" <<'PY'
+import json, pathlib, sys
+snapshot = json.loads(pathlib.Path(sys.argv[1]).read_text())
+path, phase = pathlib.Path(sys.argv[2]), sys.argv[3]
+begin, end = map(int, sys.argv[4:6])
+if sys.argv[6]:
+    bracket = json.loads(pathlib.Path(sys.argv[1] + ".request.json").read_text())
+    begin, end = bracket["request_ns"], bracket["reply_ns"]
+native = int(snapshot["monotonic"] * 1e9)
+at, uncertainty = ((begin + end) // 2, (end - begin) // 2) if sys.argv[6] else (native, 0)
+window = {} if phase == "start" else json.loads(path.read_text())
+window.update(clock_domain="controller-monotonic")
+window[phase + "_ns"] = at
+window[phase + "_uncertainty_ns"] = uncertainty
+window["native_" + phase + "_ns"] = native
+window[phase + "_request_ns"] = begin
+window[phase + "_reply_ns"] = end
+if not sys.argv[6]:
+    pathlib.Path(sys.argv[1] + ".request.json").write_text(
+        json.dumps({"request_ns": begin, "reply_ns": end}))
+path.write_text(json.dumps(window))
+PY
+}
+
+capacity_sampler_ready() {   # <sampler PID> <acknowledgment>
+    local pid="$1" acknowledgment="$2" attempt
+    for attempt in $(seq 1 1200); do
+        if [[ "$pid" == r* ]]; then
+            receiver_file_ready "$acknowledgment" && return 0
+            receiver_alive "$pid" || return 1
+        else
+            [ ! -f "$acknowledgment" ] || return 0
+            kill -0 "$pid" 2>/dev/null || return 1
+        fi
+        sleep 0.01
+    done
+    echo "sampler did not acknowledge $acknowledgment" >&2
+    return 1
+}
+
+capacity_controller_boundary() {   # <window JSON> <start|end> <begin ns> <end ns> <provenance>
+    python3 - "$@" <<'PY'
+import json, pathlib, sys
+path, phase = pathlib.Path(sys.argv[1]), sys.argv[2]
+begin, end = map(int, sys.argv[3:5])
+if begin <= 0 or end < begin:
+    raise ValueError("invalid controller collection bracket")
+window = {} if phase == "start" else json.loads(path.read_text())
+window.update(clock_domain="controller-monotonic", provenance=sys.argv[5])
+window[phase + "_request_ns"] = begin
+window[phase + "_reply_ns"] = end
+window[phase + "_ns"] = (begin + end) // 2
+window[phase + "_uncertainty_ns"] = (end - begin) // 2
+if phase == "end":
+    span = (window["end_ns"] - window["start_ns"]) / 1e9
+    if span <= 0:
+        raise ValueError("controller collection interval did not advance")
+    print(f"{span:.6f}")
+path.write_text(json.dumps(window))
+PY
 }
 
 capacity_quality_stop_monitors() {   # [sampler PIDs]; no args stops all
@@ -2954,6 +3244,7 @@ PY
     if [ "$protocol" = srt ] && [ "$CAPACITY_SRT_HLS" = no ]; then
         hls_enabled=no
     fi
+    printf '%s\n' "$case_dir" >"$RUN/active-capacity-case"
     start_instance "$workers" "$hls_enabled" no
     if [ "$rtmp_destinations" -gt 0 ]; then
         local rtmp_sinks=$(( (total_rtmp_dest + CAPACITY_RTMP_RECEIVER_PEERS - 1)
@@ -3334,97 +3625,156 @@ PY
         echo "   HLS push readiness progress=$case_dir/hls-push-readiness.csv"
     fi
 
+    # Process startup and SSH ownership are setup, not accounting. Queue and
+    # receiver samplers are ready and wait for their opening baseline releases.
+    if [ "$rtmp_destinations" -gt 0 ] && [ "$quality_mode" = yes ]; then
+        rm -f "$case_dir"/rtmp-sampler.ready* "$case_dir/rtmp-sampler.baseline"
+        python3 "$ROOT/tests/bench/rtmp_capacity_quality.py" sample \
+            "$(rtmp_sink_metric_urls)" "$case_dir/rtmp-receiver.before" \
+            "$case_dir/rtmp-receiver-intervals.csv" --interval 1 \
+            --ready-file "$case_dir/rtmp-sampler.ready" \
+            --baseline-ready "$case_dir/rtmp-sampler.baseline" \
+            >"$case_dir/rtmp-sampler.log" 2>&1 &
+        rtmp_sampler_pid="$!"
+        QUALITY_MONITORS+=( "$rtmp_sampler_pid" )
+        capacity_sampler_ready "$rtmp_sampler_pid" "$case_dir/rtmp-sampler.ready" || return 1
+    fi
+    if [ "$srt_destinations" -gt 0 ] && [ "$quality_mode" = yes ]; then
+        mapfile -t quality_worker_pids < <(worker_pids)
+        rm -f "$case_dir/queue-sampler.ready" "$case_dir/queue-sampler.baseline"
+        receiver_remove "$sink_snapshot_before" || return 1
+        receiver_remove "$case_dir/receiver-sampler.ready" || return 1
+        receiver_remove "$case_dir/receiver-sampler.ready.paused" || return 1
+        python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
+            sample-queues "$HTTP_PORT" "$case_dir/queue-samples.csv" \
+            "${quality_worker_pids[@]}" --interval 1 \
+            --ready-file "$case_dir/queue-sampler.ready" \
+            --baseline-ready "$case_dir/queue-sampler.baseline" \
+            >"$case_dir/queue-sampler.log" 2>&1 &
+        queue_sampler_pid="$!"
+        QUALITY_MONITORS+=( "$queue_sampler_pid" )
+        receiver_start "$case_dir/srt-sampler.identity.json" "$case_dir/receiver-sampler.log" \
+            python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
+            sample-receivers "${sink_pid#r}" "$sink_csv.snapshot" \
+            "$sink_snapshot_before" "$case_dir/receiver-intervals.csv" \
+            --interval 1 --ready-file "$case_dir/receiver-sampler.ready" || return 1
+        receiver_sampler_pid="$RECEIVER_PID"
+        QUALITY_MONITORS+=( "$receiver_sampler_pid" )
+        capacity_sampler_ready "$receiver_sampler_pid" "$case_dir/receiver-sampler.ready" || return 1
+        capacity_sampler_ready "$queue_sampler_pid" "$case_dir/queue-sampler.ready" || return 1
+    fi
+    measure_start="$(python3 -c 'import time; print(time.monotonic_ns())')"
     for name in "${names[@]}"; do
         owner_metrics "$name" > "$case_dir/stream.$name.before" \
             || { echo "could not capture baseline for $name" >&2; return 1; }
     done
+    measure_end="$(python3 -c 'import time; print(time.monotonic_ns())')"
+    capacity_controller_boundary "$case_dir/stream.measurement.window" start \
+        "$measure_start" "$measure_end" "controller stream-counter collection brackets" || return 1
     capacity_socket_snapshot "$case_dir/before" || return 1
     capacity_memory_snapshot "$case_dir/memory.before" || return 1
+    measure_start="$(python3 -c 'import time; print(time.monotonic_ns())')"
     capacity_worker_metrics "$case_dir/workers.before" || return 1
+    measure_end="$(python3 -c 'import time; print(time.monotonic_ns())')"
+    capacity_controller_boundary "$case_dir/workers.measurement.window" start \
+        "$measure_start" "$measure_end" "controller worker-metric collection brackets" || return 1
     capacity_window_boundary() {
-        if [ "$1" = start ]; then
-    capacity_rtmp_sink_metrics "$case_dir/rtmp-receiver.before" || return 1
-    if [ "$rtmp_destinations" -gt 0 ] && [ "$quality_mode" = yes ]; then
-        python3 "$ROOT/tests/bench/rtmp_capacity_quality.py" sample \
-            "$(rtmp_sink_metric_urls)" \
-            "$case_dir/rtmp-receiver.before" \
-            "$case_dir/rtmp-receiver-intervals.csv" --interval 1 \
-            >"$case_dir/rtmp-sampler.log" 2>&1 &
-        rtmp_sampler_pid="$!"
-        QUALITY_MONITORS+=( "$rtmp_sampler_pid" )
-    fi
-    if [ "$srt_destinations" -gt 0 ]; then
-        if [ "$quality_mode" = yes ]; then
-            capacity_srt_measurement_snapshot "$sink_pid" "$sink_csv.snapshot" \
-                "$sink_snapshot_before" start || return 1
-            receiver_start "$case_dir/srt-sampler.identity.json" "$case_dir/receiver-sampler.log" \
-                python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
-                sample-receivers "${sink_pid#r}" "$sink_csv.snapshot" \
-                "$sink_snapshot_before" "$case_dir/receiver-intervals.csv" \
-                --interval 1 || return 1
-            receiver_sampler_pid="$RECEIVER_PID"
-            QUALITY_MONITORS+=( "$receiver_sampler_pid" )
-            mapfile -t quality_worker_pids < <(worker_pids)
-            python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
-                sample-queues "$HTTP_PORT" "$case_dir/queue-samples.csv" \
-                "${quality_worker_pids[@]}" --interval 1 \
-                >"$case_dir/queue-sampler.log" 2>&1 &
-            queue_sampler_pid="$!"
-            QUALITY_MONITORS+=( "$queue_sampler_pid" )
-        else
-            capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
-                "$sink_snapshot_before" || return 1
+        local action="$1" suffix=before phase=start job status=0 attempt ready client
+        local -a captures=() ready_files=() clients=()
+        trap '
+            for ready in "${ready_files[@]}"; do
+                if [ -s "$ready.pid" ]; then
+                    read -r client <"$ready.pid"
+                    kill "$client" 2>/dev/null || true
+                fi
+            done
+            for job in "${captures[@]}"; do kill "$job" 2>/dev/null || true; done
+            for job in "${captures[@]}"; do wait "$job" 2>/dev/null || true; done
+        ' EXIT
+        trap 'exit 1' TERM INT
+        if [ "$action" = stop ]; then
+            suffix=after
+            phase=end
         fi
-    fi
-    if [ "$hls_push_destinations" -gt 0 ]; then
-        curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__snapshot" \
-            >"$case_dir/hls-push.before.json" \
-            || { echo "could not capture HLS push receiver baseline" >&2; return 1; }
-    fi
-    measure_start="$(date +%s.%N)"
-    if [ -n "$hls_pid" ]; then
-        receiver_kill -USR1 "$hls_pid" \
-            || { echo "could not start HLS reader measurement" >&2; return 1; }
-    fi
-        else
-            # Seal the reader's accounting at the boundary, but defer joining
-            # its in-flight HTTP work until other protocols close their windows.
-            if [ -n "$hls_pid" ]; then
-                receiver_kill -TERM "$hls_pid" || return 1
-            fi
-    # Join only this protocol's sampler before its closing snapshot. Other
-    # protocols keep sampling through the serial closing work below.
-    if [ "$quality_mode" = yes ] && [ "$rtmp_destinations" -gt 0 ]; then
-        capacity_quality_stop_monitors "$rtmp_sampler_pid" \
-            || { echo "the RTMP sampler failed during the measurement" \
-                 >&2; return 1; }
-    fi
-    # The closing scrape belongs to the window while publishers still run.
-    capacity_rtmp_sink_metrics "$case_dir/rtmp-receiver.after" || return 1
-    if [ "$hls_push_destinations" -gt 0 ]; then
-        curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__snapshot" \
-            >"$case_dir/hls-push.after.json" \
-            || { echo "could not capture HLS push receiver final snapshot" >&2; return 1; }
-    fi
-    if [ "$srt_destinations" -gt 0 ]; then
-        if [ "$quality_mode" = yes ]; then
-            capacity_quality_stop_monitors "$receiver_sampler_pid" "$queue_sampler_pid" \
-                || { echo "an SRT sampler failed during the measurement" \
-                     >&2; return 1; }
-            capacity_srt_measurement_snapshot "$sink_pid" "$sink_csv.snapshot" \
-                "$sink_snapshot_after" stop || return 1
-        else
-            capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
-                "$sink_snapshot_after" || return 1
+        if [ "$rtmp_destinations" -gt 0 ]; then
+            (
+                CAPTURE_READY_FILE="$CPU_CAPTURE_READY_DIR/rtmp.ready"
+                if [ "$action" = stop ] && [ "$quality_mode" = yes ]; then
+                    kill -USR2 "$rtmp_sampler_pid" || exit 1
+                    capacity_sampler_ready "$rtmp_sampler_pid" \
+                        "$case_dir/rtmp-sampler.ready.paused" || exit 1
+                fi
+                capacity_capture_gate || exit 1
+                capacity_rtmp_sink_metrics "$case_dir/rtmp-receiver.$suffix" || exit 1
+                if [ "$action" = start ] && [ "$quality_mode" = yes ]; then
+                    : >"$case_dir/rtmp-sampler.baseline"
+                fi
+            ) &
+            captures+=( "$!" )
+            ready_files+=( "$CPU_CAPTURE_READY_DIR/rtmp.ready" )
         fi
-    fi
-            if [ -n "$hls_pid" ]; then
-                capacity_quality_stop_monitors "$hls_pid" || return 1
+        if [ "$srt_destinations" -gt 0 ]; then
+            if [ "$quality_mode" = yes ]; then
+                local sampler=""
+                [ "$action" != stop ] || sampler="$receiver_sampler_pid"
+                CAPTURE_READY_FILE="$CPU_CAPTURE_READY_DIR/srt.ready" \
+                    capacity_srt_measurement_snapshot "$sink_pid" "$sink_csv.snapshot" \
+                    "$case_dir/srt.$suffix.csv" "$action" "$sampler" "$receiver_clock" &
+            else
+                CAPTURE_READY_FILE="$CPU_CAPTURE_READY_DIR/srt.ready" \
+                    capacity_srt_receiver_snapshot "$sink_pid" "$sink_csv.snapshot" \
+                    "$case_dir/srt.$suffix.csv" &
             fi
-            if [ -n "$offer_pid" ]; then
-                capacity_quality_stop_monitors "$offer_pid" || return 1
-            fi
+            captures+=( "$!" )
+            ready_files+=( "$CPU_CAPTURE_READY_DIR/srt.ready" )
         fi
+        if [ "$hls_push_destinations" -gt 0 ]; then
+            CAPTURE_READY_FILE="$CPU_CAPTURE_READY_DIR/hls_push.ready" \
+                capacity_hls_push_snapshot "$hls_push_sink_port" \
+                "$case_dir/hls-push.$suffix.json" "$phase" "$hls_push_sink_pid" &
+            captures+=( "$!" )
+            ready_files+=( "$CPU_CAPTURE_READY_DIR/hls_push.ready" )
+        fi
+        if [ -n "$hls_pid" ]; then
+            CAPTURE_READY_FILE="$CPU_CAPTURE_READY_DIR/hls_readers.ready" \
+                capacity_hls_reader_boundary "$hls_pid" "$hls_report_file" "$phase" &
+            captures+=( "$!" )
+            ready_files+=( "$CPU_CAPTURE_READY_DIR/hls_readers.ready" )
+        fi
+        for (( attempt=0; attempt<12000; attempt++ )); do
+            status=0
+            for job in "${captures[@]}"; do
+                kill -0 "$job" 2>/dev/null || exit 1
+            done
+            for ready in "${ready_files[@]}"; do
+                if [ -s "$ready.pid" ]; then
+                    read -r client <"$ready.pid"
+                    kill -0 "$client" 2>/dev/null || exit 1
+                else
+                    status=1
+                fi
+                [ -f "$ready" ] || status=1
+            done
+            [ "$status" -ne 0 ] || break
+            sleep 0.005
+        done
+        [ "$status" -eq 0 ] || exit 1
+        for ready in "${ready_files[@]}"; do
+            read -r client <"$ready.pid" || exit 1
+            clients+=( "$client" )
+        done
+        CAPTURE_READY_FILE="$CPU_CAPTURE_READY_DIR/protocols.ready" \
+            capacity_capture_gate "${captures[@]}" "${clients[@]}" || exit 1
+        if [ "$action" = start ] && [ "$srt_destinations" -gt 0 ] \
+            && [ "$quality_mode" = yes ]; then
+            : >"$case_dir/queue-sampler.baseline" || exit 1
+        fi
+        for job in "${captures[@]}"; do
+            wait "$job" || status=1
+        done
+        captures=()
+        ready_files=()
+        exit "$status"
     }
     capacity_write_processes "$case_dir/processes.tsv" "$sink_pid" \
         "$hls_pid" "$hls_push_sink_pid"
@@ -3435,6 +3785,10 @@ PY
     CPU_SNAPSHOT_DIR=""
     CPU_BOUNDARY_CALLBACK=""
     unset -f capacity_window_boundary
+    capacity_quality_stop_monitors || {
+        echo "a capacity monitor failed during the measurement" >&2
+        return 1
+    }
     if [ "$quality_mode" = yes ]; then
         for publisher_pid in "${PUBS[@]}"; do
             kill -0 "$publisher_pid" 2>/dev/null \
@@ -3449,21 +3803,27 @@ PY
             || { echo "a capacity publisher exited during the window" \
                  >&2; return 1; }
     done
+    measure_start="$(python3 -c 'import time; print(time.monotonic_ns())')"
     for name in "${names[@]}"; do
         owner_metrics "$name" > "$case_dir/stream.$name.after" \
             || { echo "could not capture final metrics for $name" >&2; return 1; }
     done
-    measure_end="$(date +%s.%N)"
-    measure_seconds="$(awk -v a="$measure_start" -v b="$measure_end" \
-        'BEGIN { printf "%.2f", b - a }')"
+    measure_end="$(python3 -c 'import time; print(time.monotonic_ns())')"
+    measure_seconds="$(capacity_controller_boundary "$case_dir/stream.measurement.window" end \
+        "$measure_start" "$measure_end" "controller stream-counter collection brackets")" || return 1
+    measure_start="$(python3 -c 'import time; print(time.monotonic_ns())')"
     capacity_worker_metrics "$case_dir/workers.after" || return 1
+    measure_end="$(python3 -c 'import time; print(time.monotonic_ns())')"
+    capacity_controller_boundary "$case_dir/workers.measurement.window" end \
+        "$measure_start" "$measure_end" "controller worker-metric collection brackets" >/dev/null || return 1
     capacity_socket_snapshot "$case_dir/after" || return 1
     capacity_memory_snapshot "$case_dir/memory.after" || return 1
 
     echo "   measurement_s=$measure_seconds requested_window_s=$seconds" \
-         "media_measurement_window_s=$measure_seconds cpu_window_s=$W_DUR" \
+         "stream_counter_measurement_window_s=$measure_seconds cpu_window_s=$W_DUR" \
          "cpu_sampling_before_ms=$W_CPU_BEFORE_MS" \
          "cpu_sampling_after_ms=$W_CPU_AFTER_MS"
+    echo "   measurement_provenance=controller-stream-counter-collection-brackets"
 
     for (( index = 0; index < programs; index++ )); do
         name="${names[$index]}"
@@ -3619,6 +3979,7 @@ PY
                 --final "$sink_snapshot_after" \
                 --intervals "$case_dir/receiver-intervals.csv" \
                 --queues "$case_dir/queue-samples.csv" \
+                --queue-window "$case_dir/receiver.measurement.window" \
                 --receiver-results "$sink_csv" \
                 --metrics-before "$case_dir/workers.before" \
                 --metrics-after "$case_dir/workers.after" \
@@ -3709,6 +4070,8 @@ PY
             --prepared-media "$case_dir/prepared-media.json" \
             --produced-segments "$case_dir/hls-production.json" \
             --measurement-window "$case_dir/cpu.before" "$case_dir/cpu.after" \
+            --receiver-window "$case_dir/hls-readers.measurement.window" \
+            --clock-domain "$receiver_clock" \
             --reference-bps "${CAPACITY_QUALITY_REFERENCE_HLS_BPS:-0}" \
             --min-delivery-ratio "$CAPACITY_QUALITY_MIN_DELIVERY_RATIO" \
             >>"$hls_log" || return 1
@@ -3948,6 +4311,7 @@ PY
         rtmp="$rtmp_destinations" hls_readers="$hls_readers" \
         hls_push="$hls_push_destinations" hls="$hls_enabled" \
         workers="$workers" measurement_s="$measure_seconds" \
+        measurement_provenance=controller-stream-counter-collection-brackets \
         requested_s="$seconds" ${preflight_meta[@]+"${preflight_meta[@]}"}
 
     kill_pubs
@@ -4098,7 +4462,8 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s>
         >"$case_dir/preflight.sender.log" 2>&1 \
         || { echo "preflight: sender fingerprint failed" >&2; return 1; }
     receiver_run python3 "$ROOT/tests/bench/capacity_preflight.py" \
-        host --role receiver --json "$case_dir/preflight.receiver.json" \
+        host --role receiver --binary "$(receiver_path "$RUN/srt_fanout_sink")" \
+        --json "$case_dir/preflight.receiver.json" \
         >"$case_dir/preflight.receiver.log" 2>&1 \
         || { echo "preflight: receiver fingerprint failed" >&2; return 1; }
     receiver_remove "$case_dir/preflight.rx.json" || return 1
@@ -4173,6 +4538,22 @@ capacity_write_diagnostics() {   # <case dir> <outcome> [key=value ...]
 
     shift 2
     for kv in "$@"; do meta+=( --meta "$kv" ); done
+    if [ -f "$RUN/active-capacity-case" ] \
+        && [ "$(cat "$RUN/active-capacity-case")" = "$case_dir" ]; then
+        mkdir -p "$case_dir/runtime-logs"
+        [ ! -d "$RUN/logs" ] || cp -a "$RUN/logs" "$case_dir/runtime-logs/sender"
+        local sink_dir
+        for sink_dir in "$RTMP_SINK_RUN"-*; do
+            [ -f "$sink_dir/active-case" ] \
+                && [ "$(cat "$sink_dir/active-case")" = "$case_dir" ] || continue
+            if [ -n "$CAPACITY_RECEIVER_CONFIG" ]; then
+                receiver_file_ready "$sink_dir/logs/error.log" \
+                    && receiver_fetch "$sink_dir/logs/error.log" \
+                    || echo "receiver error log unavailable: $sink_dir" >&2
+            fi
+            cp -a "$sink_dir" "$case_dir/runtime-logs/$(basename "$sink_dir")"
+        done
+    fi
     # The host's fingerprint travels with every rung, not only with the rungs
     # the preflight judged: a capacity number is unreadable without the CPU,
     # the cgroup, the NIC and the transport library it was taken on.  Half a

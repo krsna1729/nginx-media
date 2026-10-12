@@ -6,6 +6,7 @@ import asyncio
 import csv
 import json
 import math
+import os
 import signal
 import sys
 import time
@@ -285,16 +286,30 @@ async def run_reader(stats, playlist_url, client, ready_event, measurement_event
         stats.ready = True
         ready_event.set()
         last_sequence = tail_sequence
-        await measurement_event.wait()
-        try:
-            current_sequence, current_uris = await read_playlist(client, playlist_url, stats)
-            if current_uris:
-                last_sequence = current_sequence + len(current_uris) - 1
-        except HTTPError:
-            pass
+        pending_playlist = None
+        while not measurement_event.is_set() and not stop_event.is_set():
+            try:
+                await asyncio.wait_for(measurement_event.wait(), timeout=poll_interval)
+            except asyncio.TimeoutError:
+                try:
+                    current_sequence, current_uris = await read_playlist(client, playlist_url, stats)
+                except HTTPError:
+                    continue
+                # A playlist completed across start may already contain
+                # in-window segments. Only a wholly pre-start refresh can
+                # advance the warmup anchor without skipping delivery.
+                if measurement_event.is_set():
+                    pending_playlist = current_sequence, current_uris
+                    break
+                if current_uris:
+                    last_sequence = max(last_sequence, current_sequence + len(current_uris) - 1)
         while not stop_event.is_set():
             try:
-                current_sequence, current_uris = await read_playlist(client, playlist_url, stats)
+                if pending_playlist is None:
+                    current_sequence, current_uris = await read_playlist(client, playlist_url, stats)
+                else:
+                    current_sequence, current_uris = pending_playlist
+                    pending_playlist = None
                 if current_uris:
                     current_end = current_sequence + len(current_uris) - 1
                     if current_sequence > last_sequence + 1:
@@ -326,6 +341,7 @@ async def async_main(args):
     ready_event = asyncio.Event()
     measurement_event = asyncio.Event()
     stop_event = asyncio.Event()
+    finish_event = asyncio.Event()
     fatal_event = asyncio.Event()
     fatal_messages = []
     stats = [ReaderStats(i) for i in range(args.readers)]
@@ -342,16 +358,27 @@ async def async_main(args):
 
     def on_signal(sig):
         nonlocal start_ns, end_ns
+        if sig == signal.SIGTERM:
+            finish_event.set()
+        if end_ns is not None or (sig == signal.SIGUSR1 and start_ns is not None):
+            return
         if sig == signal.SIGUSR1:
             start_ns = time.monotonic_ns()
             measurement_event.set()
+            phase = "start"
         else:
             end_ns = time.monotonic_ns()
             for item in stats:
                 item.sealed = True
             stop_event.set()
+            phase = "end"
+        acknowledgment = args.report + "." + phase + ".json"
+        with open(acknowledgment + ".tmp", "w", encoding="utf-8") as out:
+            json.dump({"native_ns": start_ns if phase == "start" else end_ns,
+                       "clock_domain": args.clock_domain}, out)
+        os.replace(acknowledgment + ".tmp", acknowledgment)
 
-    for sig in (signal.SIGUSR1, signal.SIGTERM):
+    for sig in (signal.SIGUSR1, signal.SIGUSR2, signal.SIGTERM):
         loop.add_signal_handler(sig, on_signal, sig)
     try:
         while True:
@@ -384,10 +411,14 @@ async def async_main(args):
             await asyncio.wait_for(stop_event.wait(), timeout=args.duration)
         except asyncio.TimeoutError:
             stop_event.set()
+            finish_event.set()
             end_ns = time.monotonic_ns()
             for item in stats:
                 item.sealed = True
         elapsed = (end_ns - start_ns) / 1e9
+        # Closing counters must still find this process alive. SIGUSR2 seals
+        # receipts; SIGTERM releases reporting/exit after CPU accounting closes.
+        await finish_event.wait()
         for item in stats:
             item.rate_bps = item.bytes_received * 8 / elapsed if elapsed > 0 else 0.0
         try:
@@ -453,7 +484,7 @@ async def async_main(args):
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        for sig in (signal.SIGUSR1, signal.SIGTERM):
+        for sig in (signal.SIGUSR1, signal.SIGUSR2, signal.SIGTERM):
             loop.remove_signal_handler(sig)
 
 
@@ -484,6 +515,9 @@ def judge_readers(argv):
     parser.add_argument("--prepared-media", required=True)
     parser.add_argument("--produced-segments", required=True)
     parser.add_argument("--measurement-window", nargs=2, required=True)
+    parser.add_argument("--receiver-window")
+    parser.add_argument("--clock-domain", default="controller-monotonic",
+                        choices=("controller-monotonic", "receiver-monotonic"))
     parser.add_argument("--reference-bps", type=float, required=True)
     parser.add_argument("--min-delivery-ratio", type=float, required=True)
     args = parser.parse_args(argv)
@@ -496,8 +530,18 @@ def judge_readers(argv):
     end = read_threads(args.measurement_window[1])[1] / 1e9
     cuts, offered, span = production(args.produced_segments, start, end)
     interval = span / (len(cuts) - 1)
+    mapping = None
+    if args.receiver_window:
+        with open(args.receiver_window, encoding="utf-8") as source:
+            mapping = json.load(source)
+        if mapping["clock_domain"] != "controller-monotonic":
+            raise MeasurementError("HLS reader boundary mapping is not controller-monotonic")
+        start = max(start, (mapping["start_ns"] + mapping["start_uncertainty_ns"]) / 1e9)
+        end = min(end, (mapping["end_ns"] - mapping["end_uncertainty_ns"]) / 1e9)
+    elif args.clock_domain != "controller-monotonic":
+        raise MeasurementError("remote HLS reader boundary mapping is missing")
     window = {name: entry for name, entry in cuts.items()
-              if entry["at"] <= end - 2 * interval}
+              if start <= entry["at"] <= end - 2 * interval}
     if not window:
         raise MeasurementError("no HLS production cuts have delivery grace inside the window")
     prepared, provenance = prepared_rate(args.prepared_media)
@@ -510,6 +554,18 @@ def judge_readers(argv):
         raise MeasurementError("no HLS reader delivery rows")
     ratios = []
     errors = 0
+    if mapping:
+        for row in rows:
+            if (int(row["window_start_ns"]) != mapping["native_start_ns"]
+                    or int(row["window_end_ns"]) != mapping["native_end_ns"]):
+                raise MeasurementError("HLS reader native boundaries disagree with mapped acknowledgment")
+    else:
+        start = max(start, max(int(row["window_start_ns"]) for row in rows) / 1e9)
+        end = min(end, min(int(row["window_end_ns"]) for row in rows) / 1e9)
+        window = {name: entry for name, entry in window.items()
+                  if start <= entry["at"] <= end - 2 * interval}
+    if not window:
+        raise MeasurementError("no identified HLS cuts inside the reader's actual measurement window")
     for row in rows:
         delivered = json.loads(row["delivered_segments"])
         duration = float(row["duration_s"])

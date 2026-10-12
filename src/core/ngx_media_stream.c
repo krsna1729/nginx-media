@@ -1,5 +1,6 @@
 #include "ngx_media_destination.h"
 #include "ngx_media_stream.h"
+#include "ngx_media_graph.h"
 #include "ngx_media_timeline.h"
 #ifndef NGX_MEDIA_UNIT_TEST
 #include "ngx_media_runtime.h"
@@ -63,7 +64,11 @@ ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
 {
     ngx_media_policy_t  defaults;
 
-    if (stream == NULL || pool == NULL || name == NULL || name->len == 0) {
+    if (stream == NULL || pool == NULL || name == NULL || name->len == 0
+        || name->len > NGX_MEDIA_GRAPH_MAX_NAME
+        || (application != NULL
+            && application->len > NGX_MEDIA_GRAPH_MAX_NAME))
+    {
         return NGX_ERROR;
     }
 
@@ -166,7 +171,9 @@ ngx_media_stream_source_add(ngx_media_stream_t *stream, const ngx_str_t *id,
 {
     ngx_media_source_t  *source;
 
-    if (stream == NULL || id == NULL || id->len == 0) {
+    if (stream == NULL || id == NULL || id->len == 0
+        || id->len > NGX_MEDIA_GRAPH_MAX_NAME || priority > UINT32_MAX)
+    {
         return NULL;
     }
 

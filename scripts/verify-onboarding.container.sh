@@ -18,7 +18,7 @@ echo "== prerequisites (docs/deployment.md)"
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
     build-essential pkg-config curl ca-certificates python3 \
-    libpcre2-dev zlib1g-dev libssl-dev libsrt-openssl-dev \
+    libpcre2-dev zlib1g-dev libssl-dev libc-ares-dev libsrt-openssl-dev \
     ffmpeg >/dev/null
 
 mkdir -p /work

@@ -39,9 +39,9 @@ ngx_media_owner_dir_t *ngx_media_owner_dir_attach(ngx_cycle_t *cycle,
     ngx_log_t *log);
 
 /*
- * Publishes a stream's owner.  Only the deterministic owner may claim: a slot
- * that is not ngx_media_route_owner(hash) is refused with NULL, so a record
- * can never name a worker the hash does not.
+ * Publishes a stream's owner.  Only this cycle's deterministic owner may
+ * claim; an older worker generation or a foreign slot is refused with NULL.
+ * A new PID takes over immediately, fencing the old PID's heartbeat/release.
  */
 ngx_media_owner_record_t *ngx_media_owner_dir_claim(
     ngx_media_owner_dir_t *dir, uint64_t hash, ngx_uint_t slot);

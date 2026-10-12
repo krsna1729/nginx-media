@@ -5,6 +5,7 @@ import argparse
 import csv
 import glob
 import http.client
+import json
 import math
 import os
 import re
@@ -13,6 +14,7 @@ import sys
 import time
 from collections import defaultdict
 from threading import Event
+from pathlib import Path
 
 PACKET_DROP_METRICS = {
     "nginx_media_srt_egress_shard_feed_queue_dropped_total",
@@ -80,10 +82,19 @@ def wait_snapshot(path, after_ns, stop_event, timeout=5.0):
 
 
 def sample_receivers(args):
-    stop_event = Event()
-    signal.signal(signal.SIGTERM, lambda _signo, _frame: stop_event.set())
-    signal.signal(signal.SIGINT, lambda _signo, _frame: stop_event.set())
-    previous_ns, previous = read_receiver_snapshot(args.baseline)
+    stop_event, pause_event, wake = Event(), Event(), Event()
+
+    def stop(*_):
+        stop_event.set()
+        wake.set()
+
+    def pause(*_):
+        pause_event.set()
+        wake.set()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGUSR2, pause)
     with open(args.output, "w", newline="", encoding="utf-8") as output:
         writer = csv.DictWriter(
             output,
@@ -92,7 +103,21 @@ def sample_receivers(args):
         )
         writer.writeheader()
         output.flush()
-        while not stop_event.wait(args.interval):
+        if args.ready_file:
+            Path(args.ready_file).touch()
+        deadline = time.monotonic() + 60
+        while not Path(args.baseline).is_file():
+            if stop_event.wait(0.01):
+                return 0
+            if time.monotonic() >= deadline:
+                raise RuntimeError("controller did not provide the SRT baseline")
+        previous_ns, previous = read_receiver_snapshot(args.baseline)
+        while not stop_event.is_set() and not pause_event.is_set():
+            # Cadence is anchored to the receiver's last snapshot, not to
+            # process startup after an SSH handshake and baseline transfer.
+            delay = max(0.0, previous_ns / 1e9 + args.interval - time.monotonic())
+            if wake.wait(delay):
+                break
             try:
                 os.unlink(args.snapshot)
             except FileNotFoundError:
@@ -122,6 +147,10 @@ def sample_receivers(args):
                 })
             output.flush()
             previous_ns, previous = current_ns, current
+        if pause_event.is_set() and args.ready_file:
+            # An outstanding SIGUSR1 has completed before this acknowledgment.
+            # The controller can now toggle measurement without snapshot races.
+            Path(args.ready_file + ".paused").touch()
     return 0
 
 
@@ -205,7 +234,15 @@ def sample_queues(args):
         writer = csv.DictWriter(output, fieldnames=fields)
         writer.writeheader()
         output.flush()
-        while not stop_event.wait(args.interval):
+        if args.ready_file:
+            Path(args.ready_file).touch()
+        deadline = time.monotonic() + 60
+        while not Path(args.baseline_ready).is_file():
+            if stop_event.wait(0.01):
+                return 0
+            if time.monotonic() >= deadline:
+                raise RuntimeError("controller did not release the SRT queue baseline")
+        while not stop_event.is_set():
             samples = fetch_worker_round(args.port, expected)
             for pid in sorted(samples, key=int):
                 sample_ns, shard_values = samples[pid]
@@ -231,6 +268,8 @@ def sample_queues(args):
                     })
             output.flush()
             round_id += 1
+            if stop_event.wait(args.interval):
+                break
     return 0
 
 
@@ -505,6 +544,18 @@ def quality_report(args):
     if new < old:
         raise ValueError(f"{metric} counter regressed")
     stream_evictions = max(0.0, new - old)
+    queue_start_ns, queue_end_ns = baseline_ns, final_ns
+    if args.queue_window and os.path.isfile(args.queue_window):
+        with open(args.queue_window, encoding="utf-8") as source:
+            mapped = json.load(source)
+        if (mapped["clock_domain"] != "controller-monotonic"
+                or not 0 < mapped["start_ns"] < mapped["end_ns"]):
+            raise ValueError("invalid controller mapping for queue coverage")
+        if (mapped["native_start_ns"] != baseline_ns or mapped["native_end_ns"] != final_ns):
+            raise ValueError("queue mapping disagrees with native receiver snapshots")
+        queue_start_ns, queue_end_ns = mapped["start_ns"], mapped["end_ns"]
+    elif args.clock_domain != "controller-monotonic":
+        raise ValueError("remote receiver requires controller mapping for sender queue coverage")
     queue_rows = defaultdict(dict)
     with open(args.queues, newline="", encoding="utf-8") as source:
         reader = csv.DictReader(source)
@@ -545,8 +596,8 @@ def quality_report(args):
     for key in keys:
         first_ns = queue_rows[rounds[0]][key][0]
         last_ns = queue_rows[rounds[-1]][key][0]
-        if (abs(first_ns - baseline_ns) / 1e9 > args.max_interval_s
-                or abs(final_ns - last_ns) / 1e9 > args.max_interval_s):
+        if (abs(first_ns - queue_start_ns) / 1e9 > args.max_interval_s
+                or abs(queue_end_ns - last_ns) / 1e9 > args.max_interval_s):
             raise ValueError(f"{key}: queue samples do not cover the measurement window")
 
     peak_feed = 0.0
@@ -693,18 +744,22 @@ def main():
     receivers.add_argument("baseline")
     receivers.add_argument("output")
     receivers.add_argument("--interval", type=finite_float, default=1.0)
+    receivers.add_argument("--ready-file")
     receivers.set_defaults(run=sample_receivers)
     queues = subparsers.add_parser("sample-queues")
     queues.add_argument("port", type=int)
     queues.add_argument("output")
     queues.add_argument("worker_pids", nargs="+")
     queues.add_argument("--interval", type=finite_float, default=1.0)
+    queues.add_argument("--ready-file")
+    queues.add_argument("--baseline-ready", required=True)
     queues.set_defaults(run=sample_queues)
     report = subparsers.add_parser("report")
     report.add_argument("--baseline", required=True)
     report.add_argument("--final", required=True)
     report.add_argument("--intervals", required=True)
     report.add_argument("--queues", required=True)
+    report.add_argument("--queue-window")
     report.add_argument("--receiver-results", required=True)
     report.add_argument("--metrics-before", required=True)
     report.add_argument("--metrics-after", required=True)

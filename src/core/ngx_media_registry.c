@@ -1,4 +1,5 @@
 #include "ngx_media_registry.h"
+#include "ngx_media_graph.h"
 #include "ngx_media_file.h"
 #include "ngx_media_hls_ingest.h"
 #include "ngx_media_hls_pull.h"
@@ -209,7 +210,11 @@ ngx_media_registry_stream_create(ngx_media_registry_t *registry,
     ngx_media_stream_t          *existing;
     ngx_media_registry_entry_t  *entry;
 
-    if (registry == NULL || name == NULL || name->len == 0) {
+    if (registry == NULL || application == NULL || application->len == 0
+        || application->len > NGX_MEDIA_GRAPH_MAX_NAME
+        || name == NULL || name->len == 0
+        || name->len > NGX_MEDIA_GRAPH_MAX_NAME)
+    {
         return NULL;
     }
 

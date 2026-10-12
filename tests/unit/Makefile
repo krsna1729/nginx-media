@@ -66,7 +66,7 @@ test: $(BINS)
 # The suites that drive threads, rebuilt under ThreadSanitizer.  They live in
 # a separate directory so a normal build never mixes instrumentation.
 TSAN_TESTS := test_record test_lifecycle test_feed test_stream test_owner \
-              test_srt_output test_hls_ingest
+              test_srt_output test_hls_ingest test_http
 TSAN_BINS  := $(addprefix build/tsan/,$(TSAN_TESTS))
 
 tsan: $(TSAN_BINS)
@@ -86,6 +86,22 @@ build/tsan/test_hls_ingest: test_hls_ingest.c ngx_media_test.h $(HEADERS) $(CORE
 	@mkdir -p build/tsan
 	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) -fsanitize=thread -o $@ $< \
 	    $(HLS_INGEST) $(CORE) $(SHIM) -lpthread -lcrypto
+
+# Real loopback HTTP/TLS and HLS cancellation, with a local silent DNS server.
+HTTP := ../../src/core/ngx_media_http.c ../../src/core/ngx_media_hls_pull.c
+build/test_http: test_http.c ngx_media_test.h $(HEADERS) $(CORE) $(SHIM) $(HTTP) Makefile
+	@mkdir -p build
+	$(CC) $(CFLAGS) $(WARN) $(DEFS) -DNGX_MEDIA_TEST_REAL_HTTP $(INCLUDES) \
+	    $(shell pkg-config --cflags libcares) $(SAN) -o $@ $< \
+	    $(HTTP) $(CORE) $(SHIM) -Wl,--wrap=ares_init_options \
+	    -lpthread -lssl -lcrypto $(shell pkg-config --libs libcares)
+
+build/tsan/test_http: test_http.c ngx_media_test.h $(HEADERS) $(CORE) $(SHIM) $(HTTP) Makefile
+	@mkdir -p build/tsan
+	$(CC) $(CFLAGS) $(WARN) $(DEFS) -DNGX_MEDIA_TEST_REAL_HTTP $(INCLUDES) \
+	    $(shell pkg-config --cflags libcares) -fsanitize=thread -o $@ $< \
+	    $(HTTP) $(CORE) $(SHIM) -Wl,--wrap=ares_init_options \
+	    -lpthread -lssl -lcrypto $(shell pkg-config --libs libcares)
 
 clean:
 	rm -rf build

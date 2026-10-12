@@ -20,12 +20,11 @@ typedef struct {
     uint32_t                    slots;
 
     /*
-     * The worker count this deployment's ownership is derived under.  The
-     * record's slot is checked against it, so a record can only ever name the
-     * deterministic owner of its hash (ngx_media_route_owner) and never a
-     * third worker that happened to take a request.
+     * The active cycle's worker count and epoch.  Older workers may finish
+     * their existing programs, but may not claim metadata back after reload.
      */
     uint32_t                    workers;
+    uint64_t                    epoch;
     ngx_atomic_t                lock;
 
     /*
@@ -41,6 +40,8 @@ typedef struct {
 struct ngx_media_owner_dir_s {
     ngx_media_owner_dir_shm_t  *shm;
     ngx_uint_t                  slots;
+    ngx_uint_t                  workers;
+    uint64_t                    epoch;
     ngx_log_t                  *log;
 };
 
@@ -48,6 +49,7 @@ struct ngx_media_owner_dir_s {
 #define NGX_MEDIA_OWNER_STALE_MS 10000
 
 static ngx_media_owner_dir_shm_t  *ngx_media_owner_dir_mapped;
+static uint64_t                   ngx_media_owner_dir_epoch;
 
 static ngx_int_t
 ngx_media_owner_dir_lock(ngx_media_owner_dir_t *dir)
@@ -108,17 +110,21 @@ ngx_media_owner_dir_shm_create(ngx_cycle_t *cycle, ngx_uint_t slots,
     ngx_log_t *log)
 {
     ngx_media_owner_dir_shm_t  *shm;
-    size_t                      size;
-    ngx_uint_t                  i;
+    ngx_media_owner_dir_t       dir;
+    size_t                     size;
+    ngx_uint_t                 i;
 
     if (ngx_media_owner_dir_mapped != NULL) {
-        /*
-         * A reload keeps the mapping the workers already adopted, but a
-         * changed worker count moves every stream's deterministic owner with
-         * it, so the count a record's slot is checked against has to follow.
-         */
-        ngx_media_owner_dir_mapped->workers =
-            (uint32_t) ngx_media_owner_worker_count(cycle);
+        ngx_memzero(&dir, sizeof(dir));
+        dir.shm = ngx_media_owner_dir_mapped;
+        dir.log = log;
+        if (ngx_media_owner_dir_lock(&dir) != NGX_OK) {
+            return NGX_ERROR;
+        }
+
+        dir.shm->workers = (uint32_t) ngx_media_owner_worker_count(cycle);
+        ngx_media_owner_dir_epoch = ++dir.shm->epoch;
+        ngx_media_owner_dir_unlock(&dir);
 
         return NGX_OK;
     }
@@ -145,12 +151,14 @@ ngx_media_owner_dir_shm_create(ngx_cycle_t *cycle, ngx_uint_t slots,
     shm->magic = NGX_MEDIA_OWNER_DIR_MAGIC;
     shm->slots = (uint32_t) slots;
     shm->workers = (uint32_t) ngx_media_owner_worker_count(cycle);
+    shm->epoch = 1;
 
     for (i = 0; i < slots; i++) {
         shm->records[i].state = NGX_MEDIA_OWNER_STATE_FREE;
     }
 
     ngx_media_owner_dir_mapped = shm;
+    ngx_media_owner_dir_epoch = shm->epoch;
 
     return NGX_OK;
 }
@@ -177,6 +185,8 @@ ngx_media_owner_dir_attach(ngx_cycle_t *cycle, ngx_log_t *log)
 
     dir->shm = shm;
     dir->slots = shm->slots;
+    dir->workers = ngx_media_owner_worker_count(cycle);
+    dir->epoch = ngx_media_owner_dir_epoch; /* inherited from this fork's cycle */
     dir->log = log;
 
     return dir;
@@ -189,20 +199,8 @@ ngx_media_owner_dir_reclaimable(ngx_media_owner_record_t *record)
         return 1;
     }
 
-    /*
-     * Only a record whose owner has stopped making progress can be taken over.
-     *
-     * The owner's pid is deliberately not part of this.  A pid that matches
-     * ours is the normal case for a stream this worker owns, and reading it as
-     * "our own record from a previous cycle" disowns the record the worker
-     * that drives the program is refreshing.  A record from a previous cycle
-     * cannot be recognised by pid either - a worker forked by a reload has a
-     * new pid - and does not need to be: a draining old owner still
-     * heartbeats, so its record stays live and stays its own (goal doc 24),
-     * and a dead one stops heartbeating and is reclaimable after
-     * NGX_MEDIA_OWNER_STALE_MS, which is when the surviving worker of that
-     * slot (the same deterministic owner) can publish its own.
-     */
+    /* A stale record can be reused for another hash.  Reload takeover of the
+     * same hash is handled separately by claim's epoch and PID checks. */
     if (ngx_media_owner_dir_now() - (ngx_msec_t) record->heartbeat
         > NGX_MEDIA_OWNER_STALE_MS)
     {
@@ -268,11 +266,16 @@ ngx_media_owner_dir_claim(ngx_media_owner_dir_t *dir, uint64_t hash,
      * foreign slot here makes the record repeat ngx_media_route_owner by
      * construction: a claim either names the hash owner or writes nothing.
      */
-    if (slot != ngx_media_owner_slot(hash, (ngx_uint_t) dir->shm->workers)) {
+    if (slot != ngx_media_owner_slot(hash, dir->workers)) {
         return NULL;
     }
 
     if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
+        return NULL;
+    }
+
+    if (dir->epoch != dir->shm->epoch) {
+        ngx_media_owner_dir_unlock(dir);
         return NULL;
     }
 
@@ -287,13 +290,11 @@ ngx_media_owner_dir_claim(ngx_media_owner_dir_t *dir, uint64_t hash,
     }
 
     if (record->hash != hash || record->slot != slot
+        || record->pid != (int32_t) ngx_pid
         || ngx_media_owner_dir_reclaimable(record))
     {
-        /*
-         * A record left by the pre-deterministic ownership code may name a
-         * different slot.  The route owner is now derived, so the deterministic
-         * worker repairs that metadata instead of preserving a stale claim.
-         */
+        /* The current generation takes over immediately; a draining worker
+         * cannot reclaim it because its attached epoch no longer matches. */
         ngx_memzero(record, sizeof(ngx_media_owner_record_t));
 
         record->hash = hash;
@@ -350,7 +351,8 @@ ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint64_t hash,
     record = ngx_media_owner_dir_find(dir, hash);
 
     if (record != NULL && record->hash == hash && record->slot == slot
-        && record->pid == (int32_t) ngx_pid)
+        && record->pid == (int32_t) ngx_pid
+        && record->state == NGX_MEDIA_OWNER_STATE_OWNED)
     {
         record->generation = generation;
         record->frames = frames;

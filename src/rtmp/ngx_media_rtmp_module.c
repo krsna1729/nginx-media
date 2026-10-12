@@ -86,6 +86,7 @@ struct ngx_media_rtmp_session_s {
     ngx_uint_t                    used;
     ngx_uint_t                    state;
     ngx_connection_t             *connection;
+    unsigned                      runtime_session:1;
 
     ngx_ssl_connection_t         *ssl;         /* set when the peer is RTMPS */
     unsigned                       ssl_ready:1;
@@ -166,10 +167,12 @@ static char *ngx_media_rtmp_ssl_certificate_cmd(ngx_conf_t *cf,
     ngx_command_t *cmd, void *conf);
 static ngx_uint_t ngx_media_rtmp_ssl_enabled(void);
 static ngx_int_t ngx_media_rtmp_ssl_start(ngx_media_rtmp_session_t *session);
+static void ngx_media_rtmp_ssl_handshake_handler(ngx_event_t *ev);
 static void ngx_media_rtmp_ssl_ready(ngx_connection_t *c);
 static void ngx_media_rtmp_play_timer(ngx_event_t *ev);
 static void ngx_media_rtmp_preauth_timer(ngx_event_t *ev);
 static void ngx_media_rtmp_admitted(ngx_media_rtmp_session_t *session);
+static void ngx_media_rtmp_close_connection(ngx_connection_t *c);
 static void ngx_media_rtmp_close_session(ngx_media_rtmp_session_t *session);
 static ngx_chain_t *ngx_media_rtmp_chain_buf(ngx_media_rtmp_session_t *session,
     ngx_buf_t *b);
@@ -410,6 +413,10 @@ ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
     uint64_t             publisher_frames, publisher_configs;
     uint64_t             publisher_errors, publisher_skipped;
 
+    if (!session->used) {
+        return;
+    }
+
     if (session->play_timer.timer_set) {
         ngx_del_timer(&session->play_timer);
     }
@@ -485,17 +492,19 @@ ngx_media_rtmp_session_close(ngx_media_rtmp_session_t *session)
                       publisher_skipped, stream->generation);
     }
 
-    if (session->stream_name.data != NULL) {
+    if (session->state == NGX_MEDIA_RTMP_STATE_PLAYING
+        && session->stream_name.data != NULL)
+    {
         ngx_log_error(NGX_LOG_NOTICE, session->log, 0,
                       "media: rtmp session closed stream=%V",
                       &session->stream_name);
     }
 
-    if (session->connection != NULL) {
-        ngx_media_rtmp_session_t  *slot = session;
-
-        ngx_memzero(slot, sizeof(ngx_media_rtmp_session_t));
+    if (session->runtime_session) {
+        ngx_media_runtime_session_release();
     }
+
+    ngx_memzero(session, sizeof(*session));
 }
 
 /* queues raw bytes (the handshake reply is not a chunked message) */
@@ -1165,9 +1174,8 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
     if (!ngx_media_route_is_owner((ngx_cycle_t *) ngx_cycle,
                                   session->routed_hash))
     {
-        if (ngx_media_rtmp_keep(session, app) != NGX_OK
-            || ngx_media_rtmp_keep(session, name) != NGX_OK
-            || ngx_media_rtmp_keep(session, type) != NGX_OK)
+        /* Registry identities already belong to the stream's pool. */
+        if (ngx_media_rtmp_keep(session, type) != NGX_OK)
         {
             return NGX_ERROR;
         }
@@ -1199,9 +1207,7 @@ ngx_media_rtmp_start_publish(ngx_media_rtmp_session_t *session,
         return NGX_OK;
     }
 
-    if (ngx_media_rtmp_keep(session, app) != NGX_OK
-        || ngx_media_rtmp_keep(session, name) != NGX_OK
-        || ngx_media_rtmp_keep(session, type) != NGX_OK)
+    if (ngx_media_rtmp_keep(session, type) != NGX_OK)
     {
         return NGX_ERROR;
     }
@@ -1741,6 +1747,26 @@ ngx_media_rtmp_preauth_timer(ngx_event_t *ev)
 /* --- connection handling ------------------------------------------------- */
 
 static void
+ngx_media_rtmp_close_connection(ngx_connection_t *c)
+{
+    ngx_pool_t  *pool = c->pool;
+
+    if (c->ssl != NULL) {
+        /* A disconnect or forced drain must not wait for a TLS close_notify. */
+        c->ssl->no_wait_shutdown = 1;
+        c->ssl->no_send_shutdown = 1;
+        (void) ngx_ssl_shutdown(c);
+    }
+
+    c->data = NULL;
+    ngx_close_connection(c);
+
+    if (pool != NULL) {
+        ngx_destroy_pool(pool);
+    }
+}
+
+static void
 ngx_media_rtmp_close_session(ngx_media_rtmp_session_t *session)
 {
     ngx_connection_t  *c = session->connection;
@@ -1748,8 +1774,7 @@ ngx_media_rtmp_close_session(ngx_media_rtmp_session_t *session)
     ngx_media_rtmp_session_close(session);
 
     if (c != NULL) {
-        c->data = NULL;
-        ngx_close_connection(c);
+        ngx_media_rtmp_close_connection(c);
     }
 }
 
@@ -1765,8 +1790,13 @@ ngx_media_rtmp_read_handler(ngx_event_t *ev)
         return;
     }
 
+    if (c->close || c->error || ev->timedout) {
+        ngx_media_rtmp_close_session(session);
+        return;
+    }
+
     if (session->ssl != NULL && !session->ssl_ready) {
-        /* ngx_ssl_handshake_handler() owns the connection until it finishes */
+        /* The TLS handshake handler owns this connection until it finishes. */
         return;
     }
 
@@ -1962,7 +1992,7 @@ ngx_media_rtmp_accept_handler(ngx_event_t *ev)
         if (session == NULL) {
             ngx_log_error(NGX_LOG_WARN, c->log, 0,
                           "media: rtmp: no free session slot");
-            ngx_close_connection(nc);
+            ngx_media_rtmp_close_connection(nc);
             continue;
         }
 
@@ -1976,6 +2006,10 @@ ngx_media_rtmp_accept_handler(ngx_event_t *ev)
             ngx_media_rtmp_close_session(session);
             continue;
         }
+
+        /* Failed allocation/event registration never owns a runtime hold. */
+        session->runtime_session = 1;
+        ngx_media_runtime_session_acquire();
 
         if (ngx_media_rtmp_ssl_enabled()) {
             /*
@@ -2031,8 +2065,33 @@ ngx_media_rtmp_ssl_enabled(void)
     return (ngx_uint_t) mcf->ssl_enabled;
 }
 
+static void
+ngx_media_rtmp_ssl_handshake_handler(ngx_event_t *ev)
+{
+    ngx_connection_t          *c = ev->data;
+    ngx_media_rtmp_session_t  *session = c->data;
+
+    if (session == NULL) {
+        return;
+    }
+
+    if (c->close || c->error || ev->timedout) {
+        ngx_media_rtmp_close_session(session);
+        return;
+    }
+
+    if (ngx_ssl_handshake(c) == NGX_AGAIN) {
+        /* nginx replaces these on AGAIN; keep our forced-drain check. */
+        c->read->handler = ngx_media_rtmp_ssl_handshake_handler;
+        c->write->handler = ngx_media_rtmp_ssl_handshake_handler;
+        return;
+    }
+
+    ngx_media_rtmp_ssl_ready(c);
+}
+
 /*
- * Called by nginx when the TLS handshake finishes.  The RTMP handshake is
+ * Called when the TLS handshake finishes.  The RTMP handshake is
  * already waiting in the SSL buffer, so the read path has to be restarted:
  * nothing else will wake it.
  */
@@ -2042,7 +2101,12 @@ ngx_media_rtmp_ssl_ready(ngx_connection_t *c)
     ngx_media_rtmp_session_t  *session = c->data;
 
     if (session == NULL) {
-        ngx_close_connection(c);
+        ngx_media_rtmp_close_connection(c);
+        return;
+    }
+
+    if (c->close || c->error || c->ssl == NULL || !c->ssl->handshaked) {
+        ngx_media_rtmp_close_session(session);
         return;
     }
 
@@ -2127,6 +2191,10 @@ ngx_media_rtmp_ssl_start(ngx_media_rtmp_session_t *session)
         return NGX_OK;
 
     case NGX_AGAIN:
+        session->connection->read->handler =
+            ngx_media_rtmp_ssl_handshake_handler;
+        session->connection->write->handler =
+            ngx_media_rtmp_ssl_handshake_handler;
         return NGX_OK;
 
     default:
@@ -2404,8 +2472,7 @@ ngx_media_rtmp_listener_open(ngx_log_t *log)
     c->data = c;
 
     if (ngx_add_event(c->read, NGX_READ_EVENT, 0) != NGX_OK) {
-        ngx_free_connection(c);
-        (void) ngx_close_socket(fd);
+        ngx_close_connection(c);
         return NGX_ERROR;
     }
 
@@ -2438,10 +2505,7 @@ ngx_media_rtmp_listener_stop(void)
         return;
     }
 
-    (void) ngx_del_event(ngx_media_rtmp_listener->read, NGX_READ_EVENT, 0);
-    (void) ngx_close_socket(ngx_media_rtmp_listener->fd);
-    ngx_media_rtmp_listener->fd = (ngx_socket_t) -1;
-    ngx_free_connection(ngx_media_rtmp_listener);
+    ngx_close_connection(ngx_media_rtmp_listener);
     ngx_media_rtmp_listener = NULL;
 
     ngx_media_rtmp_started = 0;
@@ -2544,7 +2608,7 @@ ngx_media_rtmp_exit_process(ngx_cycle_t *cycle)
     for (i = 0; i < NGX_MEDIA_RTMP_MAX_SESSIONS; i++) {
 
         if (ngx_media_rtmp_sessions[i].used) {
-            ngx_media_rtmp_session_close(&ngx_media_rtmp_sessions[i]);
+            ngx_media_rtmp_close_session(&ngx_media_rtmp_sessions[i]);
         }
     }
 

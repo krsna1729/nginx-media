@@ -26,6 +26,7 @@ import sys
 import time
 import urllib.request
 from threading import Event
+from pathlib import Path
 from capacity_media_offer import prepared_rate
 
 STAMP_PREFIX = "# scrape_monotonic_ns "
@@ -161,20 +162,42 @@ def parse_totals(blob):
 
 
 def sample(args):
-    stop = Event()
-    signal.signal(signal.SIGTERM, lambda *_: stop.set())
-    signal.signal(signal.SIGINT, lambda *_: stop.set())
-    previous_ns = read_stamp(args.baseline_prefix)
-    if previous_ns is None:
-        raise ValueError("baseline snapshot carries no scrape timestamp")
-    previous = read_snapshot(args.baseline_prefix)
+    stop, pause, wake = Event(), Event(), Event()
+
+    def stop_sampling(*_):
+        stop.set()
+        wake.set()
+
+    def pause_sampling(*_):
+        pause.set()
+        wake.set()
+
+    signal.signal(signal.SIGTERM, stop_sampling)
+    signal.signal(signal.SIGINT, stop_sampling)
+    signal.signal(signal.SIGUSR2, pause_sampling)
     with open(args.output, "w", newline="", encoding="utf-8") as output:
         writer = csv.writer(output)
         writer.writerow(("destination_id", "start_ns", "end_ns",
                          "bytes_received", "total_bytes"))
         output.flush()
+        if args.ready_file:
+            Path(args.ready_file).touch()
+        if args.baseline_ready:
+            deadline = time.monotonic() + 60
+            while not Path(args.baseline_ready).is_file():
+                if stop.wait(0.01):
+                    return 0
+                if time.monotonic() >= deadline:
+                    raise ValueError("controller did not provide the RTMP baseline")
+        previous_ns = read_stamp(args.baseline_prefix)
+        if previous_ns is None:
+            raise ValueError("baseline snapshot carries no scrape timestamp")
+        previous = read_snapshot(args.baseline_prefix)
         urls = [u for u in args.url.split(",") if u]
-        while not stop.wait(args.interval):
+        while not stop.is_set() and not pause.is_set():
+            delay = max(0.0, previous_ns / 1e9 + args.interval - time.monotonic())
+            if wake.wait(delay):
+                break
             # one scrape per receiver instance; the sample's time is the
             # midpoint of the whole set
             start = end = None
@@ -196,6 +219,8 @@ def sample(args):
                                  current[identifier]))
             output.flush()
             previous, previous_ns = current, current_ns
+        if pause.is_set() and args.ready_file:
+            Path(args.ready_file + ".paused").touch()
     return 0
 
 
@@ -507,6 +532,8 @@ def main():
             sub.add_argument("baseline_prefix")
         sub.add_argument("output")
         sub.add_argument("--interval", type=positive_float, default=1.0)
+        sub.add_argument("--ready-file")
+        sub.add_argument("--baseline-ready")
         args = sub.parse_args()
         try:
             return scrape(args) if args.command == "scrape" else sample(args)

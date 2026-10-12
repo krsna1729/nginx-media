@@ -74,7 +74,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential pkg-config ca-certificates curl \
-        libpcre2-dev zlib1g-dev libssl-dev libsrt-openssl-dev \
+        libpcre2-dev zlib1g-dev libssl-dev libc-ares-dev libsrt-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -183,7 +183,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 #   ffmpeg          the supervised external profile executor
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ffmpeg libpcre2-8-0 zlib1g libssl3t64 libsrt1.5-openssl \
+        ffmpeg libpcre2-8-0 zlib1g libssl3t64 libcares2 libsrt1.5-openssl \
         ca-certificates curl gettext-base \
     && rm -rf /var/lib/apt/lists/*
 # The installed prefix from the build stage: the binary, and the compiled-in

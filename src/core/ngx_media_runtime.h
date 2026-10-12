@@ -43,6 +43,12 @@
  */
 ngx_int_t ngx_media_runtime_init(ngx_cycle_t *cycle, ngx_log_t *log);
 
+/* Worker event-loop only: acquire once for each accepted transport session,
+ * release once in its common close path, including pre-admission failures.
+ * Paired calls keep graceful drain bounded by the existing shutdown timeout. */
+void ngx_media_runtime_session_acquire(void);
+void ngx_media_runtime_session_release(void);
+
 /* the shared owner directory of this worker, or NULL before init */
 ngx_media_owner_dir_t *ngx_media_runtime_owner_dir(void);
 

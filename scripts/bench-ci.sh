@@ -29,7 +29,6 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TIER="${1:-pr}"
 OUT="${2:-$ROOT/.build/bench-results/$TIER}"
-RUN="$ROOT/.build/ingest-egress-fanout"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -76,6 +75,9 @@ run_config() {
         esac
     done
     mkdir -p "$OUT/$name"
+    # Keep raw evidence under the upload root even before collection, so a
+    # cancelled driver cannot strand its current rung outside the artifact.
+    local RUN="${CAPACITY_RUN:-$OUT/$name/runtime}"
     # What this configuration must account for, written before it runs: the
     # gate compares it with what the run produced, so a harness that dies
     # half way is an incomplete run, not a short green one.
@@ -86,22 +88,30 @@ json.dump({"mixes": mixes.split(), "steps": [int(s) for s in steps.split()]},
           open(path, "w"))
 PYEOF
     echo "== bench-ci $TIER/$name"
-    env "${harness_env[@]}" PHASES=capacity-quality-ladder \
+    env "${harness_env[@]}" CAPACITY_RUN="$RUN" PHASES=capacity-quality-ladder \
         CAPACITY_QUALITY_STOP_AFTER_FAILURES="${BENCH_STOP_AFTER_FAILURES:-2}" \
         "$ROOT/tests/bench/ingest_egress_fanout.sh" > "$OUT/$name.log" 2>&1
     status=$?
+    # Record termination before collecting evidence, including failed runs.
+    echo "$status" > "$OUT/$name.status"
     [ -f "$RUN/capacity-matrix.json" ] \
         && cp "$RUN/capacity-matrix.json" "$OUT/$name/"
     if [ -d "$RUN/capacity" ]; then
-        # the bundles and the small per-rung reports, not the media
-        (cd "$RUN" && find capacity -maxdepth 2 -type f \
-            \( -name 'diagnostics.json' -o -name '*quality*.txt' \
-               -o -name '*.csv' -o -name 'srt-shards.txt' \) \
-            -print0 | xargs -0 -r cp --parents -t "$OUT/$name/")
+        # Raw receiver windows, snapshots, CPU/process records, preflight and
+        # offered-rate/calibration evidence belong to the result, not just JSON.
+        if [ -n "${CAPACITY_RUN:-}" ]; then
+            cp -a "$RUN/capacity" "$OUT/$name/" || return 1
+        else
+            mv "$RUN/capacity" "$OUT/$name/" || return 1
+        fi
     fi
+    for arg in logs conf rtmp-sink; do
+        [ ! -d "$RUN/$arg" ] || cp -a "$RUN/$arg" "$OUT/$name/" || return 1
+    done
+    [ ! -f "$RUN/roles" ] || cp "$RUN/roles" "$OUT/$name/"
+    [ ! -f "$RUN/conf.log" ] || cp "$RUN/conf.log" "$OUT/$name/"
     grep -E '^(quality_rung_result|matrix |mix=)' "$OUT/$name.log" \
         | sed "s/^/   /"
-    echo "$status" > "$OUT/$name.status"
     return 0
 }
 

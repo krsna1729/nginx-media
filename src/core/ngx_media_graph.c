@@ -6,6 +6,10 @@
 #include "ngx_media_hls_pull.h"
 #include "ngx_media_hls_ingest.h"
 
+_Static_assert(sizeof(ngx_media_graph_wire_t) + 3 * NGX_MEDIA_GRAPH_MAX_NAME
+               + 2 * NGX_MEDIA_GRAPH_MAX_PATH <= NGX_MEDIA_IPC_MAX_PAYLOAD,
+               "graph field budgets must fit one IPC datagram");
+
 /*
  * The graph a replica stream is built with.  These are the API's own feed
  * defaults (ngx_media_api_module.c): a stream has to look the same whichever
@@ -183,6 +187,21 @@ ngx_media_graph_encode(const ngx_media_graph_op_t *op,
     u_char                 *p;
 
     if (op == NULL || header == NULL || payload == NULL || length == NULL) {
+        return NGX_ERROR;
+    }
+
+    /* Apply the receiver's field budgets before addition or uint32 casts. */
+    if (op->application.len == 0 || op->name.len == 0
+        || op->application.len > NGX_MEDIA_GRAPH_MAX_NAME
+        || op->name.len > NGX_MEDIA_GRAPH_MAX_NAME
+        || op->id.len > NGX_MEDIA_GRAPH_MAX_NAME
+        || op->path.len > NGX_MEDIA_GRAPH_MAX_PATH
+        || op->ca_file.len > NGX_MEDIA_GRAPH_MAX_PATH
+        || op->priority > UINT32_MAX
+        || op->failure_timeout > UINT32_MAX
+        || op->recovery_timeout > UINT32_MAX
+        || op->media_mode > NGX_MEDIA_STREAM_MEDIA_PROFILE)
+    {
         return NGX_ERROR;
     }
 
@@ -369,6 +388,16 @@ ngx_media_graph_source_set(const ngx_media_stream_t *stream,
     ngx_media_graph_op_t  op;
 
     if (stream == NULL || source == NULL) {
+        return NGX_ERROR;
+    }
+
+    if (stream->application.len == 0 || stream->name.len == 0
+        || stream->application.len > NGX_MEDIA_GRAPH_MAX_NAME
+        || stream->name.len > NGX_MEDIA_GRAPH_MAX_NAME
+        || source->id.len == 0
+        || source->id.len > NGX_MEDIA_GRAPH_MAX_NAME
+        || source->priority > UINT32_MAX)
+    {
         return NGX_ERROR;
     }
 
@@ -566,6 +595,13 @@ ngx_media_graph_source_open(ngx_media_stream_t *stream, const ngx_str_t *id,
 
     if (ca_file == NULL) {
         ca_file = &empty;
+    }
+
+    if (id->len > NGX_MEDIA_GRAPH_MAX_NAME || priority > UINT32_MAX
+        || path->len > NGX_MEDIA_GRAPH_MAX_PATH
+        || ca_file->len > NGX_MEDIA_GRAPH_MAX_PATH)
+    {
+        return NULL;
     }
 
     /*
