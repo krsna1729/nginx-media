@@ -718,11 +718,20 @@ Artifacts retain the complete nested per-rung directory, including failed-rung
 logs, interval CSVs, CPU/host/process snapshots, preflight and calibration/media
 offer evidence. Default CI writes live runtime evidence under the upload root,
 including during cancellation; an explicit `CAPACITY_RUN` remains caller-owned.
-Generated media payloads are excluded, not the raw measurement files.
+Generated media payloads and ingest secrets are excluded, not raw measurements.
+Uploads explicitly include hidden files because the evidence root is `.build`;
+missing required result/trend uploads fail rather than silently producing no
+artifact. Trend uploads also exclude worktree `.git` metadata.
 Artifact names identify workflow attempts. Publishers poll artifact visibility,
 preserve explicit incomplete records, and replay immutable inputs against the
 latest history tree after push races. Content IDs deduplicate retries without
 overwriting another attempt or earlier incomplete evidence.
+Publication and caller queues use GitHub's native `queue: max` with cancellation
+disabled. A publisher-global group serializes regression issue list/create as
+well as history writes; immutable replay remains protection against other
+history writers. The documented platform ceiling is 100 pending jobs; excess
+jobs can still be canceled, with source artifacts retained on their runs.
+See [GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
 
 `bench.yml` only measures, with `contents: read` and `actions: write` for
 benchmark artifact upload. Publishing is `bench-publish.yml`, the job that

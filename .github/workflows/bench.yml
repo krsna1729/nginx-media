@@ -141,18 +141,20 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bench-${{ inputs.tier }}-attempt-${{ github.run_attempt }}-${{ strategy.job-index }}
+          include-hidden-files: true
           path: |
             .build/bench-results
             !.build/bench-results/**/runtime/media/**
             !.build/bench-results/**/runtime/hls/**
             !.build/bench-results/**/ingest.secret
-          if-no-files-found: ignore
+          if-no-files-found: error
 
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: bench-logs-${{ inputs.tier }}-attempt-${{ github.run_attempt }}-${{ strategy.job-index }}
+          include-hidden-files: true
           path: .build/**/logs/error.log
           if-no-files-found: ignore
   history:
@@ -193,9 +195,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bench-trend-${{ inputs.tier }}-attempt-${{ github.run_attempt }}
+          include-hidden-files: true
           path: |
             .build/bench-trend
             !.build/bench-trend/**/runtime/media/**
             !.build/bench-trend/**/runtime/hls/**
             !.build/bench-trend/**/ingest.secret
-          if-no-files-found: ignore
+            !.build/bench-trend/**/.git
+            !.build/bench-trend/**/.git/**
+          if-no-files-found: error

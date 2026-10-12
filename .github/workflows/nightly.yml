@@ -15,6 +15,7 @@ concurrency:
   # One night, one run: a second trigger waits rather than doubling a soak.
   group: nightly
   cancel-in-progress: false
+  queue: max
 
 jobs:
   sanitizers-and-soak:
@@ -74,6 +75,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: nightly-logs
+          include-hidden-files: true
           path: .build/**/logs/error.log
           if-no-files-found: ignore
 

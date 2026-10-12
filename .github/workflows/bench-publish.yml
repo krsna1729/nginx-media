@@ -7,8 +7,8 @@ name: bench-publish
 # Separate from bench.yml because publishing needs contents: write and issue
 # creation needs issues: write. Pull requests run bench.yml only; publishing is
 # called after main, nightly and weekly benchmarks so it collects their
-# artifacts. Publishers replay their immutable input on the newest pages tree
-# after a push race; no concurrency queue can cancel a pending publication.
+# artifacts. The global publication queue also serializes regression issue
+# list/create; immutable input replay still protects history after a push race.
 
 on:
   workflow_call:
@@ -24,6 +24,10 @@ jobs:
   publish:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    concurrency:
+      group: nginx-media-benchmark-publication
+      queue: max
+      cancel-in-progress: false
 
     permissions:
       contents: write

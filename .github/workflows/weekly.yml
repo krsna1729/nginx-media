@@ -12,6 +12,7 @@ on:
 concurrency:
   group: weekly
   cancel-in-progress: false
+  queue: max
 
 jobs:
   extended:
@@ -74,6 +75,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: weekly-logs
+          include-hidden-files: true
           path: .build/**/logs/error.log
           if-no-files-found: ignore
 

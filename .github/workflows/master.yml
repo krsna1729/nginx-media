@@ -15,6 +15,7 @@ on:
 concurrency:
   group: master-${{ github.ref }}
   cancel-in-progress: false
+  queue: max
 
 jobs:
   full-suite:
@@ -95,6 +96,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: master-logs
+          include-hidden-files: true
           path: .build/**/logs/error.log
           if-no-files-found: ignore
 
