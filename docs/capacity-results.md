@@ -58,6 +58,41 @@ raw receiver bytes; only raw bytes over their actual snapshot interval enter
 efficiency. References are scoped to a mix and stored only after all checks
 pass. Offered-rate provenance is preserved in diagnostics and history.
 
+## Capture qualification checkpoint (2026-10-12)
+
+Prepared capture RPCs validate ownership and finish preparation before READY.
+CPU releases and capture tokens then dispatch together. SSH authentication and
+process startup no longer displace the measured boundary; controller brackets
+still include token delivery, actual capture and reply uncertainty.
+
+All four pure protocols passed requested fifteen-second rungs at one and four
+destinations, both locally and over authenticated loopback SSH. Every protocol
+and remote CPU window passed the unchanged 2% comparison bound. Sender CPUs
+were 4,6, publisher CPUs 16–19 and receiver CPUs 12–15; no machine-policy change
+was made.
+
+| Observed capture check | Local | Authenticated loopback SSH |
+|---|---:|---:|
+| Quality/alignment passing rungs | 8 | 8 |
+| Maximum protocol boundary skew, including uncertainty | 163.178 ms | 103.206 ms |
+| Minimum protocol overlap coverage | 99.126% | 99.356% |
+| Maximum remote CPU boundary skew | Not applicable | 3.820 ms |
+
+The independent sixteen-receiver, 8 Mbit/s-per-peer control qualified its
+baseline. A deliberate `d0000` read stall was receiver-limited only with
+full-rate source and healthy-peer evidence. The native critical-path driver
+also retained 66 raw observations from separate timing/resource builds, with
+CPU 8 measurement and a CPU 10 concurrent 64-record visitor. Its wrapped
+allocation/copy counts are observable calls, not complete totals.
+
+[`2026-10-12-qualification-checkpoint.json`](capacity-evidence/2026-10-12-qualification-checkpoint.json)
+identifies the raw archives, content hashes, frozen source and verification.
+Original failed or unaligned SSH runs remain in the control archive. Historical
+CPU/Gbit values are not retroactively repaired. These controls establish
+measurement/orchestration behavior, not a new capacity ceiling, intrinsic
+receiver maximum, physical-host networking result or 1000-destination pass.
+
+
 ## Reporting corrections (2026-09-26)
 
 Two reporting defects were fixed in the pipeline that produces these tables.
