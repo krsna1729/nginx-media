@@ -92,6 +92,30 @@ CPU/Gbit values are not retroactively repaired. These controls establish
 measurement/orchestration behavior, not a new capacity ceiling, intrinsic
 receiver maximum, physical-host networking result or 1000-destination pass.
 
+## GitHub publication qualification (2026-10-13)
+
+The [nightly run 38272651721](https://github.com/krsna1729/nginx-media/actions/runs/38272651721)
+exercised actual artifact upload, download and `gh-pages` publication from
+`02d908c6f18668db8d364158b5818ab3608255c6`. Its publication job passed.
+All four configuration artifacts and the trend artifact were collected; the
+published qualification record retained artifact IDs and source attempt 1.
+The workflow uses explicit hidden-file uploads for `.build` evidence and a
+publisher-wide FIFO queue (`queue: max`) rather than replacing pending jobs.
+
+The overall workflow did **not** qualify: HLS origin and HLS push passed through
+64 receivers, then their 128-receiver preflight failed because it fingerprinted
+an SRT-only binary that pure HLS never builds. The published qualification
+record correctly has `complete: false`, no missing configurations, and the
+HLS setup-limited rung retained. Other qualification workloads passed through
+64 receivers and recorded infrastructure limits at 128. Trend collection is a
+separate probe cohort, not a substitute for qualification.
+
+[`2026-10-13-publication-38272651721.tar.gz`](capacity-evidence/2026-10-13-publication-38272651721.tar.gz)
+preserves all six downloaded artifacts, including HLS failure logs and 55 rung
+diagnostics (3,597 archive members). SHA-256:
+`6fef7697d2a448db92516e46704eba8e985f3dc67aa68a59c07d8c6c4c56acfa`.
+This proves evidence publication, not a 128- or 1000-destination capacity pass.
+
 
 ## Reporting corrections (2026-09-26)
 

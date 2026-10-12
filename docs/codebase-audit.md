@@ -176,8 +176,11 @@ were not executed during the audit.
   repeated SHA attempts; hardware filters project mixed records. Publication
   and deployed-viewer behavioral checks pass; the real browser rendered the
   observed local history and selected the correct inspector record.
-- [ ] **B10:** preserve per-rung artifacts, preflight verdicts and calibration
-  provenance; handle duplicate publication/run attempts and pending publishers.
+- [x] **B10:** per-rung raw artifacts retain preflight, calibration and attempts;
+  immutable retry/history-race checks pass. Actual nightly run 38272651721
+  collected all four configurations and trend evidence and published to
+  `gh-pages`, preserving HLS setup failure as incomplete. Hidden `.build`
+  uploads are explicit; publisher-wide FIFO queuing retains pending runs.
 - [x] **B11:** the native critical-path driver covers references/feed, TS mux/
   demux, RTMP/AMF, IPC, registry/owner and egress reports. Separate timing/resource
   builds retain throughput, tails and observable allocation/copy counts. Actual
@@ -434,10 +437,9 @@ checkbox above marked only after the behavior is exercised.
   then three comparable recipe-bearing trend fixtures with changed cumulative
   CPU counters and one incompatible-duration fixture. All three scorecard
   sparklines rendered values 110,120,130; the incompatible sample was excluded.
-- Not done: B3's actual SRT commit and receiver tool versions are not collected
-  by any bundle. B6's controlled receiver-saturation evidence, B9's chart
-  series/run selection/mixed-record filters and B10's per-rung artifacts,
-  duplicate publication and pending publishers remain open.
+- At this earlier checkpoint, B3 transport/tool provenance, B6 receiver controls,
+  B9 chart filtering and B10 evidence/retry/publication behavior remained open.
+  Later native and GitHub qualification below records their completed checks.
 - Weekly qualification and trend use a distinct contention manifest and ladder.
   Rungs below 4 cannot form these mixes and are inapplicable, rather than
   measured or quality-failure outcomes. Explicit malformed ladders remain
@@ -535,8 +537,10 @@ checkbox above marked only after the behavior is exercised.
 - Default CI keeps live raw evidence inside its artifact root; explicit runtime
   roots retain transport mappings. Publishers preserve attempts and incomplete
   evidence, deduplicate content-identical retries and replay after history races.
-  Local publication behavior and actual viewer surface were exercised; remote
-  GitHub artifact visibility/push behavior still requires the workflow run.
+  Local publication behavior and actual viewer surface were exercised.
+  Nightly run 38272651721 also exercised GitHub artifact upload/download and
+  history push; the publisher passed while preserving the failed HLS preflight.
+  All six artifacts are archived with their hash in `capacity-results.md`.
 
 ### HTTP, identity paths and faithful allocator qualification
 
