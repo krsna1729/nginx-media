@@ -1,10 +1,15 @@
 # Control API
 
-Enable it on a location:
+Serve it on a private administrative listener:
 
 ```nginx
-location /media/api/ {
-    media_api;
+server {
+    listen 127.0.0.1:8081;
+    location /media/api/ {
+        allow 127.0.0.1;
+        deny all;
+        media_api;
+    }
 }
 ```
 
@@ -280,7 +285,7 @@ deployment secret (`media_ingest_secret`), so it can be read again whenever
 the encoder is being configured:
 
 ```sh
-curl -s http://127.0.0.1:8080/media/api/v1/streams/live/news/sources/enc1/key
+curl -s http://127.0.0.1:8081/media/api/v1/streams/live/news/sources/enc1/key
 # {"id":"enc1","key":"CW3AB274M5NCZQX4896JH86PR7","key_print":"dcc2de7b5788"}
 ```
 

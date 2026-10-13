@@ -438,7 +438,9 @@ ngx_media_hls_ingest_event_drain(ngx_media_hls_ingest_source_t *ingest)
 
         source = ingest->source;
 
-        if (source != NULL && source->stream == ingest->stream) {
+        if (source != NULL && source->stream == ingest->stream
+            && !ngx_atomic_fetch_add(&source->pending_remove, 0))
+        {
             switch (event.type) {
 
             case NGX_MEDIA_HLS_EVENT_TRACKS:
@@ -924,11 +926,7 @@ ngx_media_hls_ingest_name_cmp(const char *a, const char *b)
 
 #endif
 
-/*
- * Source removal publishes pending_remove before detaching the source.  The
- * reader owns its source pointer until close joins it, so the atomic flag is
- * the only cross-thread lifetime check needed here.
- */
+/* The reader retains its source until the worker joins and closes it. */
 static ngx_uint_t
 ngx_media_hls_ingest_source_removed(ngx_media_hls_ingest_source_t *ingest)
 {
@@ -944,7 +942,7 @@ ngx_media_hls_ingest_thread(void *data)
     u_char                          path[NGX_MEDIA_HLS_INGEST_NAME_MAX + 512];
     u_char                         *segment;
     FILE                           *file;
-    size_t                          n, total;
+    size_t                          total;
 
     segment = ingest->segment;
 
@@ -985,14 +983,13 @@ ngx_media_hls_ingest_thread(void *data)
             continue;
         }
 
-        total = 0;
+        /* fread fills this byte-sized request unless it reaches EOF/error. */
+        total = fread(segment, 1, NGX_MEDIA_HLS_INGEST_SEGMENT_MAX, file);
 
-        while (total < NGX_MEDIA_HLS_INGEST_SEGMENT_MAX
-               && (n = fread(segment + total, 1,
-                             NGX_MEDIA_HLS_INGEST_SEGMENT_MAX - total,
-                             file)) > 0)
-        {
-            total += n;
+        if (ferror(file)) {
+            ingest->failures++;
+            fclose(file);
+            continue;
         }
 
         fclose(file);
@@ -1041,11 +1038,11 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
 {
     ngx_media_hls_ingest_source_t  *ingest;
     ngx_media_ts_sink_t             sink;
-    ngx_str_t                      *copy;
     DIR                            *d;
 
-    if (stream == NULL || id == NULL || id->len == 0 || directory == NULL
-        || directory->len == 0)
+    if (stream == NULL || !stream->running || id == NULL || id->len == 0
+        || directory == NULL || directory->len == 0
+        || !ngx_media_model_available(NGX_MEDIA_MODEL_SOURCE))
     {
         return NULL;
     }
@@ -1056,37 +1053,24 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
      * a C string.  Reading past it gives ENOENT for a directory that plainly
      * exists, which is how this was found.
      */
-    ingest = ngx_pcalloc(stream->pool,
-                         sizeof(ngx_media_hls_ingest_source_t));
+    ingest = ngx_alloc(sizeof(ngx_media_hls_ingest_source_t), log);
 
     if (ingest == NULL) {
         return NULL;
     }
+    ngx_memzero(ingest, sizeof(*ingest));
 #ifndef NGX_MEDIA_UNIT_TEST
     ingest->notify_fd = -1;
 #endif
 
-    copy = ngx_pcalloc(stream->pool, sizeof(ngx_str_t));
-
-    if (copy == NULL) {
+    if (ngx_media_string_set(&ingest->directory, directory, log) != NGX_OK) {
+        ngx_media_hls_ingest_close(ingest);
         return NULL;
     }
-
-    copy->data = ngx_pnalloc(stream->pool, directory->len + 1);
-
-    if (copy->data == NULL) {
-        return NULL;
-    }
-
-    ngx_memcpy(copy->data, directory->data, directory->len);
-    copy->data[directory->len] = '\0';
-    copy->len = directory->len;
-
-    ingest->directory = *copy;
     ingest->stream = stream;
     ingest->log = log;
 
-    d = opendir((char *) copy->data);
+    d = opendir((char *) ingest->directory.data);
 
     if (d != NULL) {
         closedir(d);
@@ -1106,6 +1090,7 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
         ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
                       "media: hls ingest directory \"%V\" is not readable",
                       directory);
+        ngx_media_hls_ingest_close(ingest);
         return NULL;
     }
 
@@ -1114,8 +1099,10 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
                                                  log);
 
     if (ingest->source == NULL) {
+        ngx_media_hls_ingest_close(ingest);
         return NULL;
     }
+    ngx_media_source_retain(ingest->source);
 
     sink.tracks = ngx_media_hls_ingest_tracks;
     sink.frame = ngx_media_hls_ingest_frame;
@@ -1123,16 +1110,13 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     if (ngx_media_ts_demux_init(&ingest->demux, NULL, &sink, ingest, log)
         != NGX_OK)
     {
-        ngx_media_stream_source_remove(stream, ingest->source);
-        ingest->source = NULL;
+        ngx_media_hls_ingest_close(ingest);
         return NULL;
     }
     ingest->segment = ngx_alloc(NGX_MEDIA_HLS_INGEST_SEGMENT_MAX, log);
 
     if (ingest->segment == NULL) {
-        ngx_media_ts_demux_destroy(&ingest->demux);
-        ngx_media_stream_source_remove(stream, ingest->source);
-        ingest->source = NULL;
+        ngx_media_hls_ingest_close(ingest);
         return NULL;
     }
 
@@ -1141,11 +1125,7 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
                                * sizeof(ngx_media_hls_event_t), log);
 
     if (ingest->events == NULL) {
-        ngx_free(ingest->segment);
-        ingest->segment = NULL;
-        ngx_media_ts_demux_destroy(&ingest->demux);
-        ngx_media_stream_source_remove(stream, ingest->source);
-        ingest->source = NULL;
+        ngx_media_hls_ingest_close(ingest);
         return NULL;
     }
 
@@ -1153,13 +1133,7 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
                 ingest->events_capacity * sizeof(ngx_media_hls_event_t));
 
     if (pthread_mutex_init(&ingest->events_mutex, NULL) != 0) {
-        ngx_free(ingest->events);
-        ingest->events = NULL;
-        ngx_free(ingest->segment);
-        ingest->segment = NULL;
-        ngx_media_ts_demux_destroy(&ingest->demux);
-        ngx_media_stream_source_remove(stream, ingest->source);
-        ingest->source = NULL;
+        ngx_media_hls_ingest_close(ingest);
         return NULL;
     }
 
@@ -1206,13 +1180,7 @@ ngx_media_hls_ingest_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     return ingest;
 }
 
-/*
- * Ordered teardown: stop the reader, join it, unlink it, release it.  Safe to
- * call more than once and safe on a reader that has already finished - the
- * join is guarded by thread_started, the unlink finds nothing the second
- * time, the demux is zeroed by destroy() and the source pointer is NULLed
- * here, so a repeated close is a no-op rather than a double free.
- */
+/* Close consumes the reader pointer after joining its thread. */
 void
 ngx_media_hls_ingest_close(ngx_media_hls_ingest_source_t *ingest)
 {
@@ -1261,8 +1229,11 @@ ngx_media_hls_ingest_close(ngx_media_hls_ingest_source_t *ingest)
 
     if (ingest->stream != NULL && ingest->source != NULL) {
         ngx_media_stream_source_remove(ingest->stream, ingest->source);
+        ngx_media_source_release(ingest->source);
         ingest->source = NULL;
     }
+    ngx_free(ingest->directory.data);
+    ngx_free(ingest);
 }
 
 ngx_uint_t
@@ -1372,28 +1343,7 @@ ngx_media_hls_ingest_stop_all(void)
 
     (void) pthread_mutex_unlock(&ngx_media_hls_ingest_mutex);
 
-    for (ingest = ngx_media_hls_ingest_all; ingest != NULL;
-         ingest = ingest->next)
-    {
-        if (ingest->thread_started) {
-            (void) pthread_join(ingest->thread, NULL);
-            ingest->thread_started = 0;
-        }
-#ifndef NGX_MEDIA_UNIT_TEST
-        ngx_media_hls_ingest_notify_stop(ingest);
-#endif
-
-        ngx_media_hls_ingest_event_clear(ingest);
-
-        if (ingest->events_mutex_initialized) {
-            (void) pthread_mutex_destroy(&ingest->events_mutex);
-            ingest->events_mutex_initialized = 0;
-        }
-
-        ngx_free(ingest->events);
-        ingest->events = NULL;
-        ngx_free(ingest->segment);
-        ingest->segment = NULL;
-        ngx_media_ts_demux_destroy(&ingest->demux);
+    while (ngx_media_hls_ingest_all != NULL) {
+        ngx_media_hls_ingest_close(ngx_media_hls_ingest_all);
     }
 }

@@ -2357,22 +2357,9 @@ print(bps)
 PY
 }
 capacity_build_srt_sink() {
-    local source="$ROOT/tests/bench/srt_fanout_sink.c"
-    local binary="$RUN/srt_fanout_sink"
-    local -a cflags=() libs=()
-
-    [ -x "$binary" ] && [ "$binary" -nt "$source" ] && return 0
-    command -v cc >/dev/null && command -v pkg-config >/dev/null \
-        && pkg-config --exists srt \
-        || { echo "cc, pkg-config, and libsrt are required for SRT capacity cases" \
-                 >&2; return 1; }
-    [ -f "$source" ] \
-        || { echo "missing shared SRT receiver helper: $source" >&2; return 1; }
-    read -r -a cflags <<< "$(pkg-config --cflags srt)"
-    read -r -a libs <<< "$(pkg-config --libs srt)"
-    cc -O2 -g -Wall -Wextra -Werror -std=c2x "${cflags[@]}" \
-        "$source" -o "$binary" "${libs[@]}" \
-        || { echo "could not build the shared SRT receiver helper" >&2; return 1; }
+    python3 "$ROOT/scripts/build-capacity-receiver.py" \
+        --source "$ROOT/tests/bench/srt_fanout_sink.c" \
+        --binary "$RUN/srt_fanout_sink"
 }
 
 capacity_srt_csv_report() {   # <receiver CSV> <programs> <destinations> <stall ID> <before snapshot> <after snapshot>
@@ -3166,6 +3153,7 @@ PY
     # ladder runs, with the same env rules.
     local preflight_status=0
     capacity_preflight_rung "$case_dir" "$total_dest" "$rate" \
+        "$srt_destinations" "$rtmp_destinations" \
         || preflight_status="$?"
     case "$preflight_status" in
         0) ;;
@@ -4430,8 +4418,9 @@ PY
 # its window on it.  A host or a path that cannot carry the offered load is
 # recorded as infrastructure-limited with the measurement that says so -
 # never as a capacity result about nginx, and never as a sender failure.
-capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s>
+capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT count> <RTMP count>
     local case_dir="$1" destinations="$2" rate="$3"
+    local srt_count="$4" rtmp_count="$5" receiver_binary
     local seconds="$CAPACITY_PREFLIGHT_SECONDS"
     local threads="$CAPACITY_PREFLIGHT_THREADS"
     local probe_port=$(( BASE + 40 ))
@@ -4461,8 +4450,18 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s>
         --binary "$NGINX" --json "$case_dir/preflight.sender.json" \
         >"$case_dir/preflight.sender.log" 2>&1 \
         || { echo "preflight: sender fingerprint failed" >&2; return 1; }
+    if [ "$srt_count" -gt 0 ]; then
+        receiver_binary="$(receiver_path "$RUN/srt_fanout_sink")"
+    elif [ "$rtmp_count" -gt 0 ]; then
+        receiver_binary="$NGINX"
+        [ -z "$CAPACITY_RECEIVER_CONFIG" ] \
+            || receiver_binary="$(receiver_path "$ROOT/.build/nginx-install/sbin/nginx")"
+    else
+        receiver_binary="$(receiver_run python3 -c 'import sys; print(sys.executable)')" \
+            || { echo "preflight: receiver interpreter lookup failed" >&2; return 1; }
+    fi
     receiver_run python3 "$ROOT/tests/bench/capacity_preflight.py" \
-        host --role receiver --binary "$(receiver_path "$RUN/srt_fanout_sink")" \
+        host --role receiver --binary "$receiver_binary" \
         --json "$case_dir/preflight.receiver.json" \
         >"$case_dir/preflight.receiver.log" 2>&1 \
         || { echo "preflight: receiver fingerprint failed" >&2; return 1; }

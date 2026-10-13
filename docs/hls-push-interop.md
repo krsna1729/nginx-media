@@ -80,9 +80,13 @@ it with the first upload:
 ```sh
 response=$(curl -sS -X POST -H 'Content-Type: application/json' \
   -d '{"id":"encoder","type":"hls_push","path":"/var/lib/nginx/media/ingest/live/news"}' \
-  http://127.0.0.1:8080/media/api/v1/streams/live/news/sources)
+  http://127.0.0.1:8081/media/api/v1/streams/live/news/sources)
 KEY=$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')
 ```
+
+This provisioning call uses the loopback admin listener. In the shipped
+container, run `curl` through `docker exec media`; the public media/ingest
+listener does not expose administrative routes.
 
 Push to the key's URL, for example with ffmpeg's HLS muxer:
 
@@ -107,7 +111,9 @@ ffmpeg -re -i input -c:v libx264 -g 50 -c:a aac \
 The key selects exactly one source directory; `<path>` is kept below that
 directory, so uploads cannot cross between sources. Each object is written to
 a temporary file by nginx and renamed into place, so a reader sees a whole
-object or none of it.
+object or none of it. If reading the sealed segment fails, the reader discards
+all bytes from that attempt rather than publishing partial media, then moves
+on to the next segment.
 
 ### What the objects must be
 

@@ -14,6 +14,10 @@
 #include "ngx_media_rtmp_wire.h"
 #include "ngx_media_srt_streamid.h"
 #include "ngx_media_ts_demux.h"
+#include "ngx_media_aac.h"
+#include "ngx_media_nal.h"
+#include "ngx_media_rtmp_adapter.h"
+#include "ngx_media_ts_mux.h"
 
 #include <stdio.h>
 
@@ -383,14 +387,105 @@ fuzz_ts_frame(void *ctx, const ngx_media_frame_t *frame)
 
     (*count)++;
 }
-
 static void
 fuzz_ts_tracks(void *ctx, const ngx_media_trackset_t *tracks)
 {
-    (void) ctx;
+    ngx_uint_t *count = ctx;
     (void) tracks;
+    if (count != NULL) {
+        count[1]++;
+    }
 }
 
+static size_t
+build_valid_ts(u_char *out, size_t cap)
+{
+    ngx_media_ts_mux_conf_t  mconf;
+    ngx_media_ts_mux_t       mux;
+    ngx_media_trackset_t     tracks;
+    ngx_media_track_t        t;
+    ngx_media_ts_burst_t     burst;
+    ngx_media_frame_t        vframe, aframe;
+    ngx_media_buf_t         *vbuf, *abuf;
+    size_t                   burst_sz = 0;
+
+    ngx_media_ts_mux_conf_default(&mconf);
+    if (ngx_media_ts_mux_init(&mux, &mconf, NULL) != NGX_OK) {
+        return 0;
+    }
+
+    if (ngx_media_trackset_init(&tracks, 2, NULL) != NGX_OK) {
+        ngx_media_ts_mux_destroy(&mux);
+        return 0;
+    }
+
+    ngx_memzero(&t, sizeof(t));
+    t.media_type = NGX_MEDIA_TYPE_VIDEO;
+    t.codec = NGX_MEDIA_CODEC_H264;
+    (void) ngx_media_trackset_add(&tracks, &t);
+
+    t.media_type = NGX_MEDIA_TYPE_AUDIO;
+    t.codec = NGX_MEDIA_CODEC_AAC;
+    (void) ngx_media_trackset_add(&tracks, &t);
+
+    (void) ngx_media_ts_mux_set_tracks(&mux, &tracks);
+
+    if (ngx_media_ts_mux_burst_init(&mux, &burst, cap) == NGX_OK) {
+        static const u_char au[] = {
+            0x00, 0x00, 0x00, 0x01, 0x09, 0xF0,
+            0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1E,
+            0x00, 0x00, 0x01, 0x68, 0xCE, 0x38, 0x80,
+            0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x21
+        };
+        vbuf = ngx_media_buf_alloc(sizeof(au));
+        if (vbuf != NULL) {
+            memcpy(ngx_media_buf_data(vbuf), au, sizeof(au));
+            (void) ngx_media_buf_freeze(vbuf, sizeof(au));
+            ngx_media_frame_init(&vframe);
+            vframe.media_type = NGX_MEDIA_TYPE_VIDEO;
+            vframe.codec = NGX_MEDIA_CODEC_H264;
+            vframe.payload_format = NGX_MEDIA_PAYLOAD_ANNEXB;
+            vframe.keyframe = 1;
+            vframe.pts = 90000;
+            vframe.dts = 90000;
+            vframe.payload = vbuf;
+            (void) ngx_media_ts_mux_write_frame(&mux, &burst, &vframe, 1);
+            ngx_media_buf_unref(vbuf);
+        }
+
+        static const u_char adts[] = {
+            0xFF, 0xF1, 0x50, 0x80, 0x01, 0x3F, 0xFC, 0x21, 0x43
+        };
+        abuf = ngx_media_buf_alloc(sizeof(adts));
+        if (abuf != NULL) {
+            memcpy(ngx_media_buf_data(abuf), adts, sizeof(adts));
+            (void) ngx_media_buf_freeze(abuf, sizeof(adts));
+            ngx_media_frame_init(&aframe);
+            aframe.media_type = NGX_MEDIA_TYPE_AUDIO;
+            aframe.codec = NGX_MEDIA_CODEC_AAC;
+            aframe.payload_format = NGX_MEDIA_PAYLOAD_ADTS;
+            aframe.keyframe = 1;
+            aframe.pts = 90000;
+            aframe.dts = 90000;
+            aframe.payload = abuf;
+            (void) ngx_media_ts_mux_write_frame(&mux, &burst, &aframe, 0);
+            ngx_media_buf_unref(abuf);
+        }
+
+        (void) ngx_media_ts_mux_burst_end(&mux, &burst);
+        burst_sz = ngx_media_ts_burst_size(&burst);
+        if (burst_sz <= cap && burst.backing != NULL) {
+            memcpy(out, ngx_media_buf_data(burst.backing), burst_sz);
+        } else {
+            burst_sz = 0;
+        }
+        ngx_media_ts_mux_burst_destroy(&burst);
+    }
+
+    ngx_media_trackset_destroy(&tracks);
+    ngx_media_ts_mux_destroy(&mux);
+    return burst_sz;
+}
 static void
 test_ts_demux(void)
 {
@@ -430,6 +525,59 @@ test_ts_demux(void)
         CHECK(frames == 0, "random ts produced %lu frames", frames);
 
         ngx_media_ts_demux_destroy(&demux);
+    }
+
+    /* valid PAT/PMT/PES, AVC and ADTS stream seeds and stateful partitions */
+    {
+        u_char  valid[4096];
+        size_t  valid_len = build_valid_ts(valid, sizeof(valid));
+        static const size_t chunk_sizes[] = { 1, 7, 64, 187, 188, 189, 512 };
+
+        CHECK(valid_len >= 188 * 3, "valid ts burst generated: %lu", valid_len);
+
+        for (size_t s = 0; s < sizeof(chunk_sizes) / sizeof(chunk_sizes[0]); s++) {
+            size_t      chunk = chunk_sizes[s];
+            ngx_uint_t  sink_counts[2] = { 0, 0 };
+
+            if (ngx_media_ts_demux_init(&demux, &conf, &sink, sink_counts, NULL)
+                == NGX_OK)
+            {
+                for (size_t at = 0; at < valid_len; at += chunk) {
+                    size_t  step = (at + chunk <= valid_len) ? chunk : (valid_len - at);
+                    (void) ngx_media_ts_demux_feed(&demux, valid + at, step);
+                }
+                ngx_media_ts_demux_flush(&demux);
+
+                CHECK(sink_counts[0] > 0, "chunk %lu produced frames: %lu",
+                      chunk, sink_counts[0]);
+                CHECK(sink_counts[1] > 0, "chunk %lu notified tracks: %lu",
+                      chunk, sink_counts[1]);
+
+                ngx_media_ts_demux_destroy(&demux);
+            }
+        }
+
+        for (i = 0; i < FUZZ_ROUNDS(2000) && valid_len > 0; i++) {
+            u_char      copy[4096];
+            ngx_uint_t  sink_counts[2] = { 0, 0 };
+            size_t      mutated_len, chunk, at;
+
+            memcpy(copy, valid, valid_len);
+            mutated_len = fuzz_mutate(copy, valid_len);
+            chunk = 1 + (fuzz_next() % 256);
+
+            if (ngx_media_ts_demux_init(&demux, &conf, &sink, sink_counts, NULL)
+                == NGX_OK)
+            {
+                for (at = 0; at < mutated_len; at += chunk) {
+                    size_t  step = (at + chunk <= mutated_len)
+                                       ? chunk : (mutated_len - at);
+                    (void) ngx_media_ts_demux_feed(&demux, copy + at, step);
+                }
+                ngx_media_ts_demux_flush(&demux);
+                ngx_media_ts_demux_destroy(&demux);
+            }
+        }
     }
 }
 
@@ -481,6 +629,118 @@ test_ipc_reassembly(void)
     ngx_media_ipc_frame_reset(&frame);
 }
 
+static ngx_int_t
+fuzz_pub_frame(void *ctx, const ngx_media_frame_t *frame)
+{
+    ngx_uint_t *count = ctx;
+    (void) frame;
+    if (count != NULL) {
+        (*count)++;
+    }
+    return NGX_OK;
+}
+
+static ngx_int_t
+fuzz_pub_tracks(void *ctx, const ngx_media_trackset_t *tracks)
+{
+    (void) ctx;
+    (void) tracks;
+    return NGX_OK;
+}
+
+static void
+test_flv_publisher(void)
+{
+    ngx_media_rtmp_publisher_t  pub;
+    ngx_media_rtmp_avcc_t       avcc;
+    ngx_media_rtmp_asc_t        asc;
+    u_char                      avcc_rec[128], asc_rec[16];
+    size_t                      avcc_len = 0, asc_len = 0;
+    u_char                      vtag[256], atag[64];
+    ngx_uint_t                  frames = 0, i;
+
+    TEST_CASE("fuzz: flv publisher adapter");
+
+    static const u_char sps[] = { 0x67, 0x42, 0xC0, 0x1E, 0xD9 };
+    static const u_char pps[] = { 0x68, 0xCE, 0x3C, 0x80 };
+
+    ngx_memzero(&avcc, sizeof(avcc));
+    avcc.version = 1;
+    avcc.profile = 0x42;
+    avcc.compatibility = 0xC0;
+    avcc.level = 0x1E;
+    avcc.nal_length_size = 4;
+    avcc.nsps = 1;
+    avcc.sps[0].data = (u_char *) sps;
+    avcc.sps[0].len = sizeof(sps);
+    avcc.npps = 1;
+    avcc.pps[0].data = (u_char *) pps;
+    avcc.pps[0].len = sizeof(pps);
+
+    CHECK(ngx_media_rtmp_avcc_build(&avcc, avcc_rec, sizeof(avcc_rec),
+                                    &avcc_len) == NGX_OK,
+          "avcC built");
+
+    ngx_memzero(&asc, sizeof(asc));
+    asc.object_type = 2;
+    asc.sample_rate_index = 3;
+    asc.sample_rate = 48000;
+    asc.channels = 2;
+    CHECK(ngx_media_rtmp_asc_build(&asc, asc_rec, sizeof(asc_rec),
+                                    &asc_len) == NGX_OK,
+          "ASC built");
+
+    vtag[0] = (NGX_MEDIA_RTMP_FRAME_KEYFRAME << 4) | NGX_MEDIA_RTMP_CODEC_AVC;
+    vtag[1] = NGX_MEDIA_RTMP_AVC_SEQUENCE;
+    vtag[2] = vtag[3] = vtag[4] = 0;
+    memcpy(vtag + 5, avcc_rec, avcc_len);
+    size_t vtag_len = 5 + avcc_len;
+
+    atag[0] = 0xAF;
+    atag[1] = NGX_MEDIA_RTMP_AAC_SEQUENCE;
+    memcpy(atag + 2, asc_rec, asc_len);
+    size_t atag_len = 2 + asc_len;
+
+    CHECK(ngx_media_rtmp_publisher_init(&pub, NULL) == NGX_OK, "pub init");
+    CHECK(ngx_media_rtmp_publisher_feed(&pub, NGX_MEDIA_RTMP_MSG_VIDEO, 0,
+                                        vtag, vtag_len,
+                                        fuzz_pub_frame, fuzz_pub_tracks,
+                                        &frames) == NGX_OK,
+          "vtag feed");
+    CHECK(ngx_media_rtmp_publisher_feed(&pub, NGX_MEDIA_RTMP_MSG_AUDIO, 0,
+                                        atag, atag_len,
+                                        fuzz_pub_frame, fuzz_pub_tracks,
+                                        &frames) == NGX_OK,
+          "atag feed");
+    CHECK(pub.tracks.count == 2, "two tracks registered: %lu", pub.tracks.count);
+    ngx_media_rtmp_publisher_destroy(&pub);
+
+    for (i = 0; i < FUZZ_ROUNDS(2000); i++) {
+        u_char  vcopy[256], acopy[64];
+        size_t  mv_len, ma_len;
+
+        memcpy(vcopy, vtag, vtag_len);
+        memcpy(acopy, atag, atag_len);
+        mv_len = fuzz_mutate(vcopy, vtag_len);
+        ma_len = fuzz_mutate(acopy, atag_len);
+        frames = 0;
+
+        if (ngx_media_rtmp_publisher_init(&pub, NULL) == NGX_OK) {
+            (void) ngx_media_rtmp_publisher_feed(&pub, NGX_MEDIA_RTMP_MSG_VIDEO,
+                                                fuzz_next() % 1000,
+                                                vcopy, mv_len,
+                                                fuzz_pub_frame, fuzz_pub_tracks,
+                                                &frames);
+            (void) ngx_media_rtmp_publisher_feed(&pub, NGX_MEDIA_RTMP_MSG_AUDIO,
+                                                fuzz_next() % 1000,
+                                                acopy, ma_len,
+                                                fuzz_pub_frame, fuzz_pub_tracks,
+                                                &frames);
+            ngx_media_rtmp_publisher_destroy(&pub);
+        }
+    }
+}
+
 int
 main(void)
 {
@@ -499,6 +759,7 @@ main(void)
     test_srt_streamid();
     test_ts_demux();
     test_ipc_reassembly();
+    test_flv_publisher();
 
     TEST_LEAKS();
     TEST_MAIN_END();

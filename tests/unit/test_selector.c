@@ -83,15 +83,6 @@ give_keyframe(ngx_media_stream_t *stream, ngx_media_source_t *source,
     ngx_media_frame_release(&frame);
 }
 
-static void
-free_source_tracks(ngx_media_source_t *source)
-{
-    if (source->tracks != NULL) {
-        ngx_media_trackset_destroy(source->tracks);
-        ngx_free(source->tracks);
-        source->tracks = NULL;
-    }
-}
 
 static void
 track(ngx_media_trackset_t *set, ngx_uint_t media_type, ngx_uint_t codec)
@@ -263,9 +254,6 @@ main(void)
     TEST_ASSERT_EQ_INT(ngx_media_selector_switchback(NULL, 0), NGX_ERROR);
     ngx_media_stream_set_policy(NULL, NULL);
 
-    free_source_tracks(a);
-    free_source_tracks(b);
-    free_source_tracks(c);
 
     ngx_media_trackset_destroy(&prog_tracks);
     ngx_media_trackset_destroy(&alt_tracks);

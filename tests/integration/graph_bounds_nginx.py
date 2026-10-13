@@ -229,6 +229,30 @@ http {{
                             all(request(conn, stream_path)["recovery_timeout_ms"] == 50
                                 for conn in workers.values()))
 
+            reader_directory = run / "reader-input"
+            reader_directory.mkdir()
+            for source_id, source_type, source_path, priority in (
+                    ("directory-reader", "hls_push", str(reader_directory), 173),
+                    ("origin-reader", "hls_pull",
+                     f"http://127.0.0.1:{port}/hls/missing/index.m3u8", 189)):
+                request(workers[False], stream_path + "/sources", "POST", {
+                    "id": source_id, "type": source_type, "path": source_path,
+                    "priority": priority,
+                }, 201)
+
+                def reader_priority():
+                    for conn in workers.values():
+                        sources = request(conn, stream_path + "/sources")["sources"]
+                        source = next((s for s in sources if s["id"] == source_id), None)
+                        if source is None or source["priority"] != priority:
+                            return False
+                    return True
+
+                await_condition("reader priority on owner and replica", reader_priority)
+                request(workers[True], stream_path + "/sources/" + source_id,
+                        "DELETE")
+            print("reader-backed priorities survive nonowner creation on owner and replica")
+
             programs = [("live", "news.one", "red"), ("live", "news_one", "blue"),
                         ("live.one", "news", "green"), ("live_one", "news", "yellow"),
                         ("live", 'news"}\\one', "magenta"), (app, name, "cyan")]

@@ -53,6 +53,8 @@ error_log logs/error.log info;
 pid logs/nginx.pid;
 
 events { worker_connections 256; }
+media_egress_workers srt 1;
+media_egress_workers hls_push 1;
 
 media_hls /var/lib/nginx/media/hls;
 media_ingest_secret /var/lib/nginx/media/ingest.secret;
@@ -60,17 +62,37 @@ media_srt_listen 127.0.0.1:9000;
 
 http {
     server {
+        listen 127.0.0.1:8081;
+        location /media/api/ {
+            allow 127.0.0.1;
+            deny all;
+            media_api;
+        }
+        location / { deny all; }
+    }
+    server {
         listen 8080;
 
-        location /media/api/ { media_api; }
+        location = /media/api { deny all; }
+        location ^~ /media/api/ { deny all; }
 
         location /hls/ { alias /var/lib/nginx/media/hls/; }
     }
 }
 CONF
 ./.build/nginx-install/sbin/nginx -p /run/media -c nginx.conf
+trap './.build/nginx-install/sbin/nginx -p /run/media -c nginx.conf -s quit || true' EXIT
 
-empty="$(curl -fsS http://127.0.0.1:8080/media/api/v1/streams)"
+echo "== public administrative requests are refused"
+for method in GET POST DELETE; do
+    status="$(curl -sS -o /dev/null -w '%{http_code}' -X "$method" \
+        -H 'Content-Type: application/json' \
+        -d '{"application":"live","name":"public"}' \
+        http://127.0.0.1:8080/media/api/v1/streams)"
+    [ "$status" = 403 ] || { echo "public $method returned $status" >&2; exit 1; }
+done
+
+empty="$(curl -fsS http://127.0.0.1:8081/media/api/v1/streams)"
 case "$empty" in
     *'"count":0'*) echo "   an empty list, as documented: $empty" ;;
     *) echo "expected no streams yet, got: $empty" >&2; exit 1 ;;
@@ -79,13 +101,13 @@ esac
 echo "== a program"
 curl -fsS -X POST -H 'Content-Type: application/json' \
     -d '{"application":"live","name":"demo"}' \
-    http://127.0.0.1:8080/media/api/v1/streams >/dev/null
+    http://127.0.0.1:8081/media/api/v1/streams >/dev/null
 
 echo "== a live encoder instead (SRT publish)"
 # the quickstart: a source is provisioned and the API issues the key
 KEY="$(curl -fsS -X POST -H 'Content-Type: application/json' \
     -d '{"id":"enc1","type":"srt","priority":100}' \
-    http://127.0.0.1:8080/media/api/v1/streams/live/demo/sources \
+    http://127.0.0.1:8081/media/api/v1/streams/live/demo/sources \
     | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])")"
 [ -n "$KEY" ] || { echo "the API issued no key" >&2; exit 1; }
 echo "   issued key: $KEY"
@@ -109,11 +131,12 @@ grep -q '#EXTM3U' /tmp/playlist \
     || { echo "the playlist is not a playlist:" >&2; head -3 /tmp/playlist >&2; exit 1; }
 echo "   playlist: $(head -1 /tmp/playlist)"
 
-view="$(curl -fsS http://127.0.0.1:8080/media/api/v1/streams/live/demo)"
+view="$(curl -fsS http://127.0.0.1:8081/media/api/v1/streams/live/demo)"
 case "$view" in
     *fanout_ms*) echo "   the program's own view carries fanout_ms" ;;
     *) echo "the program view has no fanout_ms: $view" >&2; exit 1 ;;
 esac
 
 ./.build/nginx-install/sbin/nginx -p /run/media -c nginx.conf -s quit
+trap - EXIT
 echo "== onboarding ok"

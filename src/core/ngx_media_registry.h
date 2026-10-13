@@ -71,9 +71,21 @@ ngx_media_stream_t *ngx_media_registry_stream_create(
     ngx_media_registry_t *registry, const ngx_str_t *application,
     const ngx_str_t *name, const ngx_media_feed_conf_t *feed_conf,
     ngx_log_t *log);
+/*
+ * Stage a replacement alongside its old identity, charging both allocations.
+ * The worker must admit its runtime before retiring the old entry, or discard
+ * this new entry with stream_discard without remembering a deletion.
+ */
+ngx_media_stream_t *ngx_media_registry_stream_stage(
+    ngx_media_registry_t *registry, const ngx_str_t *application,
+    const ngx_str_t *name, const ngx_media_feed_conf_t *feed_conf,
+    ngx_log_t *log);
 
 /* ordered teardown; NGX_ERROR when the stream is not in this registry */
 ngx_int_t ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
+    ngx_media_stream_t *stream);
+/* Roll back an uncommitted allocation; unlike delete, writes no tombstone. */
+ngx_int_t ngx_media_registry_stream_discard(ngx_media_registry_t *registry,
     ngx_media_stream_t *stream);
 
 /*

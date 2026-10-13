@@ -27,6 +27,7 @@
 
 #define ngx_strlen(s)  strlen((const char *) (s))
 #define ngx_string(str) { sizeof(str) - 1, (u_char *) (str) }
+#define ngx_null_string { 0, NULL }
 #define ngx_strncmp(s1, s2, n) \
     strncmp((const char *) (s1), (const char *) (s2), (n))
 #define ngx_strncasecmp(s1, s2, n) \

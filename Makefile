@@ -1,7 +1,7 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit tsan bench-reporting bench-veth-up bench-veth-down bench-preflight \
-    nginx graph-conflict graph-bounds incarnation smoke routing-bounds routed-sources route-lifecycle routed-reload bench-worker-scaling \
+.PHONY: unit unit-native coverage msan tsan bench-reporting bench-veth-up bench-veth-down bench-preflight \
+    nginx graph-conflict graph-bounds incarnation smoke routing-bounds routed-sources routed-admission route-lifecycle routed-reload deployment-surface model-churn bench-worker-scaling \
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
     bench-capacity-curve bench-capacity-quality bench-burst-sizing bench-core-critical-paths test-image test-in-container \
     test-integration \
@@ -16,6 +16,15 @@ NGINX_VERSION ?= 1.30.5
 
 unit:
 	$(MAKE) -C tests/unit test
+
+unit-native:
+	$(MAKE) -C tests/unit native
+
+coverage:
+	$(MAKE) -C tests/unit coverage
+
+msan:
+	python3 scripts/msan-isolated.py
 
 # Reporting and provenance: Python3/Node and isolated native fixtures, no nginx.
 bench-reporting:
@@ -194,6 +203,15 @@ route-lifecycle:
 routed-reload:
 	python3 tests/integration/routed_reload_nginx.py
 
+routed-admission:
+	python3 tests/integration/routed_admission_nginx.py
+
+deployment-surface:
+	python3 tests/integration/deployment_surface_nginx.py
+
+model-churn:
+	python3 tests/integration/model_churn_nginx.py
+
 srt-admission:
 	python3 tests/integration/srt_admission_nginx.py
 
@@ -219,10 +237,10 @@ BASE ?= debian:trixie
 # type=gha), which only exists where ACTIONS_RUNTIME_TOKEN does; passing those
 # flags locally would fail, so they stay out of the default.
 DOCKER_CACHE_ARGS ?=
-TEST_TARGETS ?= unit ingest-keys routing-bounds routed-sources route-lifecycle routed-reload srt-admission rtmp-preauth srt-ingest srt-ingest-nginx ts-fixture source-switch \
+TEST_TARGETS ?= unit ingest-keys routing-bounds routed-sources routed-admission route-lifecycle routed-reload deployment-surface srt-admission rtmp-preauth srt-ingest srt-ingest-nginx ts-fixture source-switch \
     api-switch api-graph graph-bounds failover hls hls-push hls-pull hls-ingest \
     hls-profile hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
-    graph-conflict churn \
+    graph-conflict churn model-churn \
     rtmp \
     rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
     srt-worker-ports \

@@ -52,6 +52,7 @@ typedef struct ngx_media_file_source_s {
 /*
  * log is kept by the reader and used by every read it performs, so it has to
  * outlive the request: pass the worker's log, never a connection's.
+ * All reader operations run on the owning worker, never on a producer thread.
  */
 ngx_media_file_source_t *ngx_media_file_open(ngx_media_stream_t *stream,
     const ngx_str_t *id, const ngx_str_t *path, ngx_uint_t mode,
@@ -65,6 +66,7 @@ ngx_media_file_source_t *ngx_media_file_open(ngx_media_stream_t *stream,
 ngx_int_t ngx_media_file_advance(ngx_media_file_source_t *source,
     ngx_log_t *log);
 
+/* Consumes the reader pointer and releases its retained source. */
 void ngx_media_file_close(ngx_media_file_source_t *source);
 
 /*

@@ -80,6 +80,7 @@ struct ngx_media_hls_push_t {
      * threads are raw heap-owned, never tied to an NGINX pool.
      */
     ngx_atomic_t             refs;
+    ngx_media_destination_t *model; /* retained through the last upload */
 
 
     ngx_str_t                directory;    /* output directory */
@@ -229,6 +230,7 @@ ngx_media_hls_push_release(ngx_media_hls_push_t *push)
     free(push->directory.data);
     free(push->url.data);
     free(push->ca_file.data);
+    ngx_media_destination_release(push->model);
     free(push);
 }
 
@@ -904,6 +906,8 @@ ngx_media_hls_push_add(ngx_media_stream_t *stream,
         return NGX_ERROR;
     }
 
+    push->model = destination;
+    ngx_media_destination_retain(destination);
 
     (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
     push->next = ngx_media_hls_push_all;

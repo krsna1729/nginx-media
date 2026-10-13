@@ -460,7 +460,9 @@ ngx_media_hls_pull_event_drain(ngx_media_hls_pull_t *pull)
 
         source = pull->source;
 
-        if (source != NULL && source->stream == pull->stream) {
+        if (source != NULL && source->stream == pull->stream
+            && !ngx_atomic_fetch_add(&source->pending_remove, 0))
+        {
             switch (event.type) {
 
             case NGX_MEDIA_HLS_EVENT_TRACKS:
@@ -647,11 +649,7 @@ ngx_media_hls_pull_segment_url(ngx_media_hls_pull_t *pull, const u_char *name,
 
 /* --- the pull loop ------------------------------------------------------- */
 
-/*
- * Source removal publishes pending_remove before detaching the source.  The
- * reader owns its source pointer until close joins it, so the atomic flag is
- * the only cross-thread lifetime check needed here.
- */
+/* The reader retains its source until the worker joins and closes it. */
 static ngx_uint_t
 ngx_media_hls_pull_source_removed(ngx_media_hls_pull_t *pull)
 {
@@ -869,11 +867,11 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
 {
     ngx_media_hls_pull_t  *pull;
     ngx_media_ts_sink_t    sink;
-    ngx_str_t             *copy, *ca_copy;
     u_char                *slash;
 
-    if (stream == NULL || id == NULL || id->len == 0 || url == NULL
-        || url->len == 0)
+    if (stream == NULL || !stream->running || id == NULL || id->len == 0
+        || url == NULL || url->len == 0
+        || !ngx_media_model_available(NGX_MEDIA_MODEL_SOURCE))
     {
         return NULL;
     }
@@ -892,75 +890,33 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
         return NULL;
     }
 
-    pull = ngx_pcalloc(stream->pool, sizeof(ngx_media_hls_pull_t));
+    pull = ngx_alloc(sizeof(ngx_media_hls_pull_t), log);
 
     if (pull == NULL) {
         return NULL;
     }
+    ngx_memzero(pull, sizeof(*pull));
     ngx_media_http_conn_init(&pull->http);
 #ifndef NGX_MEDIA_UNIT_TEST
     pull->notify_fd = -1;
 #endif
 
-    copy = ngx_pcalloc(stream->pool, sizeof(ngx_str_t));
-
-    if (copy == NULL) {
+    /* Both values outlive the request and are released after joining. */
+    if (ngx_media_string_set(&pull->url, url, log) != NGX_OK
+        || ngx_media_string_set(&pull->ca_file, ca_file, log) != NGX_OK)
+    {
+        ngx_media_hls_pull_close(pull);
         return NULL;
     }
-
-    copy->data = ngx_pnalloc(stream->pool, url->len + 1);
-
-    if (copy->data == NULL) {
-        return NULL;
-    }
-
-    ngx_memcpy(copy->data, url->data, url->len);
-    copy->data[url->len] = '\0';
-    copy->len = url->len;
-
-    pull->url = *copy;
     pull->stream = stream;
     pull->log = log;
 
-    /*
-     * The caller's strings are slices of something it owns - a request body,
-     * usually - and a reader outlives the request that created it.  Both have
-     * to be copied into the stream's pool.  The URL was; the CA file was not,
-     * so the pull worked for exactly as long as the creating request was
-     * alive and then read whatever the body's memory had become.
-     */
-    if (ca_file != NULL && ca_file->len > 0) {
-        /*
-         * A separate variable on purpose: `copy` is still the URL's copy and
-         * the base below is computed from it.  Reusing the name here made the
-         * base come out of the certificate path, so every relative segment
-         * resolved to a directory on this machine instead of the origin's.
-         */
-        ca_copy = ngx_pcalloc(stream->pool, sizeof(ngx_str_t));
-
-        if (ca_copy == NULL) {
-            return NULL;
-        }
-
-        ca_copy->data = ngx_pnalloc(stream->pool, ca_file->len + 1);
-
-        if (ca_copy->data == NULL) {
-            return NULL;
-        }
-
-        ngx_memcpy(ca_copy->data, ca_file->data, ca_file->len);
-        ca_copy->data[ca_file->len] = '\0';
-        ca_copy->len = ca_file->len;
-
-        pull->ca_file = *ca_copy;
-    }
-
     /* relative playlist entries resolve against the playlist's directory */
-    slash = (u_char *) strrchr((char *) copy->data, '/');
+    slash = (u_char *) strrchr((char *) pull->url.data, '/');
 
-    if (slash != NULL && slash > copy->data + 7) {
-        pull->base.data = copy->data;
-        pull->base.len = (size_t) (slash - copy->data) + 1;
+    if (slash != NULL && slash > pull->url.data + 7) {
+        pull->base.data = pull->url.data;
+        pull->base.len = (size_t) (slash - pull->url.data) + 1;
     }
 
     pull->source = ngx_media_stream_source_add(stream, id,
@@ -968,8 +924,10 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
                                                log);
 
     if (pull->source == NULL) {
+        ngx_media_hls_pull_close(pull);
         return NULL;
     }
+    ngx_media_source_retain(pull->source);
     pull->id = pull->source->id;
 
     sink.tracks = ngx_media_hls_pull_tracks;
@@ -978,8 +936,7 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     if (ngx_media_ts_demux_init(&pull->demux, NULL, &sink, pull, log)
         != NGX_OK)
     {
-        ngx_media_stream_source_remove(stream, pull->source);
-        pull->source = NULL;
+        ngx_media_hls_pull_close(pull);
         return NULL;
     }
     pull->playlist = ngx_alloc(NGX_MEDIA_HLS_PULL_PLAYLIST_MAX, log);
@@ -997,15 +954,7 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     if (pull->playlist == NULL || pull->segment == NULL
         || pull->segment_url == NULL)
     {
-        ngx_free(pull->segment_url);
-        pull->segment_url = NULL;
-        ngx_free(pull->segment);
-        pull->segment = NULL;
-        ngx_free(pull->playlist);
-        pull->playlist = NULL;
-        ngx_media_ts_demux_destroy(&pull->demux);
-        ngx_media_stream_source_remove(stream, pull->source);
-        pull->source = NULL;
+        ngx_media_hls_pull_close(pull);
         return NULL;
     }
 
@@ -1014,15 +963,7 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
                              * sizeof(ngx_media_hls_event_t), log);
 
     if (pull->events == NULL) {
-        ngx_free(pull->segment_url);
-        pull->segment_url = NULL;
-        ngx_free(pull->segment);
-        pull->segment = NULL;
-        ngx_free(pull->playlist);
-        pull->playlist = NULL;
-        ngx_media_ts_demux_destroy(&pull->demux);
-        ngx_media_stream_source_remove(stream, pull->source);
-        pull->source = NULL;
+        ngx_media_hls_pull_close(pull);
         return NULL;
     }
 
@@ -1030,17 +971,7 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
                 pull->events_capacity * sizeof(ngx_media_hls_event_t));
 
     if (pthread_mutex_init(&pull->events_mutex, NULL) != 0) {
-        ngx_free(pull->events);
-        pull->events = NULL;
-        ngx_free(pull->segment_url);
-        pull->segment_url = NULL;
-        ngx_free(pull->segment);
-        pull->segment = NULL;
-        ngx_free(pull->playlist);
-        pull->playlist = NULL;
-        ngx_media_ts_demux_destroy(&pull->demux);
-        ngx_media_stream_source_remove(stream, pull->source);
-        pull->source = NULL;
+        ngx_media_hls_pull_close(pull);
         return NULL;
     }
 
@@ -1093,13 +1024,7 @@ ngx_media_hls_pull_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     return pull;
 }
 
-/*
- * Ordered teardown: stop the reader, join it, unlink it, release it.  Safe to
- * call more than once and safe on a reader that has already finished - the
- * join is guarded by thread_started, the unlink finds nothing the second
- * time, the demux is zeroed by destroy() and the source pointer is NULLed
- * here, so a repeated close is a no-op rather than a double free.
- */
+/* Close consumes the reader pointer after joining its thread. */
 void
 ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull)
 {
@@ -1158,8 +1083,12 @@ ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull)
 
     if (pull->stream != NULL && pull->source != NULL) {
         ngx_media_stream_source_remove(pull->stream, pull->source);
+        ngx_media_source_release(pull->source);
         pull->source = NULL;
     }
+    ngx_free(pull->url.data);
+    ngx_free(pull->ca_file.data);
+    ngx_free(pull);
 }
 
 ngx_uint_t
@@ -1274,31 +1203,7 @@ ngx_media_hls_pull_stop_all(void)
 
     (void) pthread_mutex_unlock(&ngx_media_hls_pull_mutex);
 
-    for (pull = ngx_media_hls_pull_all; pull != NULL; pull = pull->next) {
-        if (pull->thread_started) {
-            (void) pthread_join(pull->thread, NULL);
-            pull->thread_started = 0;
-        }
-        ngx_media_http_conn_close(&pull->http);
-#ifndef NGX_MEDIA_UNIT_TEST
-        ngx_media_hls_pull_notify_stop(pull);
-#endif
-
-        ngx_media_hls_pull_event_clear(pull);
-
-        if (pull->events_mutex_initialized) {
-            (void) pthread_mutex_destroy(&pull->events_mutex);
-            pull->events_mutex_initialized = 0;
-        }
-
-        ngx_free(pull->events);
-        pull->events = NULL;
-        ngx_free(pull->segment_url);
-        pull->segment_url = NULL;
-        ngx_free(pull->segment);
-        pull->segment = NULL;
-        ngx_free(pull->playlist);
-        pull->playlist = NULL;
-        ngx_media_ts_demux_destroy(&pull->demux);
+    while (ngx_media_hls_pull_all != NULL) {
+        ngx_media_hls_pull_close(ngx_media_hls_pull_all);
     }
 }

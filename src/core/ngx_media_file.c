@@ -4,20 +4,21 @@
 #include "ngx_media_stream.h"
 
 #include <fcntl.h>
-#include <pthread.h>
 #include <unistd.h>
 
 #define NGX_MEDIA_FILE_CHUNK  65536
 
 static ngx_media_file_source_t  *ngx_media_file_all;
-static pthread_mutex_t           ngx_media_file_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* File readers, like the model, are owned exclusively by the worker loop. */
 
 static void
 ngx_media_file_sink_tracks(void *ctx, const ngx_media_trackset_t *tracks)
 {
     ngx_media_file_source_t  *source = ctx;
 
-    if (source == NULL || source->source == NULL || tracks == NULL) {
+    if (source == NULL || source->source == NULL || tracks == NULL
+        || ngx_atomic_fetch_add(&source->source->pending_remove, 0))
+    {
         return;
     }
 
@@ -31,7 +32,9 @@ ngx_media_file_sink_frame(void *ctx, const ngx_media_frame_t *frame)
 {
     ngx_media_file_source_t  *source = ctx;
 
-    if (source == NULL || source->stream == NULL || source->source == NULL) {
+    if (source == NULL || source->stream == NULL || source->source == NULL
+        || ngx_atomic_fetch_add(&source->source->pending_remove, 0))
+    {
         return;
     }
 
@@ -57,34 +60,24 @@ ngx_media_file_open(ngx_media_stream_t *stream, const ngx_str_t *id,
 {
     ngx_media_file_source_t  *source;
     ngx_media_ts_sink_t       sink;
-    ngx_str_t                *copy;
 
-    if (stream == NULL || id == NULL || id->len == 0 || path == NULL
-        || path->len == 0)
+    if (stream == NULL || !stream->running || id == NULL || id->len == 0
+        || path == NULL || path->len == 0
+        || !ngx_media_model_available(NGX_MEDIA_MODEL_SOURCE))
     {
         return NULL;
     }
 
-    source = ngx_pcalloc(stream->pool, sizeof(ngx_media_file_source_t));
+    source = ngx_alloc(sizeof(ngx_media_file_source_t), log);
     if (source == NULL) {
         return NULL;
     }
-
-    copy = ngx_pcalloc(stream->pool, sizeof(ngx_str_t));
-    if (copy == NULL) {
+    ngx_memzero(source, sizeof(*source));
+    source->file.fd = NGX_INVALID_FILE;
+    if (ngx_media_string_set(&source->path, path, log) != NGX_OK) {
+        ngx_free(source);
         return NULL;
     }
-
-    copy->data = ngx_pnalloc(stream->pool, path->len + 1);
-    if (copy->data == NULL) {
-        return NULL;
-    }
-
-    ngx_memcpy(copy->data, path->data, path->len);
-    copy->data[path->len] = '\0';
-    copy->len = path->len;
-
-    source->path = *copy;
     source->stream = stream;
     source->mode = mode;
 
@@ -93,8 +86,10 @@ ngx_media_file_open(ngx_media_stream_t *stream, const ngx_str_t *id,
                                                  NGX_MEDIA_SOURCE_FILE, 0,
                                                  log);
     if (source->source == NULL) {
+        ngx_media_file_close(source);
         return NULL;
     }
+    ngx_media_source_retain(source->source);
 
     /*
      * Opened non-blocking, then checked: open(2) on a FIFO with no writer, or
@@ -103,7 +98,7 @@ ngx_media_file_open(ngx_media_stream_t *stream, const ngx_str_t *id,
      * file is read synchronously on the event loop, so only a regular file
      * is a source.
      */
-    source->file.fd = ngx_open_file(copy->data,
+    source->file.fd = ngx_open_file(source->path.data,
                                     NGX_FILE_RDONLY|NGX_FILE_NONBLOCK,
                                     NGX_FILE_OPEN, 0);
     if (source->file.fd == NGX_INVALID_FILE) {
@@ -152,17 +147,15 @@ ngx_media_file_open(ngx_media_stream_t *stream, const ngx_str_t *id,
     ngx_media_health_transport(&source->source->health, 1, ngx_current_msec);
     ngx_media_source_touch(source->source);
 
-    source->chunk = ngx_pnalloc(stream->pool, NGX_MEDIA_FILE_CHUNK);
+    source->chunk = ngx_alloc(NGX_MEDIA_FILE_CHUNK, log);
 
     if (source->chunk == NULL) {
         ngx_media_file_close(source);
         return NULL;
     }
 
-    (void) pthread_mutex_lock(&ngx_media_file_mutex);
     source->next = ngx_media_file_all;
     ngx_media_file_all = source;
-    (void) pthread_mutex_unlock(&ngx_media_file_mutex);
 
     ngx_log_error(NGX_LOG_NOTICE, log, 0,
                   "media: file source %V opened for %V/%V from %V", id,
@@ -236,11 +229,7 @@ ngx_media_file_advance(ngx_media_file_source_t *source, ngx_log_t *log)
     return NGX_OK;
 }
 
-/*
- * Source removal publishes pending_remove before detaching the source.  The
- * reader owns its source pointer until close joins it, so the atomic flag is
- * the only lifetime check needed here.
- */
+/* The reader holds a source reference until close releases the reader. */
 static ngx_uint_t
 ngx_media_file_removed(ngx_media_file_source_t *source)
 {
@@ -248,12 +237,7 @@ ngx_media_file_removed(ngx_media_file_source_t *source)
             || ngx_atomic_fetch_add(&source->source->pending_remove, 0));
 }
 
-/*
- * Ordered teardown, and safe to repeat: the unlink finds nothing the second
- * time, the descriptor is NGX_INVALID_FILE after the first close, the demux
- * is zeroed by destroy() and the source pointer is NULLed here, so closing a
- * reader that has already finished - or already been closed - is a no-op.
- */
+/* Close consumes the reader pointer; callers must not reuse it. */
 void
 ngx_media_file_close(ngx_media_file_source_t *source)
 {
@@ -263,7 +247,6 @@ ngx_media_file_close(ngx_media_file_source_t *source)
         return;
     }
 
-    (void) pthread_mutex_lock(&ngx_media_file_mutex);
 
     for (link = &ngx_media_file_all; *link != NULL; link = &(*link)->next) {
 
@@ -273,7 +256,6 @@ ngx_media_file_close(ngx_media_file_source_t *source)
         }
     }
 
-    (void) pthread_mutex_unlock(&ngx_media_file_mutex);
 
     if (source->file.fd != NGX_INVALID_FILE) {
         (void) ngx_close_file(source->file.fd);
@@ -284,10 +266,13 @@ ngx_media_file_close(ngx_media_file_source_t *source)
 
     if (source->stream != NULL && source->source != NULL) {
         ngx_media_stream_source_remove(source->stream, source->source);
+        ngx_media_source_release(source->source);
         source->source = NULL;
     }
 
-    source->finished = 1;
+    ngx_free(source->chunk);
+    ngx_free(source->path.data);
+    ngx_free(source);
 }
 
 void
@@ -302,7 +287,6 @@ ngx_media_file_close_stream(ngx_media_stream_t *stream)
     for ( ;; ) {
         found = NULL;
 
-        (void) pthread_mutex_lock(&ngx_media_file_mutex);
 
         for (source = ngx_media_file_all; source != NULL;
              source = source->next)
@@ -313,7 +297,6 @@ ngx_media_file_close_stream(ngx_media_stream_t *stream)
             }
         }
 
-        (void) pthread_mutex_unlock(&ngx_media_file_mutex);
 
         if (found == NULL) {
             return;
@@ -334,55 +317,18 @@ ngx_media_file_close_stream(ngx_media_stream_t *stream)
 void
 ngx_media_file_advance_all(ngx_log_t *log)
 {
-    ngx_media_file_source_t **link;
-    ngx_media_file_source_t  *source, *removed, *next;
+    ngx_media_file_source_t *source, *next;
 
-    removed = NULL;
-
-    (void) pthread_mutex_lock(&ngx_media_file_mutex);
-
-    for (link = &ngx_media_file_all; *link != NULL; ) {
-        source = *link;
-
+    for (source = ngx_media_file_all; source != NULL; source = next) {
+        next = source->next;
         if (ngx_media_file_removed(source)) {
-            /*
-             * Splice the reader off the registry for teardown below:
-             * close() takes this mutex and would deadlock here, and a source
-             * being destroyed must not be walked by the next tick.  The link
-             * is reused for the local list, which nothing else sees.
-             */
-            *link = source->next;
-            source->next = removed;
-            removed = source;
-            continue;
-        }
-
-        if (!source->finished) {
+            ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                          "media: file source %V removed, closing its reader",
+                          &source->path);
+            ngx_media_file_close(source);
+        } else if (!source->finished) {
             (void) ngx_media_file_advance(source, log);
         }
-
-        link = &source->next;
-    }
-
-    (void) pthread_mutex_unlock(&ngx_media_file_mutex);
-
-    /*
-     * The reader is already off the registry, so this is the ordered teardown
-     * of a stopped reader: close() releases the descriptor, the demuxer and
-     * the source itself.  Without it a deleted file source stayed linked and
-     * was still advanced by every tick, reading a file no one owns.
-     */
-    while (removed != NULL) {
-        source = removed;
-        next = removed->next;
-
-        ngx_log_error(NGX_LOG_NOTICE, log, 0,
-                      "media: file source %V removed, closing its reader",
-                      &source->path);
-
-        ngx_media_file_close(source);
-
-        removed = next;
     }
 }
 
@@ -392,13 +338,11 @@ ngx_media_file_count(void)
     ngx_media_file_source_t  *source;
     ngx_uint_t                count = 0;
 
-    (void) pthread_mutex_lock(&ngx_media_file_mutex);
 
     for (source = ngx_media_file_all; source != NULL; source = source->next) {
         count++;
     }
 
-    (void) pthread_mutex_unlock(&ngx_media_file_mutex);
 
     return count;
 }

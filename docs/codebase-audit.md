@@ -87,9 +87,9 @@ were not executed during the audit.
 - [x] **R5:** recover from per-datagram IPC errors without permanently removing
   a peer read event; handle partial frame sends, sequence gaps and backpressure
   at a keyframe boundary.
-- [ ] **R6:** enforce stream/source/destination quotas against runtime and owner
+- [x] **R6:** enforce stream/source/destination quotas against runtime and owner
   directory capacity; expose claim/admission failure rather than dropping it.
-- [ ] **R7:** preserve reader-backed source priorities on the owner, test failed
+- [x] **R7:** preserve reader-backed source priorities on the owner, test failed
   graph admission and repair-journal saturation, and bound long-lived pool
   growth during source/destination/path churn.
 - [ ] **D1:** provide a protected administrative API and deployment-specific
@@ -111,19 +111,19 @@ were not executed during the audit.
 - [x] **T4:** the shim now leaves palloc/pnalloc storage uninitialized and keeps
   explicit poison intact; only pcalloc zeros its allocation. All 35 normal
   ASan/UBSan suites pass both ordinary and poisoned-allocation runs.
-- [ ] **T5:** replace source-text assertions and replicas in `test_security.c`
+- [x] **T5:** replace source-text assertions and replicas in `test_security.c`
   with production behavioral tests. For example, finding `SSL_set1_host` in
   source does not prove actual wrong-host rejection. Delete replaced pins;
   do not repin wording after refactors.
 - [x] **T6:** `make bench-reporting` now runs commit-selection tests, and
   `ingest-keys` is in the shared integration targets used by container CI.
-- [ ] **T7:** add per-file branch coverage plus an explicit inventory of production
+- [x] **T7:** add per-file branch coverage plus an explicit inventory of production
   files excluded from unit builds. Establish a baseline before coverage floors.
-- [ ] **T8:** test routed session/graph/registry/owner-directory state transitions,
+- [x] **T8:** test routed session/graph/registry/owner-directory state transitions,
   SRT removal while sending, stream deletion while leased, HLS push queue/retry
   ownership and actual HTTP/TLS behavior. Use barriers for real cross-thread
   lifetimes, not concurrent calls to APIs whose contract is single-owner.
-- [ ] **T9:** add valid PAT/PMT/PES, AVC/HEVC/ADTS, AMF and FLV fuzz seeds, stateful
+- [x] **T9:** add valid PAT/PMT/PES, AVC/HEVC/ADTS, AMF and FLV fuzz seeds, stateful
   feed partitions, progress/allocation invariants and coverage-guided fuzzing.
   Keep deterministic regressions; uniform random TS primarily rejects input.
 - [ ] **T10:** isolate scratch directories/ports and inject time where useful.
@@ -226,13 +226,13 @@ verification used GCC 16.2.1 and Clang 22.1.8; no compiler was installed/upgrade
   toolchains. Both local compilers passed the checked-overflow smoke.
 - [ ] **C2:** selectively extend nodiscard on significant status APIs, while
   reviewing explicit void discards and migrating all affected callers.
-- [ ] **C3:** generate a compilation database from the actual build and include
+- [x] **C3:** generate a compilation database from the actual build and include
   compiler identity in build/configure invalidation. clangd navigation without
   the database did not reliably resolve the nginx allocator macro.
-- [ ] **C4:** retain CodeQL and add triaged GCC fanalyzer/Clang analysis lanes.
+- [x] **C4:** retain CodeQL and add triaged GCC fanalyzer/Clang analysis lanes.
   Start MemorySanitizer with isolated core/parser targets because dependency
   instrumentation limits prevent treating it as a blanket production flag.
-- [ ] **C5:** evaluate FORTIFY_SOURCE=3, stack-clash protection and target-appropriate
+- [x] **C5:** evaluate FORTIFY_SOURCE=3, stack-clash protection and target-appropriate
   control-flow protection with compatibility/performance checks. The inspected
   artifact already had PIE, RELRO, immediate binding and a non-executable stack.
 - [ ] **C6:** add pinned modern compiler lanes while retaining supported distro
@@ -568,4 +568,35 @@ checkbox above marked only after the behavior is exercised.
 - Remaining security-suite source pins and copied validators/rings were removed.
   The retained production parser/storage regressions pass 47 checks in both
   allocator modes; deletion does not count as new coverage of the removed models.
+
+### Production quotas, compiler lanes, coverage baseline and parser fuzzing
+
+- Production quotas enforce finite `media_stream_limit` (up to 256, matching
+  the shared owner-directory ceiling), `media_source_limit` and
+  `media_destination_limit` per worker. Bounded model rooms refuse objects
+  with 503 before mutation; removed objects retain their allocation until the
+  last reader/lease/holder releases it. The native churn fixture verified 2,560
+  file cycles, 160 ingest cycles, 80 pull cycles, 640 destination cycles and
+  1,280 path replacements; retained resident memory plateaued within the 8 MiB
+  allowance.
+- Owner-directory mutations (claim, heartbeat, release) enforce generation
+  epoch fences against obsolete attached directories. In native multi-worker
+  routing, 256 real directory records were admitted on worker 3, direct and
+  routed publishers refused at the 257th record, and natural stale reclaim
+  recovered capacity across reload after closing old-generation publishers.
+- Per-file branch coverage reports 7,565 / 9,716 lines hit (77.9%) and
+  4,094 / 6,844 branches hit (59.8%) across 39 production C files. An explicit
+  inventory identifies the 13 production files excluded from standalone unit
+  linking.
+- The unit parser fuzz suite incorporates valid MPEG-TS seeds (PAT, PMT, AVC
+  keyframe, AAC ADTS) generated through production muxer code and FLV publisher
+  seeds (avcC and AudioSpecificConfig sequence headers). Stateful feed
+  partitions verify unmutated progress across 1- to 512-byte slices and survive
+  72,082 mutated rounds with zero memory leaks under allocation poisoning.
+- Compiler analysis lanes verify 52 production translation units under GCC 16
+  SARIF and Clang plist analyzers without diagnostic suppression. Nine exact
+  fingerprints are triaged in `scripts/analyzer-triage.json` with trace-backed
+  invariants. The isolated MemorySanitizer lane passes all eight parser/core
+  suites without uninstrumented third-party library linkage. Real compiler flips
+  rebuild native objects and unchanged configurations hit the object cache.
 

@@ -36,6 +36,11 @@ ngx_int_t ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
     ngx_log_t *log, const ngx_str_t *application, const ngx_str_t *name,
     const ngx_media_feed_conf_t *feed_conf);
 void ngx_media_stream_destroy(ngx_media_stream_t *stream);
+/* Nonblocking unlink; retained sources/destinations keep their stream alive. */
+void ngx_media_stream_retire(ngx_media_stream_t *stream);
+/* Persistent holders keep the registry pool alive; atomic release may drain senders. */
+void ngx_media_stream_retain(ngx_media_stream_t *stream);
+void ngx_media_stream_release(ngx_media_stream_t *stream);
 
 ngx_media_source_t *ngx_media_stream_source_add(ngx_media_stream_t *stream,
     const ngx_str_t *id, ngx_uint_t type, ngx_uint_t priority, ngx_log_t *log);
@@ -53,7 +58,7 @@ ngx_int_t ngx_media_stream_publish(ngx_media_stream_t *stream,
 ngx_int_t ngx_media_stream_promote(ngx_media_stream_t *stream,
     ngx_media_source_t *source);
 
-/* retries deferred switches and removals after leases drain */
+/* retries deferred switches after leases drain */
 void ngx_media_stream_switch_resolve(ngx_media_stream_t *stream);
 
 ngx_int_t ngx_media_stream_lease_begin(ngx_media_stream_t *stream,

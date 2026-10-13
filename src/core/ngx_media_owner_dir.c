@@ -322,6 +322,11 @@ ngx_media_owner_dir_release(ngx_media_owner_dir_t *dir, uint64_t hash,
     if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
         return;
     }
+
+    if (dir->epoch != dir->shm->epoch) {
+        ngx_media_owner_dir_unlock(dir);
+        return;
+    }
     record = ngx_media_owner_dir_find(dir, hash);
 
     if (record != NULL && record->hash == hash && record->slot == slot
@@ -345,6 +350,11 @@ ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint64_t hash,
     }
 
     if (ngx_media_owner_dir_lock(dir) != NGX_OK) {
+        return;
+    }
+
+    if (dir->epoch != dir->shm->epoch) {
+        ngx_media_owner_dir_unlock(dir);
         return;
     }
 

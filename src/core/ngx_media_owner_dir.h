@@ -41,12 +41,13 @@ ngx_media_owner_dir_t *ngx_media_owner_dir_attach(ngx_cycle_t *cycle,
 /*
  * Publishes a stream's owner.  Only this cycle's deterministic owner may
  * claim; an older worker generation or a foreign slot is refused with NULL.
- * A new PID takes over immediately, fencing the old PID's heartbeat/release.
+ * A new PID takes over immediately. Older attached epochs cannot extend or
+ * release records, even before the current generation claims the same hash.
  */
 ngx_media_owner_record_t *ngx_media_owner_dir_claim(
     ngx_media_owner_dir_t *dir, uint64_t hash, ngx_uint_t slot);
 
-/* drops a stream's record (owner shutdown or stream removal) */
+/* drops a stream's record only from its current epoch and owner PID */
 void ngx_media_owner_dir_release(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_uint_t slot);
 
@@ -58,7 +59,7 @@ void ngx_media_owner_dir_release(ngx_media_owner_dir_t *dir, uint64_t hash,
  */
 uint64_t ngx_media_owner_dir_revision_next(ngx_media_owner_dir_t *dir);
 
-/* refreshes liveness and progress for a stream this worker owns */
+/* refreshes liveness/progress only from the current epoch and owner PID */
 void ngx_media_owner_dir_heartbeat(ngx_media_owner_dir_t *dir, uint64_t hash,
     ngx_uint_t slot, uint64_t generation, uint64_t frames, ngx_uint_t sources);
 

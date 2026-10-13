@@ -54,7 +54,10 @@ ngx_int_t ngx_media_route_close(ngx_cycle_t *cycle, uint64_t hash,
  * messages carry it so the owner can keep concurrent and superseded
  * connections of the same program apart.
  */
-uint64_t ngx_media_route_session_id(uint64_t local);
+uint64_t ngx_media_route_session_id(void);
+
+/* Live peer identity from this socket generation, including worker respawns. */
+uint64_t ngx_media_route_peer_pid(ngx_uint_t peer);
 
 /*
  * Forwards the track contract of a routed source.  The owner needs it before
@@ -75,6 +78,17 @@ typedef ngx_int_t (*ngx_media_route_frame_pt)(void *ctx, ngx_uint_t peer,
     uint64_t hash, const ngx_media_ipc_header_t *header, ngx_media_buf_t *payload);
 
 void ngx_media_route_set_sink(ngx_media_route_frame_pt cb, void *ctx);
+
+/*
+ * Owner feedback returns on the same generation-local endpoint.  The ingress
+ * callback matches hash/incarnation/session/source_type; NULL means peer EOF.
+ * OPEN remains pending until ACCEPT, and must expire after this deadline.
+ */
+#define NGX_MEDIA_ROUTE_ADMISSION_TIMEOUT  3000
+typedef void (*ngx_media_route_status_pt)(ngx_uint_t peer,
+    const ngx_media_ipc_header_t *header);
+void ngx_media_route_set_status_sink(ngx_uint_t source_type,
+    ngx_media_route_status_pt cb);
 
 /*
  * Sends one message to every other worker: the control plane's counterpart of

@@ -106,7 +106,6 @@ ngx_media_hls_playlist_rewrite(const u_char *in, size_t len,
     /* pass 1: the header's extent, and every segment's lines */
     header_end = len;
     trailer = len;
-    next = 0;
 
     for (pos = 0; pos < len; pos = next) {
         nl = memchr(in + pos, '\n', len - pos);
@@ -221,7 +220,6 @@ ngx_media_hls_playlist_rewrite(const u_char *in, size_t len,
 
     /* pass 2: the header, with the sequences moved past what was removed */
     o = 0;
-    next = 0;
 
     for (pos = 0; pos < header_end; pos = next) {
         nl = memchr(in + pos, '\n', header_end - pos);

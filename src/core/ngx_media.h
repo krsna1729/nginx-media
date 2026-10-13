@@ -155,6 +155,7 @@ struct ngx_media_stream_s {
     uint64_t                emergency_switches;
     uint64_t                program_frames;
     unsigned                running:1;
+    ngx_atomic_t            references; /* persistent holders, including senders */
 };
 
 /* source (goal doc 4.4).  Priority comes from trusted configuration, never
@@ -208,6 +209,7 @@ struct ngx_media_source_s {
     ngx_media_health_t      health;
     ngx_uint_t              compat;    /* vs the program track contract */
     ngx_uint_t              writers;   /* outstanding write leases */
+    ngx_uint_t              references; /* list, leases and persistent holders */
     uint64_t                frames_in;
     uint64_t                payload_bytes_in;
     uint64_t                frames_out;

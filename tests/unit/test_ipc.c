@@ -87,6 +87,27 @@ test_messages(void)
     CHECK(message.payload == NULL, "no payload");
     ngx_media_ipc_message_release(&message);
 
+    /* The owner returns admission on the same bidirectional endpoint. */
+    h.incarnation = UINT64_C(0xfedcba9876543210);
+    h.session = UINT64_C(0x123456789abcdef0);
+    for (uint8_t type = NGX_MEDIA_IPC_MSG_ACCEPT;
+         type <= NGX_MEDIA_IPC_MSG_REJECT; type++)
+    {
+        h.type = type;
+        CHECK(ngx_media_ipc_send_header(local, &h) == NGX_OK,
+              "owner feedback sent in reverse");
+        CHECK(ngx_media_ipc_recv(peer, &message) == NGX_OK,
+              "ingress receives feedback");
+        CHECK(message.header.type == type
+              && message.header.hash == h.hash
+              && message.header.incarnation == h.incarnation
+              && message.header.session == h.session
+              && message.header.source_type == NGX_MEDIA_SOURCE_RTMP,
+              "complete admission identity preserved");
+        CHECK(message.payload == NULL, "feedback is header-only");
+        ngx_media_ipc_message_release(&message);
+    }
+
     /* a small frame */
     buf = payload(64, 0x10);
     h = header(NGX_MEDIA_IPC_MSG_VIDEO, 0x1234);

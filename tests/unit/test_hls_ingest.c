@@ -14,7 +14,7 @@
  * still inside the reader.
  */
 
-#define _DEFAULT_SOURCE 1
+#define _GNU_SOURCE 1
 
 #include "ngx_media_test.h"
 
@@ -22,6 +22,8 @@
 #include "ngx_media_stream.h"
 #include "ngx_media_ts_mux.h"
 
+#include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +33,7 @@
 #define ROOT_DIR    ".build/hls-ingest"
 #define DIR_A       ROOT_DIR "/a"
 #define DIR_B       ROOT_DIR "/b"
+#define DIR_ERROR   ROOT_DIR "/read-error"
 #define SEGMENT_MS  3600
 #define SEG_FRAMES  25
 #define DRAIN_MS    8000
@@ -53,6 +56,65 @@ ngx_media_runtime_iso_source(ngx_media_stream_t *stream,
     (void) stream;
     (void) source;
     (void) frame;
+}
+
+static atomic_uint  read_errors;
+static atomic_uint  next_segment_waiting;
+static atomic_uint  read_next_segment;
+
+FILE *__real_fopen(const char *path, const char *mode);
+
+/* Return real, decodable TS packets once, then fail the same stdio read. */
+static ssize_t
+failed_segment_read(void *cookie, char *buf, size_t size)
+{
+    FILE   *file = cookie;
+    size_t  limit = 40 * NGX_MEDIA_TS_PACKET_SIZE;
+
+    if (ftell(file) != 0) {
+        atomic_fetch_add(&read_errors, 1);
+        errno = EIO;
+        return -1;
+    }
+
+    return (ssize_t) fread(buf, 1, size < limit ? size : limit, file);
+}
+
+static int
+failed_segment_close(void *cookie)
+{
+    return fclose(cookie);
+}
+
+FILE *
+__wrap_fopen(const char *path, const char *mode)
+{
+    FILE                   *file, *failed;
+    cookie_io_functions_t   io = { .read = failed_segment_read,
+                                   .close = failed_segment_close };
+
+    file = __real_fopen(path, mode);
+    if (file == NULL || strcmp(mode, "rb") != 0) {
+        return file;
+    }
+
+    if (strcmp(path, DIR_ERROR "/seg-00001.ts") == 0) {
+        failed = fopencookie(file, mode, io);
+        if (failed == NULL) {
+            fclose(file);
+        }
+        return failed;
+    }
+
+    if (strcmp(path, DIR_ERROR "/seg-00002.ts") == 0) {
+        /* The previous segment is fully handled before the worker drains. */
+        atomic_store(&next_segment_waiting, 1);
+        while (!atomic_load(&read_next_segment)) {
+            (void) nanosleep(&(struct timespec) { 0, 1000000 }, NULL);
+        }
+    }
+
+    return file;
 }
 
 static void
@@ -419,7 +481,7 @@ main(void)
 
         TEST_ASSERT_EQ_U64(ngx_media_hls_ingest_stream_readers(&stream[i]), 0);
 
-        /* a repeated close finds nothing to stop or free */
+        /* NULL remains a no-op; a retired reader pointer is not reusable. */
         ngx_media_hls_ingest_close(NULL);
     }
     TEST_CASE("source removal wakes a live reader");
@@ -459,7 +521,22 @@ main(void)
         TEST_ASSERT_EQ_U64(ngx_media_hls_ingest_stream_readers(&stream[0]), 0);
     }
 
-    TEST_CASE("shutdown stops every live reader, and close still unlinks it");
+    TEST_CASE("reader wrappers, seen tables and strings plateau on a live stream");
+    {
+        size_t outstanding = ngx_media_test_allocs - ngx_media_test_frees;
+        for (cycle = 0; cycle < 64; cycle++) {
+            reader[0] = ngx_media_hls_ingest_open(&stream[0], S("reused"),
+                                                  &dir_str[0], NULL);
+            TEST_ASSERT_NOT_NULL(reader[0]);
+            ngx_media_hls_ingest_close(reader[0]);
+            reader[0] = NULL;
+            TEST_ASSERT_EQ_U64(ngx_media_test_allocs - ngx_media_test_frees,
+                               outstanding);
+            TEST_ASSERT_EQ_U64(stream[0].references, 0);
+        }
+    }
+
+    TEST_CASE("shutdown consumes every live reader");
     for (i = 0; i < 2; i++) {
         reader[i] = ngx_media_hls_ingest_open(&stream[i], S("uploader"),
                                               &dir_str[i], NULL);
@@ -471,8 +548,54 @@ main(void)
     ngx_media_hls_ingest_drain_all();
 
     for (i = 0; i < 2; i++) {
-        ngx_media_hls_ingest_close(reader[i]);
         TEST_ASSERT_EQ_U64(ngx_media_hls_ingest_stream_readers(&stream[i]), 0);
+        reader[i] = NULL;
+    }
+
+    TEST_CASE("a failed segment read publishes no partial media and continues");
+    {
+        ngx_media_stream_t              error_stream;
+        ngx_media_hls_ingest_source_t  *error_reader;
+        ngx_str_t                       error_dir = path_str(DIR_ERROR);
+
+        empty_dir(DIR_ERROR);
+        write_segment(&f, DIR_ERROR "/seg-00001.ts", 900000);
+        write_segment(&f, DIR_ERROR "/seg-00002.ts",
+                      900000 + SEG_FRAMES * SEGMENT_MS);
+        atomic_store(&read_errors, 0);
+        atomic_store(&next_segment_waiting, 0);
+        atomic_store(&read_next_segment, 0);
+
+        TEST_ASSERT_EQ_INT(ngx_media_stream_init(&error_stream, pool, NULL,
+                                                 S("live"), S("read-error"),
+                                                 &feed_conf), NGX_OK);
+        error_reader = ngx_media_hls_ingest_open(&error_stream, S("uploader"),
+                                                &error_dir, NULL);
+        TEST_ASSERT_NOT_NULL(error_reader);
+        source = ngx_media_stream_source_find(&error_stream, S("uploader"));
+        TEST_ASSERT_NOT_NULL(source);
+        TEST_ASSERT_EQ_INT(ngx_media_stream_promote(&error_stream, source),
+                           NGX_OK);
+
+        for (i = 0; i < DRAIN_MS; i++) {
+            if (atomic_load(&next_segment_waiting)) {
+                break;
+            }
+            (void) nanosleep(&(struct timespec) { 0, 1000000 }, NULL);
+        }
+        TEST_ASSERT(atomic_load(&next_segment_waiting));
+
+        /* Five drains exhaust the 128-event queue at 32 events per drain. */
+        for (i = 0; i < 5; i++) {
+            ngx_media_hls_ingest_drain_all();
+        }
+        TEST_ASSERT_EQ_U64(atomic_load(&read_errors), 1);
+        TEST_ASSERT_EQ_U64(ngx_media_feed_units(&error_stream.program_feed), 0);
+
+        atomic_store(&read_next_segment, 1);
+        TEST_ASSERT(drain_until_units(&error_stream.program_feed, 1));
+        ngx_media_hls_ingest_close(error_reader);
+        ngx_media_stream_destroy(&error_stream);
     }
 
     for (i = 0; i < 2; i++) {

@@ -14,18 +14,53 @@ media_ingest_secret /var/lib/nginx/media/ingest.secret;
 
 http {
     server {
-        listen 127.0.0.1:8080;
+        listen 8080;
         location /hls/ { alias /var/lib/nginx/media/hls/; }
-        location /media/api/ { media_api; }
+        location = /media/api { deny all; }
+        location ^~ /media/api/ { deny all; }
         location /ingest/ {
             access_log off; # request URI contains the HLS source key
             media_hls_ingest /var/lib/nginx/media/ingest;
+        }
+    }
+    server {
+        listen 127.0.0.1:8081;
+        location /media/api/ {
+            allow 127.0.0.1;
+            deny all;
+            media_api;
         }
     }
 }
 ```
 
 ## Program model
+
+### `media_stream_limit`, `media_source_limit`, `media_destination_limit`
+
+Finite allocation budgets in the `main` context:
+
+| Directive | Default | Admitted range |
+|---|---:|---:|
+| `media_stream_limit <count>;` | 256 | 0–256 |
+| `media_source_limit <count>;` | 4096 | 0–4294967295 |
+| `media_destination_limit <count>;` | 4096 | 0–4294967295 |
+
+Zero refuses new objects; it does not mean unlimited. Counts are per worker
+and cover all of that worker's streams, including removed objects still held
+by a reader, publisher, write lease, connection or send. A deleted object
+returns its slot only after its last holder releases it. Existing-object
+replay does not allocate a second object or consume another slot.
+
+API creation returns HTTP 503 when the local budget has no room. A desired
+document preflights its distinct new objects before changing configuration;
+deletions do not provide speculative credits for objects that may still be
+retained. Transport-specific queue/session limits can refuse admission sooner.
+The 256-stream ceiling also matches the shared owner-directory capacity.
+
+These object counts are not a process memory, thread or FD limit. Use
+`worker_connections`, `media_egress_workers` and the service/container budgets
+in [`deployment.md`](deployment.md) for those separate resources.
 
 ### `media_hls <directory>;`
 
@@ -205,10 +240,10 @@ every program, so the key is what says which source a publisher is:
 # create the program, then a source; the response carries the key once
 curl -X POST -H 'Content-Type: application/json' \
   -d '{"application":"live","name":"news"}' \
-  http://127.0.0.1:8080/media/api/v1/streams
+  http://127.0.0.1:8081/media/api/v1/streams
 curl -X POST -H 'Content-Type: application/json' \
   -d '{"id":"enc1","type":"srt","priority":100}' \
-  http://127.0.0.1:8080/media/api/v1/streams/live/news/sources
+  http://127.0.0.1:8081/media/api/v1/streams/live/news/sources
 # {"id":"enc1","key":"CW3AB274M5NCZQX4896JH86PR7","key_print":"dcc2de7b5788",...}
 
 ffmpeg ... -f mpegts "srt://127.0.0.1:9000?streamid=CW3AB274M5NCZQX4896JH86PR7"

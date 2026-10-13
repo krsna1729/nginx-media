@@ -3,8 +3,8 @@
 A program that carries media, built entirely through the control API, in
 about five minutes.  Nothing here needs a second machine.
 
-Everything below was run to produce this document.  Where a number appears, it
-came out of the run rather than out of the design.
+The native and container boundary checks in `docs/deployment.md` exercise
+the protected API path; `make onboarding` also runs the publish/read scenario.
 
 ## Build
 
@@ -27,15 +27,27 @@ error_log logs/error.log info;
 pid logs/nginx.pid;
 
 events { worker_connections 256; }
+media_egress_workers srt 1;
+media_egress_workers hls_push 1;
 
 media_hls /var/lib/nginx/media/hls;
 media_ingest_secret /var/lib/nginx/media/ingest.secret;
 
 http {
     server {
+        listen 127.0.0.1:8081;
+        location /media/api/ {
+            allow 127.0.0.1;
+            deny all;
+            media_api;
+        }
+        location / { deny all; }
+    }
+    server {
         listen 8080;
 
-        location /media/api/ { media_api; }
+        location = /media/api { deny all; }
+        location ^~ /media/api/ { deny all; }
 
         location /hls/ { alias /var/lib/nginx/media/hls/; }
     }
@@ -45,18 +57,23 @@ http {
 Start it and ask what programs exist:
 
 ```sh
-curl -s http://127.0.0.1:8080/media/api/v1/streams
+curl -s http://127.0.0.1:8081/media/api/v1/streams
 {"streams":[],"count":0}
 ```
 
 An empty list, and that is the point: no stream is declared anywhere.
+
+The API is only on loopback port 8081. Public port 8080 serves media and
+returns 403 for administrative requests, including requests from localhost.
+For a container, run API calls with `docker exec media curl ...` rather than
+publishing the admin port.
 
 ## A program
 
 ```sh
 curl -s -X POST -H 'Content-Type: application/json' \
     -d '{"application":"live","name":"demo"}' \
-    http://127.0.0.1:8080/media/api/v1/streams
+    http://127.0.0.1:8081/media/api/v1/streams
 ```
 
 ## Something to carry
@@ -72,7 +89,7 @@ ffmpeg -f lavfi -i "testsrc2=size=320x240:rate=25" -t 30 \
 
 curl -s -X POST -H 'Content-Type: application/json' \
     -d '{"id":"file1","type":"file","path":"/tmp/demo.ts"}' \
-    http://127.0.0.1:8080/media/api/v1/streams/live/demo/sources
+    http://127.0.0.1:8081/media/api/v1/streams/live/demo/sources
 ```
 
 The source is admitted through the same health model a live encoder goes
@@ -98,7 +115,7 @@ the directory does not grow with uptime.
 And the program's own view of itself:
 
 ```sh
-curl -s http://127.0.0.1:8080/media/api/v1/streams/live/demo
+curl -s http://127.0.0.1:8081/media/api/v1/streams/live/demo
 ```
 
 Two fields are worth knowing about:
@@ -115,22 +132,19 @@ Two fields are worth knowing about:
 An SRT publisher takes the same route:
 
 ```sh
+KEY=$(curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"enc1","type":"srt","priority":100}' \
+    http://127.0.0.1:8081/media/api/v1/streams/live/demo/sources \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')
 ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=25" \
     -f lavfi -i "sine=frequency=440:sample_rate=48000" -ac 2 \
     -c:v libx264 -preset ultrafast -g 50 -pix_fmt yuv420p \
     -c:a aac -b:a 128k \
-    -f mpegts "srt://127.0.0.1:9000?streamid=CW3AB274M5NCZQX4896JH86PR7"
+    -f mpegts "srt://127.0.0.1:9000?streamid=$KEY"
 ```
 
-Add `media_srt_listen 0.0.0.0:9000;` to the configuration first, then give
-the program a source and take the key the API issues:
-
-```sh
-curl -s -X POST -H 'Content-Type: application/json' \
-    -d '{"id":"enc1","type":"srt","priority":100}' \
-    http://127.0.0.1:8080/media/api/v1/streams/live/demo/sources
-# {"id":"enc1","key":"CW3AB274M5NCZQX4896JH86PR7",...}
-```
+Add `media_srt_listen 0.0.0.0:9000;` to the configuration before running
+these commands. The provisioning call returns the source and its key.
 
 The key **is** the stream id, and it is what the publisher presents; anything
 else is refused (`no source for key <fingerprint>`), with the fingerprint in
@@ -148,7 +162,15 @@ by until the selector promotes it.
 
 ```sh
 docker build -f Containerfile -t nginx-media .
-docker run -p 8080:8080 -p 9000:9000/udp -p 1935:1935 nginx-media
+docker run -d --name media -p 8080:8080 -p 9000:9000/udp -p 1935:1935 nginx-media
 ```
 
-The image starts with the same empty graph and the same API on port 8080.
+The image starts with the same empty graph. Its API is on container loopback
+port 8081, reached from the host with:
+
+```sh
+docker exec media curl -fsS http://127.0.0.1:8081/media/api/v1/streams
+```
+
+Public HLS remains on port 8080. See `docs/deployment.md` for resource budgets
+and the executable native/container boundary checks.

@@ -793,8 +793,10 @@ hls_lifecycle(void)
             TEST_ASSERT_EQ_INT(ngx_media_hls_push_register(NULL), NGX_OK);
             dest = ngx_media_destination_add(&stream, S("push"), NGX_MEDIA_DEST_HLS_PUSH, NULL);
             TEST_ASSERT_NOT_NULL(dest);
-            dest->host = endpoint;
-            dest->path = directory;
+            TEST_ASSERT_EQ_INT(ngx_media_string_set(&dest->host, &endpoint, NULL),
+                               NGX_OK);
+            TEST_ASSERT_EQ_INT(ngx_media_string_set(&dest->path, &directory, NULL),
+                               NGX_OK);
             dest->segment_duration_ms = 10000;
             TEST_ASSERT_EQ_INT(ngx_media_destination_start(&stream, dest, NULL), NGX_OK);
             ngx_media_hls_push_sealed(&directory, &path, NULL);
@@ -853,8 +855,10 @@ hls_push_request_budget(void)
     destination = ngx_media_destination_add(&stream, S("push"),
                                              NGX_MEDIA_DEST_HLS_PUSH, NULL);
     TEST_ASSERT_NOT_NULL(destination);
-    destination->host = endpoint;
-    destination->path = directory;
+    TEST_ASSERT_EQ_INT(ngx_media_string_set(&destination->host, &endpoint, NULL),
+                       NGX_OK);
+    TEST_ASSERT_EQ_INT(ngx_media_string_set(&destination->path, &directory, NULL),
+                       NGX_OK);
     destination->segment_duration_ms = 1000;
     TEST_ASSERT_EQ_INT(ngx_media_destination_start(&stream, destination, NULL), NGX_OK);
     started = now_ms();

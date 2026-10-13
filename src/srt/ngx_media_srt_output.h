@@ -10,6 +10,7 @@
 #include "ngx_media_srt_output_queue.h"
 #include "ngx_media_srt_transport.h"
 
+#include "ngx_media_destination.h"
 #include <pthread.h>
 
 /*
@@ -46,6 +47,7 @@ typedef struct {
      */
     const ngx_media_srt_params_t  *params;
     uint64_t    egress_token;      /* worker-local manager record */
+    ngx_media_destination_t *model; /* optional retained dynamic model */
 } ngx_media_srt_output_conf_t;
 
 typedef struct {
@@ -88,8 +90,9 @@ ngx_uint_t ngx_media_srt_outputs_concurrency(
 void ngx_media_srt_outputs_adapt(ngx_media_srt_outputs_t *outs);
 
 /*
- * Runtime destinations share the fixed egress shards.  add() takes a free
- * slot; remove() stops it and releases it after any in-flight send completes.
+ * Runtime destinations share the fixed egress shards. add() owns immutable
+ * copies of all routing/connection strings. remove() is nonblocking; strings
+ * and the retained model survive any in-flight connect or send.
  */
 ngx_int_t ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
     const ngx_media_srt_output_conf_t *conf, ngx_uint_t *index,

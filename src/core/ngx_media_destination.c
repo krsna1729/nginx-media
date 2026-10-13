@@ -54,43 +54,15 @@ ngx_media_destination_touch(ngx_media_destination_t *destination)
     }
 }
 
-ngx_str_t *
-ngx_media_destination_strdup(ngx_pool_t *pool, const ngx_str_t *src)
-{
-    ngx_str_t  *dst;
-
-    if (src == NULL || src->len == 0) {
-        return NULL;
-    }
-
-    dst = ngx_pcalloc(pool, sizeof(ngx_str_t));
-    if (dst == NULL) {
-        return NULL;
-    }
-
-    dst->data = ngx_pnalloc(pool, src->len + 1);
-    if (dst->data == NULL) {
-        return NULL;
-    }
-
-    ngx_memcpy(dst->data, src->data, src->len);
-    dst->data[src->len] = '\0';
-    dst->len = src->len;
-
-    return dst;
-}
 
 ngx_media_destination_t *
 ngx_media_destination_add(ngx_media_stream_t *stream, const ngx_str_t *id,
     ngx_uint_t type, ngx_log_t *log)
 {
     ngx_media_destination_t  *destination;
-    ngx_str_t                *copy;
 
-    /* the model allocates from the stream's pool, so no logger is needed */
-    (void) log;
 
-    if (stream == NULL || id == NULL || id->len == 0) {
+    if (stream == NULL || !stream->running || id == NULL || id->len == 0) {
         return NULL;
     }
 
@@ -98,18 +70,23 @@ ngx_media_destination_add(ngx_media_stream_t *stream, const ngx_str_t *id,
         return NULL;
     }
 
-    destination = ngx_pcalloc(stream->pool, sizeof(ngx_media_destination_t));
+    if (ngx_media_model_admit(NGX_MEDIA_MODEL_DESTINATION) != NGX_OK) {
+        return NULL;
+    }
+    destination = ngx_alloc(sizeof(ngx_media_destination_t), log);
     if (destination == NULL) {
+        ngx_media_model_release(NGX_MEDIA_MODEL_DESTINATION);
         return NULL;
     }
-
-    copy = ngx_media_destination_strdup(stream->pool, id);
-    if (copy == NULL) {
+    ngx_memzero(destination, sizeof(*destination));
+    if (ngx_media_string_set(&destination->id, id, log) != NGX_OK) {
+        ngx_free(destination);
+        ngx_media_model_release(NGX_MEDIA_MODEL_DESTINATION);
         return NULL;
     }
-
-    destination->id = *copy;
     destination->stream = stream;
+    destination->references = 1;
+    ngx_media_stream_retain(stream);
     destination->type = type;
     destination->enabled = 1;
 
@@ -241,18 +218,16 @@ ngx_media_destination_start(ngx_media_stream_t *stream,
     return NGX_OK;
 }
 
-/*
- * Ordered teardown: stop the transport before dropping the object, so a
- * sender thread is never left writing into a destination that no longer
- * exists.  The object itself is pool-allocated and released with the stream.
- */
+/* Stop the backend before reclaiming the model and its owned strings. */
 void
 ngx_media_destination_remove(ngx_media_stream_t *stream,
     ngx_media_destination_t *destination)
 {
     const ngx_media_destination_ops_t  *ops;
 
-    if (stream == NULL || destination == NULL) {
+    if (stream == NULL || destination == NULL
+        || destination->stream != stream)
+    {
         return;
     }
 
@@ -265,9 +240,39 @@ ngx_media_destination_remove(ngx_media_stream_t *stream,
     destination->egress_token = 0;
 
     destination->impl = NULL;
-    destination->stream = NULL;
 
     ngx_queue_remove(&destination->queue);
 
     ngx_media_stream_touch(stream);
+    ngx_media_destination_release(destination);
+}
+
+void
+ngx_media_destination_retain(ngx_media_destination_t *destination)
+{
+    if (destination != NULL) {
+        (void) ngx_atomic_fetch_add(&destination->references, 1);
+    }
+}
+
+void
+ngx_media_destination_release(ngx_media_destination_t *destination)
+{
+    ngx_media_stream_t *stream;
+
+    if (destination == NULL
+        || ngx_atomic_fetch_add(&destination->references, -1) != 1)
+    {
+        return;
+    }
+    stream = destination->stream;
+    ngx_free(destination->id.data);
+    ngx_free(destination->host.data);
+    ngx_free(destination->streamid.data);
+    ngx_free(destination->path.data);
+    ngx_free(destination->ca_file.data);
+    ngx_free(destination->profile.data);
+    ngx_free(destination);
+    ngx_media_model_release(NGX_MEDIA_MODEL_DESTINATION);
+    ngx_media_stream_release(stream);
 }

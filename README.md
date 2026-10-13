@@ -37,12 +37,16 @@ Then, with `.build/nginx-install/sbin/nginx -p . -c <your config>` running:
 # a program that carries media, built entirely through the API
 curl -X POST -H 'Content-Type: application/json' \
   -d '{"application":"live","name":"demo"}' \
-  http://127.0.0.1:8080/media/api/v1/streams
+  http://127.0.0.1:8081/media/api/v1/streams
 
-# publish to it over SRT, RTMP, or from a file
+# provision a publisher source and use the API-issued key
+KEY=$(curl -fsS -X POST -H 'Content-Type: application/json' \
+  -d '{"id":"encoder","type":"srt","priority":100}' \
+  http://127.0.0.1:8081/media/api/v1/streams/live/demo/sources \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')
 ffmpeg -re -f lavfi -i "testsrc2=size=1280x720:rate=25" \
   -c:v libx264 -preset ultrafast -g 50 -pix_fmt yuv420p \
-  -f mpegts "srt://127.0.0.1:9000?streamid=CW3AB274M5NCZQX4896JH86PR7"
+  -f mpegts "srt://127.0.0.1:9000?streamid=$KEY"
 
 curl http://127.0.0.1:8080/hls/live/demo/index.m3u8
 ```
@@ -115,7 +119,14 @@ docker run -d --name media \
   ghcr.io/krsna1729/nginx-media:latest
 ```
 
-The image starts with no streams declared and the control API on 8080.
+The image starts with no streams declared. Public media HTTP is on 8080;
+the administrative API is only on container loopback 127.0.0.1:8081:
+
+```sh
+docker exec media curl -fsS http://127.0.0.1:8081/media/api/v1/streams
+```
+
+Do not publish or proxy the administrative port through the public listener.
 `container/examples/` has ready-made configurations — API only, SRT ingest,
 RTMP ingest, a relay, an SRT sink, recording, and a full one for testing.
 `container/nginx.conf` is mountable and the mount is live:

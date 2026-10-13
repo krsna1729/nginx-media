@@ -26,6 +26,9 @@ typedef struct {
     ngx_uint_t   switchback;
     ngx_uint_t   srt_egress_workers;
     ngx_uint_t   hls_push_egress_workers;
+    ngx_uint_t   stream_limit;
+    ngx_uint_t   source_limit;
+    ngx_uint_t   destination_limit;
 
     /* static outputs applied to every stream (per-stream configuration
      * arrives with the stream database) */
@@ -40,6 +43,20 @@ typedef struct {
 
 #define NGX_MEDIA_POLICY_FAILURE_TIMEOUT_DEFAULT 1500
 #define NGX_MEDIA_POLICY_RECOVERY_TIMEOUT_DEFAULT 10000
+
+#define NGX_MEDIA_STREAM_LIMIT_DEFAULT       256
+#define NGX_MEDIA_SOURCE_LIMIT_DEFAULT       4096
+#define NGX_MEDIA_DESTINATION_LIMIT_DEFAULT  4096
+#define NGX_MEDIA_MODEL_STREAM               0
+#define NGX_MEDIA_MODEL_SOURCE               1
+#define NGX_MEDIA_MODEL_DESTINATION          2
+
+/* Worker-local live allocation counts, including retired retained objects. */
+ngx_uint_t ngx_media_model_available(ngx_uint_t kind);
+ngx_uint_t ngx_media_model_room(ngx_uint_t kind);
+ngx_int_t ngx_media_model_admit(ngx_uint_t kind);
+void ngx_media_model_release(ngx_uint_t kind);
+ngx_uint_t ngx_media_model_count(ngx_uint_t kind);
 
 #define NGX_MEDIA_EGRESS_WORKERS_UNSET ((ngx_uint_t) -1)
 /* configured core policy, with a default fallback for unit/runtime callers */
