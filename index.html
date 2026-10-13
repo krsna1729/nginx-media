@@ -275,10 +275,6 @@
         <span class="filter-label">Hardware</span>
         <nav id="runners" class="pills" aria-label="Runner Hardware"></nav>
       </div>
-      <label class="filter-segment diagnostic-filters">
-        <span class="filter-label">Profile</span>
-        <select id="profiles" aria-label="Benchmark profile"></select>
-      </label>
     </div>
     <div class="view-tabs" role="tablist" aria-label="View Switcher">
       <button id="tab-overview" role="tab" aria-selected="true" onclick="switchView('overview')">📊 Overview</button>
@@ -576,40 +572,21 @@ function runnerIdentity(fp) {
     if (!empty) identity[key] = v;
   }
   if (fp.cgroup && fp.cgroup.cpu_max) identity.cgroup = {cpu_max: fp.cgroup.cpu_max};
-  return Object.keys(identity).length ? stableJson(identity) : "";
+  return stableJson(identity);
 }
 
-// bench_history.recipes_comparable: every measurement field and the first
-// rung must match. Missing recipes remain visible but are not comparable.
+// bench_history.recipes_comparable: every field that decides what a rung
+// measures must match; ladders must begin at the same rung.  Records that
+// predate recipes cannot be compared with ones that carry one, but form one
+// series among themselves so the older history stays visible.
 const RECIPE_MATCH = ["seconds", "rate", "stop_after_failures", "min_delivery_ratio",
   "interval_floor", "max_low_seconds", "srt_workers", "hls_push_workers", "srt_hls",
   "mixes", "harness"];
 function recipesComparable(a, b) {
+  if (!a && !b) return true;
   if (!a || !b) return false;
   if (RECIPE_MATCH.some(k => a[k] == null || stableJson(a[k]) !== stableJson(b[k]))) return false;
   return Boolean(a.steps?.length && b.steps?.length && a.steps[0] === b.steps[0]);
-}
-
-function profileRecords(records, profile) {
-  return records.filter(r => (r.comparison_group || "") === profile);
-}
-
-function hardwareRecords(records, identity) {
-  if (identity === "all") return records;
-  return records.flatMap(record => {
-    const configs = {};
-    for (const [name, config] of Object.entries(record.configs || {})) {
-      const mixes = Object.fromEntries(Object.entries(config.mixes || {})
-        .filter(([, mix]) => runnerIdentity(mix.fingerprint) === identity));
-      if (Object.keys(mixes).length) configs[name] = {...config, mixes};
-    }
-    return Object.keys(configs).length ? [{...record, record_id: recordKey(record), configs}] : [];
-  });
-}
-
-function recordKey(record) {
-  return record.record_id || stableJson([record.run, record.run_attempt,
-    record.sha, record.timestamp, record.comparison_group, record.configs]);
 }
 
 function statusBadge(complete) {
@@ -619,32 +596,26 @@ function statusBadge(complete) {
 }
 
 function series(records, pick, selectedHardware = "all") {
-  const out = [];
+  const out = {};
   for (const r of records) {
     for (const [config, c] of Object.entries(r.configs || {})) {
       if (c.complete !== true) continue;
       for (const [mix, m] of Object.entries(c.mixes || {})) {
-        const identity = runnerIdentity(m.fingerprint);
-        if (!identity || (selectedHardware !== "all" && identity !== selectedHardware)) continue;
+        if (!m.fingerprint) continue;
         const hw = runnerHardware(m.fingerprint);
+        if (selectedHardware !== "all" && hw !== selectedHardware) continue;
         for (const [label, y] of pick(config, mix, m, hw)) {
-          let data = out.find(s => s.key === label && s.mix === mix
-            && s.identity === identity && s.profile === (r.comparison_group || "")
-            && recipesComparable(s.recipe, c.recipe));
-          if (!data) {
-            data = {key: label, mix, identity, profile: r.comparison_group || "",
-              recipe: c.recipe, label: `${label} · ${runnerClass(m.fingerprint)} · series ${out.length + 1}`, points: []};
-            out.push(data);
-          }
-          const commitTime = (r.commit_timestamp || r.timestamp || "").slice(0, 19);
+          const key = selectedHardware === "all" ? `${label} · ${hw}` : label;
+          const data = out[key] ||= {label: key, points: []};
+          const commitTime = (r.commit_timestamp || r.timestamp).slice(0, 19);
           const sha = r.sha || "";
-          data.points.push({x: `${commitTime}\u0000${sha}\u0000${recordKey(r)}`,
+          data.points.push({x: `${commitTime}\u0000${sha}`,
                             y, sha: sha.slice(0, 8), hw});
         }
       }
     }
   }
-  return out;
+  return Object.values(out);
 }
 
 const PALETTE = [
@@ -766,7 +737,6 @@ function drawSparkline(canvas, values) {
 let currentTierRecords = [];
 let activeHardware = "all";
 let currentView = "overview";
-let activeProfile = "";
 
 function switchView(viewName) {
   currentView = viewName;
@@ -778,15 +748,16 @@ function switchView(viewName) {
   }
 }
 
-function inspectCommit(key) {
-  const source = currentTierRecords.find(r => recordKey(r) === key);
-  const rec = source && hardwareRecords([source], activeHardware)[0];
+function inspectCommit(sha, trend = false, group = "") {
+  const rec = currentTierRecords.find(r => (r.sha || "").startsWith(sha)
+    && Boolean(r.comparison_group) === trend
+    && (r.comparison_group || "") === group);
   if (!rec) return;
   const panel = document.getElementById("commit-inspector");
   panel.classList.add("open");
   document.getElementById("inspect-sha").textContent = (rec.sha || "").slice(0, 10);
   document.getElementById("inspect-meta").textContent =
-    `Tier: ${rec.tier} · Run: ${rec.run || "local"} · Attempt: ${rec.run_attempt || "unknown"} · Date: ${rec.timestamp} · Status: ${rec.complete ? "Complete" : "Incomplete"}` +
+    `Tier: ${rec.tier} · Date: ${rec.timestamp} · Status: ${rec.complete ? "Complete" : "Incomplete"}` +
     (rec.comparison_group ? " · Same-runner trend probe (compact ladder; not qualification)" : "");
   
   const tiles = document.getElementById("inspect-tiles");
@@ -835,21 +806,25 @@ function renderCapacityDiagnostics() {
     diagnosticChart = null;
   }
 
-  const newest = hardwareRecords(profileRecords(currentTierRecords, activeProfile), activeHardware)
+  const newest = currentTierRecords.filter(record => !record.comparison_group)
     .reduce((latest, record) =>
-      !latest || (record.timestamp || "") > (latest.timestamp || "") ? record : latest, null);
+      Object.values(record.configs || {}).some(config =>
+        Object.values(config.mixes || {}).some(mix =>
+          activeHardware === "all" || runnerHardware(mix.fingerprint) === activeHardware)) &&
+      (!latest || (record.timestamp || "") > (latest.timestamp || "")) ? record : latest, null);
   const mixes = {};
   if (newest) {
     for (const [configName, config] of Object.entries(newest.configs || {})) {
       for (const [name, mix] of Object.entries(config.mixes || {})) {
-        mixes[`${configName}/${name}`] = {configName, mixName: name, ...mix};
+        if (activeHardware !== "all" && runnerHardware(mix.fingerprint) !== activeHardware) continue;
+        mixes[name] = {configName, ...mix};
       }
     }
   }
-  const names = Object.keys(mixes).filter(name => !mixes[name].mixName.endsWith("-srt-reference"));
+  const names = Object.keys(mixes).filter(name => !name.endsWith("-srt-reference"));
   const selected = names.includes(selector.value) ? selector.value : names[0];
   selector.innerHTML = names.map(name =>
-    `<option value="${esc(name)}">${esc(name)}</option>`).join("");
+    `<option value="${esc(name)}">${esc(workloadMeta(name).title)}</option>`).join("");
   selector.disabled = !selected;
   const rungSelector = document.getElementById("diagnostic-rung");
   if (!selected) {
@@ -873,7 +848,7 @@ function renderCapacityDiagnostics() {
     `<option value="${esc(r.destinations)}">${esc(r.destinations)} destinations · ${esc(r.outcome)}</option>`).join("");
   rungSelector.disabled = !selectedRung;
   if (!selectedRung) {
-    document.getElementById("diagnostic-context").textContent = `${selected} · ${runnerHardware(workload.fingerprint)} · no rung-level diagnostics`;
+    document.getElementById("diagnostic-context").textContent = `${workloadMeta(selected).title} · ${runnerHardware(workload.fingerprint)} · no rung-level diagnostics`;
     for (const id of ["flow-workload", "flow-rung", "flow-program", "flow-workers", "flow-cpu", "flow-worker-detail", "flow-protocols", "flow-delivery", "flow-gate"]) {
       document.getElementById(id).textContent = "–";
     }
@@ -885,7 +860,7 @@ function renderCapacityDiagnostics() {
   const highestPass = workload.highest_passing ?? "–";
   const firstFailure = workload.first_quality_failure ?? "none";
   const infra = rungs.filter(r => r.outcome === "infrastructure-limited").map(r => r.destinations);
-  const meta = workloadMeta(workload.mixName);
+  const meta = workloadMeta(selected);
   const peak = selectedRung.peak || {};
   const fmt = (value, suffix = "") => Number.isFinite(value) ? `${value.toFixed(1)}${suffix}` : "–";
   const delivery = Number.isFinite(selectedRung.observed_delivery_ratio)
@@ -966,53 +941,39 @@ function render(records, selectedHardware = activeHardware) {
   activeHardware = selectedHardware;
   charts.splice(0).forEach(c => c.destroy());
   for (const id of ["capacity", "efficiency"]) document.getElementById(id).innerHTML = "";
-  const profiles = document.getElementById("profiles");
-  const groups = [...new Set(records.map(r => r.comparison_group).filter(Boolean))];
-  if (activeProfile && !groups.includes(activeProfile)) activeProfile = "";
-  profiles.innerHTML = `<option value="">Qualification</option>` + groups.map(group =>
-    `<option value="${esc(group)}">Same-runner probe: ${esc(group)}</option>`).join("");
-  profiles.value = activeProfile;
-  profiles.onchange = () => { activeProfile = profiles.value; closeInspector(); render(records); };
-  // Distinct stable identities, not just CPU display names.
+  renderCapacityDiagnostics();
+  // 1. Discover distinct hardware in this tier
   const hwCounts = new Map();
-  const qualificationRecords = profileRecords(records, activeProfile);
+  const qualificationRecords = records.filter(r => !r.comparison_group);
   for (const r of qualificationRecords) {
     for (const c of Object.values(r.configs || {})) {
+      if (c.complete === true) {
         for (const m of Object.values(c.mixes || {})) {
           if (m.fingerprint) {
-            const hw = runnerIdentity(m.fingerprint);
-            if (hw) {
-              const old = hwCounts.get(hw);
-              hwCounts.set(hw, {count: (old?.count || 0) + 1, fingerprint: m.fingerprint});
-            }
+            const hw = runnerHardware(m.fingerprint);
+            hwCounts.set(hw, (hwCounts.get(hw) || 0) + 1);
           }
         }
+      }
     }
   }
-  if (activeHardware !== "all" && !hwCounts.has(activeHardware)) activeHardware = "all";
-  renderCapacityDiagnostics();
 
   // 2. Update KPI Banner
-  const latestOverall = hardwareRecords(qualificationRecords, activeHardware).reduce((newest, record) =>
+  const latestOverall = qualificationRecords.reduce((newest, record) =>
     !newest || (record.timestamp || "") > (newest.timestamp || "") ? record : newest, null);
-  document.getElementById("kpi-runs").textContent = hardwareRecords(qualificationRecords, activeHardware).length;
+  document.getElementById("kpi-runs").textContent = qualificationRecords.length;
   document.getElementById("kpi-runs-sub").textContent = hwCounts.size > 0 ? `${hwCounts.size} hardware types` : "No runs";
-  const hardwareLabel = hwCounts.has(activeHardware)
-    ? runnerClass(hwCounts.get(activeHardware).fingerprint) : "All Hardware";
-  document.getElementById("kpi-hw").textContent = hardwareLabel;
-  document.getElementById("kpi-hw-sub").textContent = activeHardware === "all" ? "Runner identities remain separate series" : "Filtered to one stable runner identity";
+  document.getElementById("kpi-hw").textContent = activeHardware === "all" ? "All Hardware" : activeHardware;
+  document.getElementById("kpi-hw-sub").textContent = activeHardware === "all" ? "Comparing across all runners" : `Filtered to ${activeHardware}`;
   if (latestOverall) {
     document.getElementById("kpi-commit").textContent = (latestOverall.sha || "").slice(0, 8) || "unknown";
     document.getElementById("kpi-commit-sub").textContent = (latestOverall.timestamp || "").slice(0, 10);
-  } else {
-    document.getElementById("kpi-commit").textContent = "–";
-    document.getElementById("kpi-commit-sub").textContent = "No matching runs";
   }
 
   // 3. Hardware Filter Pills
   const hwRow = document.getElementById("hardware-row");
   const hwNav = document.getElementById("runners");
-  if (hwCounts.size > 1 || activeHardware !== "all") {
+  if (hwCounts.size > 1) {
     hwRow.style.display = "";
     hwNav.innerHTML = "";
     const allBtn = document.createElement("button");
@@ -1020,9 +981,9 @@ function render(records, selectedHardware = activeHardware) {
     allBtn.setAttribute("aria-pressed", activeHardware === "all");
     allBtn.onclick = () => render(records, "all");
     hwNav.appendChild(allBtn);
-    for (const [hw, {count, fingerprint}] of hwCounts) {
+    for (const [hw, count] of hwCounts) {
       const btn = document.createElement("button");
-      btn.textContent = `${runnerClass(fingerprint)} (${count})`;
+      btn.textContent = `${hw} (${count})`;
       btn.setAttribute("aria-pressed", activeHardware === hw);
       btn.onclick = () => render(records, hw);
       hwNav.appendChild(btn);
@@ -1030,16 +991,26 @@ function render(records, selectedHardware = activeHardware) {
   } else {
     hwRow.style.display = "none";
     hwNav.innerHTML = "";
+    activeHardware = "all";
   }
 
-  const filteredRecords = hardwareRecords(qualificationRecords, activeHardware);
-  const filteredQualification = filteredRecords;
-  const filteredTrendRecords = filteredRecords;
+  const filteredRecords = activeHardware === "all" ? records : records.filter(r =>
+    Object.values(r.configs || {}).some(c =>
+      Object.values(c.mixes || {}).some(m => m.fingerprint && runnerHardware(m.fingerprint) === activeHardware)));
+  const filteredQualification = activeHardware === "all" ? qualificationRecords : qualificationRecords.filter(r =>
+    Object.values(r.configs || {}).some(c =>
+      Object.values(c.mixes || {}).some(m => m.fingerprint && runnerHardware(m.fingerprint) === activeHardware)));
+  const latestComparisonGroup = [...records].reverse().find(r => r.comparison_group)?.comparison_group;
+  const trendRecords = latestComparisonGroup
+    ? records.filter(r => r.comparison_group === latestComparisonGroup) : records;
+  const filteredTrendRecords = activeHardware === "all" ? trendRecords : trendRecords.filter(r =>
+    Object.values(r.configs || {}).some(c =>
+      Object.values(c.mixes || {}).some(m => m.fingerprint && runnerHardware(m.fingerprint) === activeHardware)));
 
   // 4. Render Executive Scorecard Grid with inline sparklines
   const scorecardContainer = document.getElementById("scorecard-container");
   if (scorecardContainer) {
-    const latestForScore = filteredQualification.reduce((newest, record) =>
+    const latestForScore = (filteredQualification.length ? filteredQualification : qualificationRecords).reduce((newest, record) =>
       !newest || (record.timestamp || "") > (newest.timestamp || "") ? record : newest, null);
     let cardsHtml = "";
     const sparkData = {};
@@ -1047,7 +1018,6 @@ function render(records, selectedHardware = activeHardware) {
       for (const [cName, c] of Object.entries(latestForScore.configs || {})) {
         for (const [mName, m] of Object.entries(c.mixes || {})) {
           if (mName.endsWith("-srt-reference")) continue;
-          const sparkId = `spark-${Object.keys(sparkData).length}`;
           const meta = workloadMeta(mName);
           const highest = m.highest_passing ?? "–";
           const firstFail = m.first_quality_failure ? `Fail @ ${m.first_quality_failure}` : "No failures";
@@ -1060,18 +1030,16 @@ function render(records, selectedHardware = activeHardware) {
           // runs, or a different host or recipe, is not a trend.
           const trendVals = [];
           const fixedRung = passRung ? passRung.destinations : null;
-          for (const rec of [...filteredTrendRecords].sort((a, b) =>
-            (a.commit_timestamp || a.timestamp || "").localeCompare(b.commit_timestamp || b.timestamp || ""))) {
+          for (const rec of filteredTrendRecords) {
             const entry = rec.configs?.[cName]?.mixes?.[mName];
-            if (!entry || fixedRung === null || rec.configs[cName].complete !== true
-                || !runnerIdentity(m.fingerprint)) continue;
+            if (!entry || fixedRung === null) continue;
             if (runnerIdentity(entry.fingerprint) !== runnerIdentity(m.fingerprint)) continue;
             if (!recipesComparable(rec.configs[cName].recipe, c.recipe)) continue;
             const p = (entry.rungs || []).find(g => g.outcome === "pass"
               && g.destinations === fixedRung && Number.isFinite(g.sender_cpu_per_gbps));
             if (p) trendVals.push(p.sender_cpu_per_gbps);
           }
-          sparkData[sparkId] = trendVals;
+          sparkData[mName] = trendVals;
 
           cardsHtml += `
             <div class="scorecard" onclick="switchView('charts')">
@@ -1079,7 +1047,7 @@ function render(records, selectedHardware = activeHardware) {
                 <div class="scorecard-top">
                   <div>
                     <div class="scorecard-title">${esc(meta.title)}</div>
-                    <div class="scorecard-id">${esc(cName)} / ${esc(mName)}</div>
+                    <div class="scorecard-id">${esc(mName)}</div>
                   </div>
                   <span class="proto-tag ${esc(meta.protoClass)}">${esc(meta.badge)}</span>
                 </div>
@@ -1095,8 +1063,8 @@ function render(records, selectedHardware = activeHardware) {
                 </div>
               </div>
               <div class="scorecard-bottom-row">
-                <div class="scorecard-foot">${statusBadge(c.complete)} · ${esc(firstFail)} · ${esc(cpuSub)}</div>
-                <canvas class="sparkline-canvas" id="${sparkId}" width="90" height="26"></canvas>
+                <div class="scorecard-foot">${esc(firstFail)} · ${esc(cpuSub)}</div>
+                <canvas class="sparkline-canvas" id="spark-${esc(mName)}" width="90" height="26"></canvas>
               </div>
             </div>`;
         }
@@ -1105,8 +1073,8 @@ function render(records, selectedHardware = activeHardware) {
     scorecardContainer.innerHTML = cardsHtml || `<p class="empty">No workloads recorded in this tier.</p>`;
     // Draw sparklines after DOM insertion
     setTimeout(() => {
-      for (const [sparkId, vals] of Object.entries(sparkData)) {
-        const can = document.getElementById(sparkId);
+      for (const [mName, vals] of Object.entries(sparkData)) {
+        const can = document.getElementById(`spark-${mName}`);
         if (can) drawSparkline(can, vals);
       }
     }, 10);
@@ -1135,7 +1103,7 @@ function render(records, selectedHardware = activeHardware) {
         }
       }
       const hwLabel = [...hwSet].join(", ") || "Unknown hardware";
-      mRows += `<tr data-record-key="${esc(recordKey(r))}" onclick="inspectCommit(this.dataset.recordKey)"><td><strong>${esc(ts)}</strong> · attempt ${esc(r.run_attempt || "unknown")}</td>` +
+      mRows += `<tr onclick="inspectCommit('${esc(sha)}', ${Boolean(r.comparison_group)}, '${esc(r.comparison_group || "")}')"><td><strong>${esc(ts)}</strong></td>` +
                `<td><code>${esc(sha)}</code></td>` +
                `<td>${esc(hwLabel)}</td>` +
                `<td>${r.comparison_group ? '<span class="badge unverified">same-runner trend probe</span>' : '<span class="badge complete">qualification</span>'}</td>` +
@@ -1152,7 +1120,7 @@ function render(records, selectedHardware = activeHardware) {
       for (const [mix, e] of Object.entries(c.mixes || {})) {
         if (!mix.endsWith("-srt-reference")) {
           const hw = runnerHardware(e.fingerprint);
-          if (activeHardware === "all" || runnerIdentity(e.fingerprint) === activeHardware) {
+          if (activeHardware === "all" || hw === activeHardware) {
             byMix[mix] = true;
           }
         }
@@ -1176,7 +1144,7 @@ function render(records, selectedHardware = activeHardware) {
   }
 
   // 7. Latest Run Breakdown Table
-  const latest = filteredQualification.reduce((newest, record) =>
+  const latest = (filteredQualification.length ? filteredQualification : qualificationRecords).reduce((newest, record) =>
     !newest || (record.timestamp || "") > (newest.timestamp || "")
       ? record : newest, null);
   const table = document.getElementById("latest");
@@ -1224,7 +1192,6 @@ function render(records, selectedHardware = activeHardware) {
     document.getElementById("kpi-tier-sub").textContent = `Selected tier: ${tier}`;
     for (const b of nav.children) b.setAttribute("aria-pressed", b.textContent === tier);
     activeHardware = "all";
-    activeProfile = "";
     closeInspector();
     try { render(await loadTier(tier), "all"); } catch (e) { render([], "all"); }
   };
