@@ -1,19 +1,23 @@
 #include "ngx_media_route.h"
+#include "ngx_media_graph.h"
 
 #ifndef NGX_MEDIA_UNIT_TEST
 
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_event.h>
+#include <sys/mman.h>
 
 /*
- * One row of endpoints per worker: row[i][j] is worker i's end of the pair it
- * shares with worker j.  The master creates every pair before forking, so a
- * worker only has to adopt the fds it inherits.
+ * Each configuration cycle owns its matrix until the master destroys that
+ * cycle's pool.  Forked workers keep their own descriptors and memory, so a
+ * reload can close the master's old matrix without disturbing draining peers.
  */
-
-static int                    ngx_media_route_fds[NGX_MEDIA_ROUTE_MAX_WORKERS]
-                                               [NGX_MEDIA_ROUTE_MAX_WORKERS];
+typedef struct {
+    ngx_uint_t  workers;
+    int         fds[NGX_MEDIA_ROUTE_MAX_WORKERS][NGX_MEDIA_ROUTE_MAX_WORKERS];
+    ngx_atomic_t *pids;
+} ngx_media_route_generation_t;
 
 static ngx_media_ipc_endpoint_t
     *ngx_media_route_endpoints[NGX_MEDIA_ROUTE_MAX_WORKERS];
@@ -24,11 +28,52 @@ static ngx_connection_t      *ngx_media_route_connections[
 static ngx_uint_t             ngx_media_route_workers;
 static ngx_media_route_frame_pt  ngx_media_route_sink;
 static void                  *ngx_media_route_sink_ctx;
+static ngx_media_route_status_pt ngx_media_route_status_sinks[3];
+static ngx_media_route_generation_t *ngx_media_route_active_generation;
+
+static void
+ngx_media_route_generation_cleanup(void *data)
+{
+    ngx_media_route_generation_t  *generation = data;
+    ngx_uint_t                    i, j;
+
+    for (i = 0; i < generation->workers; i++) {
+        for (j = 0; j < generation->workers; j++) {
+            if (generation->fds[i][j] >= 0) {
+                (void) close(generation->fds[i][j]);
+                generation->fds[i][j] = -1;
+            }
+        }
+    }
+    if (generation->pids != NULL) {
+        (void) munmap((void *) generation->pids,
+                      generation->workers * sizeof(ngx_atomic_t));
+        generation->pids = NULL;
+    }
+}
+
+static ngx_media_route_generation_t *
+ngx_media_route_generation(ngx_cycle_t *cycle)
+{
+    ngx_pool_cleanup_t  *cleanup;
+
+    for (cleanup = cycle->pool->cleanup; cleanup != NULL;
+         cleanup = cleanup->next)
+    {
+        if (cleanup->handler == ngx_media_route_generation_cleanup) {
+            return cleanup->data;
+        }
+    }
+
+    return NULL;
+}
 
 ngx_int_t
 ngx_media_route_master_init(ngx_cycle_t *cycle, ngx_log_t *log)
 {
-    ngx_uint_t  i, j, workers;
+    ngx_media_route_generation_t  *generation;
+    ngx_pool_cleanup_t            *cleanup;
+    ngx_uint_t                     i, j, workers;
 
     workers = ngx_media_owner_worker_count(cycle);
 
@@ -41,33 +86,31 @@ ngx_media_route_master_init(ngx_cycle_t *cycle, ngx_log_t *log)
         return NGX_ERROR;
     }
 
-    if (ngx_media_route_workers == workers) {
-        return NGX_OK;   /* already configured for this worker count */
+    if (ngx_media_route_generation(cycle) != NULL) {
+        return NGX_ERROR;
     }
 
-    if (ngx_media_route_workers > 0) {
-        /* close stale socket pairs when worker count changes on reload */
-        for (i = 0; i < ngx_media_route_workers; i++) {
-            for (j = i + 1; j < ngx_media_route_workers; j++) {
-                if (ngx_media_route_fds[i][j] >= 0) {
-                    (void) close(ngx_media_route_fds[i][j]);
-                    ngx_media_route_fds[i][j] = -1;
-                }
-                if (ngx_media_route_fds[j][i] >= 0) {
-                    (void) close(ngx_media_route_fds[j][i]);
-                    ngx_media_route_fds[j][i] = -1;
-                }
-            }
-        }
-        ngx_media_route_workers = 0;
+    cleanup = ngx_pool_cleanup_add(cycle->pool,
+                                  sizeof(ngx_media_route_generation_t));
+    if (cleanup == NULL) {
+        return NGX_ERROR;
     }
 
-    ngx_memset(ngx_media_route_fds, -1, sizeof(ngx_media_route_fds));
+    generation = cleanup->data;
+    generation->workers = workers;
+    generation->pids = NULL;
+    ngx_memset(generation->fds, -1, sizeof(generation->fds));
+    cleanup->handler = ngx_media_route_generation_cleanup;
 
-    if (workers < 2) {
-        /* a single worker needs no routing at all */
-        ngx_media_route_workers = workers;
-        return NGX_OK;
+    generation->pids = mmap(NULL, workers * sizeof(ngx_atomic_t),
+                            PROT_READ | PROT_WRITE,
+                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (generation->pids == MAP_FAILED) {
+        ngx_log_error(NGX_LOG_EMERG, log, ngx_errno,
+                      "media: could not allocate generation-local "
+                      "routing peer identities");
+        generation->pids = NULL;
+        return NGX_ERROR;
     }
     for (i = 0; i < workers; i++) {
 
@@ -81,15 +124,14 @@ ngx_media_route_master_init(ngx_cycle_t *cycle, ngx_log_t *log)
                 ngx_log_error(NGX_LOG_EMERG, log, ngx_errno,
                               "media: could not create the routing socket pair "
                               "for workers %ui and %ui", i, j);
+                ngx_media_route_generation_cleanup(generation);
                 return NGX_ERROR;
             }
 
-            ngx_media_route_fds[i][j] = fds[0];
-            ngx_media_route_fds[j][i] = fds[1];
+            generation->fds[i][j] = fds[0];
+            generation->fds[j][i] = fds[1];
         }
     }
-
-    ngx_media_route_workers = workers;
 
     ngx_log_error(NGX_LOG_NOTICE, log, 0,
                   "media: routing socket pairs created for %ui workers",
@@ -130,6 +172,34 @@ ngx_media_route_is_owner(ngx_cycle_t *cycle, uint64_t hash)
 static uint64_t   ngx_media_route_bad_datagrams;
 static ngx_msec_t ngx_media_route_bad_logged;
 
+static void
+ngx_media_route_endpoint_close(ngx_uint_t peer)
+{
+    ngx_connection_t  *c = ngx_media_route_connections[peer];
+
+    if (c != NULL) {
+        if (c->read->active) {
+            (void) ngx_del_event(c->read, NGX_READ_EVENT, NGX_CLOSE_EVENT);
+        }
+        if (c->read->posted) {
+            ngx_delete_posted_event(c->read);
+        }
+        if (c->write->posted) {
+            ngx_delete_posted_event(c->write);
+        }
+
+        /* Keep fd valid until nginx removes it from its connection index. */
+        ngx_free_connection(c);
+        c->fd = (ngx_socket_t) -1;
+        ngx_media_route_connections[peer] = NULL;
+    }
+
+    if (ngx_media_route_endpoints[peer] != NULL) {
+        ngx_media_ipc_close(ngx_media_route_endpoints[peer]);
+        ngx_media_route_endpoints[peer] = NULL;
+    }
+}
+
 /* feeds frames received from another worker into the local program */
 static void
 ngx_media_route_read_handler(ngx_event_t *ev)
@@ -138,9 +208,22 @@ ngx_media_route_read_handler(ngx_event_t *ev)
     ngx_media_ipc_endpoint_t *endpoint = c->data;
     ngx_media_ipc_message_t   message;
     ngx_int_t                 rc;
+    ngx_media_ipc_header_t     reply;
+    ngx_uint_t                peer;
+
+    for (peer = 0; peer < ngx_media_route_workers; peer++) {
+        if (ngx_media_route_endpoints[peer] == endpoint) {
+            break;
+        }
+    }
+
+    if (peer == ngx_media_route_workers) {
+        return;
+    }
 
     for ( ;; ) {
-        rc = ngx_media_ipc_recv(endpoint, &message);
+        rc = (c->close || c->error) ? NGX_ERROR
+                                   : ngx_media_ipc_recv(endpoint, &message);
 
         if (rc == NGX_AGAIN) {
             return;
@@ -164,12 +247,40 @@ ngx_media_route_read_handler(ngx_event_t *ev)
         }
 
         if (rc != NGX_OK) {
-            /* the peer is gone: nothing sensible to do but stop reading */
             ngx_log_error(NGX_LOG_WARN, c->log, 0,
                           "media: worker %ui routing endpoint closed",
                           (ngx_uint_t) ngx_worker);
-            (void) ngx_del_event(c->read, NGX_READ_EVENT, 0);
+            if (ngx_media_route_sink != NULL) {
+                (void) ngx_media_route_sink(ngx_media_route_sink_ctx, peer,
+                                            0, NULL, NULL);
+            }
+            for (ngx_uint_t type = NGX_MEDIA_SOURCE_SRT;
+                 type <= NGX_MEDIA_SOURCE_RTMP; type++)
+            {
+                if (ngx_media_route_status_sinks[type] != NULL) {
+                    ngx_media_route_status_sinks[type](peer, NULL);
+                }
+            }
+            ngx_media_route_endpoint_close(peer);
             return;
+        }
+
+        if (message.header.type == NGX_MEDIA_IPC_MSG_ACCEPT
+            || message.header.type == NGX_MEDIA_IPC_MSG_REJECT)
+        {
+            ngx_uint_t type = message.header.source_type;
+
+            if (peer == ngx_media_route_owner((ngx_cycle_t *) ngx_cycle,
+                                              message.header.hash)
+                && type >= NGX_MEDIA_SOURCE_SRT
+                && type <= NGX_MEDIA_SOURCE_RTMP
+                && message.header.length == 0
+                && ngx_media_route_status_sinks[type] != NULL)
+            {
+                ngx_media_route_status_sinks[type](peer, &message.header);
+            }
+            ngx_media_ipc_message_release(&message);
+            continue;
         }
 
         if (ngx_media_route_sink != NULL) {
@@ -179,9 +290,29 @@ ngx_media_route_read_handler(ngx_event_t *ev)
              * addressed, so a routed source could resolve to another stream's
              * slot (or to none) while the two workers believed they agreed.
              */
-            (void) ngx_media_route_sink(ngx_media_route_sink_ctx,
-                                        message.header.hash,
-                                        &message.header, message.payload);
+            rc = ngx_media_route_sink(ngx_media_route_sink_ctx, peer,
+                                      message.header.hash,
+                                      &message.header, message.payload);
+
+            if (message.header.type == NGX_MEDIA_IPC_MSG_OPEN) {
+                ngx_memzero(&reply, sizeof(reply));
+                reply.version = NGX_MEDIA_IPC_VERSION;
+                reply.type = rc == NGX_OK ? NGX_MEDIA_IPC_MSG_ACCEPT
+                                          : NGX_MEDIA_IPC_MSG_REJECT;
+                reply.hash = message.header.hash;
+                reply.incarnation = message.header.incarnation;
+                reply.session = message.header.session;
+                reply.source_type = message.header.source_type;
+
+                if (ngx_media_ipc_send_header(endpoint, &reply) != NGX_OK
+                    && rc == NGX_OK)
+                {
+                    /* No ingress can commit this admission; undo its slot. */
+                    reply.type = NGX_MEDIA_IPC_MSG_CLOSE;
+                    (void) ngx_media_route_sink(ngx_media_route_sink_ctx, peer,
+                                                reply.hash, &reply, NULL);
+                }
+            }
         }
 
         ngx_media_ipc_message_release(&message);
@@ -191,56 +322,91 @@ ngx_media_route_read_handler(ngx_event_t *ev)
 ngx_int_t
 ngx_media_route_worker_init(ngx_cycle_t *cycle, ngx_log_t *log)
 {
-    ngx_media_ipc_endpoint_t  *endpoint;
-    ngx_connection_t          *c;
-    ngx_uint_t                 slot, i;
+    ngx_media_route_generation_t  *generation;
+    ngx_media_ipc_endpoint_t      *endpoint;
+    ngx_connection_t             *c;
+    ngx_uint_t                    slot, i, j;
 
     slot = (ngx_uint_t) ngx_worker;
+    generation = ngx_media_route_generation(cycle);
+    if (generation == NULL || slot >= generation->workers) {
+        return NGX_ERROR;
+    }
 
-    if (ngx_media_route_workers < 2 || slot >= ngx_media_route_workers) {
+    ngx_media_route_workers = generation->workers;
+    ngx_media_route_active_generation = generation;
+    ngx_atomic_t *pid_slot = &generation->pids[slot];
+    while (!ngx_atomic_cmp_set(pid_slot, ngx_atomic_fetch_add(pid_slot, 0),
+                               (ngx_atomic_uint_t) ngx_pid))
+    {
+        /* A prior worker may be publishing its clean-exit release. */
+    }
+
+    /* Each worker owns only its row.  Keeping peers' copies open masks peer
+     * exit and leaks O(workers squared) descriptors in every worker. */
+    for (i = 0; i < generation->workers; i++) {
+        if (i == slot) {
+            continue;
+        }
+        for (j = 0; j < generation->workers; j++) {
+            if (generation->fds[i][j] >= 0) {
+                (void) close(generation->fds[i][j]);
+                generation->fds[i][j] = -1;
+            }
+        }
+    }
+
+    if (ngx_media_route_workers < 2) {
         return NGX_OK;
     }
 
     for (i = 0; i < ngx_media_route_workers; i++) {
 
-        if (i == slot || ngx_media_route_fds[slot][i] < 0) {
+        if (i == slot || generation->fds[slot][i] < 0) {
             continue;
         }
 
-        if (ngx_media_ipc_adopt(ngx_media_route_fds[slot][i], &endpoint, log)
+        if (ngx_media_ipc_adopt(generation->fds[slot][i], &endpoint, log)
             != NGX_OK)
         {
             ngx_log_error(NGX_LOG_EMERG, log, 0,
                           "media: could not adopt the routing endpoint to "
                           "worker %ui", i);
-            return NGX_ERROR;
+            goto failed;
         }
 
         ngx_media_route_endpoints[i] = endpoint;
+        generation->fds[slot][i] = -1; /* endpoint owns it from here */
 
         c = ngx_get_connection(ngx_media_ipc_fd(endpoint), log);
 
         if (c == NULL) {
-            return NGX_ERROR;
+            goto failed;
         }
 
         c->data = endpoint;
         c->read->handler = ngx_media_route_read_handler;
         c->read->log = log;
 
+        ngx_media_route_connections[i] = c;
+
         if (ngx_add_event(c->read, NGX_READ_EVENT, 0) != NGX_OK) {
-            ngx_free_connection(c);
-            return NGX_ERROR;
+            ngx_media_route_endpoint_close(i);
+            goto failed;
         }
 
-        ngx_media_route_connections[i] = c;
     }
 
     ngx_log_error(NGX_LOG_NOTICE, log, 0,
                   "media: worker %ui routing ready", slot);
 
     return NGX_OK;
+failed:
+    ngx_media_route_worker_shutdown(log);
+    ngx_media_route_generation_cleanup(generation);
+    return NGX_ERROR;
 }
+
 
 void
 ngx_media_route_worker_shutdown(ngx_log_t *log)
@@ -248,21 +414,16 @@ ngx_media_route_worker_shutdown(ngx_log_t *log)
     ngx_uint_t  i;
 
     (void) log;
+    if (ngx_media_route_active_generation != NULL
+        && ngx_media_route_active_generation->pids != NULL)
+    {
+        (void) ngx_atomic_cmp_set(
+            &ngx_media_route_active_generation->pids[ngx_worker], ngx_pid, 0);
+    }
 
     for (i = 0; i < ngx_media_route_workers; i++) {
 
-        if (ngx_media_route_connections[i] != NULL) {
-            (void) ngx_del_event(ngx_media_route_connections[i]->read,
-                                 NGX_READ_EVENT, 0);
-            ngx_media_route_connections[i]->fd = (ngx_socket_t) -1;
-            ngx_free_connection(ngx_media_route_connections[i]);
-            ngx_media_route_connections[i] = NULL;
-        }
-
-        if (ngx_media_route_endpoints[i] != NULL) {
-            ngx_media_ipc_close(ngx_media_route_endpoints[i]);
-            ngx_media_route_endpoints[i] = NULL;
-        }
+        ngx_media_route_endpoint_close(i);
     }
 }
 
@@ -271,6 +432,36 @@ ngx_media_route_set_sink(ngx_media_route_frame_pt cb, void *ctx)
 {
     ngx_media_route_sink = cb;
     ngx_media_route_sink_ctx = ctx;
+}
+
+void
+ngx_media_route_set_status_sink(ngx_uint_t source_type,
+    ngx_media_route_status_pt cb)
+{
+    if (source_type >= NGX_MEDIA_SOURCE_SRT
+        && source_type <= NGX_MEDIA_SOURCE_RTMP)
+    {
+        ngx_media_route_status_sinks[source_type] = cb;
+    }
+}
+
+uint64_t
+ngx_media_route_peer_pid(ngx_uint_t peer)
+{
+    ngx_pid_t  pid;
+
+    if (ngx_media_route_active_generation == NULL
+        || ngx_media_route_active_generation->pids == NULL
+        || peer >= ngx_media_route_active_generation->workers)
+    {
+        return 0;
+    }
+    pid = (ngx_pid_t) ngx_atomic_fetch_add(
+                         &ngx_media_route_active_generation->pids[peer], 0);
+    if (pid == 0 || (kill(pid, 0) == -1 && ngx_errno == NGX_ESRCH)) {
+        return 0;
+    }
+    return pid;
 }
 
 /*
@@ -379,16 +570,17 @@ ngx_media_route_endpoint_for(ngx_cycle_t *cycle, uint64_t hash)
 }
 
 /*
- * A publisher connection's identity across workers.  The transport's own
- * session numbers repeat from worker to worker, and a reconnect may reuse one,
- * so the process id is part of it: the owner tells two connections of the same
- * program apart, and a late frame or CLOSE of a superseded connection cannot
- * be taken for the current one.
+ * A publisher connection's identity across workers and protocols.  SRT's
+ * transport ids and RTMP's local counters can coincide in one worker, so the
+ * route assigns one sequence shared by both and includes the worker PID.
+ * Late frames or CLOSE cannot name another protocol's or superseded session.
  */
 uint64_t
-ngx_media_route_session_id(uint64_t local)
+ngx_media_route_session_id(void)
 {
-    return ((uint64_t) ngx_pid << 32) | (local & 0xffffffffULL);
+    static uint64_t  sequence;
+
+    return ((uint64_t) ngx_pid << 32) | (++sequence & 0xffffffffULL);
 }
 
 ngx_int_t
@@ -403,6 +595,7 @@ ngx_media_route_open(ngx_cycle_t *cycle, uint64_t hash,
     size_t                     len;
     u_char                    *p;
     ngx_int_t                  rc;
+    uint32_t                  lengths[3];
 
     endpoint = ngx_media_route_endpoint_for(cycle, hash);
 
@@ -410,14 +603,18 @@ ngx_media_route_open(ngx_cycle_t *cycle, uint64_t hash,
         return NGX_ERROR;
     }
 
-    /* "application/stream/source": exactly two separators */
-    len = application->len + stream->len + source_id->len + 2;
-
-    if (len > NGX_MEDIA_IPC_MAX_PAYLOAD) {
-        /* the sink parses one datagram as one message: refuse rather than
-         * truncate into chunked fragments it would misread as new opens */
+    /* Lengths preserve the complete graph identity, including separators. */
+    if (application->len == 0 || stream->len == 0 || source_id->len == 0
+        || application->len > NGX_MEDIA_GRAPH_MAX_NAME
+        || stream->len > NGX_MEDIA_GRAPH_MAX_NAME
+        || source_id->len > NGX_MEDIA_GRAPH_MAX_NAME)
+    {
         return NGX_ERROR;
     }
+    lengths[0] = (uint32_t) application->len;
+    lengths[1] = (uint32_t) stream->len;
+    lengths[2] = (uint32_t) source_id->len;
+    len = sizeof(lengths) + application->len + stream->len + source_id->len;
 
     payload = ngx_media_buf_alloc(len);
 
@@ -426,15 +623,14 @@ ngx_media_route_open(ngx_cycle_t *cycle, uint64_t hash,
     }
 
     p = ngx_media_buf_data(payload);
+    ngx_memcpy(p, lengths, sizeof(lengths));
+    p += sizeof(lengths);
 
     ngx_memcpy(p, application->data, application->len);
     p += application->len;
-    *p++ = '/';
     ngx_memcpy(p, stream->data, stream->len);
     p += stream->len;
-    *p++ = '/';
     ngx_memcpy(p, source_id->data, source_id->len);
-    p += source_id->len;
 
     (void) ngx_media_buf_freeze(payload, len);
 

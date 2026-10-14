@@ -1,9 +1,9 @@
 NGINX_VERSION ?= 1.30.5
 
-.PHONY: unit tsan bench-reporting bench-veth-up bench-veth-down bench-preflight \
-    nginx graph-conflict incarnation smoke routing-bounds routed-sources bench-worker-scaling \
+.PHONY: unit unit-native coverage msan tsan bench-reporting bench-veth-up bench-veth-down bench-preflight \
+    nginx graph-conflict graph-bounds incarnation smoke routing-bounds routed-sources routed-admission route-lifecycle routed-reload deployment-surface model-churn bench-worker-scaling \
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
-    bench-capacity-curve bench-capacity-quality bench-burst-sizing test-image test-in-container \
+    bench-capacity-curve bench-capacity-quality bench-burst-sizing bench-core-critical-paths test-image test-in-container \
     test-integration \
     srt-ingest srt-ingest-nginx srt-admission ts-fixture source-switch api-switch api-graph \
     failover hls hls-push hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
@@ -17,10 +17,23 @@ NGINX_VERSION ?= 1.30.5
 unit:
 	$(MAKE) -C tests/unit test
 
-# The reporting pipeline's own tests: no nginx, no network, plain python3.
+unit-native:
+	$(MAKE) -C tests/unit native
+
+coverage:
+	$(MAKE) -C tests/unit coverage
+
+msan:
+	python3 scripts/msan-isolated.py
+
+# Reporting and provenance: Python3/Node and isolated native fixtures, no nginx.
 bench-reporting:
 	python3 tests/bench/test_reporting.py
 	python3 tests/bench/test_commit_selection.py
+	python3 tests/bench/test_capacity_receiver.py
+	python3 tests/bench/test_receiver_control.py
+	python3 tests/bench/test_transport_provenance.py
+	python3 tests/bench/test_publication.py
 
 # The receiver topologies for capacity runs, and the two-host orchestrator.
 # veth-up/veth-down need root (sudo -n is used for the ip commands only).
@@ -71,6 +84,9 @@ api-switch:
 
 api-graph:
 	tests/integration/api_graph_nginx.sh
+
+graph-bounds:
+	python3 tests/integration/graph_bounds_nginx.py
 
 failover:
 	tests/integration/failover_nginx.sh
@@ -181,6 +197,21 @@ routing-bounds:
 routed-sources:
 	python3 tests/integration/routed_sources_nginx.py
 
+route-lifecycle:
+	tests/integration/route_lifecycle.sh
+
+routed-reload:
+	python3 tests/integration/routed_reload_nginx.py
+
+routed-admission:
+	python3 tests/integration/routed_admission_nginx.py
+
+deployment-surface:
+	python3 tests/integration/deployment_surface_nginx.py
+
+model-churn:
+	python3 tests/integration/model_churn_nginx.py
+
 srt-admission:
 	python3 tests/integration/srt_admission_nginx.py
 
@@ -206,10 +237,10 @@ BASE ?= debian:trixie
 # type=gha), which only exists where ACTIONS_RUNTIME_TOKEN does; passing those
 # flags locally would fail, so they stay out of the default.
 DOCKER_CACHE_ARGS ?=
-TEST_TARGETS ?= unit ingest-keys routing-bounds routed-sources srt-admission rtmp-preauth srt-ingest srt-ingest-nginx ts-fixture source-switch \
-    api-switch api-graph failover hls hls-push hls-pull hls-ingest \
+TEST_TARGETS ?= unit ingest-keys routing-bounds routed-sources routed-admission route-lifecycle routed-reload deployment-surface srt-admission rtmp-preauth srt-ingest srt-ingest-nginx ts-fixture source-switch \
+    api-switch api-graph graph-bounds failover hls hls-push hls-pull hls-ingest \
     hls-profile hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop file-source transform stream-delete incarnation \
-    graph-conflict churn \
+    graph-conflict churn model-churn \
     rtmp \
     rtmp-hevc rtmps rtmp-workers srt-output srt-output-mux srt-lane-isolation srt-lane-isolation-fanout srt-crypto \
     srt-worker-ports \
@@ -262,6 +293,9 @@ bench-fanout-delay:
 # lossless capacity rather than treating bitrate as a sufficient proxy.
 bench-burst-sizing:
 	tests/bench/burst_sizing.sh
+
+bench-core-critical-paths:
+	python3 tests/bench/core_critical_paths.py
 
 # What more workers buy, and what they do not: the API is per-worker state,
 # and one program's fanout is owned by one worker.

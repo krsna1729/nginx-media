@@ -77,6 +77,18 @@ ngx_uint_t ngx_media_source_preroll_high_water_units(
 size_t ngx_media_source_preroll_high_water_bytes(
     const ngx_media_source_t *source);
 
+/*
+ * Retain before storing a source beyond the current worker call. Removal
+ * drops the list's reference; final release frees the source and its strings.
+ * All refcount operations run on the worker; readers release after joining.
+ */
+void ngx_media_source_retain(ngx_media_source_t *source);
+void ngx_media_source_release(ngx_media_source_t *source);
+
+/* Atomically replace a heap-owned, NUL-terminated string (empty clears it). */
+ngx_int_t ngx_media_string_set(ngx_str_t *dst, const ngx_str_t *src,
+    ngx_log_t *log);
+
 void ngx_media_source_lease_begin(ngx_media_source_t *source);
 void ngx_media_source_lease_end(ngx_media_source_t *source);
 

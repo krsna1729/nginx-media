@@ -1,6 +1,7 @@
 #include "ngx_media_policy.h"
 
 static ngx_media_policy_t  *ngx_media_policy_worker;
+static ngx_atomic_t ngx_media_model_objects[3];
 
 #ifndef NGX_MEDIA_UNIT_TEST
 extern ngx_module_t  ngx_media_core_module;
@@ -20,6 +21,9 @@ ngx_media_policy_init(ngx_media_policy_t *policy)
     policy->switchback = NGX_MEDIA_SWITCHBACK_AUTO;
     policy->srt_egress_workers = NGX_MEDIA_EGRESS_WORKERS_UNSET;
     policy->hls_push_egress_workers = NGX_MEDIA_EGRESS_WORKERS_UNSET;
+    policy->stream_limit = NGX_MEDIA_STREAM_LIMIT_DEFAULT;
+    policy->source_limit = NGX_MEDIA_SOURCE_LIMIT_DEFAULT;
+    policy->destination_limit = NGX_MEDIA_DESTINATION_LIMIT_DEFAULT;
     ngx_media_executor_conf_default(&policy->transform_executor);
 
     /*
@@ -70,4 +74,69 @@ ngx_media_policy_get(ngx_cycle_t *cycle)
     }
 
     return ngx_media_policy_worker;
+}
+
+ngx_uint_t
+ngx_media_model_room(ngx_uint_t kind)
+{
+    ngx_media_policy_t *policy;
+    ngx_uint_t         limit;
+    ngx_uint_t         count;
+
+#ifndef NGX_MEDIA_UNIT_TEST
+    policy = ngx_media_policy_get((ngx_cycle_t *) ngx_cycle);
+#else
+    policy = ngx_media_policy_worker;
+#endif
+    switch (kind) {
+    case NGX_MEDIA_MODEL_STREAM:
+        limit = policy ? policy->stream_limit : NGX_MEDIA_STREAM_LIMIT_DEFAULT;
+        if (limit > NGX_MEDIA_STREAM_LIMIT_DEFAULT) {
+            limit = NGX_MEDIA_STREAM_LIMIT_DEFAULT;
+        }
+        break;
+    case NGX_MEDIA_MODEL_SOURCE:
+        limit = policy ? policy->source_limit : NGX_MEDIA_SOURCE_LIMIT_DEFAULT;
+        break;
+    case NGX_MEDIA_MODEL_DESTINATION:
+        limit = policy ? policy->destination_limit
+                       : NGX_MEDIA_DESTINATION_LIMIT_DEFAULT;
+        break;
+    default:
+        return 0;
+    }
+    count = (ngx_uint_t) ngx_atomic_fetch_add(&ngx_media_model_objects[kind], 0);
+    return count < limit ? limit - count : 0;
+}
+
+ngx_uint_t
+ngx_media_model_available(ngx_uint_t kind)
+{
+    return ngx_media_model_room(kind) != 0;
+}
+
+ngx_int_t
+ngx_media_model_admit(ngx_uint_t kind)
+{
+    if (!ngx_media_model_available(kind)) {
+        return NGX_ERROR;
+    }
+    (void) ngx_atomic_fetch_add(&ngx_media_model_objects[kind], 1);
+    return NGX_OK;
+}
+
+void
+ngx_media_model_release(ngx_uint_t kind)
+{
+    if (kind < 3) {
+        (void) ngx_atomic_fetch_add(&ngx_media_model_objects[kind], -1);
+    }
+}
+
+ngx_uint_t
+ngx_media_model_count(ngx_uint_t kind)
+{
+    return kind < 3
+        ? (ngx_uint_t) ngx_atomic_fetch_add(&ngx_media_model_objects[kind], 0)
+        : 0;
 }

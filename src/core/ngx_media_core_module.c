@@ -235,6 +235,8 @@ static ngx_int_t ngx_media_parse_msec(const ngx_str_t *value,
     ngx_msec_t *out);
 static char *ngx_media_egress_workers_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
     void *conf);
+static char *ngx_media_object_limit_cmd(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 
 /*
  * Failover timeouts are sub-second quantities, so unlike nginx's own time
@@ -290,6 +292,19 @@ ngx_media_parse_msec(const ngx_str_t *value, ngx_msec_t *out)
 }
 
 static ngx_command_t ngx_media_core_commands[] = {
+
+    { ngx_string("media_stream_limit"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_object_limit_cmd, 0,
+      offsetof(ngx_media_policy_t, stream_limit), NULL },
+    { ngx_string("media_source_limit"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_object_limit_cmd, 0,
+      offsetof(ngx_media_policy_t, source_limit), NULL },
+    { ngx_string("media_destination_limit"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_media_object_limit_cmd, 0,
+      offsetof(ngx_media_policy_t, destination_limit), NULL },
 
     { ngx_string("media_failover_failure_timeout"),
       NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
@@ -415,17 +430,48 @@ ngx_media_core_create_conf(ngx_cycle_t *cycle)
 static char *
 ngx_media_core_init_conf(ngx_cycle_t *cycle, void *conf)
 {
-    ngx_uint_t  workers;
-
     (void) conf;
-    workers = ngx_media_owner_worker_count(cycle);
-    if (workers > NGX_MEDIA_ROUTE_MAX_WORKERS) {
-        ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,
-                      "media: worker_processes %ui exceeds routing limit %ui",
-                      workers, (ngx_uint_t) NGX_MEDIA_ROUTE_MAX_WORKERS);
+
+    /*
+     * init_module failures terminate the master; configuration failures keep
+     * its active cycle.  Allocate the new routing matrix here so descriptor
+     * exhaustion rejects a reload without retiring the old generation.
+     */
+    if (ngx_media_route_master_init(cycle, cycle->log) != NGX_OK) {
         return NGX_CONF_ERROR;
     }
 
+    return NGX_CONF_OK;
+}
+
+static char *
+ngx_media_object_limit_cmd(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_str_t  *value = cf->args->elts;
+    ngx_uint_t *slot = (ngx_uint_t *) ((u_char *) conf + cmd->offset);
+    uint32_t    n = 0;
+    size_t      i;
+    uint32_t    digit;
+
+    if (value[1].len == 0) {
+        return "must be a finite uint32 integer";
+    }
+    for (i = 0; i < value[1].len; i++) {
+        if (value[1].data[i] < '0' || value[1].data[i] > '9') {
+            return "must be a finite uint32 integer";
+        }
+        digit = value[1].data[i] - '0';
+        if (n > (UINT32_MAX - digit) / 10) {
+            return "must be a finite uint32 integer";
+        }
+        n = n * 10 + digit;
+    }
+    if (cmd->offset == offsetof(ngx_media_policy_t, stream_limit)
+        && n > NGX_MEDIA_STREAM_LIMIT_DEFAULT)
+    {
+        return "must not exceed the shared owner directory ceiling (256)";
+    }
+    *slot = n;
     return NGX_CONF_OK;
 }
 
@@ -703,11 +749,6 @@ ngx_media_core_init_module(ngx_cycle_t *cycle)
      */
     if (ngx_media_owner_dir_shm_create(cycle, NGX_MEDIA_OWNER_DIR_SLOTS,
                                        cycle->log) != NGX_OK) {
-        return NGX_ERROR;
-    }
-
-    /* worker-to-worker routing pairs are inherited across the fork */
-    if (ngx_media_route_master_init(cycle, cycle->log) != NGX_OK) {
         return NGX_ERROR;
     }
 

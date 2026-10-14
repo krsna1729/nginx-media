@@ -12,6 +12,7 @@ on:
 concurrency:
   group: weekly
   cancel-in-progress: false
+  queue: max
 
 jobs:
   extended:
@@ -41,7 +42,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config \
-            libpcre2-dev zlib1g-dev libssl-dev \
+            libpcre2-dev zlib1g-dev libssl-dev libc-ares-dev \
             ffmpeg libsrt-openssl-dev
 
       - name: Cache the pinned nginx source
@@ -74,6 +75,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: weekly-logs
+          include-hidden-files: true
           path: .build/**/logs/error.log
           if-no-files-found: ignore
 
@@ -106,3 +108,4 @@ jobs:
     permissions:
       contents: write
       issues: write
+      actions: read

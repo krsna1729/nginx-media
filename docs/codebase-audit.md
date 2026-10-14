@@ -67,26 +67,29 @@ were not executed during the audit.
 
 ### Further correctness and hardening
 
-- [ ] **S5:** implement bounded HTTP response framing for GET and upload:
-  Content-Length, chunked encoding, premature EOF, cap/timeout truncation and
-  conflicting framing headers (`src/core/ngx_media_http.c:499-548`).
-- [ ] **S6:** carry a total monotonic deadline through HTTP operations and make
-  active operations cancellable; idle socket timeouts alone do not bound
-  dribbling responses, DNS or shutdown joins.
-- [ ] **S7:** apply the existing credential redactor at lower-level HTTP, HLS
-  pull and RTMP destination logging sinks, including reconnect/failure paths.
+- [x] **S5:** bounded HTTP response framing now rejects conflicting/invalid
+  Content-Length and transfer encodings, premature EOF, malformed chunks/trailers
+  and cap exhaustion. Actual HTTP/TLS tests pass, including reusable 204 responses.
+- [x] **S6:** one monotonic budget covers DNS, address fallback, connect, TLS,
+  transfer and complete response draining. Sticky cancellation is owner-closed.
+  Actual DNS, dribble, blocked upload and HLS remove/stop scenarios pass.
+- [x] **S7:** HLS pull logs use the shared credential redactor; RTMP destination
+  logs identify the logical program, not its publish key. The actual HLS pull
+  test failed before redaction and passes with opened/failing query secrets absent.
 - [x] **S8:** reject non-regular file sources promptly; synchronous FIFO/device
   open/read can block an nginx worker (`ngx_media_file.c:99-100,173`).
-- [ ] **R3:** align API/graph encoder limits with decoder limits; prevent distinct
-  program names colliding after HLS directory sanitization.
-- [ ] **R4:** isolate routing socket pairs between worker generations and test
-  owner-directory PID takeover after reload.
+- [x] **R3:** API/graph admission and decode share identity/path/scalar budgets.
+  Native two-worker maxima and next-invalid atomic PATCH/replay scenarios pass;
+  six simultaneous real publishers decode through independent encoded HLS paths.
+- [x] **R4:** routing matrices are cycle-owned and generation-isolated; owner
+  epochs fence old PID heartbeat/release/reclaim. Actual same-count reload,
+  old CLOSE/EOF, reconnect, forced timeout and incomplete/failed TLS drain pass.
 - [x] **R5:** recover from per-datagram IPC errors without permanently removing
   a peer read event; handle partial frame sends, sequence gaps and backpressure
   at a keyframe boundary.
-- [ ] **R6:** enforce stream/source/destination quotas against runtime and owner
+- [x] **R6:** enforce stream/source/destination quotas against runtime and owner
   directory capacity; expose claim/admission failure rather than dropping it.
-- [ ] **R7:** preserve reader-backed source priorities on the owner, test failed
+- [x] **R7:** preserve reader-backed source priorities on the owner, test failed
   graph admission and repair-journal saturation, and bound long-lived pool
   growth during source/destination/path churn.
 - [ ] **D1:** provide a protected administrative API and deployment-specific
@@ -105,24 +108,24 @@ were not executed during the audit.
 - [x] **T3:** track source/shim header dependencies in normal and TSan rules.
   A simulated `ngx_media_buffer.h` change now schedules recompilation.
   Instrumentation variants remain separate; common-object reuse is O5.
-- [ ] **T4:** match nginx allocator semantics in the shim: palloc/pnalloc do not
-  zero memory, pcalloc does. Current zeroing also overwrites pool poison mode;
-  the documentation's "stricter than production" claim is incorrect.
-- [ ] **T5:** replace source-text assertions and replicas in `test_security.c`
+- [x] **T4:** the shim now leaves palloc/pnalloc storage uninitialized and keeps
+  explicit poison intact; only pcalloc zeros its allocation. All 35 normal
+  ASan/UBSan suites pass both ordinary and poisoned-allocation runs.
+- [x] **T5:** replace source-text assertions and replicas in `test_security.c`
   with production behavioral tests. For example, finding `SSL_set1_host` in
   source does not prove actual wrong-host rejection. Delete replaced pins;
   do not repin wording after refactors.
 - [x] **T6:** `make bench-reporting` now runs commit-selection tests, and
   `ingest-keys` is in the shared integration targets used by container CI.
-- [ ] **T7:** add per-file branch coverage plus an explicit inventory of production
+- [x] **T7:** add per-file branch coverage plus an explicit inventory of production
   files excluded from unit builds. Establish a baseline before coverage floors.
-- [ ] **T8:** test routed session/graph/registry/owner-directory state transitions,
+- [x] **T8:** test routed session/graph/registry/owner-directory state transitions,
   SRT removal while sending, stream deletion while leased, HLS push queue/retry
   ownership and actual HTTP/TLS behavior. Use barriers for real cross-thread
   lifetimes, not concurrent calls to APIs whose contract is single-owner.
 - [ ] **T9:** add valid PAT/PMT/PES, AVC/HEVC/ADTS, AMF and FLV fuzz seeds, stateful
   feed partitions, progress/allocation invariants and coverage-guided fuzzing.
-  Keep deterministic regressions; uniform random TS primarily rejects input.
+  Deterministic seeds and partitions are implemented; coverage feedback and HEVC seeds remain.
 - [ ] **T10:** isolate scratch directories/ports and inject time where useful.
   Add an ASan nginx integration lane for teardown/churn/ingest rather than
   assuming the unit shim represents nginx's event loop and allocator.
@@ -141,35 +144,48 @@ were not executed during the audit.
 - [x] **B2 / P1:** repair PR-to-main comparison: PR jobs fetch branch history,
   but Python filters it out because the tier is not `pr`. Compare only compatible
   recipes; PR and branch now share the 15-second default.
-- [ ] **B3:** store seconds, source rate, rungs, mixes, stop rules and harness
-  revision; compare compatible recipes. Record compiler/flags, actual SRT
-  commit, receiver versions and binary provenance. Binary hashes are evidence,
-  not an equality requirement across the code revisions under comparison.
-  (Recipe, compiler/flags and binary provenance are done; the SRT commit and
-  receiver versions are not collected anywhere yet.)
-- [ ] **B4:** align CPU and receiver byte sampling boundaries and report window
-  skew; validate absolute expected workload as well as relative delivery.
+- [x] **B3:** store compatible recipes and content-bound compiler/flags, actual
+  transport source commit, native receiver versions and binary provenance.
+  Pinned artifacts record their actual checkout HEAD; fingerprinting validates
+  artifact hashes and resolved linkage. Distribution libraries explicitly retain
+  an unknown source commit rather than inheriting a configured pin. Native
+  receiver compiler commands, tool/runtime versions and hashes survive history.
+  Binary hashes remain evidence, not equality requirements across revisions.
+- [x] **B4:** CPU and receiver byte boundaries retain endpoint/skew/coverage and
+  independent absolute media anchors. Prepared captures exclude SSH startup
+  without widening the 2% bound. Actual requested fifteen-second SRT/RTMP/HLS
+  origin/push controls passed one/four rungs locally and over authenticated SSH;
+  every protocol and remote CPU interval met the bound. Native receiver clocks
+  and PID identities remain separate from controller brackets.
 - [x] **B5:** use one workload set for manifest and execution. bench-ci's
   ALL_MIXES has seven names while harness `all` executes nine. Do not mask
   incomplete results by shortening the ladder or discarding failure evidence.
-- [ ] **B6:** require positive evidence of floor-rung passes; reject non-finite
-  thresholds, malformed/missing measurement inputs, sampling gaps and failed
-  calibration references. Distinguish receiver saturation from nginx failures
-  with controlled receiver-capacity evidence. (Floor-rung evidence, non-finite
-  inputs, failed calibration references and receiver/sender sampling validation
-  are done; controlled receiver-saturation qualification remains open.)
-- [ ] **B7:** repair the distributed path: fetched receiver metadata, remote PID
-  and CPU accounting, fresh ready/probe files and fatal preflight errors.
+- [x] **B6:** floor passes, finite thresholds, complete intervals/shards/queues
+  and successful absolute-rate calibration are required. The independent native
+  16-receiver control passed full-rate source/TS checks; a single-peer read stall
+  was receiver-limited only with qualified baseline and healthy-lane evidence.
+  This is a controlled causal result, not an intrinsic receiver maximum.
+- [x] **B7:** native authenticated loopback SSH passed receiver builds, fetched
+  metadata/provenance, remote CPU/ownership accounting, fresh preflight and all
+  four protocol one/four-rung controls. This is orchestration qualification,
+  not a second-physical-host capacity result.
 - [x] **B8:** repair weekly failed-build stubs: the weekly branch leaves `configs`
   unset but stub_summary references it under `set -u`.
-- [ ] **B9:** make viewer series/sparklines use stable identity and a fixed rung;
-  fix profile comparability, exact run selection and mixed-record filters.
-- [ ] **B10:** preserve per-rung artifacts, preflight verdicts and calibration
-  provenance; handle duplicate publication/run attempts and pending publishers.
-- [ ] **B11:** add one small critical-section benchmark driver: buffer refs,
-  feed publish/read, mux/demux, RTMP parse, IPC framing/reassembly and registry/
-  owner-directory operations. Report throughput, allocations/copies and tails;
-  do not introduce a framework or compare instrumented and production timings.
+- [x] **B9:** viewer series use stable runner identity, compatible recipe,
+  qualification/probe cohort and a fixed rung. Exact record selection preserves
+  repeated SHA attempts; hardware filters project mixed records. Publication
+  and deployed-viewer behavioral checks pass; the real browser rendered the
+  observed local history and selected the correct inspector record.
+- [x] **B10:** per-rung raw artifacts retain preflight, calibration and attempts;
+  immutable retry/history-race checks pass. Actual nightly run 38272651721
+  collected all four configurations and trend evidence and published to
+  `gh-pages`, preserving HLS setup failure as incomplete. Hidden `.build`
+  uploads are explicit; publisher-wide FIFO queuing retains pending runs.
+- [x] **B11:** the native critical-path driver covers references/feed, TS mux/
+  demux, RTMP/AMF, IPC, registry/owner and egress reports. Separate timing/resource
+  builds retain throughput, tails and observable allocation/copy counts. Actual
+  three-repeat, 10000-sample rows ran on CPU 8 with a CPU-10 concurrent visitor;
+  incomplete total allocation/copy counts are explicit, not estimated.
 - [ ] **B12:** measure scheduler fairness under visit-budget exhaustion, metrics
   scraping during egress reports, routed reload/reconnect, redundant publishers,
   long-lived churn, loss, p99/p99.9 latency and queue overruns. The egress manager
@@ -210,15 +226,15 @@ verification used GCC 16.2.1 and Clang 22.1.8; no compiler was installed/upgrade
   toolchains. Both local compilers passed the checked-overflow smoke.
 - [ ] **C2:** selectively extend nodiscard on significant status APIs, while
   reviewing explicit void discards and migrating all affected callers.
-- [ ] **C3:** generate a compilation database from the actual build and include
+- [x] **C3:** generate a compilation database from the actual build and include
   compiler identity in build/configure invalidation. clangd navigation without
   the database did not reliably resolve the nginx allocator macro.
-- [ ] **C4:** retain CodeQL and add triaged GCC fanalyzer/Clang analysis lanes.
+- [x] **C4:** retain CodeQL and add triaged GCC fanalyzer/Clang analysis lanes.
   Start MemorySanitizer with isolated core/parser targets because dependency
   instrumentation limits prevent treating it as a blanket production flag.
 - [ ] **C5:** evaluate FORTIFY_SOURCE=3, stack-clash protection and target-appropriate
-  control-flow protection with compatibility/performance checks. The inspected
-  artifact already had PIE, RELRO, immediate binding and a non-executable stack.
+  control-flow protection with compatibility/performance checks. Compiler-flag
+  verification and smoke inspection are automated; performance benchmarking remains.
 - [ ] **C6:** add pinned modern compiler lanes while retaining supported distro
   lanes. Defer C2y, wholesale atomics replacement, blanket O3 and LTO/PGO rollout
   until behavior and measurement are trustworthy.
@@ -421,10 +437,9 @@ checkbox above marked only after the behavior is exercised.
   then three comparable recipe-bearing trend fixtures with changed cumulative
   CPU counters and one incompatible-duration fixture. All three scorecard
   sparklines rendered values 110,120,130; the incompatible sample was excluded.
-- Not done: B3's actual SRT commit and receiver tool versions are not collected
-  by any bundle. B6's controlled receiver-saturation evidence, B9's chart
-  series/run selection/mixed-record filters and B10's per-rung artifacts,
-  duplicate publication and pending publishers remain open.
+- At this earlier checkpoint, B3 transport/tool provenance, B6 receiver controls,
+  B9 chart filtering and B10 evidence/retry/publication behavior remained open.
+  Later native and GitHub qualification below records their completed checks.
 - Weekly qualification and trend use a distinct contention manifest and ladder.
   Rungs below 4 cannot form these mixes and are inapplicable, rather than
   measured or quality-failure outcomes. Explicit malformed ladders remain
@@ -466,10 +481,10 @@ checkbox above marked only after the behavior is exercised.
   zero-delivery evidence remains a quality failure. Invalid SRT evidence cannot
   claim strict full rate. Existing infrastructure verdicts remain separate;
   no receiver-saturation conclusion is inferred from CPU usage alone.
-- Each protocol's sampler is joined immediately before its closing snapshot,
-  while publishers still run. Other protocols keep sampling during serial
-  closing work. HLS readers are joined to seal their report, and cleanup
-  stops any remaining monitors.
+- Samplers acknowledge readiness before accounting. Opening/closing native
+  captures dispatch concurrently with CPU releases; quiescence finishes in-flight
+  samples before closing counters. Joins/fetches run after accounting closes,
+  and cleanup stops any remaining monitors.
 - Reproductions: five-second RTMP sampling gaps and empty SRT sender metrics
   previously passed; both now fail as invalid measurements. Omitting RTMP
   interval evidence also previously bypassed validation and is now rejected.
@@ -493,3 +508,95 @@ checkbox above marked only after the behavior is exercised.
   these runs used affinity only and made no machine-policy changes. They
   verify reporting behavior, not a new capacity ceiling or CPU-efficiency
   comparison. Raw results are under `.build/reliability-*`.
+
+### Native receiver controls, provenance and publication
+
+- `make bench-reporting` passed 473 reporting checks, commit selection, seventeen
+  receiver ownership/capture checks, five causal/lifetime controls, the isolated
+  native transport-provenance build and immutable publication/viewer checks.
+- A native independent SRT source qualified sixteen receivers at constant
+  8 Mbit/s each for ten seconds. The paired `d0000` read stall was classified
+  receiver-limited only with full-rate source and healthy-lane evidence.
+  This proves a controlled failure cause and recipe lower bound, not an
+  intrinsic receiver maximum or production capacity ceiling.
+- Real authenticated loopback SSH compiled receiver tools natively, fetched
+  compiler/runtime fingerprints and passed fresh path/CPU preflight. SRT,
+  HLS-origin and HLS-push passed fifteen-second rungs at one and four
+  destinations. RTMP's original four-destination rung failed in its availability
+  probe; a kernel smoke demonstrated TIME_WAIT false rejection. Matching SSH's
+  socket-reuse semantics then passed a fresh RTMP one/four-rung replay.
+  Original failure evidence is retained, not replaced by the replay.
+- The original SSH runs correctly withheld CPU/Gbit when capture startup skew
+  exceeded the 2% bound. A fresh prepared-RPC run passed all eight quality and
+  protocol/remote-CPU alignment checks at the unchanged requested fifteen seconds.
+  Maximum protocol skew was 103.206 ms; remote CPU skew was 3.820 ms. A matching
+  local eight-rung run passed with maximum protocol skew 163.178 ms.
+  Complete raw runs, original failures, native controls and the frozen tested
+  source are archived under `docs/capacity-evidence/2026-10-12-*`, with content
+  hashes and qualification limits in the checkpoint JSON.
+- Default CI keeps live raw evidence inside its artifact root; explicit runtime
+  roots retain transport mappings. Publishers preserve attempts and incomplete
+  evidence, deduplicate content-identical retries and replay after history races.
+  Local publication behavior and actual viewer surface were exercised.
+  Nightly run 38272651721 also exercised GitHub artifact upload/download and
+  history push; the publisher passed while preserving the failed HLS preflight.
+  All six artifacts are archived with their hash in `capacity-results.md`.
+
+### HTTP, identity paths and faithful allocator qualification
+
+- All 35 unit suites passed ASan/UBSan in ordinary and poisoned-allocation modes;
+  actual HTTP/TLS/DNS tests now pass 1203 checks in each allocator mode.
+  The ordered-address DNS test encounters a real stalled first connect before
+  succeeding at the second address within the original total budget.
+- Actual HLS pull failed before credential redaction and passed afterward.
+  HLS push conformance passed generic and YouTube receivers, reconnect/retry
+  budgets, ordered uploads and forward progress after failed segments.
+- Native graph-boundary checks round-tripped 256-byte identities, 4096-byte
+  source path/CA fields and uint32 priority across owner and replica. Invalid
+  boundaries, mixed PATCH and replay left state unchanged; spooled bodies used
+  the same admission budget. Six concurrent paced publishers produced distinct
+  HLS paths with independently matched decoded color-frame SHA256 hashes.
+- The standalone native routing lifecycle passed generation isolation, draining
+  descriptor copies, atomic allocation failure and bounded descriptor counts.
+  Actual reload exposed early RTMP source-worker exit, then connection-pool
+  destruction exposed registry-string aliasing. Session retention/full teardown
+  and immutable stream-owned names now pass all native reload/TLS scenarios.
+- The native critical-path smoke produced 66 observations: eleven operations
+  times three repetitions in each of separate timing/resource builds.
+  Linker-wrap counters cover observable calls only; complete allocation/copy
+  totals remain unavailable. No production speedup or capacity ceiling is claimed.
+- Remaining security-suite source pins and copied validators/rings were removed.
+  The retained production parser/storage regressions pass 47 checks in both
+  allocator modes; deletion does not count as new coverage of the removed models.
+
+### Production quotas, compiler lanes, coverage baseline and parser fuzzing
+
+- Production quotas enforce finite `media_stream_limit` (up to 256, matching
+  the shared owner-directory ceiling), `media_source_limit` and
+  `media_destination_limit` per worker. Bounded model rooms refuse objects
+  with 503 before mutation; removed objects retain their allocation until the
+  last reader/lease/holder releases it. The native churn fixture verified 2,560
+  file cycles, 160 ingest cycles, 80 pull cycles, 640 destination cycles and
+  1,280 path replacements; retained resident memory plateaued within the 8 MiB
+  allowance.
+- Owner-directory mutations (claim, heartbeat, release) enforce generation
+  epoch fences against obsolete attached directories. In native multi-worker
+  routing, 256 real directory records were admitted on worker 3, direct and
+  routed publishers refused at the 257th record, and natural stale reclaim
+  recovered capacity across reload after closing old-generation publishers.
+- Per-file branch coverage reports 7,565 / 9,716 lines hit (77.9%) and
+  4,094 / 6,844 branches hit (59.8%) across 39 production C files. An explicit
+  inventory identifies the 13 production files excluded from standalone unit
+  linking.
+- The unit parser fuzz suite incorporates valid MPEG-TS seeds (PAT, PMT, AVC
+  keyframe, AAC ADTS) generated through production muxer code and FLV publisher
+  seeds (avcC and AudioSpecificConfig sequence headers). Stateful feed
+  partitions verify unmutated progress across 1- to 512-byte slices and survive
+  72,082 mutated rounds with zero memory leaks under allocation poisoning.
+- Compiler analysis lanes verify 52 production translation units under GCC 16
+  SARIF and Clang plist analyzers without diagnostic suppression. Nine exact
+  fingerprints are triaged in `scripts/analyzer-triage.json` with trace-backed
+  invariants. The isolated MemorySanitizer lane passes all eight parser/core
+  suites without uninstrumented third-party library linkage. Real compiler flips
+  rebuild native objects and unchanged configurations hit the object cache.
+

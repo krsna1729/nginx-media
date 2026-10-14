@@ -1,0 +1,70 @@
+{
+  "schema": "nginx-media.qualification-checkpoint/1",
+  "timestamp": "2026-10-12T10:12:06+00:00",
+  "branch": "fix/capacity-evidence-completion",
+  "base_sha": "0c7e838f4615a461608a8b9f87137b58b0cfa9c3",
+  "source_identity": "Frozen working-tree source archive; base SHA alone does not identify the uncommitted repairs exercised here",
+  "topology": "One physical host, local receivers and independently authenticated loopback SSH receivers",
+  "placement": {"sender_cpus": "4,6", "receiver_cpus": "12-15", "publisher_cpus": "16-19", "machine_policy_changed": false},
+  "capacity_ceiling_claim": null,
+  "protocols": ["pure-srt", "pure-rtmp", "pure-hls", "pure-hls-push"],
+  "rungs_per_protocol": [1, 4],
+  "requested_seconds_per_rung": 15,
+  "alignment_bound_fraction": 0.02,
+  "local": {
+    "rungs": 8,
+    "all_quality_and_cpu_alignment_pass": true,
+    "max_protocol_skew_s": 0.163177973,
+    "min_protocol_coverage": 0.9912642604169356,
+    "raw_root": ".build/window-validation-prepared-local"
+  },
+  "ssh": {
+    "rungs": 8,
+    "summary_complete": true,
+    "quality_gate": "pass",
+    "all_protocol_and_remote_cpu_alignment_pass": true,
+    "max_protocol_skew_s": 0.103205601,
+    "min_protocol_coverage": 0.9935597316926094,
+    "max_remote_cpu_skew_s": 0.003819262,
+    "raw_root": ".build/ssh-proof-a7f03854-e98f-4587-9b7b-ba1c1d33b212/result12",
+    "prepared_rpc": "Ownership and quiescence precede READY; request/reply brackets begin at capture-token dispatch, excluding SSH authentication/process startup"
+  },
+  "independent_receiver_control": {
+    "destinations": 16,
+    "bitrate_bps_each": 8000000,
+    "requested_seconds": 10,
+    "baseline_status": "qualified",
+    "paired_status": "receiver-limited",
+    "cause": "Explicit d0000 read stall with full-rate source and qualified healthy lanes",
+    "intrinsic_receiver_maximum": null,
+    "raw_root": ".build/receiver-control-owned-proof/control-lz9sie62"
+  },
+  "native_critical_paths": {
+    "operations": 11,
+    "repetitions": 3,
+    "samples_per_operation": 10000,
+    "main_cpu": 8,
+    "visitor_cpu": 10,
+    "observations": 66,
+    "builds": ["uninstrumented timing", "linker-wrapped observable resources"],
+    "total_allocation_and_copy_counts": "unavailable; linker wrapping does not capture inlined or dependency-internal operations",
+    "contention_scope": "Actual concurrent 64-record egress visitor, not full HTTP metrics formatting",
+    "raw_root": ".build/core-critical-pinned-concurrent"
+  },
+  "verification": {
+    "reporting_checks": 473,
+    "receiver_ownership_and_capture_tests": 17,
+    "causal_receiver_control_tests": 5,
+    "unit_suites": 35,
+    "unit_allocator_modes": ["ordinary", "poisoned"],
+    "http_checks_each_allocator_mode": 1203,
+    "native_scenarios_passed": ["graph bounds and independently decoded HLS identities", "routing descriptor lifecycle", "routed reload and TLS drain", "RTMPS media", "HLS pull query-secret redaction", "HLS push conformance"]
+  },
+  "archives": [
+    {"path": "2026-10-12-qualification-controls.tar.gz", "sha256": "4037fed45026e61e817d4ec290555c013617ec99fe4ab0a2f1729a32a42f286d", "contents": "Original result6-result10 failures/replays and preflight, earlier local controls, independent receiver control, native critical-path raw data"},
+    {"path": "2026-10-12-prepared-source.tar.gz", "sha256": "45fd4af73493eba0e756972ca72410d6ecfb68c868cf1a098ae8a18c0ba8cc3d", "contents": "Frozen source, config, scripts, tests and Makefile used by final capture qualification"},
+    {"path": "2026-10-12-prepared-ssh.tar.gz", "sha256": "7d49b70d3fdf44bac0e54a3359b8dd04db86fd51479fe0ff17ae9a1f43390c62", "contents": "Complete result12 per-rung raw evidence, native build/preflight and transport mapping"},
+    {"path": "2026-10-12-prepared-local.tar.gz", "sha256": "7b1b1f3e12ecdeb8aa11e2c72aa8f121d692d4c8e1300063618f74d3a6722ef9", "contents": "Complete prepared local per-rung raw evidence and matrix"}
+  ],
+  "limits": ["No second physical receiver host configured", "No new 1000-destination qualification", "No intrinsic receiver maximum", "No production speedup inferred from native microbenchmarks", "Historical pre-correction CPU/Gbit records are not retroactively aligned", "Actual GitHub publication workflow run remains to be exercised"]
+}

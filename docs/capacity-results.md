@@ -12,6 +12,22 @@ IRQ/NIC topology all move it, so it is compared within one host class.  Every ro
 comes from a rung's `diagnostics.json`; the method is in
 `development.md` ("Per-rung diagnostics and outcomes").
 
+Distributed evidence has a separate qualification boundary. The SSH driver now
+uses fresh explicit receiver roots, native receiver binaries, authenticated SSH
+host keys, owned remote process groups and fetched receiver fingerprints/probes.
+All named SRT/RTMP/HLS workloads use real receivers; RTMP administration remains
+private through SSH forwarding, and HLS-origin readers address the sender.
+Receiver CPU/process snapshots are host-separated rather than attributing a
+local SSH client's CPU to the remote receiver. Configuration manifests and
+logs/statuses use the same completeness contract as local history.
+No external SSH receiver or second physical host is configured in the current
+environment. An isolated loopback sshd can exercise transport, lifecycle and
+actual media, but cannot substantiate a physical-host/network capacity claim.
+Initial admission stops if measured CPU-cost evidence is absent or any probe,
+fingerprint, fetch or judge operation fails. This orchestration repair adds no
+new measured capacity result to the tables below.
+
+
 ## What landed, and why
 
 | Pull request | Root cause | Fix |
@@ -20,6 +36,86 @@ comes from a rung's `diagnostics.json`; the method is in
 | [#6](https://github.com/krsna1729/nginx-media/pull/6) | The HLS reader benchmark published its acceptance threshold in the field the diagnostics and history layers read as the observed ratio, so every HLS-origin record carried 0.95 as a result | `observed_delivery_ratio` is reported separately from the threshold, with a `delivery_ratio_basis` that says which it is; history schema `bench-history/2` |
 | [#8](https://github.com/krsna1729/nginx-media/pull/8) | A lane is a shard of one worker, so two workers' shard 0 are two lanes; the report compared shard numbers across workers and merged unrelated queues | The lane key is the worker plus the shard, and the report's lane totals are per worker |
 | [#9](https://github.com/krsna1729/nginx-media/pull/9) | Loopback softirq collapses onto one CPU when the receiver CPUs are too few, so a boundary read from that topology is the host's, not the software's; and the SRT-heavy contention mix failed its first rung for want of an RTMP reference | Receiver topologies are named and recorded per rung, a preflight classifies the host before a run, `capacity_mix_minimum_rung` derives the first rung a mix can actually calibrate from, and a two-host orchestrator exists for the runs this host cannot carry |
+
+## Measurement-window and absolute-rate corrections (2026-10-04)
+
+New runs retain CPU and receiver start/end brackets, overlap coverage and
+endpoint skew. CPU per delivered Gbit/s is unavailable unless all protocol
+windows and CPU accounting align within 2% of the CPU interval, including
+capture uncertainty. Receiver-counted throughput is retained independently.
+Native remote monotonic clocks require controller request-bracket mapping;
+remote process identities and CPU accounting are not merged into local PIDs.
+Historical records without these boundaries are not retroactively aligned,
+and these changes do not constitute fresh capacity evidence for the tables.
+
+RTMP calibration and delivery now use prepared elementary packet payload rate,
+not configured bitrate or TS overhead. HLS uses independently identified
+produced segment sizes and local cut timestamps, checks production against
+prepared elementary media, then checks receiver delivery of the produced set.
+Half-rate source/reference calibration cannot satisfy the absolute gate.
+HLS end-minus-grace identified coverage is reported separately from full-window
+raw receiver bytes; only raw bytes over their actual snapshot interval enter
+efficiency. References are scoped to a mix and stored only after all checks
+pass. Offered-rate provenance is preserved in diagnostics and history.
+
+## Capture qualification checkpoint (2026-10-12)
+
+Prepared capture RPCs validate ownership and finish preparation before READY.
+CPU releases and capture tokens then dispatch together. SSH authentication and
+process startup no longer displace the measured boundary; controller brackets
+still include token delivery, actual capture and reply uncertainty.
+
+All four pure protocols passed requested fifteen-second rungs at one and four
+destinations, both locally and over authenticated loopback SSH. Every protocol
+and remote CPU window passed the unchanged 2% comparison bound. Sender CPUs
+were 4,6, publisher CPUs 16–19 and receiver CPUs 12–15; no machine-policy change
+was made.
+
+| Observed capture check | Local | Authenticated loopback SSH |
+|---|---:|---:|
+| Quality/alignment passing rungs | 8 | 8 |
+| Maximum protocol boundary skew, including uncertainty | 163.178 ms | 103.206 ms |
+| Minimum protocol overlap coverage | 99.126% | 99.356% |
+| Maximum remote CPU boundary skew | Not applicable | 3.820 ms |
+
+The independent sixteen-receiver, 8 Mbit/s-per-peer control qualified its
+baseline. A deliberate `d0000` read stall was receiver-limited only with
+full-rate source and healthy-peer evidence. The native critical-path driver
+also retained 66 raw observations from separate timing/resource builds, with
+CPU 8 measurement and a CPU 10 concurrent 64-record visitor. Its wrapped
+allocation/copy counts are observable calls, not complete totals.
+
+[`2026-10-12-qualification-checkpoint.json`](capacity-evidence/2026-10-12-qualification-checkpoint.json)
+identifies the raw archives, content hashes, frozen source and verification.
+Original failed or unaligned SSH runs remain in the control archive. Historical
+CPU/Gbit values are not retroactively repaired. These controls establish
+measurement/orchestration behavior, not a new capacity ceiling, intrinsic
+receiver maximum, physical-host networking result or 1000-destination pass.
+
+## GitHub publication qualification (2026-10-13)
+
+The [nightly run 38272651721](https://github.com/krsna1729/nginx-media/actions/runs/38272651721)
+exercised actual artifact upload, download and `gh-pages` publication from
+`02d908c6f18668db8d364158b5818ab3608255c6`. Its publication job passed.
+All four configuration artifacts and the trend artifact were collected; the
+published qualification record retained artifact IDs and source attempt 1.
+The workflow uses explicit hidden-file uploads for `.build` evidence and a
+publisher-wide FIFO queue (`queue: max`) rather than replacing pending jobs.
+
+The overall workflow did **not** qualify: HLS origin and HLS push passed through
+64 receivers, then their 128-receiver preflight failed because it fingerprinted
+an SRT-only binary that pure HLS never builds. The published qualification
+record correctly has `complete: false`, no missing configurations, and the
+HLS setup-limited rung retained. Other qualification workloads passed through
+64 receivers and recorded infrastructure limits at 128. Trend collection is a
+separate probe cohort, not a substitute for qualification.
+
+[`2026-10-13-publication-38272651721.tar.gz`](capacity-evidence/2026-10-13-publication-38272651721.tar.gz)
+preserves all six downloaded artifacts, including HLS failure logs and 55 rung
+diagnostics (3,597 archive members). SHA-256:
+`6fef7697d2a448db92516e46704eba8e985f3dc67aa68a59c07d8c6c4c56acfa`.
+This proves evidence publication, not a 128- or 1000-destination capacity pass.
+
 
 ## Reporting corrections (2026-09-26)
 

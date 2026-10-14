@@ -24,6 +24,7 @@
 
 typedef struct ngx_media_destination_s {
     ngx_media_stream_t     *stream;
+    ngx_atomic_t            references;
 
     ngx_str_t               id;         /* stable logical id */
     ngx_uint_t              type;       /* NGX_MEDIA_DEST_* */
@@ -81,10 +82,11 @@ ngx_int_t ngx_media_destination_start(ngx_media_stream_t *stream,
     ngx_media_destination_t *destination, ngx_log_t *log);
 void ngx_media_destination_remove(ngx_media_stream_t *stream,
     ngx_media_destination_t *destination);
+void ngx_media_destination_retain(ngx_media_destination_t *destination);
+void ngx_media_destination_release(ngx_media_destination_t *destination);
 ngx_uint_t ngx_media_destination_count(const ngx_media_stream_t *stream);
 
-/* NUL-terminated pool copy of a nonempty string field */
-ngx_str_t *ngx_media_destination_strdup(ngx_pool_t *pool, const ngx_str_t *src);
+/* All destination string fields are heap owned; use ngx_media_string_set(). */
 
 /* bumps the object revision: call it from every desired-state mutation */
 void ngx_media_destination_touch(ngx_media_destination_t *destination);

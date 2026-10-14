@@ -164,6 +164,7 @@ static ngx_media_owner_dir_t     *ngx_media_runtime_owners;
 
 typedef struct {
     ngx_uint_t              used;
+    ngx_uint_t              peer;
 
     /*
      * The stream identity the sender addressed.  It was uint32_t here while
@@ -202,6 +203,8 @@ static ngx_uint_t           ngx_media_runtime_in_tick;
 static ngx_uint_t           ngx_media_runtime_timer_visit;
 static ngx_uint_t           ngx_media_runtime_armed;
 static ngx_msec_t           ngx_media_runtime_last_idle_log;
+/* Accepted transport sessions also retain their worker during graceful drain. */
+static ngx_uint_t           ngx_media_runtime_sessions;
 
 static ngx_str_t            ngx_media_runtime_none = ngx_string("none");
 
@@ -224,94 +227,6 @@ ngx_media_runtime_policy(void)
 }
 
 /* --- outputs ------------------------------------------------------------- */
-
-/*
- * One character of a path element built from an application or stream name.
- * Those come from the control API, and a name that contains a separator or
- * ".." would choose a directory outside the configured root, so anything
- * outside this set becomes an underscore.
- */
-static u_char
-ngx_media_runtime_path_char(u_char c)
-{
-    if ((c >= 'a' && c <= 'z')
-        || (c >= 'A' && c <= 'Z')
-        || (c >= '0' && c <= '9')
-        || c == '-'
-        || c == '_')
-    {
-        return c;
-    }
-
-    return '_';
-}
-
-/*
- * The directory one program's HLS output goes to: the configured root, then the
- * application, then the stream name.
- *
- * Every program writing into the root would share one playlist name and one
- * set of segment names, which is not a smaller version of the same thing: the
- * programs overwrite each other's media and a viewer cannot tell whose
- * playlist it fetched.  A program's output is its own directory, and that is
- * also the directory a push destination watches.
- *
- * The string lives in the stream's pool: it is read by the HLS segmenter for
- * as long as the stream exists, and the stream's runtime outputs are released
- * before that pool goes.
- */
-static ngx_str_t *
-ngx_media_runtime_hls_dir(ngx_media_stream_t *stream, const ngx_str_t *root,
-    ngx_log_t *log)
-{
-    ngx_str_t  *path;
-    u_char     *p;
-    size_t      app_len, len, i;
-
-    /* an application is required by the API; an empty one still gets a level */
-    app_len = (stream->application.len > 0) ? stream->application.len : 1;
-
-    len = root->len + 1 + app_len + 1 + stream->name.len;
-
-    path = ngx_pcalloc(stream->pool, sizeof(ngx_str_t));
-
-    if (path == NULL) {
-        return NULL;
-    }
-
-    p = ngx_pnalloc(stream->pool, len);
-
-    if (p == NULL) {
-        return NULL;
-    }
-
-    path->data = p;
-    path->len = len;
-
-    ngx_memcpy(p, root->data, root->len);
-    p += root->len;
-    *p++ = '/';
-
-    if (stream->application.len > 0) {
-
-        for (i = 0; i < stream->application.len; i++) {
-            *p++ = ngx_media_runtime_path_char(stream->application.data[i]);
-        }
-
-    } else {
-        *p++ = '_';
-    }
-
-    *p++ = '/';
-
-    for (i = 0; i < stream->name.len; i++) {
-        *p++ = ngx_media_runtime_path_char(stream->name.data[i]);
-    }
-
-    (void) log;
-
-    return path;
-}
 
 static void
 ngx_media_runtime_outputs_stop(ngx_media_runtime_outputs_t *out);
@@ -909,11 +824,13 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
 
     out->used = 1;
     out->stream = stream;
+    ngx_media_stream_retain(stream);
     out->generation = stream->generation;
 
     ngx_media_feed_cursor_init(&stream->program_feed, &out->cursor);
 
     if (ngx_media_ts_mux_init(&out->mux, NULL, log) != NGX_OK) {
+        ngx_media_stream_release(stream);
         ngx_free(out);
         return NULL;
     }
@@ -923,8 +840,8 @@ ngx_media_runtime_outputs_get(ngx_media_stream_t *stream, ngx_log_t *log)
     }
 
     if (policy->hls_path.len > 0) {
-        ngx_str_t  *dir = ngx_media_runtime_hls_dir(stream, &policy->hls_path,
-                                                    log);
+        ngx_str_t  *dir = ngx_media_hls_program_dir(stream->pool,
+            &policy->hls_path, &stream->application, &stream->name);
 
         if (dir == NULL) {
             ngx_media_runtime_outputs_stop(out);
@@ -1560,11 +1477,67 @@ ngx_media_runtime_outputs_stop(ngx_media_runtime_outputs_t *out)
     ngx_media_hls_destroy(&out->hls);
     ngx_media_ts_mux_destroy(&out->mux);
     ngx_media_ts_mux_destroy(&out->iso_mux);
+    ngx_media_stream_release(out->stream);
 
     ngx_memzero(out, sizeof(ngx_media_runtime_outputs_t));
 }
 
 /* --- owner side of the routing escape hatch ------------------------------ */
+
+static void
+ngx_media_runtime_routed_close(ngx_media_runtime_routed_t *slot)
+{
+    ngx_media_stream_t  *stream = slot->stream;
+    ngx_media_source_t  *source = slot->source;
+
+    if (source->stream != stream
+        || ngx_atomic_fetch_add(&source->pending_remove, 0))
+    {
+        /* The control plane already deleted the source. */
+    } else if (slot->created && !source->key_set) {
+        ngx_media_stream_source_remove(stream, source);
+        (void) ngx_media_graph_source_delete(stream, &source->id,
+                                             stream->revision);
+    } else {
+        /* Provisioned state and its key survive publisher disconnect. */
+        ngx_media_health_transport(&source->health, 0, ngx_current_msec);
+    }
+
+    ngx_media_ipc_frame_reset(&slot->frame);
+    ngx_media_source_release(source);
+    ngx_media_stream_release(stream);
+    ngx_memzero(slot, sizeof(*slot));
+}
+
+void
+ngx_media_runtime_session_acquire(void)
+{
+    ngx_media_runtime_sessions++;
+}
+
+void
+ngx_media_runtime_session_release(void)
+{
+    ngx_media_runtime_sessions--;
+}
+
+static ngx_uint_t
+ngx_media_runtime_drain_active(void)
+{
+    ngx_uint_t  i;
+
+    if (ngx_media_runtime_sessions != 0) {
+        return 1;
+    }
+
+    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
+        if (ngx_media_runtime_routed[i].used) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
 
 /*
  * Frames that arrive from another worker are fed into the local program as if
@@ -1572,21 +1545,30 @@ ngx_media_runtime_outputs_stop(ngx_media_runtime_outputs_t *out)
  * OPEN message and publishes every frame through the normal path.
  */
 static ngx_int_t
-ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
+ngx_media_runtime_route_sink(void *ctx, ngx_uint_t peer, uint64_t hash,
     const ngx_media_ipc_header_t *header, ngx_media_buf_t *payload)
 {
     ngx_media_registry_t  *registry;
     ngx_media_stream_t    *stream;
     ngx_media_source_t    *source;
-    ngx_uint_t             created;
+    ngx_uint_t             created, i, target;
     ngx_str_t              application, name, source_id;
-    u_char                *p, *slash;
+    u_char                *p;
     ngx_media_feed_conf_t  feed_conf;
 
     (void) ctx;
 
     if (header == NULL) {
-        return NGX_ERROR;
+        ngx_uint_t  i;
+
+        for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
+            if (ngx_media_runtime_routed[i].used
+                && ngx_media_runtime_routed[i].peer == peer)
+            {
+                ngx_media_runtime_routed_close(&ngx_media_runtime_routed[i]);
+            }
+        }
+        return NGX_OK;
     }
 
 
@@ -1608,50 +1590,38 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
 
 
     if (header->type == NGX_MEDIA_IPC_MSG_OPEN) {
+        uint32_t  lengths[3];
 
-        if (header->incarnation == 0
-            || payload == NULL || ngx_media_buf_size(payload) < 3)
+        if (header->incarnation == 0 || header->session == 0
+            || (header->source_type != NGX_MEDIA_SOURCE_SRT
+                && header->source_type != NGX_MEDIA_SOURCE_RTMP)
+            || !ngx_media_route_is_owner((ngx_cycle_t *) ngx_cycle, hash)
+            || (header->session >> 32) != ngx_media_route_peer_pid(peer)
+            || payload == NULL || ngx_media_buf_size(payload) < sizeof(lengths))
         {
             return NGX_ERROR;
         }
 
         p = ngx_media_buf_data(payload);
-
-        slash = ngx_strlchr(p, p + ngx_media_buf_size(payload), '/');
-
-        if (slash == NULL) {
-            return NGX_ERROR;
+        ngx_memcpy(lengths, p, sizeof(lengths));
+        for (i = 0; i < 3; i++) {
+            if (lengths[i] == 0 || lengths[i] > NGX_MEDIA_GRAPH_MAX_NAME) {
+                return NGX_ERROR;
+            }
         }
-
-        application.data = p;
-        application.len = (size_t) (slash - p);
-
-        name.data = slash + 1;
-
-        slash = ngx_strlchr(name.data,
-                            p + ngx_media_buf_size(payload), '/');
-
-        if (slash == NULL) {
-            return NGX_ERROR;
-        }
-
-        name.len = (size_t) (slash - name.data);
-
-        source_id.data = slash + 1;
-        source_id.len = ngx_media_buf_size(payload)
-                        - application.len - name.len - 2;
-
-        /*
-         * The datagram itself is bounded, but its fields are copied into
-         * long-lived pool objects below.  Keep the identity fields at the same
-         * bound as graph operations; otherwise a peer could turn one OPEN
-         * into a nearly-64 KiB stream/source allocation on every reconnect.
-         */
-        if (application.len == 0 || name.len == 0 || source_id.len == 0
-            || application.len > NGX_MEDIA_GRAPH_MAX_NAME
-            || name.len > NGX_MEDIA_GRAPH_MAX_NAME
-            || source_id.len > NGX_MEDIA_GRAPH_MAX_NAME)
+        if (ngx_media_buf_size(payload)
+            != sizeof(lengths) + (size_t) lengths[0] + lengths[1] + lengths[2])
         {
+            return NGX_ERROR;
+        }
+        application.data = p + sizeof(lengths);
+        application.len = lengths[0];
+        name.data = application.data + application.len;
+        name.len = lengths[1];
+        source_id.data = name.data + name.len;
+        source_id.len = lengths[2];
+
+        if (ngx_media_owner_hash(&application, &name) != hash) {
             return NGX_ERROR;
         }
 
@@ -1665,7 +1635,40 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
             && stream->incarnation != header->incarnation)
         {
             ngx_media_runtime_stats.routed_identity_mismatches++;
-            return NGX_OK;
+            return NGX_DECLINED;
+        }
+
+        source = stream != NULL
+                 ? ngx_media_stream_source_find(stream, &source_id) : NULL;
+        if (source != NULL
+            && (source->type != header->source_type
+                || ngx_atomic_fetch_add(&source->pending_remove, 0)))
+        {
+            return NGX_DECLINED;
+        }
+
+        /* Reserve capacity before touching health, active state or sources.
+         * Superseding a source reuses its slot even when every slot is busy. */
+        target = NGX_MEDIA_RUNTIME_MAX_ROUTED;
+        for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
+            if (ngx_media_runtime_routed[i].used) {
+                if (source != NULL
+                    && ngx_media_runtime_routed[i].source == source)
+                {
+                    target = i;
+                    break;
+                }
+            } else if (target == NGX_MEDIA_RUNTIME_MAX_ROUTED) {
+                target = i;
+            }
+        }
+        if (target == NGX_MEDIA_RUNTIME_MAX_ROUTED) {
+            ngx_media_runtime_stats.routed_slot_overflows++;
+            return NGX_DECLINED;
+        }
+
+        if (ngx_media_runtime_claim(&application, &name) != NGX_OK) {
+            return NGX_ERROR;
         }
 
         if (stream == NULL) {
@@ -1739,61 +1742,24 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
          * from the connection it supersedes, so only a source that no
          * operator provisioned is deleted when the last connection closes.
          */
-        {
-            ngx_uint_t  i;
-
-            for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
-
-                if (ngx_media_runtime_routed[i].used
-                    && ngx_media_runtime_routed[i].source == source)
-                {
-                    created |= ngx_media_runtime_routed[i].created;
-                    ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
-                    ngx_memzero(&ngx_media_runtime_routed[i],
-                                sizeof(ngx_media_runtime_routed_t));
-                }
-            }
+        created |= ngx_media_runtime_routed[target].created;
+        ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[target].frame);
+        if (ngx_media_runtime_routed[target].used) {
+            ngx_media_source_release(ngx_media_runtime_routed[target].source);
+            ngx_media_stream_release(ngx_media_runtime_routed[target].stream);
         }
-
-        /* remember the routed source so its frames have a destination */
-        {
-            ngx_uint_t  i;
-
-            for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
-
-                if (!ngx_media_runtime_routed[i].used) {
-                    ngx_media_runtime_routed[i].used = 1;
-                    ngx_media_runtime_routed[i].created = created;
-                    ngx_media_runtime_routed[i].hash = hash;
-                    ngx_media_runtime_routed[i].incarnation =
-                        header->incarnation;
-                    ngx_media_runtime_routed[i].session = header->session;
-                    ngx_media_runtime_routed[i].stream = stream;
-                    ngx_media_runtime_routed[i].source = source;
-                    break;
-                }
-            }
-
-            if (i == NGX_MEDIA_RUNTIME_MAX_ROUTED) {
-                ngx_media_runtime_stats.routed_slot_overflows++;
-
-                if (created) {
-                    ngx_media_stream_source_remove(stream, source);
-
-                } else {
-                    ngx_media_health_transport(&source->health, 0,
-                                               ngx_current_msec);
-                }
-
-                return NGX_OK;
-            }
-        }
-
-        /* the owner claims the stream in the shared directory */
-        if (ngx_media_runtime_owners != NULL) {
-            (void) ngx_media_owner_dir_claim(ngx_media_runtime_owners, hash,
-                                             (ngx_uint_t) ngx_worker);
-        }
+        ngx_memzero(&ngx_media_runtime_routed[target],
+                    sizeof(ngx_media_runtime_routed_t));
+        ngx_media_runtime_routed[target].used = 1;
+        ngx_media_runtime_routed[target].peer = peer;
+        ngx_media_runtime_routed[target].created = created;
+        ngx_media_runtime_routed[target].hash = hash;
+        ngx_media_runtime_routed[target].incarnation = header->incarnation;
+        ngx_media_runtime_routed[target].session = header->session;
+        ngx_media_runtime_routed[target].stream = stream;
+        ngx_media_runtime_routed[target].source = source;
+        ngx_media_source_retain(source);
+        ngx_media_stream_retain(stream);
 
         /*
          * A source this OPEN had to create is published to the other workers
@@ -1904,7 +1870,9 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
                    == header->incarnation
                 && ngx_media_runtime_routed[i2].session == header->session
                 && ngx_media_runtime_routed[i2].source->stream
-                   == ngx_media_runtime_routed[i2].stream)
+                   == ngx_media_runtime_routed[i2].stream
+                && !ngx_atomic_fetch_add(
+                       &ngx_media_runtime_routed[i2].source->pending_remove, 0))
             {
                 (void) ngx_media_source_tracks_set(
                     ngx_media_runtime_routed[i2].source, &set, ngx_cycle->log);
@@ -1948,42 +1916,7 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
                    == header->incarnation
                 && ngx_media_runtime_routed[i].session == header->session)
             {
-                ngx_media_stream_t  *gone_stream =
-                    ngx_media_runtime_routed[i].stream;
-                ngx_media_source_t  *gone_source =
-                    ngx_media_runtime_routed[i].source;
-
-                if (gone_source->stream != gone_stream) {
-                    /* the control plane already deleted the source */
-
-                } else if (ngx_media_runtime_routed[i].created) {
-                    ngx_media_stream_source_remove(gone_stream, gone_source);
-
-                    /*
-                     * The replicas drop the same source: no operator
-                     * provisioned it, the publisher that created it is gone,
-                     * and a replica that kept it would answer with a source
-                     * nothing feeds.
-                     */
-                    (void) ngx_media_graph_source_delete(gone_stream,
-                                                         &gone_source->id,
-                                                         gone_stream->revision);
-
-                } else {
-                    /*
-                     * A provisioned source stays, with its key: a publisher
-                     * that disconnects is not a source the operator deleted.
-                     * Only its transport goes down, as for a publisher that
-                     * landed on this worker.
-                     */
-                    ngx_media_health_transport(&gone_source->health, 0,
-                                               ngx_current_msec);
-                }
-
-                ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
-
-                ngx_memzero(&ngx_media_runtime_routed[i],
-                            sizeof(ngx_media_runtime_routed_t));
+                ngx_media_runtime_routed_close(&ngx_media_runtime_routed[i]);
                 break;
             }
         }
@@ -2053,12 +1986,12 @@ ngx_media_runtime_route_sink(void *ctx, uint64_t hash,
         }
 
         if (ngx_media_runtime_routed[i].source->stream
-            != ngx_media_runtime_routed[i].stream)
+            != ngx_media_runtime_routed[i].stream
+            || ngx_atomic_fetch_add(
+                   &ngx_media_runtime_routed[i].source->pending_remove, 0))
         {
-            /* the control plane deleted the source this connection feeds */
-            ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
-            ngx_memzero(&ngx_media_runtime_routed[i],
-                        sizeof(ngx_media_runtime_routed_t));
+            /* The control plane deleted the source this connection feeds. */
+            ngx_media_runtime_routed_close(&ngx_media_runtime_routed[i]);
             return NGX_OK;
         }
 
@@ -2193,6 +2126,7 @@ ngx_media_runtime_prepare(ngx_media_stream_t *stream, ngx_log_t *log)
 
     slot->used = 1;
     slot->stream = stream;
+    ngx_media_stream_retain(stream);
 
     ngx_media_feed_cursor_init(&stream->program_feed, &slot->cursor);
     ngx_media_rtmp_prepare_init(&slot->prepare, 2048, 32 * 1024 * 1024);
@@ -2312,21 +2246,28 @@ found:
 /* --- timer --------------------------------------------------------------- */
 
 
-void
+ngx_int_t
 ngx_media_runtime_claim(const ngx_str_t *application, const ngx_str_t *name)
 {
     uint64_t  hash;
 
-    if (ngx_media_runtime_owners == NULL || application == NULL
-        || name == NULL)
-    {
-        return;
+    if (application == NULL || name == NULL) {
+        return NGX_ERROR;
     }
 
     hash = ngx_media_owner_hash(application, name);
+    if (!ngx_media_route_is_owner((ngx_cycle_t *) ngx_cycle, hash)) {
+        return NGX_DECLINED;
+    }
 
-    (void) ngx_media_owner_dir_claim(ngx_media_runtime_owners, hash,
-                                     (ngx_uint_t) ngx_worker);
+    if (ngx_media_runtime_owners == NULL
+        || ngx_media_owner_dir_claim(ngx_media_runtime_owners, hash,
+                                      (ngx_uint_t) ngx_worker) == NULL)
+    {
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
 }
 
 void
@@ -2420,7 +2361,8 @@ ngx_media_runtime_wakeup(void)
 {
     if (!ngx_media_runtime_armed
         || ngx_media_runtime_in_tick
-        || ngx_exiting || ngx_terminate || ngx_quit)
+        || ngx_terminate || ngx_quit
+        || (ngx_exiting && !ngx_media_runtime_drain_active()))
     {
         return;
     }
@@ -2491,6 +2433,27 @@ ngx_media_runtime_visit(ngx_log_t *log)
     }
 
     if (ngx_media_runtime_timer_visit) {
+        uint64_t   peer_pids[NGX_MEDIA_ROUTE_MAX_WORKERS];
+        uint64_t   checked = 0;
+
+        /* Master copies preserve sockets for respawn and mask current-cycle
+         * EOF.  A generation-local PID vector fences killed/replaced ingress
+         * sessions without disturbing a live publisher from an older cycle. */
+        for (ngx_uint_t i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
+            ngx_media_runtime_routed_t *slot = &ngx_media_runtime_routed[i];
+            if (!slot->used) {
+                continue;
+            }
+            if (!(checked & (UINT64_C(1) << slot->peer))) {
+                peer_pids[slot->peer] = ngx_media_route_peer_pid(slot->peer);
+                checked |= UINT64_C(1) << slot->peer;
+            }
+            if ((slot->session >> 32) != peer_pids[slot->peer]
+                || ngx_atomic_fetch_add(&slot->source->pending_remove, 0))
+            {
+                ngx_media_runtime_routed_close(slot);
+            }
+        }
         ngx_media_graph_repair_tick(log);
         ngx_media_runtime_stats.reconnecting = 0;
     }
@@ -2702,7 +2665,8 @@ static void
 ngx_media_runtime_wakeup_handler(ngx_event_t *ev)
 {
     if (!ngx_media_runtime_armed
-        || ngx_exiting || ngx_terminate || ngx_quit)
+        || ngx_terminate || ngx_quit
+        || (ngx_exiting && !ngx_media_runtime_drain_active()))
     {
         return;
     }
@@ -2719,8 +2683,12 @@ ngx_media_runtime_handler(ngx_event_t *ev)
 
     ngx_media_runtime_periodic_visit(ev->log);
 
-    /* stop re-arming during shutdown so the worker can exit */
-    if (ngx_exiting || ngx_terminate || ngx_quit) {
+    /* A publisher and its routed old owner both retain their generation.
+     * Session close, routed CLOSE or peer EOF releases that retention;
+     * worker_shutdown_timeout forces socket handlers through close. */
+    if (ngx_terminate || ngx_quit
+        || (ngx_exiting && !ngx_media_runtime_drain_active()))
+    {
         return;
     }
 
@@ -2910,6 +2878,7 @@ ngx_media_runtime_stream_release(ngx_media_stream_t *stream)
         if (prepare->used) {
             ngx_media_rtmp_prepare_destroy(&prepare->prepare);
         }
+        ngx_media_stream_release(prepare->stream);
         ngx_free(prepare);
         break;
     }
@@ -2931,6 +2900,8 @@ ngx_media_runtime_stream_release(ngx_media_stream_t *stream)
             && ngx_media_runtime_routed[i].stream == stream)
         {
             ngx_media_ipc_frame_reset(&ngx_media_runtime_routed[i].frame);
+            ngx_media_source_release(ngx_media_runtime_routed[i].source);
+            ngx_media_stream_release(ngx_media_runtime_routed[i].stream);
             ngx_memzero(&ngx_media_runtime_routed[i],
                         sizeof(ngx_media_runtime_routed_t));
         }
@@ -2942,12 +2913,18 @@ ngx_media_runtime_shutdown(ngx_log_t *log)
 {
     ngx_media_runtime_outputs_t  *output;
     ngx_media_runtime_prepare_t  *prepare;
+    ngx_uint_t                   i;
 
     ngx_media_hls_pull_stop_all();
     ngx_media_hls_ingest_stop_all();
 
     ngx_media_runtime_stop();
     ngx_media_route_worker_shutdown(log);
+    for (i = 0; i < NGX_MEDIA_RUNTIME_MAX_ROUTED; i++) {
+        if (ngx_media_runtime_routed[i].used) {
+            ngx_media_runtime_routed_close(&ngx_media_runtime_routed[i]);
+        }
+    }
 
     while ((output = ngx_media_runtime_outputs) != NULL) {
         ngx_media_runtime_outputs = output->next;
@@ -2964,6 +2941,7 @@ ngx_media_runtime_shutdown(ngx_log_t *log)
         if (prepare->used) {
             ngx_media_rtmp_prepare_destroy(&prepare->prepare);
         }
+        ngx_media_stream_release(prepare->stream);
         ngx_free(prepare);
     }
 

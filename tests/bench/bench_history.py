@@ -42,9 +42,10 @@ SCHEMA = "nginx-media.bench-history/3"
 # they are left as they are and their basis says so.
 OBSERVED_RATIO_KEYS = {
     "srt": ("quality_average_delivery_ratio_min",),
-    "rtmp": ("quality_min_delivery_ratio",),
-    "hls_push": ("quality_average_delivery_ratio_min",),
-    "hls_readers": ("observed_min_delivery_ratio",),
+    "rtmp": ("quality_min_delivery_ratio", "quality_absolute_delivery_ratio_min"),
+    "hls_push": ("quality_average_delivery_ratio_min", "quality_absolute_delivery_ratio_min"),
+    "hls_readers": ("observed_min_delivery_ratio", "quality_identified_delivery_ratio_min",
+                    "quality_absolute_delivery_ratio_min"),
 }
 
 THRESHOLD_RATIO_KEYS = {
@@ -152,6 +153,8 @@ def rung_record(bundle):
         "strict_full_rate": strict,
         # the environment this rung was taken in, and its peak pressure
         "host_fingerprint": bundle.get("host_fingerprint"),
+        "receiver_host_fingerprint": bundle.get("receiver_host_fingerprint"),
+        "receiver_nginx_fingerprint": bundle.get("receiver_nginx_fingerprint"),
         "peak": peak_pressure(bundle),
         "strict_full_rate_pass": (all(v == "yes" for v in strict.values())
                                   if strict else None),
@@ -164,6 +167,16 @@ def rung_record(bundle):
         # one-destination reference rate each protocol was judged against
         "preflight": preflight_verdict(bundle.get("preflight")),
         "reference_bps": calibration_references(delivery),
+        "offered_media": {
+            protocol: {key: report[key] for key in (
+                "quality_offered_payload_bps", "quality_offered_rate_provenance",
+                "quality_prepared_source_payload_bps", "quality_prepared_rate_provenance")
+                if key in report}
+            for protocol in PROTOCOLS
+            if isinstance((report := value(delivery.get(protocol))), dict)},
+        "window_alignment": efficiency.get("window_alignment"),
+        "receiver_cpu_alignment": efficiency.get("receiver_cpu_alignment"),
+        "receiver_host": bundle.get("receiver_host"),
     }
 
 
@@ -221,7 +234,7 @@ def peak_pressure(bundle):
 # revision under comparison is a different binary by definition.)
 HARNESS_FILES = (
     "ingest_egress_fanout.sh", "capacity-mixes.conf",
-    "capacity_diagnostics.py", "capacity_preflight.py",
+    "capacity_diagnostics.py", "capacity_preflight.py", "capacity_media_offer.py",
     "hls_capacity_readers.py", "hls_push_capacity.py",
     "proc_cpu_sampler.py", "rtmp_capacity_quality.py",
     "srt_capacity_quality.py", "srt_fanout_sink.c")
@@ -382,28 +395,35 @@ def runner_identity(fingerprint):
 
 
 def build_provenance(rungs):
-    """How the binary under test was built, from the first rung that says:
-    compiler, configure arguments (which carry the compiler flags), the
-    hash of the binary and the transport library it links.  Evidence for a
-    reader asking why two runs differ; never an equality requirement,
-    because a different revision is a different binary by definition."""
-    for rung in rungs:
-        fingerprint = rung.get("host_fingerprint")
-        if not isinstance(fingerprint, dict):
-            continue
-        build = fingerprint.get("build")
-        provenance = {}
-        if isinstance(build, dict):
-            for key, label in (("compiler", "compiler"),
-                               ("configure_arguments", "configure_arguments"),
-                               ("sha256", "binary_sha256")):
-                if build.get(key):
-                    provenance[label] = build[key]
-        if fingerprint.get("transport"):
-            provenance["transport"] = fingerprint["transport"]
-        if provenance:
-            return provenance
-    return None
+    """Build/receiver evidence, never a revision-comparison equality key."""
+    provenance = {}
+    for fingerprint_key, label in (
+            ("host_fingerprint", None),
+            ("receiver_host_fingerprint", "receiver"),
+            ("receiver_nginx_fingerprint", "receiver_nginx")):
+        for rung in rungs:
+            fingerprint = rung.get(fingerprint_key)
+            if not isinstance(fingerprint, dict):
+                continue
+            observed = {}
+            build = fingerprint.get("build")
+            if isinstance(build, dict):
+                for key in ("compiler", "configure_arguments", "compiler_command",
+                            "cflags", "ldflags", "compile_command", "source", "package"):
+                    if key in build:
+                        observed[key] = build[key]
+                if build.get("sha256"):
+                    observed["binary_sha256"] = build["sha256"]
+            for key in ("transport", "transport_provenance", "tools"):
+                if fingerprint.get(key):
+                    observed[key] = fingerprint[key]
+            if observed:
+                if label:
+                    provenance[label] = copy.deepcopy(observed)
+                else:
+                    provenance.update(copy.deepcopy(observed))
+                break
+    return provenance or None
 
 
 def run_environment(entry):
@@ -504,12 +524,22 @@ def summarize(args):
         "ref": os.environ.get("GITHUB_REF_NAME")
                or git("rev-parse", "--abbrev-ref", "HEAD"),
         "run": os.environ.get("GITHUB_RUN_ID"),
+        "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
         "expected_configs": expected,
         "missing_configs": missing,
         "unexpected_configs": unexpected,
         "complete": complete,
         "configs": configs,
     }
+    if args.source_artifacts:
+        with open(args.source_artifacts, encoding="utf-8") as source:
+            artifacts = json.load(source)
+        record["source_artifacts"] = artifacts
+        record["complete"] = record["complete"] and artifacts["configurations_complete"] is True
+        for job in artifacts["jobs"]:
+            for name in job["configurations"]:
+                if name in configs:
+                    configs[name]["source_artifact"] = job
     with open(args.out, "w", encoding="utf-8") as output:
         json.dump(record, output, indent=1)
     print(f"bench_summary={args.out}")
@@ -749,6 +779,17 @@ def regression_report(args):
     return 0
 
 
+def publication_id(record):
+    """Content identity: retries deduplicate, attempts and changed evidence do not.
+
+    Publication time is not evidence; a later collection of the same attempt
+    must not hide its earlier incomplete record if the evidence differs."""
+    payload = {key: value for key, value in record.items()
+               if key not in ("timestamp", "record_id")}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True,
+                                    separators=(",", ":")).encode()).hexdigest()
+
+
 def publish(args):
     with open(args.summary, encoding="utf-8") as source:
         record = json.load(source)
@@ -766,10 +807,24 @@ def publish(args):
     data_dir = os.path.join(args.pages, "data")
     os.makedirs(data_dir, exist_ok=True)
     path = os.path.join(data_dir, f"{record['tier']}.jsonl")
-    with open(path, "a", encoding="utf-8") as output:
-        output.write(json.dumps(record, separators=(",", ":")) + "\n")
-        for sample in samples:
-            output.write(json.dumps(sample, separators=(",", ":")) + "\n")
+    existing = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as source:
+            existing = [json.loads(line) for line in source if line.strip()]
+    seen = {publication_id(row) for row in existing}
+    additions = []
+    for row in [record] + samples:
+        identity = publication_id(row)
+        if identity not in seen:
+            row["record_id"] = identity
+            additions.append(row)
+            seen.add(identity)
+    # Write atomically: a failed publication must leave existing history whole.
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as output:
+        for row in existing + additions:
+            output.write(json.dumps(row, separators=(",", ":")) + "\n")
+    os.replace(temporary, path)
     viewer = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "history", "index.html")
     shutil.copyfile(viewer, os.path.join(args.pages, "index.html"))
@@ -791,6 +846,7 @@ def main():
     s.add_argument("--tier", required=True)
     s.add_argument("--out", required=True)
     s.add_argument("--expected-configs")
+    s.add_argument("--source-artifacts")
     g = sub.add_parser("gate")
     g.add_argument("summary")
     g.add_argument("--tier", required=True)

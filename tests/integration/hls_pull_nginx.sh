@@ -26,6 +26,7 @@ mkdir -p "$RUN/origin/conf" "$RUN/origin/logs" "$RUN/origin/hls" \
          "$RUN/puller/conf" "$RUN/puller/logs" "$RUN/puller/hls"
 
 PUB=0
+ORIGIN_PUB=0
 
 # The master is stopped and waited for, and its children are then killed by
 # parent: nginx rewrites a worker's argv to "nginx: worker process", so a
@@ -56,7 +57,10 @@ stop_instance() {
 }
 
 cleanup() {
-    [ "$PUB" != "0" ] && kill -KILL "$PUB" 2>/dev/null
+    [ "$PUB" != "0" ] && kill -TERM "$PUB" 2>/dev/null
+    [ "$ORIGIN_PUB" != "0" ] && kill -TERM "$ORIGIN_PUB" 2>/dev/null
+    [ "$PUB" = "0" ] || wait "$PUB" 2>/dev/null
+    [ "$ORIGIN_PUB" = "0" ] || wait "$ORIGIN_PUB" 2>/dev/null
     stop_instance "$RUN/origin"
     stop_instance "$RUN/puller"
     return 0
@@ -150,7 +154,7 @@ echo "   source create: $SRC"
 
 [ "$SRC" = "201" ] || { echo "could not create the source" >&2; exit 1; }
 
-timeout 60 ffmpeg -hide_banner -loglevel error -re \
+timeout -k 2 60 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=320x240:rate=25" \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -t 30 -f mpegts \
@@ -164,7 +168,7 @@ echo "== the origin publishes hls"
 # is nothing new to fetch and nothing for the program to switch to - and this
 # test spends most of its time waiting for a source to become healthy, for a
 # switch to land on a keyframe, and for the relay to segment.
-timeout 180 ffmpeg -hide_banner -loglevel error -re \
+timeout -k 2 180 ffmpeg -hide_banner -loglevel error -re \
     -f lavfi -i "testsrc2=size=640x360:rate=25" \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p \
     -t 120 -f mpegts \
@@ -185,7 +189,7 @@ echo "   origin playlist is up"
 echo "== an hls pull source is added at runtime"
 STATUS="$(curl -sS -o "$RUN/pull.json" -w '%{http_code}' \
     -X POST -H 'Content-Type: application/json' \
-    -d "{\"id\":\"origin-hls\",\"type\":\"hls_pull\",\"path\":\"https://127.0.0.1:$ORIGIN_HTTP/hls/live/origin/index.m3u8\",\"ca_file\":\"$RUN/cert.pem\"}" \
+    -d "{\"id\":\"origin-hls\",\"type\":\"hls_pull\",\"path\":\"https://127.0.0.1:$ORIGIN_HTTP/hls/live/origin/index.m3u8?token=hls-pull-open-secret\",\"ca_file\":\"$RUN/cert.pem\"}" \
     "$API/streams/live/relay/sources")"
 
 cat "$RUN/pull.json"; echo
@@ -263,8 +267,40 @@ echo "   pulled hls segment: $PROBE"
 printf '%s' "$PROBE" | grep -q '^h264' \
     || { echo "the pulled segment does not carry H.264" >&2; exit 1; }
 
-grep -q 'hls pull source origin-hls opened' "$RUN/puller/logs/error.log" \
-    || { echo "the pull source was not opened" >&2; exit 1; }
+# Error paths must retain a useful endpoint without publishing query credentials.
+mkdir -p "$RUN/origin/hls/redaction"
+cat >"$RUN/origin/hls/redaction/index.m3u8" <<'PLAYLIST'
+#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:2,
+broken.ts?token=hls-pull-segment-secret
+PLAYLIST
+STATUS="$(curl -sS -o "$RUN/redaction-source.json" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    -d "{\"id\":\"redaction\",\"type\":\"hls_pull\",\"path\":\"https://127.0.0.1:$ORIGIN_HTTP/hls/redaction/index.m3u8\",\"ca_file\":\"$RUN/cert.pem\"}" \
+    "$API/streams/live/relay/sources")"
+[ "$STATUS" = 201 ] || { echo "redaction source admission failed: $STATUS" >&2; exit 1; }
+for _ in $(seq 1 100); do
+    grep -Fq '/hls/redaction/broken.ts' "$RUN/origin/logs/error.log" && break
+    sleep 0.1
+done
+grep -Fq '/hls/redaction/broken.ts' "$RUN/origin/logs/error.log" \
+    || { echo "credential-bearing segment did not reach the failing origin" >&2; exit 1; }
+for _ in $(seq 1 100); do
+    grep -Fq '/hls/redaction/broken.ts' "$RUN/puller/logs/error.log" && break
+    sleep 0.1
+done
+grep -Fq '/hls/redaction/broken.ts' "$RUN/puller/logs/error.log" \
+    || { echo "failed segment endpoint was not reported" >&2; exit 1; }
+if grep -Eq 'hls-pull-(open|segment)-secret' "$RUN/puller/logs/error.log"; then
+    echo "HLS pull logs exposed query credentials" >&2
+    exit 1
+fi
+STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+    "$API/streams/live/relay/sources/redaction")"
+[ "$STATUS" = 200 ] || { echo "redaction source removal failed: $STATUS" >&2; exit 1; }
+
 
 # ---------------------------------------------------------------------------
 # a source whose origin accepts and never answers

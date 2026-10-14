@@ -1,10 +1,15 @@
 # Control API
 
-Enable it on a location:
+Serve it on a private administrative listener:
 
 ```nginx
-location /media/api/ {
-    media_api;
+server {
+    listen 127.0.0.1:8081;
+    location /media/api/ {
+        allow 127.0.0.1;
+        deny all;
+        media_api;
+    }
 }
 ```
 
@@ -14,12 +19,12 @@ location on loopback, behind a reverse proxy that authenticates, or on a Unix
 socket — `security.md` section 3 has the safe shapes, and what a caller who
 reaches it can do to a deployment — and never beside a public `listen`.
 
-All routes are under `/media/api/v1/`.  Responses are bounded JSON with
-explicit status codes; the buffer is fixed size, so a pathological registry
-produces a truncated error rather than an unbounded allocation.  Everything
-below is what `tests/integration/api_switch_nginx.sh` asserts against two real
-SRT publishers; the graph routes are what `tests/integration/api_graph_nginx.sh`
-drives from a deployment that declares no streams at all.
+All routes are under `/media/api/v1/`. Responses have explicit status codes.
+Response storage is estimated from the requested graph and capped at 64 MiB;
+allocation/formatting failure returns an error rather than a partial success.
+Switching is exercised by `tests/integration/api_switch_nginx.sh` against real
+SRT publishers; `api_graph_nginx.sh` drives graph mutations without static
+streams, and `graph_bounds_nginx.py` exercises admission and HLS identity bounds.
 
 ## Routes
 
@@ -173,6 +178,17 @@ object exists before anything publishes to it and a source can be attached
 first.  Creating one that already exists returns `200` with `"created":false`
 and the object's current revision.
 
+Graph identity fields (`application`, `name`, source `id`) admit at most
+256 UTF-8 bytes; source paths and trust-anchor paths admit at most 4096 bytes.
+Graph-replicated unsigned scalar settings are checked before narrowing to 32 bits. Next-invalid
+values return `400` without changing desired state or revision, including a
+PATCH containing both valid and invalid fields. Desired-state replay validates
+the entire document's field bounds before applying it. Mutation JSON bodies are
+bounded to 65440 bytes whether nginx buffers them in memory or a temporary file;
+larger bodies return `413`. The HLS output path encodes unsafe identity bytes
+without collision; see `configuration.md`, `media_hls`.
+
+
 The optional `media` field selects the stream's representation:
 
 ```json
@@ -269,7 +285,7 @@ deployment secret (`media_ingest_secret`), so it can be read again whenever
 the encoder is being configured:
 
 ```sh
-curl -s http://127.0.0.1:8080/media/api/v1/streams/live/news/sources/enc1/key
+curl -s http://127.0.0.1:8081/media/api/v1/streams/live/news/sources/enc1/key
 # {"id":"enc1","key":"CW3AB274M5NCZQX4896JH86PR7","key_print":"dcc2de7b5788"}
 ```
 

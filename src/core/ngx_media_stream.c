@@ -1,5 +1,6 @@
 #include "ngx_media_destination.h"
 #include "ngx_media_stream.h"
+#include "ngx_media_graph.h"
 #include "ngx_media_timeline.h"
 #ifndef NGX_MEDIA_UNIT_TEST
 #include "ngx_media_runtime.h"
@@ -56,6 +57,22 @@ ngx_media_stream_touch(ngx_media_stream_t *stream)
     }
 }
 
+void
+ngx_media_stream_retain(ngx_media_stream_t *stream)
+{
+    if (stream != NULL) {
+        (void) ngx_atomic_fetch_add(&stream->references, 1);
+    }
+}
+
+void
+ngx_media_stream_release(ngx_media_stream_t *stream)
+{
+    if (stream != NULL) {
+        (void) ngx_atomic_fetch_add(&stream->references, -1);
+    }
+}
+
 ngx_int_t
 ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
     ngx_log_t *log, const ngx_str_t *application, const ngx_str_t *name,
@@ -63,7 +80,11 @@ ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
 {
     ngx_media_policy_t  defaults;
 
-    if (stream == NULL || pool == NULL || name == NULL || name->len == 0) {
+    if (stream == NULL || pool == NULL || name == NULL || name->len == 0
+        || name->len > NGX_MEDIA_GRAPH_MAX_NAME
+        || (application != NULL
+            && application->len > NGX_MEDIA_GRAPH_MAX_NAME))
+    {
         return NGX_ERROR;
     }
 
@@ -112,7 +133,7 @@ ngx_media_stream_init(ngx_media_stream_t *stream, ngx_pool_t *pool,
 }
 
 void
-ngx_media_stream_destroy(ngx_media_stream_t *stream)
+ngx_media_stream_retire(ngx_media_stream_t *stream)
 {
     ngx_queue_t  *q, *next;
 
@@ -120,6 +141,7 @@ ngx_media_stream_destroy(ngx_media_stream_t *stream)
         return;
     }
 
+    stream->running = 0;
     /*
      * Destinations go first: each one's transport is stopped through its
      * backend before the object that describes it is released, so a sender is
@@ -143,21 +165,25 @@ ngx_media_stream_destroy(ngx_media_stream_t *stream)
     {
         next = q->next;
 
-        {
-            ngx_media_source_t  *source
-                = ngx_queue_data(q, ngx_media_source_t, queue);
-
-            ngx_media_source_preroll_destroy(source);
-            ngx_media_source_tracks_destroy(source);
-        }
+        ngx_media_stream_source_remove(stream,
+            ngx_queue_data(q, ngx_media_source_t, queue));
     }
 
     ngx_queue_init(&stream->sources);
 
-    ngx_media_feed_destroy(&stream->program_feed);
 
     stream->active = NULL;
     stream->running = 0;
+}
+
+void
+ngx_media_stream_destroy(ngx_media_stream_t *stream)
+{
+    if (stream == NULL || stream->pool == NULL) {
+        return;
+    }
+    ngx_media_stream_retire(stream);
+    ngx_media_feed_destroy(&stream->program_feed);
 }
 
 ngx_media_source_t *
@@ -166,7 +192,9 @@ ngx_media_stream_source_add(ngx_media_stream_t *stream, const ngx_str_t *id,
 {
     ngx_media_source_t  *source;
 
-    if (stream == NULL || id == NULL || id->len == 0) {
+    if (stream == NULL || !stream->running || id == NULL || id->len == 0
+        || id->len > NGX_MEDIA_GRAPH_MAX_NAME || priority > UINT32_MAX)
+    {
         return NULL;
     }
 
@@ -174,20 +202,25 @@ ngx_media_stream_source_add(ngx_media_stream_t *stream, const ngx_str_t *id,
         return NULL;
     }
 
-    source = ngx_pcalloc(stream->pool, sizeof(ngx_media_source_t));
+    if (ngx_media_model_admit(NGX_MEDIA_MODEL_SOURCE) != NGX_OK) {
+        return NULL;
+    }
+    source = ngx_alloc(sizeof(ngx_media_source_t), log);
     if (source == NULL) {
+        ngx_media_model_release(NGX_MEDIA_MODEL_SOURCE);
+        return NULL;
+    }
+    ngx_memzero(source, sizeof(*source));
+    if (ngx_media_string_set(&source->id, id, log) != NGX_OK) {
+        ngx_free(source);
+        ngx_media_model_release(NGX_MEDIA_MODEL_SOURCE);
         return NULL;
     }
 
-    source->id.data = ngx_pnalloc(stream->pool, id->len);
-    if (source->id.data == NULL) {
-        return NULL;
-    }
-
-    ngx_memcpy(source->id.data, id->data, id->len);
-    source->id.len = id->len;
 
     source->stream = stream;
+    source->references = 1;
+    ngx_media_stream_retain(stream);
     source->type = type;
     source->priority = priority;
     source->enabled = 1;
@@ -197,6 +230,7 @@ ngx_media_stream_source_add(ngx_media_stream_t *stream, const ngx_str_t *id,
                                       NGX_MEDIA_PREROLL_DEFAULT_BYTES, log)
         != NGX_OK)
     {
+        ngx_media_source_release(source);
         return NULL;
     }
 
@@ -257,23 +291,11 @@ void
 ngx_media_stream_source_remove(ngx_media_stream_t *stream,
     ngx_media_source_t *source)
 {
-    if (stream == NULL || source == NULL || source->stream != stream) {
+    if (stream == NULL || source == NULL || source->stream != stream
+        || !ngx_atomic_cmp_set(&source->pending_remove, 0, 1))
+    {
         return;
     }
-
-    if (source->writers > 0) {
-        /* in-flight writers must drain before destruction */
-        (void) ngx_atomic_cmp_set(&source->pending_remove, 0, 1);
-        return;
-    }
-
-    /*
-     * Publish removal before detaching the source pointer.  Reader threads
-     * use this atomic flag as their lifetime handoff; they must not race a
-     * plain source->stream read while the worker unlinks the source.
-     */
-    (void) ngx_atomic_cmp_set(&source->pending_remove, 0, 1);
-
     if (stream->active == source) {
         stream->active = NULL;
         source->active = 0;
@@ -288,19 +310,18 @@ ngx_media_stream_source_remove(ngx_media_stream_t *stream,
         stream->generation++;
     }
 
-    ngx_media_source_preroll_destroy(source);
-    ngx_media_source_tracks_destroy(source);
-
     ngx_queue_remove(&source->queue);
-
-    source->stream = NULL;
+    ngx_media_source_release(source);
 }
 
 ngx_int_t
 ngx_media_stream_lease_begin(ngx_media_stream_t *stream,
     ngx_media_source_t *source)
 {
-    if (stream == NULL || source == NULL || source->stream != stream) {
+    if (stream == NULL || source == NULL || source->stream != stream
+        || !stream->running
+        || ngx_atomic_fetch_add(&source->pending_remove, 0))
+    {
         return NGX_ERROR;
     }
 
@@ -327,7 +348,8 @@ ngx_media_stream_publish(ngx_media_stream_t *stream,
     ngx_int_t  rc;
 
     if (stream == NULL || source == NULL || frame == NULL
-        || source->stream != stream)
+        || source->stream != stream || !stream->running
+        || ngx_atomic_fetch_add(&source->pending_remove, 0))
     {
         return NGX_ERROR;
     }
@@ -372,7 +394,10 @@ ngx_int_t
 ngx_media_stream_promote(ngx_media_stream_t *stream,
     ngx_media_source_t *source)
 {
-    if (stream == NULL || source == NULL || source->stream != stream) {
+    if (stream == NULL || source == NULL || source->stream != stream
+        || !stream->running
+        || ngx_atomic_fetch_add(&source->pending_remove, 0))
+    {
         return NGX_ERROR;
     }
 
@@ -414,14 +439,6 @@ ngx_media_stream_switch_resolve(ngx_media_stream_t *stream)
 
         source = ngx_queue_data(q, ngx_media_source_t, queue);
 
-        if (ngx_atomic_fetch_add(&source->pending_remove, 0)
-            && source->writers == 0)
-        {
-            if (ngx_atomic_cmp_set(&source->pending_remove, 1, 0)) {
-                ngx_media_stream_source_remove(stream, source);
-                continue;
-            }
-        }
 
         if (source->pending_switch
             && source->state == NGX_MEDIA_SOURCE_AWAITING_SYNC

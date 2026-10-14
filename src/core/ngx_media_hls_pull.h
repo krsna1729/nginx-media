@@ -33,7 +33,7 @@ ngx_media_hls_pull_t *ngx_media_hls_pull_open(ngx_media_stream_t *stream,
     const ngx_str_t *id, const ngx_str_t *url, const ngx_str_t *ca_file,
     ngx_log_t *log);
 
-/* stops the reader, joins it, and removes the source; safe to repeat */
+/* Joins and frees the reader and its retained source; consumes the pointer. */
 void ngx_media_hls_pull_close(ngx_media_hls_pull_t *pull);
 
 /*

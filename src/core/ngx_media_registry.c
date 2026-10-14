@@ -1,4 +1,5 @@
 #include "ngx_media_registry.h"
+#include "ngx_media_graph.h"
 #include "ngx_media_file.h"
 #include "ngx_media_hls_ingest.h"
 #include "ngx_media_hls_pull.h"
@@ -61,22 +62,32 @@ ngx_media_registry_entry_release(ngx_media_registry_entry_t *entry)
     }
 
     ngx_free(entry);
+    ngx_media_model_release(NGX_MEDIA_MODEL_STREAM);
 }
 
-static void
-ngx_media_registry_release_queue(ngx_queue_t *queue)
+static ngx_uint_t
+ngx_media_registry_release_queue(ngx_queue_t *queue, ngx_queue_t *draining)
 {
-    ngx_queue_t                 *q;
+    ngx_queue_t                 *q, *next;
     ngx_media_registry_entry_t  *entry;
+    ngx_uint_t                   retained = 0;
 
-    while (!ngx_queue_empty(queue)) {
-        q = ngx_queue_head(queue);
+    for (q = ngx_queue_head(queue); q != queue; q = next) {
+        next = ngx_queue_next(q);
         entry = ngx_queue_data(q, ngx_media_registry_entry_t, link);
-
-        ngx_queue_remove(&entry->link);
-
-        ngx_media_registry_entry_release(entry);
+        ngx_media_stream_retire(&entry->stream);
+        if (ngx_atomic_fetch_add(&entry->stream.references, 0) != 0) {
+            if (queue != draining) {
+                ngx_queue_remove(&entry->link);
+                ngx_queue_insert_tail(draining, &entry->link);
+            }
+            retained++;
+        } else {
+            ngx_queue_remove(&entry->link);
+            ngx_media_registry_entry_release(entry);
+        }
     }
+    return retained;
 }
 
 void
@@ -86,19 +97,14 @@ ngx_media_registry_destroy(ngx_media_registry_t *registry)
         return;
     }
 
-/*
- * Both queues go, draining included.  A draining entry waits for every
- * reader and SRT session that holds a reference to stop; shutdown has already
- * joined the pull, ingest, push and SRT threads before the cycle pool is
- * destroyed.
- */
-    ngx_media_registry_release_queue(&registry->entries);
-    ngx_media_registry_release_queue(&registry->draining);
-
-    ngx_queue_init(&registry->entries);
-    ngx_queue_init(&registry->draining);
+    /* Shutdown normally joined all holders; outstanding leases still win. */
+    registry->draining_count =
+        ngx_media_registry_release_queue(&registry->draining,
+                                          &registry->draining);
+    registry->draining_count +=
+        ngx_media_registry_release_queue(&registry->entries,
+                                          &registry->draining);
     registry->count = 0;
-    registry->draining_count = 0;
 }
 
 static void
@@ -202,24 +208,28 @@ ngx_media_registry_stream_is_live(const ngx_media_registry_t *registry,
 }
 
 ngx_media_stream_t *
-ngx_media_registry_stream_create(ngx_media_registry_t *registry,
+ngx_media_registry_stream_stage(ngx_media_registry_t *registry,
     const ngx_str_t *application, const ngx_str_t *name,
     const ngx_media_feed_conf_t *feed_conf, ngx_log_t *log)
 {
-    ngx_media_stream_t          *existing;
     ngx_media_registry_entry_t  *entry;
 
-    if (registry == NULL || name == NULL || name->len == 0) {
+    if (registry == NULL || application == NULL || application->len == 0
+        || application->len > NGX_MEDIA_GRAPH_MAX_NAME
+        || name == NULL || name->len == 0
+        || name->len > NGX_MEDIA_GRAPH_MAX_NAME)
+    {
         return NULL;
     }
 
-    existing = ngx_media_registry_stream(registry, application, name);
-    if (existing != NULL) {
-        return existing;
+
+    if (ngx_media_model_admit(NGX_MEDIA_MODEL_STREAM) != NGX_OK) {
+        return NULL;
     }
 
     entry = ngx_alloc(sizeof(ngx_media_registry_entry_t), log);
     if (entry == NULL) {
+        ngx_media_model_release(NGX_MEDIA_MODEL_STREAM);
         return NULL;
     }
 
@@ -228,6 +238,7 @@ ngx_media_registry_stream_create(ngx_media_registry_t *registry,
     entry->pool = ngx_create_pool(4096, log);
     if (entry->pool == NULL) {
         ngx_free(entry);
+        ngx_media_model_release(NGX_MEDIA_MODEL_STREAM);
         return NULL;
     }
 
@@ -236,6 +247,7 @@ ngx_media_registry_stream_create(ngx_media_registry_t *registry,
     {
         ngx_destroy_pool(entry->pool);
         ngx_free(entry);
+        ngx_media_model_release(NGX_MEDIA_MODEL_STREAM);
         return NULL;
     }
 
@@ -243,6 +255,28 @@ ngx_media_registry_stream_create(ngx_media_registry_t *registry,
     registry->count++;
 
     return &entry->stream;
+}
+
+ngx_media_stream_t *
+ngx_media_registry_stream_create(ngx_media_registry_t *registry,
+    const ngx_str_t *application, const ngx_str_t *name,
+    const ngx_media_feed_conf_t *feed_conf, ngx_log_t *log)
+{
+    ngx_media_stream_t *existing;
+
+    if (registry == NULL || application == NULL || application->len == 0
+        || application->len > NGX_MEDIA_GRAPH_MAX_NAME
+        || name == NULL || name->len == 0
+        || name->len > NGX_MEDIA_GRAPH_MAX_NAME)
+    {
+        return NULL;
+    }
+    existing = ngx_media_registry_stream(registry, application, name);
+    if (existing != NULL) {
+        return existing;
+    }
+    return ngx_media_registry_stream_stage(registry, application, name,
+                                           feed_conf, log);
 }
 
 /*
@@ -257,13 +291,12 @@ ngx_media_registry_stream_create(ngx_media_registry_t *registry,
  * freed memory.  So a stream with such a reader goes on the draining list, and
  * its pool is released by ngx_media_registry_drain() once the reader is gone.
  */
-ngx_int_t
-ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
-    ngx_media_stream_t *stream)
+static ngx_int_t
+ngx_media_registry_stream_remove(ngx_media_registry_t *registry,
+    ngx_media_stream_t *stream, ngx_uint_t remember)
 {
     ngx_media_registry_entry_t  *entry;
-    ngx_media_source_t          *source;
-    ngx_queue_t                 *q, *next;
+    ngx_queue_t                 *q;
     ngx_uint_t                   pull, ingest, srt;
 
     if (registry == NULL || stream == NULL) {
@@ -287,6 +320,7 @@ ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
          * into it, so all three have to be released while it is still there.
          */
         ngx_media_runtime_stream_release(&entry->stream);
+        entry->stream.running = 0;
 
         /*
          * A file reader is paced by the tick on this thread, so closing it is
@@ -295,21 +329,7 @@ ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
          */
         ngx_media_file_close_stream(&entry->stream);
 
-/*
- * The remaining sources are detached rather than destroyed, because readers
- * and transport sessions may still hold pointers into the stream pool.  They
- * see removal and stop publishing; the draining list keeps the pool alive
- * until their references are gone.
- */
-        for (q = ngx_queue_head(&entry->stream.sources);
-             q != (ngx_queue_t *) &entry->stream.sources;
-             q = next)
-        {
-            next = q->next;
-            source = ngx_queue_data(q, ngx_media_source_t, queue);
-
-            ngx_media_stream_source_remove(&entry->stream, source);
-        }
+        ngx_media_stream_retire(&entry->stream);
 
         ngx_queue_remove(&entry->link);
         registry->count--;
@@ -321,17 +341,21 @@ ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
          * which the delete path has already carried up to the operation's
          * when the operation was newer than this replica's copy.
          */
-        ngx_media_registry_tombstone(
-            registry,
-            ngx_media_owner_hash(&entry->stream.application,
-                                 &entry->stream.name),
-            entry->stream.revision);
+        if (remember) {
+            ngx_media_registry_tombstone(
+                registry,
+                ngx_media_owner_hash(&entry->stream.application,
+                                     &entry->stream.name),
+                entry->stream.revision);
+        }
 
         pull = ngx_media_hls_pull_stream_readers(&entry->stream);
         ingest = ngx_media_hls_ingest_stream_readers(&entry->stream);
         srt = ngx_media_srt_stream_readers(&entry->stream);
 
-        if (pull == 0 && ingest == 0 && srt == 0) {
+        if (pull == 0 && ingest == 0 && srt == 0
+            && ngx_atomic_fetch_add(&entry->stream.references, 0) == 0)
+        {
             ngx_media_registry_entry_release(entry);
             return NGX_OK;
         }
@@ -352,6 +376,20 @@ ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
     }
 
     return NGX_ERROR;
+}
+
+ngx_int_t
+ngx_media_registry_stream_destroy(ngx_media_registry_t *registry,
+    ngx_media_stream_t *stream)
+{
+    return ngx_media_registry_stream_remove(registry, stream, 1);
+}
+
+ngx_int_t
+ngx_media_registry_stream_discard(ngx_media_registry_t *registry,
+    ngx_media_stream_t *stream)
+{
+    return ngx_media_registry_stream_remove(registry, stream, 0);
 }
 
 void
@@ -377,7 +415,9 @@ ngx_media_registry_drain(ngx_media_registry_t *registry, ngx_log_t *log)
         ingest = ngx_media_hls_ingest_stream_readers(&entry->stream);
         srt = ngx_media_srt_stream_readers(&entry->stream);
 
-        if (pull > 0 || ingest > 0 || srt > 0) {
+        if (pull > 0 || ingest > 0 || srt > 0
+            || ngx_atomic_fetch_add(&entry->stream.references, 0) != 0)
+        {
 
             /*
              * Readers and SRT sessions have been told their source is gone;

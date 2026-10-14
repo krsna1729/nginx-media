@@ -45,47 +45,114 @@ CORE := ../../src/core/ngx_media_key.c \
         ../../src/rtmp/ngx_media_rtmp_adapter.c
 
 SHIM := shim/ngx_shim.c
-HEADERS := $(wildcard ../../src/*/*.h shim/*.h)
 HLS_INGEST := ../../src/core/ngx_media_hls_ingest.c
+HTTP := ../../src/core/ngx_media_http.c ../../src/core/ngx_media_hls_pull.c
+HTTP_CFLAGS := $(shell pkg-config --cflags libcares)
+HTTP_LIBS := -Wl,--wrap=ares_init_options -lssl -lcrypto $(shell pkg-config --libs libcares)
+LDLIBS ?= -lpthread -lcrypto
+PYTHON ?= python3
+COVERAGE_CC ?= gcc
+COVERAGE_CFLAGS ?= -O0 -g
+COVERAGE_GCOV ?= gcov
 
 # Every standalone suite belongs to the normal sanitizer run.
 TESTS := $(basename $(wildcard test_*.c))
-BINS  := $(addprefix build/,$(TESTS))
+TSAN_TESTS := test_record test_lifecycle test_feed test_stream test_owner \
+              test_srt_output test_hls_ingest test_http
+BINS := $(addprefix build/,$(TESTS))
+TSAN_BINS := $(addprefix build/tsan/,$(TSAN_TESTS))
+NATIVE_BINS := $(addprefix build/native/,$(TESTS))
+COVERAGE_BINS := $(addprefix build/coverage/,$(TESTS))
 
-.PHONY: all test tsan clean
+.PHONY: all test tsan native coverage clean FORCE
+.DEFAULT_GOAL := all
+.SECONDARY:
+
+# The configuration stamp changes only when effective flags, build recipes or
+# the resolved compiler/version change. Depfiles track the headers actually used.
+# Common and real-HTTP objects never share a directory: their shim definitions
+# differ. Normal, TSan, native and coverage also have independent stamps/objects.
+define build_mode
+$(1)_COMMON := $$(patsubst ../../%.c,build/obj/$(1)/common/%.o,$$(CORE)) build/obj/$(1)/common/$$(SHIM:.c=.o)
+$(1)_HTTP := $$(patsubst ../../%.c,build/obj/$(1)/http/%.o,$$(CORE) $$(HTTP)) build/obj/$(1)/http/$$(SHIM:.c=.o)
+
+build/obj/$(1)/.config: FORCE
+	@$$(PYTHON) build_tools.py config --compiler "$(4)" $$@ -- \
+	    $(5) $$(CPPFLAGS) $$(WARN) $$(DEFS) $$(INCLUDES) $(6) \
+	    $$(HTTP_CFLAGS) -DNGX_MEDIA_TEST_REAL_HTTP $$(LDFLAGS) $$(LDLIBS) $$(HTTP_LIBS)
+
+build/obj/$(1)/common/src/%.o: ../../src/%.c build/obj/$(1)/.config
+	$$(PYTHON) build_tools.py compile $$@.command.json -- $(4) \
+	    $(5) $$(CPPFLAGS) $$(WARN) $$(DEFS) $$(INCLUDES) $(6) \
+	    -MMD -MP -MF $$(@:.o=.d) -c $$< -o $$@
+
+build/obj/$(1)/common/shim/%.o: shim/%.c build/obj/$(1)/.config
+	$$(PYTHON) build_tools.py compile $$@.command.json -- $(4) \
+	    $(5) $$(CPPFLAGS) $$(WARN) $$(DEFS) $$(INCLUDES) $(6) \
+	    -MMD -MP -MF $$(@:.o=.d) -c $$< -o $$@
+
+build/obj/$(1)/common/%.o: %.c build/obj/$(1)/.config
+	$$(PYTHON) build_tools.py compile $$@.command.json -- $(4) \
+	    $(5) $$(CPPFLAGS) $$(WARN) $$(DEFS) $$(INCLUDES) $(6) \
+	    -MMD -MP -MF $$(@:.o=.d) -c $$< -o $$@
+
+build/obj/$(1)/http/src/%.o: ../../src/%.c build/obj/$(1)/.config
+	$$(PYTHON) build_tools.py compile $$@.command.json -- $(4) \
+	    $(5) $$(CPPFLAGS) $$(WARN) $$(DEFS) -DNGX_MEDIA_TEST_REAL_HTTP \
+	    $$(INCLUDES) $$(HTTP_CFLAGS) $(6) -MMD -MP -MF $$(@:.o=.d) -c $$< -o $$@
+
+build/obj/$(1)/http/shim/%.o: shim/%.c build/obj/$(1)/.config
+	$$(PYTHON) build_tools.py compile $$@.command.json -- $(4) \
+	    $(5) $$(CPPFLAGS) $$(WARN) $$(DEFS) -DNGX_MEDIA_TEST_REAL_HTTP \
+	    $$(INCLUDES) $$(HTTP_CFLAGS) $(6) -MMD -MP -MF $$(@:.o=.d) -c $$< -o $$@
+
+build/obj/$(1)/http/%.o: %.c build/obj/$(1)/.config
+	$$(PYTHON) build_tools.py compile $$@.command.json -- $(4) \
+	    $(5) $$(CPPFLAGS) $$(WARN) $$(DEFS) -DNGX_MEDIA_TEST_REAL_HTTP \
+	    $$(INCLUDES) $$(HTTP_CFLAGS) $(6) -MMD -MP -MF $$(@:.o=.d) -c $$< -o $$@
+
+$$(addprefix $(2)/,$$(filter-out test_http test_hls_ingest,$(3))): $(2)/%: build/obj/$(1)/common/%.o $$($(1)_COMMON) build/obj/$(1)/.config
+	@mkdir -p $$(@D)
+	$(4) $(5) $$(WARN) $(6) $$(LDFLAGS) -o $$@ $$(filter %.o,$$^) $$(LDLIBS)
+
+$(2)/test_hls_ingest: build/obj/$(1)/common/test_hls_ingest.o $$($(1)_COMMON) build/obj/$(1)/common/src/core/ngx_media_hls_ingest.o build/obj/$(1)/.config
+	@mkdir -p $$(@D)
+	$(4) $(5) $$(WARN) $(6) $$(LDFLAGS) -o $$@ $$(filter %.o,$$^) $$(LDLIBS) -Wl,--wrap=fopen
+
+$(2)/test_http: build/obj/$(1)/http/test_http.o $$($(1)_HTTP) build/obj/$(1)/.config
+	@mkdir -p $$(@D)
+	$(4) $(5) $$(WARN) $(6) $$(LDFLAGS) -o $$@ $$(filter %.o,$$^) $$(LDLIBS) $$(HTTP_LIBS)
+
+-include $$(wildcard build/obj/$(1)/common/*.d build/obj/$(1)/common/shim/*.d build/obj/$(1)/common/src/*/*.d \
+                    build/obj/$(1)/http/*.d build/obj/$(1)/http/shim/*.d build/obj/$(1)/http/src/*/*.d)
+endef
+
+$(eval $(call build_mode,normal,build,$(TESTS),$(CC),$(CFLAGS),$(SAN)))
+$(eval $(call build_mode,tsan,build/tsan,$(TESTS),$(CC),$(CFLAGS),-fsanitize=thread))
+$(eval $(call build_mode,native,build/native,$(TESTS),$(CC),$(CFLAGS),))
+$(eval $(call build_mode,coverage,build/coverage,$(TESTS),$(COVERAGE_CC),$(COVERAGE_CFLAGS),--coverage))
 
 all: $(BINS)
+	@$(PYTHON) build_tools.py database build/compile_commands.json build/obj/normal
 
-build/%: %.c ngx_media_test.h $(HEADERS) $(CORE) $(SHIM) Makefile
-	@mkdir -p build
-	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) $(SAN) -o $@ $< $(CORE) $(SHIM) -lpthread -lcrypto
-
-test: $(BINS)
-	@fail=0; for t in $(TESTS); do ./build/$$t || fail=1; done; exit $$fail
-
-# The suites that drive threads, rebuilt under ThreadSanitizer.  They live in
-# a separate directory so a normal build never mixes instrumentation.
-TSAN_TESTS := test_record test_lifecycle test_feed test_stream test_owner \
-              test_srt_output test_hls_ingest
-TSAN_BINS  := $(addprefix build/tsan/,$(TSAN_TESTS))
+test: all
+	@$(PYTHON) build_tools.py run . $(BINS)
 
 tsan: $(TSAN_BINS)
-	@fail=0; for t in $(TSAN_TESTS); do ./build/tsan/$$t || fail=1; done; exit $$fail
+	@$(PYTHON) build_tools.py database build/tsan/compile_commands.json build/obj/tsan
+	@$(PYTHON) build_tools.py run . $(TSAN_BINS)
 
-build/tsan/%: %.c ngx_media_test.h $(HEADERS) $(CORE) $(SHIM) Makefile
-	@mkdir -p build/tsan
-	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) -fsanitize=thread -o $@ $< $(CORE) $(SHIM) -lpthread -lcrypto
+native: $(NATIVE_BINS)
+	@$(PYTHON) build_tools.py database build/native/compile_commands.json build/obj/native
+	@$(PYTHON) build_tools.py run build/native/run $(NATIVE_BINS)
 
-# The reader needs its host-side implementation in both sanitizer variants.
-build/test_hls_ingest: test_hls_ingest.c ngx_media_test.h $(HEADERS) $(CORE) $(SHIM) $(HLS_INGEST) Makefile
-	@mkdir -p build
-	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) $(SAN) -o $@ $< \
-	    $(HLS_INGEST) $(CORE) $(SHIM) -lpthread -lcrypto
-
-build/tsan/test_hls_ingest: test_hls_ingest.c ngx_media_test.h $(HEADERS) $(CORE) $(SHIM) $(HLS_INGEST) Makefile
-	@mkdir -p build/tsan
-	$(CC) $(CFLAGS) $(WARN) $(DEFS) $(INCLUDES) -fsanitize=thread -o $@ $< \
-	    $(HLS_INGEST) $(CORE) $(SHIM) -lpthread -lcrypto
+# Native GCC/gcov instrumentation is intentionally independent of CC and SAN.
+# Preserve raw .gcno/.gcda, gcov JSON, executed-command database and suite logs.
+# Report real line/branch hit counts and every excluded production .c, not a floor.
+coverage: $(COVERAGE_BINS)
+	@$(PYTHON) build_tools.py database build/coverage/compile_commands.json build/obj/coverage
+	@$(PYTHON) build_tools.py coverage build/coverage --objects build/obj/coverage \
+	    --gcov "$(COVERAGE_GCOV)" $(COVERAGE_BINS)
 
 clean:
 	rm -rf build

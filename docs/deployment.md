@@ -8,11 +8,11 @@ instructions are tested rather than believed.
 ## 1. From source
 
 Prerequisites (Debian/Ubuntu; on Arch, `base-devel pkgconf pcre2 zlib openssl
-srt ffmpeg`):
+c-ares srt ffmpeg`):
 
 ```sh
 sudo apt-get install -y build-essential pkg-config curl ca-certificates \
-    python3 libpcre2-dev zlib1g-dev libssl-dev libsrt-openssl-dev ffmpeg
+    python3 libpcre2-dev zlib1g-dev libssl-dev libc-ares-dev libsrt-openssl-dev ffmpeg
 ```
 
 `ffmpeg` is what the examples publish with; `python3` is what they parse the
@@ -69,6 +69,16 @@ publishers.
 
 ### Run it as a service
 
+Before starting, adapt the installed copy of `container/nginx.conf` for the
+service: replace the container worker include with `worker_processes 1;`,
+remove `user www-data;` (the unit runs all processes as `nginx-media`), set
+`pid logs/nginx.pid;` and `error_log logs/error.log info;`, and change the HLS
+directive and public HLS alias to `/usr/local/nginx-media/hls`. Set
+`media_ingest_secret /var/lib/nginx-media/ingest.secret;` explicitly. If
+recording is enabled, use `/usr/local/nginx-media/record` for its directive and
+alias. Keep the separate loopback admin listener and public refusal locations.
+Use the same prefix in these paths and the unit if installing elsewhere.
+
 ```sh
 sudo useradd --system --home /usr/local/nginx-media \
     --shell /usr/sbin/nologin nginx-media
@@ -91,7 +101,9 @@ nginx in front (`docs/security.md`).
 ### Verify the deployment
 
 ```sh
-curl -s localhost:8080/media/api/v1/streams      # {"streams":[],"count":0}
+curl -fsS http://127.0.0.1:8081/media/api/v1/streams # {"streams":[],"count":0}
+curl -sS -o /dev/null -w '%{http_code}\n' \
+    http://127.0.0.1:8080/media/api/v1/streams       # 403, even from localhost
 ```
 
 One trap worth knowing before the first publish: a root master drops its
@@ -103,13 +115,17 @@ whole server as a service user, which is why it does not have this problem;
 Then publish something and read it back, exactly as in the quickstart:
 
 ```sh
-curl -s -X POST -H 'Content-Type: application/json' \
+curl -fsS -X POST -H 'Content-Type: application/json' \
     -d '{"application":"live","name":"demo"}' \
-    localhost:8080/media/api/v1/streams
+    http://127.0.0.1:8081/media/api/v1/streams
+KEY=$(curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"id":"encoder","type":"srt","priority":100}' \
+    http://127.0.0.1:8081/media/api/v1/streams/live/demo/sources \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["key"])')
 
 ffmpeg -re -f lavfi -i "testsrc2=size=320x180:rate=25" -t 10 \
     -c:v libx264 -preset ultrafast -g 25 -pix_fmt yuv420p -f mpegts \
-    "srt://127.0.0.1:9000?streamid=CW3AB274M5NCZQX4896JH86PR7"
+    "srt://127.0.0.1:9000?streamid=$KEY"
 
 curl -s localhost:8080/hls/live/demo/index.m3u8
 ```
@@ -122,6 +138,8 @@ worker's event-loop delay and the feed backlog.
 
 ```sh
 docker run -d --name media \
+    --cpus=2 --memory=1g --memory-swap=1g --ulimit nofile=8192:8192 \
+    -e NGINX_WORKER_PROCESSES=1 \
     -p 8080:8080 -p 1935:1935 -p 9000:9000/udp \
     -v "$PWD/container:/config:ro" -e NGINX_CONFIG=/config/nginx.conf \
     -v media:/var/lib/nginx/media \
@@ -133,6 +151,64 @@ config directory is mounted rather than the file; `container/examples/` has
 scenarios (SRT or RTMP ingest, recording, an onward relay).  The image is
 built by `.github/workflows/container.yml` and tested by the same integration
 suite as the source build.
+
+### Administrative boundary
+
+The default and every shipped container example put administrative routes
+only on `127.0.0.1:8081`, with nginx `allow 127.0.0.1; deny all;`. Public
+HTTP on 8080 uses `deny all;` in the `/media/api` and `/media/api/…`
+locations, producing 403 in nginx's access phase. The admin listener also
+denies paths outside its API location. This needs only the native access
+module, not the rewrite module (the source build deliberately omits it).
+HLS, recording locations where configured, and SRT/RTMP publisher listeners
+stay on their media paths and ports. HLS ingest, when added, stays on its
+publisher location with its existing source-key authorization.
+
+For a native service, administer from the service host using the loopback
+URL above. For a container, the authorized path is inside its network
+namespace, using the image's existing `curl`:
+
+```sh
+docker exec media curl -fsS http://127.0.0.1:8081/media/api/v1/streams
+docker exec media curl -fsS -X POST -H 'Content-Type: application/json' \
+    -d '{"application":"live","name":"demo"}' \
+    http://127.0.0.1:8081/media/api/v1/streams
+```
+
+Do not publish 8081, add a public API alias, or proxy public HTTP to admin.
+Loopback grants authority to processes in that network namespace, not to a
+named user; restrict shell/container-exec access accordingly. Host-network
+containers share the host's loopback trust boundary. An off-host controller
+can use SSH to run the same local command. If a separate remote admin
+listener is deliberately configured, restrict its network and use native
+nginx TLS client-certificate or `auth_basic` protection; see
+`docs/security.md`. The module has no administrative credential framework.
+
+The entrypoint only renders `/etc/nginx/conf.d/workers.conf`; it never
+rewrites or changes ownership of a mounted nginx configuration. The operator
+owns its API boundary and resource settings. Source-key examples parse JSON
+with host-side `python3`, not a new runtime-container dependency.
+
+### Executable boundary checks
+
+For a built native binary:
+
+```sh
+NGINX_BIN="$PWD/.build/nginx-install/sbin/nginx" \
+    python3 tests/integration/deployment_surface_nginx.py
+```
+
+This starts real nginx instances from the default and all seven shipped
+configs, changing only test-local paths, worker identity and ports. It checks
+public GET/POST/DELETE refusal (also with an admin-looking Host header),
+loopback stream create/list, and public HLS/recording file serving where
+configured. It does not measure media performance. Default smoke HTTP ports
+are 18080/18081; `PUBLIC_PORT` and `ADMIN_PORT` override them.
+`make onboarding` additionally provisions an SRT source through loopback,
+publishes real media and fetches the resulting public HLS playlist.
+The image workflow runs public refusal, inside-container create/list and
+public HLS-serving checks against the built image.
+
 
 ## 3. The static artifact
 
@@ -151,6 +227,48 @@ update.
 library each rung was taken on; the number that travels between hosts is
 sender CPU per delivered Gbit/s.  `make bench-preflight` judges a host against
 an offered load before a run spends its window on it.
+
+### Explicit resource budgets
+
+The default config uses `worker_connections 4096;` per nginx worker and
+`media_egress_workers srt 1; media_egress_workers hls_push 1;` in the main
+context. The examples state their own connection limits (256–8192) and the
+same fixed sender counts. Fixed counts disable adaptive pool sizing; they
+are a predictable starting budget, not a measured capacity recommendation.
+Sender pools are per nginx worker, so increasing `worker_processes` also
+multiplies their thread budget. RTMP egress stays on the event loop.
+
+The Docker command above limits the container to two CPU equivalents, 1 GiB
+memory with no additional swap, and 8192 open FDs per process. For a native
+service, an equivalent operator-selected systemd drop-in is:
+
+```ini
+# sudo systemctl edit nginx-media
+[Service]
+CPUQuota=200%
+MemoryMax=1G
+MemorySwapMax=0
+LimitNOFILE=8192
+```
+
+Then run `sudo systemctl daemon-reload` and restart the service. The shipped
+unit's `LimitNOFILE=1048576` alone is a ceiling, not a reserved allocation and
+not a CPU/memory budget. Choose budgets from the actual workload: nginx
+connection slots include HTTP clients and nginx-managed upstreams, while
+SRT sockets, recordings, logs and runtime files also need process FDs.
+Leave headroom above `worker_connections` for those files; a config with
+8192 connection slots needs a larger FD limit than the example 8192 ceiling.
+CPU quota is a shared scheduling limit, not CPU affinity or a latency promise.
+
+Memory limits cover workers, replicated graph state, transport queues and
+external FFmpeg transforms in the same cgroup. Exhausting the limit can kill
+processes; it does not produce a graceful API capacity response. Recording
+also needs an independently provisioned disk/retention budget. These
+process/container controls are **not** R6 object quotas: there are no claimed
+per-tenant/per-object stream, source or destination quotas here. Restrict
+admin access and bound offered workloads operationally. No new sandbox
+settings or throughput claims are implied by these examples.
+
 
 ## Upgrading
 

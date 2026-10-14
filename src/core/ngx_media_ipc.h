@@ -22,8 +22,9 @@
  * that does not fit the bound is rejected instead of being truncated.
  */
 
-#define NGX_MEDIA_IPC_VERSION        3
+#define NGX_MEDIA_IPC_VERSION        4
 
+/* OPEN: three uint32_t lengths followed by application, stream and source bytes. */
 #define NGX_MEDIA_IPC_MSG_OPEN       1
 #define NGX_MEDIA_IPC_MSG_CLOSE      2
 #define NGX_MEDIA_IPC_MSG_TRACKS     3
@@ -46,12 +47,16 @@
 /*
  * A graph operation: one desired-state mutation of the control API, broadcast
  * to every worker so each holds a replica of the graph.  It travels the same
- * one-way transport as a routed publisher, but in the other direction: OPEN,
- * TRACKS and CLOSE carry one stream's media to its owner, this carries the
- * shape of the graph to everyone.  The payload is the operation (see
- * ngx_media_graph.h), not media.
+ * bidirectional transport as routed publishers: OPEN, TRACKS and CLOSE carry
+ * one stream's media to its owner; admission feedback returns to its ingress.
+ * GRAPH carries the shape of the graph to everyone.  Its payload is the
+ * operation (see ngx_media_graph.h), not media.
  */
 #define NGX_MEDIA_IPC_MSG_GRAPH      10
+
+/* Owner admission decision, header-only and matched to the complete OPEN. */
+#define NGX_MEDIA_IPC_MSG_ACCEPT     11
+#define NGX_MEDIA_IPC_MSG_REJECT     12
 
 /*
  * The largest single datagram, header included.  A SOCK_SEQPACKET datagram is
@@ -130,7 +135,7 @@ ngx_int_t ngx_media_ipc_send(ngx_media_ipc_endpoint_t *endpoint,
     const ngx_media_ipc_header_t *header, ngx_media_buf_t *payload,
     size_t offset, size_t length);
 
-/* sends a header-only message (open, close, tracks, health, switch, eof) */
+/* sends a header-only message (close or admission feedback) */
 ngx_int_t ngx_media_ipc_send_header(ngx_media_ipc_endpoint_t *endpoint,
     const ngx_media_ipc_header_t *header);
 

@@ -137,11 +137,11 @@ def parse_cpu_list(text):
     return cpus
 
 
-def read_processes(case_dir):
+def read_processes(case_dir, prefix=""):
     rows = load_csv(os.path.join(case_dir, "processes.tsv").replace(
         ".tsv", ".tsv"))
     processes = {}
-    path = os.path.join(case_dir, "processes.tsv")
+    path = os.path.join(case_dir, prefix + "processes.tsv")
     try:
         with open(path, encoding="utf-8") as source:
             reader = csv.DictReader(source, delimiter="\t")
@@ -153,13 +153,15 @@ def read_processes(case_dir):
     return processes
 
 
-def cpu_section(case_dir, processes, host_after):
-    before = os.path.join(case_dir, "cpu.before")
-    after = os.path.join(case_dir, "cpu.after")
+def cpu_section(case_dir, processes, host_after, prefix=""):
+    before = os.path.join(case_dir, prefix + "cpu.before")
+    after = os.path.join(case_dir, prefix + "cpu.after")
     if not (os.path.exists(before) and os.path.exists(after)):
         return {"status": "unavailable",
                 "reason": "no CPU snapshots in case directory"}, None
     totals, acct = proc_cpu_sampler.cpu_deltas(before, after)
+    if prefix:
+        acct["window"]["clock_domain"] = "receiver-monotonic"
     by_kind = {}
     by_process = {}
     roles = {}
@@ -183,6 +185,7 @@ def cpu_section(case_dir, processes, host_after):
     section = {
         "unit_note": "percent of one core; 100 = one fully busy core",
         "interval": ok(acct["window_s"], "s"),
+        "window": acct["window"],
         "clk_tck": ok(acct["clk_tck"], "ticks/s"),
         "thread_accounting": ok(acct, "threads"),
         "by_kind_pct_of_core": ok({k: round(v, 2) for k, v in by_kind.items()},
@@ -237,6 +240,25 @@ def _role(role_map, role, reason):
     if role in role_map:
         return ok(round(role_map[role], 2), "%core")
     return missing("%core", reason)
+
+
+def host_interval(before, after, clock_domain="controller-monotonic"):
+    snapshots = (before or {}, after or {})
+    keys = ("capture_start_ns", "monotonic_ns", "capture_end_ns")
+    if any(not isinstance(snapshot.get(key), (int, float))
+           or not math.isfinite(snapshot[key])
+           for snapshot in snapshots for key in keys):
+        return missing("s", "actual extended host capture brackets are unavailable")
+    if any(not snapshot["capture_start_ns"] <= snapshot["monotonic_ns"]
+           <= snapshot["capture_end_ns"] for snapshot in snapshots):
+        return missing("s", "extended host capture midpoint is outside its bracket")
+    start, end = (snapshot["monotonic_ns"] for snapshot in snapshots)
+    if end <= start:
+        return missing("s", "extended host measurement interval is nonpositive")
+    return ok((end - start) / 1e9, "s", window={
+        "clock_domain": clock_domain, "start_ns": start, "end_ns": end,
+        "start_uncertainty_ns": (before["capture_end_ns"] - before["capture_start_ns"]) / 2,
+        "end_uncertainty_ns": (after["capture_end_ns"] - after["capture_start_ns"]) / 2})
 
 
 def environment_section(host_before, host_after, processes):
@@ -705,7 +727,7 @@ def parse_cpu_list(text):
     return cpus
 
 
-def run_queue_pressure(host_before, host_after, window_s):
+def run_queue_pressure(host_before, host_after):
     """What the run queue did over the window.
 
     The CPU counters say how busy the CPUs were; the PSI "some" total says how
@@ -716,6 +738,7 @@ def run_queue_pressure(host_before, host_after, window_s):
     before = ((host_before or {}).get("host") or {})
     after = ((host_after or {}).get("host") or {})
     result = {}
+    window_s = host_interval(host_before, host_after)["value"]
     pressure_before = (before.get("cpu_pressure") or {}).get("some_total")
     pressure_after = (after.get("cpu_pressure") or {}).get("some_total")
     if pressure_before is not None and pressure_after is not None and window_s:
@@ -785,60 +808,100 @@ def saturation_summary(cpu, env, net):
     return notes
 
 
-def efficiency_section(bundle):
-    """CPU per delivered Gbit/s.  Far less host-bound than a destination
-    count - a wider host moves the capacity boundary, not this ratio - but
-    not host-independent: CPU microarchitecture and frequency, kernel, SRT
-    library version, compiler and IRQ/NIC topology all move it, so history
-    is compared within one runner class.
+def alignment(cpu_window, receiver_window, seconds):
+    """Both endpoint displacement and uncertainty must fit the existing 2% bound."""
+    if not cpu_window or not receiver_window:
+        return missing("mixed", "measurement boundaries were not captured")
+    if (cpu_window.get("clock_domain") != "controller-monotonic"
+            or receiver_window.get("clock_domain") != "controller-monotonic"):
+        return missing("mixed", "no controller clock mapping for receiver boundaries")
+    keys = ("start_ns", "end_ns", "start_uncertainty_ns", "end_uncertainty_ns")
+    if any(not isinstance(window.get(key), (int, float))
+           or not math.isfinite(window[key])
+           for window in (cpu_window, receiver_window) for key in keys):
+        return missing("mixed", "timestamp brackets or clock mapping are unavailable")
+    start, end = receiver_window["start_ns"], receiver_window["end_ns"]
+    cpu_start, cpu_end = cpu_window["start_ns"], cpu_window["end_ns"]
+    if end <= start or cpu_end <= cpu_start or not seconds:
+        return missing("mixed", "nonpositive measurement coverage")
+    skew = max(abs(start - cpu_start) + receiver_window["start_uncertainty_ns"]
+               + cpu_window["start_uncertainty_ns"],
+               abs(end - cpu_end) + receiver_window["end_uncertainty_ns"]
+               + cpu_window["end_uncertainty_ns"]) / 1e9
+    duration_error = abs((end - start) / 1e9 - seconds)
+    coverage = max(0, min(end, cpu_end) - max(start, cpu_start)) / (cpu_end - cpu_start)
+    comparable = max(skew, duration_error) <= seconds * 0.02
+    return {"status": "ok" if comparable else "unavailable",
+            "value": {"cpu": cpu_window, "receiver": receiver_window,
+                      "coverage": coverage, "max_boundary_skew_s": skew,
+                      "duration_error_s": duration_error, "bound_fraction": 0.02},
+            "unit": "mixed",
+            **({} if comparable else {"reason": "measurement boundary skew exceeds 2% of CPU window"})}
 
-    Delivered means counted by the receivers, never by the sender: a sender
-    counter (bytes queued, bytes written) keeps counting what a congested or
-    failing receiver never got, which would make a failing rung look cheap.
-    Each protocol's bytes are divided by that protocol's own receiver-side
-    measurement duration when it reports one."""
-    shell_seconds = (bundle["intervals"]["media_measurement"] or {}).get("value")
+
+def efficiency_section(bundle):
+    """Preserve receiver throughput, but compare CPU only across aligned windows."""
     cpu = bundle.get("cpu") or {}
     kinds = (cpu.get("by_kind_pct_of_core") or {}).get("value") or {}
     delivery = bundle.get("delivery") or {}
-    gbps = 0.0
-    sources = []
-    for proto, keys, seconds_keys in (
-            ("srt", ("quality_total_receiver_bytes",),
-             ("quality_measurement_s",)),
-            ("rtmp", ("quality_aggregate_bytes",),
-             ("quality_measurement_s",)),
-            ("hls_push", ("quality_total_receiver_bytes", "quality_total_bytes"),
-             ("quality_measurement_s",)),
-            ("hls_readers", ("receiver_bytes_total",),
-             ("receiver_measurement_s",))):
+    windows = bundle.get("receiver_windows") or {}
+    cpu_window = cpu.get("window")
+    cpu_seconds = (cpu.get("interval") or {}).get("value")
+    gbps, sources, alignments = 0.0, [], {}
+    for proto, keys, seconds_key, prefix in (
+            ("srt", ("quality_total_receiver_bytes",), "quality_measurement_s", "quality"),
+            ("rtmp", ("quality_aggregate_bytes",), "quality_measurement_s", "quality"),
+            ("hls_push", ("quality_total_receiver_bytes",), "quality_measurement_s", "quality"),
+            ("hls_readers", ("receiver_bytes_total",), "receiver_measurement_s", "receiver")):
         report = (delivery.get(proto) or {}).get("value") or {}
-        for key in keys:
-            value = report.get(key)
-            if isinstance(value, (int, float)) and value > 0:
-                seconds = next((report.get(k) for k in seconds_keys
-                                if isinstance(report.get(k), (int, float))
-                                and report.get(k) > 0), None)
-                basis = "receiver window"
-                if seconds is None:
-                    seconds, basis = shell_seconds, "shell window"
-                if not seconds:
-                    break
-                gbps += value * 8 / seconds / 1e9
-                sources.append(f"{proto} {key} over the {basis}")
-                break
+        value = next((report.get(key) for key in keys if isinstance(report.get(key), (int, float))
+                      and report[key] >= 0), None)
+        seconds = report.get(seconds_key)
+        if (value is None or not isinstance(seconds, (int, float)) or seconds <= 0
+                or not math.isfinite(seconds) or not math.isfinite(value)):
+            if report:
+                alignments[proto] = missing("mixed", "receiver byte total or its window is unavailable")
+            continue
+        gbps += value * 8 / seconds / 1e9
+        sources.append(f"{proto} receiver-counted bytes over receiver window")
+        window = windows.get(proto) or {
+            "start_ns": report.get(f"{prefix}_window_start_ns"),
+            "end_ns": report.get(f"{prefix}_window_end_ns"),
+            "clock_domain": report.get(f"{prefix}_clock_domain"),
+            "start_uncertainty_ns": report.get(f"{prefix}_start_uncertainty_ns"),
+            "end_uncertainty_ns": report.get(f"{prefix}_end_uncertainty_ns")}
+        alignments[proto] = alignment(cpu_window, window, cpu_seconds)
+        if alignments[proto]["status"] == "ok" and abs((window["end_ns"] - window["start_ns"]) / 1e9 - seconds) > seconds * 0.02:
+            alignments[proto] = missing("mixed", "controller clock mapping disagrees with native receiver duration")
     if gbps <= 0:
         return {"status": "unavailable",
                 "reason": "no receiver-counted byte total or measurement interval"}
-    result = {"delivered": ok(round(gbps, 4), "Gbit/s", sources=sources)}
-    receivers = sum(v for k, v in kinds.items()
-                    if k.endswith("receiver") or k == "hls-readers")
+    result = {"delivered": ok(round(gbps, 4), "Gbit/s", sources=sources),
+              "window_alignment": alignments}
+    comparable = bool(alignments) and all(row["status"] == "ok" for row in alignments.values())
+    receiver_comparable = comparable
+    receivers = sum(v for k, v in kinds.items() if k.endswith("receiver") or k == "hls-readers")
+    remote = bundle.get("receiver_host") or {}
+    if remote:
+        remote_cpu = remote.get("cpu") or {}
+        remote_kinds = (remote_cpu.get("by_kind_pct_of_core") or {}).get("value") or {}
+        remote_alignment = alignment(cpu_window, remote_cpu.get("window"), cpu_seconds)
+        result["receiver_cpu_alignment"] = remote_alignment
+        receiver_comparable = receiver_comparable and remote_alignment["status"] == "ok"
+        native_duration = (remote_cpu.get("interval") or {}).get("value")
+        if not native_duration or abs(native_duration - cpu_seconds) > cpu_seconds * 0.02:
+            receiver_comparable = False
+            result["receiver_cpu_alignment"] = missing(
+                "mixed", "controller CPU mapping disagrees with native receiver CPU duration")
+        receivers += sum(v for k, v in remote_kinds.items()
+                         if k.endswith("receiver") or k == "hls-readers")
+    reason = "CPU/Gbit comparison requires every receiver and CPU boundary within 2%"
     if "worker" in kinds:
-        result["sender_cpu_per_gbps"] = ok(round(kinds["worker"] / gbps, 2),
-                                           "%core per Gbit/s")
+        result["sender_cpu_per_gbps"] = (ok(round(kinds["worker"] / gbps, 2), "%core per Gbit/s")
+                                         if comparable else missing("%core per Gbit/s", reason))
     if receivers:
-        result["receiver_cpu_per_gbps"] = ok(round(receivers / gbps, 2),
-                                             "%core per Gbit/s")
+        result["receiver_cpu_per_gbps"] = (ok(round(receivers / gbps, 2), "%core per Gbit/s")
+                                           if receiver_comparable else missing("%core per Gbit/s", reason))
     return result
 
 
@@ -869,7 +932,11 @@ def build(args):
         "case": meta,
         "outcome": meta.get("outcome", "unknown"),
         "intervals": {
-            "media_measurement": ok(meta.get("measurement_s"), "s"),
+            "stream_counter_measurement": ok(
+                meta.get("measurement_s"), "s",
+                provenance=meta.get("measurement_provenance"),
+                window=load_json(os.path.join(case_dir, "stream.measurement.window"))),
+            "extended_host": host_interval(host_before, host_after),
             "cpu": cpu.get("interval", missing("s", "no CPU window"))
             if isinstance(cpu, dict) else missing("s", "no CPU window"),
             "requested": ok(meta.get("requested_s"), "s"),
@@ -891,11 +958,39 @@ def build(args):
         "host_fingerprint": (load_json(os.path.join(case_dir,
                                                     "host-fingerprint.json"))
                              or missing("mixed", "no host fingerprint")),
+        "receiver_host_fingerprint": (
+            load_json(os.path.join(case_dir, "preflight.receiver.json"))
+            or missing("mixed", "no native receiver host fingerprint")),
+        "receiver_nginx_fingerprint": (
+            load_json(os.path.join(case_dir, "receiver-nginx-fingerprint.json"))
+            or missing("mixed", "no native receiver nginx fingerprint")),
     }
-    window_s = (meta.get("measurement_s")
-                if isinstance(meta.get("measurement_s"), (int, float))
-                else None)
-    pressure = run_queue_pressure(host_before, host_after, window_s)
+    bundle["counter_windows"] = {
+        kind: load_json(os.path.join(case_dir, f"{kind}.measurement.window"))
+        or missing("mixed", f"no {kind} counter collection brackets")
+        for kind in ("stream", "workers")}
+    bundle["receiver_windows"] = {}
+    for proto, filename in (("srt", "receiver.measurement.window"),
+                            ("hls_push", "hls-push.measurement.window"),
+                            ("hls_readers", "hls-readers.measurement.window"),
+                            ("rtmp", "rtmp.measurement.window")):
+        mapped = load_json(os.path.join(case_dir, filename))
+        if mapped:
+            bundle["receiver_windows"][proto] = mapped
+    receiver_after = load_json(os.path.join(case_dir, "receiver.host.after.json"))
+    receiver_before = load_json(os.path.join(case_dir, "receiver.host.before.json"))
+    if receiver_after:
+        receiver_processes = read_processes(case_dir, "receiver.")
+        receiver_cpu, _ = cpu_section(case_dir, receiver_processes, receiver_after, "receiver.")
+        receiver_cpu["window"] = load_json(os.path.join(case_dir, "receiver.cpu.window")) or {
+            "clock_domain": "receiver-monotonic"}
+        bundle["receiver_host"] = {
+            "cpu": receiver_cpu,
+            "extended_host_interval": host_interval(
+                receiver_before, receiver_after, "receiver-monotonic"),
+            "cpu_environment": environment_section(receiver_before, receiver_after, receiver_processes),
+            "network": network_section(receiver_before, receiver_after, receiver_processes)}
+    pressure = run_queue_pressure(host_before, host_after)
     if pressure:
         env["run_queue_pressure"] = ok(
             pressure, "share of the window and queue depth")
@@ -983,9 +1078,10 @@ def matrix(args):
 # what made a passing rung look like a 95% delivery rate.
 OBSERVED_RATIO_KEYS = {
     "srt": ("quality_average_delivery_ratio_min",),
-    "rtmp": ("quality_min_delivery_ratio",),
-    "hls_push": ("quality_average_delivery_ratio_min",),
-    "hls_readers": ("observed_min_delivery_ratio",),
+    "rtmp": ("quality_min_delivery_ratio", "quality_absolute_delivery_ratio_min"),
+    "hls_push": ("quality_average_delivery_ratio_min", "quality_absolute_delivery_ratio_min"),
+    "hls_readers": ("observed_min_delivery_ratio", "quality_identified_delivery_ratio_min",
+                    "quality_absolute_delivery_ratio_min"),
 }
 
 THRESHOLD_RATIO_KEYS = {

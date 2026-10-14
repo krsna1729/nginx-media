@@ -1,0 +1,133 @@
+[
+  {
+    "lane": "gcc",
+    "fingerprint": "a35913ee37ca1ace9e62cf59584605ec99a40f8a2b4123714dbdea6f02fea307",
+    "reason": "GCC16 loses the checked-bit/PID-cache correlation in runtime.c:2435-2451. checked starts zero; a peer cache entry is written before its bit is set, and any set bit implies an earlier write in this visit. route.c:214-221 derives peer from a live endpoint index below the validated <=64 worker count; runtime.c:1754 preserves that index in the slot. No local cache/bit writes occur elsewhere. Native SIGKILL/respawn admission exercised this path; zeroing every cache entry would add work without fixing a reachable uninitialized read.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "gcc",
+    "fingerprint": "82daf3d54a7cb9c177da1c058fc70ef2646a0f2054a20be8eb9057ae490afb67",
+    "reason": "The raw GCC16 shutdown trace repeats an already-freed caller head. haivision.c:1314-1328 unlinks that exact head to session->next before freeing it. Caller/listener membership is immutable after wrapping; mux_release only decrements a locked counter and cannot free a wrapper. srt_close receives an integer handle, not the wrapper. Module teardown joins sender/ingest threads before backend traversal, so each shutdown iteration consumes a different live node or NULL.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "gcc",
+    "fingerprint": "43560716b25684eea2f151c9617adbf12514c89a80abbe3a246ec27c8369cc8e",
+    "reason": "Same impossible repeated freed caller-head trace as the adjacent haivision session_close diagnostic. Unlink-before-free at haivision.c:1314-1328 excludes another visit to that node; session_shutdown never frees the wrapper. Sender close/removal/shutdown serialize ownership under dest->mutex, defer close while sending, and join all senders before remaining closes. Ingest owns accepted closes on its single joined thread. No concurrent caller traversal remains during backend shutdown.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "gcc",
+    "fingerprint": "1f07b3e595387164f4514e8c8dc6b3c08767584389f4affc41a8eb596fa27df1",
+    "reason": "GCC16 takes the first config NAL's need<=cfg_cap branch with cfg=NULL and cfg_len=cfg_cap=0. nal_iter_next returns a nonempty slice, so need=4+nal.len>=5 forces allocation. Failure breaks before writes; success assigns cfg before positive cfg_cap. Production AU ceilings are <=4MiB, nonoverlapping normalized prefixes bound config bytes to <=5MiB, so need/capacity arithmetic cannot wrap on this x64 lane. Existing TS-demux config-bearing keyframe regression exercises allocation and intact media output.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "gcc",
+    "fingerprint": "2ea1eed27044f2a88b64ec2e326fa5a37e998e07fd88dc9c0768b8cac450dd4b",
+    "reason": "dup2(input_pipe[0],STDIN_FILENO) intentionally establishes child standard input for exec. Only the pid==0 branch duplicates descriptors; original pipe ends and inherited descriptors >=3 are closed, while stdin/stdout/stderr survive exec by design. Any duplication/exec failure calls _exit, whose process teardown closes all descriptors. No parent descriptor is created by child dup2. The raw GCC16 trace reports a leak at the duplication itself, before these lifetime/exec transitions.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "gcc",
+    "fingerprint": "a641afd0c9a785a83572f4b3b5afddae562848abab6ecf90efb748166d1cb8f6",
+    "reason": "dup2(output_pipe[1],STDOUT_FILENO) intentionally establishes child standard output across exec, not a retained parent FD. executor.c:326-344 duplicates only after fork in pid==0, closes all original pipe ends and inherited descriptors >=3, then execs or _exits; failure and eventual child exit close standard descriptors. GCC16 reports a leak at the deliberate duplication before modeling process/exec ownership.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "gcc",
+    "fingerprint": "0709f6506cb3075116cd880c948df727df62515ca519808733f6a72813169ad6",
+    "reason": "dup2(error_pipe[1],STDERR_FILENO) intentionally establishes child stderr across exec. executor.c:326-344 closes original pipe ends/inherited descriptors >=3 and execs or calls _exit; descriptor 2 belongs to that child until its exit. The parent never executes dup2. The raw GCC16 creation-site leak diagnostic omits this intentional standard-stream process lifetime.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "gcc",
+    "fingerprint": "d58f42b94f98b6276269c58767d9cc98ffc0e2341d0d5d8f3cbde6f7e9113346",
+    "reason": "GCC16 assumes successful rtmp_writer_message yields nparts==0 when analyzing the other TU. rtmp_wire.c:917-1015 emits >=1 chunk header even for an empty message, so success always has >=1 part. queue_message allocates a non-NULL buffer/link for every part, returning on failure before publishing; pending_last/d->out_last and its buf are therefore non-NULL at line1007. Production writers use chunk_size4096/max_message16MiB with bounded queue/parts admission; all control/command/metadata/media callers share the writer postcondition.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "gcc",
+    "fingerprint": "0d02e534864d48d13e88558ac3d202bf4d5f95e929ec07fa3fd08bc258ef4e82",
+    "reason": "GCC16's IPC restart trace resets payload to NULL but incorrectly keeps active true. frame_reset unconditionally clears active; the subsequent allocation branch returns immediately on failure and sets active only after obtaining payload. Production slots start zeroed/reset, no other payload/active mutations occur, and inconsistent frames reset then return. Existing IPC replacement-first-chunk regression exercises this exact restart and validates the replacement payload. Ordered offsets and <=4MiB total/64KiB fragments also exclude copy-size overflow on this x64 lane.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "clang",
+    "fingerprint": "b7e8aabb334c37cc8faaf9869e4a2c3689f214d61e50b8475d3c315de2f10371",
+    "reason": "The RTMP module plist assumes i>=packet.nparts at i=0 and executes chain construction zero times after the external writer succeeds. rtmp_writer_message emits at least one chunk header on every success, including zero-length messages (rtmp_wire.c:917-1015). Each part then obtains a checked non-NULL buffer/link before publication in rtmp_module.c:666-724; failure returns immediately. Thus out_last and its buf are non-NULL at line741. The trace violates the writer postcondition rather than exposing a reachable empty chain.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "clang",
+    "fingerprint": "9e4b1c3d7f75cbde13ae57f55bfb3eb80a9e55e4f3eb4fafba8b428f5e5a657a",
+    "reason": "Configuration NAL allocation invariant also reviewed for GCC16: cfg starts NULL only with cfg_cap=cfg_len=0; nal_iter_next supplies nonempty NALs, forcing first need>=5 and allocation. Failure breaks before writes; success sets cfg before positive capacity. Subsequent appends are covered by capacity. Production AU limits <=4MiB and normalized config bytes <=5MiB exclude arithmetic/capacity wrap on this x64 lane. The TS-demux configuration-bearing keyframe regression exercises the valid allocation path.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "clang",
+    "fingerprint": "7f9c09fec481792f40960bf5ab979b3c51022e5b10d7ee24c2a46fc848ea30a9",
+    "reason": "The destination queue has the same successful external RTMP-writer postcondition as the module queue: nparts>=1, including header-only empty messages. Every part receives a checked buffer/link before pending_last is published. The diagnosed nparts==0 branch cannot follow writer success; allocation failures return before out_last publication. Production writer/footprint bounds keep admitted chunks and parts within fixed queue/ring capacity; no null fallback is needed.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "clang",
+    "compiler": "22",
+    "fingerprint": "6188ee57f05d7b3b03ac1152bc68fbdcd5c2fa8ca7760266fd9b7e735e044abb",
+    "reason": "The trace invents a malformed C ngx_str_t CA argument {len>0,data=NULL}, not network input or an allocation-failure path. All production sends use immutable push CA snapshots published only after checked strdup succeeds; GETs use pull CA copied by ngx_media_string_set, which rejects positive-length NULL storage and publishes only successful allocation. API JSON/graph slices have valid allocated/body-backed storage, and reader joins precede CA frees. This review relies on the valid-slice C precondition; it does not claim malformed arbitrary C arguments are safe or permit fallback to system trust.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "clang",
+    "fingerprint": "580aa0255e30158b1a1a778a1fa0054882e359c5f66d4d16bb71076262e717fb",
+    "reason": "The exact response plist takes the first CRLF with have=0, writes line[0]=NUL, then impossibly assumes strlen(line)<13 is false and reads line[7]. strlen is zero on that path and short-circuits to error. In all successful line reads preceding bytes and the terminator are initialized; embedded NUL/LF and exhaustion are rejected, so strlen>=13 implies bytes0..12 were written. Existing HTTP/TLS malformed/short/empty response cases exercise these boundaries without blanket stack zeroing.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "clang",
+    "compiler": "22",
+    "fingerprint": "929427cf51dc1d0ac7cafd5eead33a253e726fb6fb4702c52c3401f1c60a038a",
+    "reason": "The notifier retains file->refs=1 through the entire locked destination traversal. Each attempted enqueue adds a provisional reference; enqueue failure consumes none, so the following failure release observes at least2 and cannot free. Success transfers that one reference to the queue. Atomic refcount invariant is 1 notifier + queued/upload holders + provisional enqueue; the plist's assumed free at line1249 followed by another iteration violates this invariant. List removal/stop is serialized by the global mutex.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "clang",
+    "compiler": "22",
+    "fingerprint": "dc2d39ce6360bcae370d67e2d6aacdfc9445ade830054564de35651505b16f51",
+    "reason": "Same impossible notifier-reference loss as the adjacent sealed-file diagnostic. The notifier's durable reference is released only at1259; dequeue transfers queue ownership to an upload, retry transfers it back, terminal/eviction/remove/stop each release only their owned reference. After unlocking, other holders may finish but cannot consume the notifier reference. Final release sees1+remaining holders and frees only when1; an earlier failure release cannot free this file.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "clang",
+    "compiler": "21",
+    "fingerprint": "b93553167d2099e8f672c70157da70f6166973a74bda7e7eec16e55026913e44",
+    "reason": "The notifier retains file->refs=1 through the entire locked destination traversal. Each attempted enqueue adds a provisional reference; enqueue failure consumes none, so the following failure release observes at least2 and cannot free. Success transfers that one reference to the queue. Atomic refcount invariant is 1 notifier + queued/upload holders + provisional enqueue; the plist's assumed free at line1249 followed by another iteration violates this invariant. List removal/stop is serialized by the global mutex.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "clang",
+    "compiler": "21",
+    "fingerprint": "171ad3ef87470f4be5e29b6ee2ac08f5c39b4d392374ea68074e50aedf601065",
+    "reason": "Same impossible notifier-reference loss as the adjacent sealed-file diagnostic. The notifier's durable reference is released only at1259; dequeue transfers queue ownership to an upload, retry transfers it back, terminal/eviction/remove/stop each release only their owned reference. After unlocking, other holders may finish but cannot consume the notifier reference. Final release sees1+remaining holders and frees only when1; an earlier failure release cannot free this file.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  }
+]

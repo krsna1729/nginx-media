@@ -16,20 +16,21 @@
  * rebuilds the source locally and feeds it through the normal path, so the
  * selector, feed, HLS and recordings only ever see local state.
  *
- * Socket pairs are created in the master before workers fork, one per ordered
- * worker pair, so a worker adopts its own row without any connection setup.
+ * Socket pairs belong to one configuration/worker generation, even when a
+ * reload keeps the same worker count.  The master closes its old copies on
+ * cycle cleanup; draining workers retain only their own row until shutdown.
  */
 
 #define NGX_MEDIA_ROUTE_MAX_WORKERS 64
 
-/* master: creates every worker-to-worker pair before forking */
+/* configuration: creates cycle-owned pairs; failure rejects this cycle */
 ngx_int_t ngx_media_route_master_init(ngx_cycle_t *cycle, ngx_log_t *log);
 
 /* worker: adopts its row of endpoints and registers them with the event loop */
 ngx_int_t ngx_media_route_worker_init(ngx_cycle_t *cycle, ngx_log_t *log);
 void ngx_media_route_worker_shutdown(ngx_log_t *log);
 
-/* the slot that owns a stream, from the shared directory when it knows */
+/* deterministic slot under this cycle's worker count */
 ngx_uint_t ngx_media_route_owner(ngx_cycle_t *cycle, uint64_t hash);
 
 /* true when this worker owns the stream */
@@ -53,7 +54,10 @@ ngx_int_t ngx_media_route_close(ngx_cycle_t *cycle, uint64_t hash,
  * messages carry it so the owner can keep concurrent and superseded
  * connections of the same program apart.
  */
-uint64_t ngx_media_route_session_id(uint64_t local);
+uint64_t ngx_media_route_session_id(void);
+
+/* Live peer identity from this socket generation, including worker respawns. */
+uint64_t ngx_media_route_peer_pid(ngx_uint_t peer);
 
 /*
  * Forwards the track contract of a routed source.  The owner needs it before
@@ -66,11 +70,25 @@ ngx_int_t ngx_media_route_frame(ngx_cycle_t *cycle, uint64_t hash,
     uint64_t incarnation, uint64_t session, const ngx_media_frame_t *frame,
     uint64_t sequence);
 
-/* frames received from other workers, handed to the program owner */
-typedef ngx_int_t (*ngx_media_route_frame_pt)(void *ctx, uint64_t hash,
-    const ngx_media_ipc_header_t *header, ngx_media_buf_t *payload);
+/*
+ * Messages carry the peer slot from this generation's endpoint, not wire
+ * metadata.  header == NULL reports peer EOF so its routed sources can drain.
+ */
+typedef ngx_int_t (*ngx_media_route_frame_pt)(void *ctx, ngx_uint_t peer,
+    uint64_t hash, const ngx_media_ipc_header_t *header, ngx_media_buf_t *payload);
 
 void ngx_media_route_set_sink(ngx_media_route_frame_pt cb, void *ctx);
+
+/*
+ * Owner feedback returns on the same generation-local endpoint.  The ingress
+ * callback matches hash/incarnation/session/source_type; NULL means peer EOF.
+ * OPEN remains pending until ACCEPT, and must expire after this deadline.
+ */
+#define NGX_MEDIA_ROUTE_ADMISSION_TIMEOUT  3000
+typedef void (*ngx_media_route_status_pt)(ngx_uint_t peer,
+    const ngx_media_ipc_header_t *header);
+void ngx_media_route_set_status_sink(ngx_uint_t source_type,
+    ngx_media_route_status_pt cb);
 
 /*
  * Sends one message to every other worker: the control plane's counterpart of

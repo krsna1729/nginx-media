@@ -27,6 +27,10 @@ The configure line is deliberately small: `--with-threads` because the ingest,
 recording and push paths each own a thread, `--with-http_ssl_module` because
 HLS pull and push speak TLS, and the rewrite and gzip modules are left out
 because this module neither rewrites nor compresses.
+HTTP pull/push additionally require c-ares (`pkg-config libcares`): DNS runs in
+the operation's poll loop, so the total deadline and cancellation also cover
+name resolution. Debian/Ubuntu use `libc-ares-dev`; Arch uses `c-ares`.
+
 
 Everything the script produces lands under `.build/`:
 
@@ -78,6 +82,14 @@ since the pinned one carries the system's soname.  The distribution's libsrt
 still matters - it is what users have, and the ci matrix spans three of them -
 but a capacity claim is about one library at one version.
 
+Pinned builds also write content-bound `.provenance.json` beside their transport
+artifacts and nginx binary. `source_commit` is the actual checked-out HEAD, not
+the configured tag/ref. Fingerprinting verifies hashes and the binary's actual
+linked-library resolution before using this metadata; system libraries and
+stale sidecars report an unknown source commit. Native receiver builds retain
+the executed compiler command, flags/version, source/binary hashes, actual
+package/runtime library versions and receiver tool versions.
+
 `MEDIA_SRT_BACKEND` selects which implementations of the module's own
 transport contract are compiled in: `srt` (the default and the only production
 configuration), `udp`, or `both`.  It is documented in `configuration.md`; for
@@ -90,8 +102,8 @@ different name (`robotweax-srt`, see `configuration.md`).
 ### A statically linked artifact
 
 `scripts/build-static.sh` builds one file with no library dependencies at all:
-nginx, the module, libsrt (at the pin in `scripts/srt-pins.sh`), OpenSSL, PCRE2
-and zlib linked into a single static executable.  It builds in an Alpine/musl
+nginx, the module, libsrt (at the pin in `scripts/srt-pins.sh`), OpenSSL, c-ares,
+PCRE2 and zlib linked into a single static executable. It builds in an Alpine/musl
 container - glibc warns loudly about static linking (NSS, `dlopen`,
 `getaddrinfo`) and OpenSSL's providers are loadable modules there, while musl
 is built for it and Alpine ships static OpenSSL, PCRE2 and zlib - and leaves
@@ -148,13 +160,13 @@ The portable core is compiled against `tests/unit/shim/ngx_shim.h` and
 `shim/ngx_shim.c` instead of nginx.  The shim supplies the nginx types the core
 uses (`ngx_str_t`, `ngx_pool_t`, `ngx_queue_t` and its macros, the atomic
 macros, the status codes) plus a pool that tracks every allocation so a leak is
-visible and frees everything on destroy. The shim currently zeroes pool
-allocations, unlike nginx's `ngx_palloc()`/`ngx_pnalloc()`; this can mask
-uninitialized-memory defects and remains an audit item. Two hooks exist:
+visible and frees everything on destroy. Like nginx, `ngx_palloc()` and
+`ngx_pnalloc()` leave requested memory uninitialized, while `ngx_pcalloc()`
+zeroes exactly the requested bytes. Two hooks exist:
 `ngx_media_test_fail_alloc` makes every allocation fail so callers' NULL
-handling is exercised, and `NGX_MEDIA_TEST_POISON=1` fills direct allocations
-with `0xAA` and a poisoned tail. Pool allocations currently overwrite the
-poisoned contents with zeros.
+handling is exercised, and `NGX_MEDIA_TEST_POISON=1` fills direct and pool
+allocations with `0xAA` and a poisoned tail. `ngx_pcalloc()` clears its requested
+memory but leaves the poisoned tail intact.
 
 Each suite is a standalone binary (`tests/unit/test_*.c`) using the macros in
 `tests/unit/ngx_media_test.h`: `TEST_ASSERT*`, `TEST_LEAKS()` at the end of a
@@ -162,13 +174,14 @@ run, and `TEST_MAIN_END()` to report the check and failure counts.
 
 ```sh
 make unit                                    # build and run all of them
+NGX_MEDIA_TEST_POISON=1 make unit             # rerun every suite with poison
 make -C tests/unit build/test_buffer         # build one
 ./tests/unit/build/test_buffer               # run one
 make -C tests/unit tsan                      # threaded suites under TSan
 ```
 
 `make unit` is `make -C tests/unit test`: it builds the binaries into
-`tests/unit/build/` and discovers every `test_*.c` suite (34 at this revision).
+`tests/unit/build/` and discovers every `test_*.c` suite (35 at this revision).
 AddressSanitizer and UndefinedBehaviorSanitizer are enabled by default (`SAN`);
 sanitizer errors are fatal and frame pointers are retained. Source/shim headers
 are build dependencies, so a header-only change rebuilds the affected suites.
@@ -183,10 +196,9 @@ never the length of one: a generator's depth comes from the buffer that holds
 it, and `FUZZ_BUF_WRITE` fails the suite if a hand-assembled write would pass
 the end, so a larger nightly scale cannot overflow the harness itself.
 
-`make bench-reporting` runs `tests/bench/test_reporting.py` and
-`tests/bench/test_commit_selection.py`: receiver measurement, delivery ratios,
-completeness, regression baselines and historical commit-selection behavior.
-Plain `python3`, no nginx or network.
+`make bench-reporting` runs reporting/commit selection, owned receiver lifecycle,
+independent receiver controls, native provenance, artifact publication and viewer
+behavior. Python3/Node plus isolated native fixtures; no nginx service is required.
 
 ### Integration scripts: `tests/integration`
 
@@ -319,8 +331,33 @@ ladders.  The three-way case places all outputs
 on the same program owner and validates each protocol against its calibrated
 single-destination reference, which is stored only from a calibration rung that
 passed its own checks. `CAPACITY_QUALITY_MIXES` selects a subset;
+
 `CAPACITY_QUALITY_STEPS` chooses the strictly increasing destination counts
 (starting at one), and `CAPACITY_QUALITY_SECONDS` sets each measurement window.
+
+`make bench-core-critical-paths` rebuilds the configured native nginx recipe in
+an isolated temporary tree and measures buffer references, feed publish/read,
+TS mux/demux, RTMP chunk/AMF parsing, IPC reassembly, registry/owner operations,
+and egress reports alone or during a 64-record metrics visit. A real TS fixture
+is required (`make ts-fixture`). For a pinned collection:
+
+```sh
+python3 tests/bench/core_critical_paths.py --samples 10000 --cpu 8 \
+    --visitor-cpu 10 --output .build/core-critical-pinned
+```
+
+Raw JSON/CSV retain three repetitions, sorted latency samples, p50/p95/p99/p99.9,
+throughput and compiler/fixture/source provenance. Uninstrumented native timing
+and linker-wrapped resource observations are separate builds. Allocation/copy
+counts cover observable calls only; inlined operations and shared-library
+internals remain explicitly unavailable, not zero. These are critical-path
+observations, not a production capacity ceiling or a blocking regression gate.
+Visit counters are deltas for that measured row. A visitor restricted to the
+same CPU can remain unscheduled during a short row; zero completed visits do
+not establish contention. The explicit visitor CPU above supplies a separate
+core, and the provenance records both affinities.
+
+
 
 #### Per-rung diagnostics and outcomes
 
@@ -389,6 +426,19 @@ Every capacity rung leaves `diagnostics.json` in its case directory
   number to compare across commits and SRT libraries - within one host class,
   since CPU model and frequency, kernel, library version, compiler and NIC
   topology still move it.
+  CPU/Gbit comparisons additionally require proven boundary alignment:
+  `efficiency.window_alignment` records each protocol's start/end brackets,
+  overlap coverage and maximum endpoint skew. Both endpoint displacement
+  (including capture uncertainty) and duration error must be at most **2% of
+  the CPU window**. Equally long shifted windows do not pass. Missing old
+  timestamps or missing remote-clock mapping leave CPU/Gbit unavailable while
+  receiver-counted throughput remains visible; no shell-duration fallback is
+  used. Remote CPU/process/network accounting stays under `receiver_host`,
+  separate from local PID identities. Controller-side request brackets map
+  remote boundaries; native remote monotonic clocks are never assumed shared.
+  `receiver_host_fingerprint` and `receiver_nginx_fingerprint` retain native
+  receiver architecture, boot identity, binary and transport-library provenance
+  from collected receiver artifacts, including below preflight thresholds.
 - **saturation_notes** — plain statements of which side ran out first.
 
 A rung has one of three outcomes: `setup-failure` (receivers, publishers or
@@ -423,7 +473,7 @@ The measuring side is kept from becoming the measured limit:
   every shared-runner tier uses.  Two other topologies are wired:
   `ip netns exec <ns>` / `nsenter --net=/run/netns/<ns> --no-fork` with the
   namespace's own address puts the traffic over a veth pair, and
-  `ssh <host>` puts the receivers on another machine.  The namespace
+  the distributed driver below puts the receivers on another machine. The namespace
   topology is one command - `eval "$(tests/bench/capacity_veth.sh up)"` -
   and it is the topology to use when the question is whether the software
   depends on loopback; it is not a NIC, so a number from it is a number
@@ -443,16 +493,69 @@ The measuring side is kept from becoming the measured limit:
   that workload's ladder; it is never a quality failure and never a
   statement about nginx.  The bundle keeps the whole preflight under
   `preflight`, and the matrix and history list the rung separately.
-- **Two hosts.**  `tests/bench/capacity_distributed.sh --receiver user@host
-  --addr 10.10.0.2` mirrors the repository to the receiver host at the same
-  absolute path, runs the preflight on both sides, then runs the ladder with
-  the receivers started over ssh.  Artifacts come back through
-  `CAPACITY_RECEIVER_FILE_TEST`/`_FETCH`/`_COLLECT` (a no-op when the
-  receivers share this filesystem), so the same harness and the same
-  diagnostics work for both.  The link between the hosts is the measurement:
-  a 1000 x 8 Mbit/s rung needs about 9.6 Gbit/s of path including overhead,
-  and on anything smaller the preflight says so instead of the run
-  pretending.
+- **Two hosts.** `tests/bench/capacity_distributed.sh --receiver user@host
+  --addr 10.10.0.2 --sender-addr 10.10.0.1 --mixes all` supports every named
+  SRT, sharded RTMP, HLS-origin and HLS-push workload. Each workload gets its
+  own configuration manifest, log, status and diagnostic directories; contention
+  calibration begins at four outputs when the requested first rung is one.
+  `--receiver-root /absolute/isolated/root` explicitly maps sender run paths
+  onto a **new** receiver root (default: a scoped fresh `/tmp` directory).
+  Only source is mirrored: `.build` and `.git` are excluded, no `--delete`
+  is used, and receiver SRT/nginx binaries are compiled natively. Fingerprints
+  record architecture, boot ID, actual binary hash and linked SRT identity.
+  Both host fingerprints and both probe results must arrive before judging;
+  exit 0 admits the ladder, 2 stops as infrastructure-limited, and every other
+  status is fatal. Initial admission requires measured
+  `CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS` and
+  `CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS`, not guessed core-count capacity.
+  `--out` must name a new directory; readiness, probe and snapshot artifacts
+  cannot be inherited from an earlier run.
+  `CAPACITY_RECEIVER_CONFIG` carries serialized SSH argv and path mappings.
+  Receivers publish their own PID, process group, start time and ownership token;
+  liveness and signals verify them on the receiver. Local SSH client CPU is
+  never sampled as receiver CPU. Remote CPU and host snapshots stay in separate
+  `receiver.cpu.*`, `receiver.host.*` and `receiver.processes.tsv` artifacts
+  because numeric PIDs and monotonic clocks can collide across hosts.
+  `remote_workspace` identifies the complete owned receiver root, including
+  sibling calibration/run paths, so native paths are never translated twice.
+  Closing the SSH owner's stdin reaps its owned receiver group. Long-lived
+  clients/tunnels bind to the true harness PID, including SIGKILL and startup
+  races. Cleanup also closes/reaps local owners when a new signal RPC fails.
+  Tunnel owners are the actual SSH process, not a wrapper. The availability
+  probe uses SSH's socket-reuse semantics so TIME_WAIT is not a false listener.
+  RTMP administration binds remote loopback and uses a private SSH forward.
+  HLS-origin readers use `--sender-addr`: the sender exposes only `/hls/` on
+  a separate listener, never its unauthenticated administration API.
+  Existing authenticated host keys are required; `--ssh-port`, `--ssh-key`
+  and `--known-hosts` support an isolated loopback sshd without permanent SSH
+  configuration. For example, after independently authenticating its host key:
+
+  ```sh
+  tests/bench/capacity_distributed.sh --receiver \"$USER@127.0.0.1\" \
+    --addr 127.0.0.1 --sender-addr 127.0.0.1 --ssh-port 22222 \
+    --ssh-key \"$PWD/.build/ssh-smoke/client\" \
+    --known-hosts \"$PWD/.build/ssh-smoke/known_hosts\" \
+    --receiver-root \"$PWD/.build/ssh-smoke/receiver-new\" \
+    --out \"$PWD/.build/ssh-smoke/result-new\" \
+    --mixes 'pure-srt pure-rtmp pure-hls pure-hls-push' --steps '1' \
+    --seconds 15 --preflight-only
+  python3 tests/bench/test_capacity_receiver.py \
+    --ssh-config .build/ssh-smoke/result-new/receiver-config.json
+  ```
+
+  Without measured CPU costs, the first command stops with insufficient
+  evidence after native preparation and the actual probe. Its transport config
+  remains usable for the second command's real process/file/signal/teardown
+  smoke. For an actual media smoke (not admission or capacity qualification),
+  use that config with `CAPACITY_RUN` set to its `local_run`,
+  `CAPACITY_RECEIVER_CONFIG` to its path, `CAPACITY_PREFLIGHT=no`,
+  `CAPACITY_RECEIVER_ADDR=127.0.0.1`, `CAPACITY_SENDER_ADDR=127.0.0.1`,
+  `CAPACITY_QUALITY_MIXES='pure-srt pure-rtmp pure-hls pure-hls-push'`,
+  `CAPACITY_QUALITY_STEPS=1`, `CAPACITY_QUALITY_SECONDS=15`, and
+  `PHASES=capacity-quality-ladder` when launching `ingest_egress_fanout.sh`.
+  Loopback SSH proves orchestration only, not a second physical host or NIC
+  capacity. A 1000 × 8 Mbit/s rung needs about 9.6 Gbit/s including overhead;
+  insufficient or invalid evidence must never become a capacity claim.
 - The SRT receiver listens on several ports (`PORT:N`) so no single receiver
   UDP socket and libsrt receive thread carries more than
   `CAPACITY_SRT_RECEIVER_PEERS` destinations (16 by default).
@@ -468,7 +571,7 @@ The measuring side is kept from becoming the measured limit:
 - `CAPACITY_QUALITY_STOP_AFTER_FAILURES=N` ends a workload's ladder after N
   consecutive quality failures; the rungs above are reported as unmeasured,
   never as failures.  The CI tiers use 2.
-- Each run takes a 256-port block from 10240-17919, chosen from its PID
+- Each run takes a 512-port block from 10240-17919, chosen from its PID
   (`CAPACITY_BASE` overrides): below the kernel's ephemeral range, where an
   outgoing socket of the previous run can briefly hold a listener's port, and
   clear of the integration suites' fixed ports.
@@ -481,10 +584,66 @@ HLS output fail with them.
 RTMP delivery divides by the interval between two receiver scrapes stamped
 with the monotonic clock around each request, not by a shell-measured window,
 and a 1 s receiver sampler provides the short-interval floor and the longest
-stall.  HLS push is judged on identified segments: the segments first
-delivered inside the window, each checked per destination for arrival,
-exactly-once upload, size, lag behind the first destination, and a playlist
-that referenced it before its upload completed.
+stall. RTMP also checks every receiver and calibration against prepared
+elementary media: `prepared-media.json` records ffprobe packet payload sizes
+divided by the source's presentation span, not nominal bitrate or TS overhead.
+HLS production is observed independently on the sender: playlist-identified
+final segment sizes and filesystem last-write cut timestamps mapped to the
+local monotonic clock are retained in `hls-production.json`. At least two cuts
+inside the measurement interval are required; the production rate excludes the
+first cut's bytes and divides subsequent bytes by the first-to-last cut span.
+HLS production must itself meet the prepared elementary rate, so a common-mode
+half-rate producer/reference is not calibration evidence. HLS push and readers
+then check the exact produced segment set, with trailing grace of twice the
+observed cut interval. Push checks arrival, exactly-once upload, size, relative
+destination lag and playlist ordering; readers retain fetched identities for
+local post-collection judging. Identified-window bytes and end-minus-grace
+coverage are separate from raw receiver snapshot bytes and their full window;
+only the latter enter efficiency. Relative and absolute gates both apply.
+References are reset for every mix and persisted only after their own checks
+pass. Offered/prepared rates and provenance travel into diagnostics and history.
+
+HLS-reader acceptance excludes cuts before the reader's acknowledged actual
+start, not just before the CPU snapshot. Remote native start/end values must
+agree with their controller-clock acknowledgments; an unmapped clock is a
+setup failure. Missing in-window segments still fail delivery.
+
+CPU accounting opens only after sampler/receiver readiness and closes before
+sampler joins or artifact fetches. Every capture first validates ownership and
+prepares its native operation, including sampler quiescence, then acknowledges
+READY while parked. The controller releases CPU accounting and all capture
+tokens together. SSH authentication and process startup are outside request/reply
+brackets; token dispatch through native reply is inside. Receiver replies retain
+native capture times separately from controller brackets. Failed preparation
+aborts the boundary and reaps parked captures instead of opening accounting.
+Extended host snapshots run outside CPU accounting and retain their own interval.
+PSI shares use that host interval, not the stream or CPU denominator.
+`stream.measurement.window` and `workers.measurement.window` retain independent
+counter-collection brackets; frame FPS uses the stream-counter midpoint interval.
+HLS readers use SIGUSR2 to seal end-of-window receipts but remain alive for the
+closing CPU snapshot. SIGTERM releases report generation and exit afterward.
+Warmup anchors refresh before start; a playlist completed across start is
+consumed without skipping its in-window segments.
+
+
+
+For an independent receiver control, use a valid MPEG-TS fixture:
+
+```sh
+python3 tests/bench/receiver_capacity_control.py --source "$SOURCE" \
+    --destinations 16 --seconds 10 --bitrate-bps 8000000 \
+    --sender-cpus 4,6 --receiver-cpus 12-15 --paired-stall \
+    --out .build/receiver-control
+```
+
+The native source bypasses nginx egress and offers constant-paced 1316-byte
+SRT messages. Raw attempted/accepted/blocked/error counters, receiver intervals,
+TS integrity and CPU snapshots identify this explicit recipe. A qualified
+baseline is a lower bound for that receiver recipe, not a production ceiling.
+The paired control changes only destination `d0000`'s read behavior; it reports
+`receiver-limited` only with full-rate source evidence and healthy lane-mates.
+CPU pressure alone is not attribution. Controller exit, including SIGKILL,
+terminates its native workloads through Linux parent-death binding.
 
 `bench-burst-sizing` runs the in-process demux/mux/remux fixture at each
 capacity in `CAPACITIES` (bytes).  It reports burst count, observed byte range,
@@ -549,6 +708,30 @@ History schema 3 records the configurations expected from the workflow and
 marks absent matrix artifacts incomplete. The viewer plots only complete
 configurations with benchmark fingerprints, separates runner fingerprints into
 different series, and labels each latest-run row with the benchmark runner.
+
+Viewer efficiency series use a fixed destination rung and separate stable
+runner identity, measurement recipe and qualification/probe cohort. Hardware
+filters project each mixed record's matching contents; inspector selection uses
+the exact record/attempt rather than the commit SHA alone.
+
+Artifacts retain the complete nested per-rung directory, including failed-rung
+logs, interval CSVs, CPU/host/process snapshots, preflight and calibration/media
+offer evidence. Default CI writes live runtime evidence under the upload root,
+including during cancellation; an explicit `CAPACITY_RUN` remains caller-owned.
+Generated media payloads and ingest secrets are excluded, not raw measurements.
+Uploads explicitly include hidden files because the evidence root is `.build`;
+missing required result/trend uploads fail rather than silently producing no
+artifact. Trend uploads also exclude worktree `.git` metadata.
+Artifact names identify workflow attempts. Publishers poll artifact visibility,
+preserve explicit incomplete records, and replay immutable inputs against the
+latest history tree after push races. Content IDs deduplicate retries without
+overwriting another attempt or earlier incomplete evidence.
+Publication and caller queues use GitHub's native `queue: max` with cancellation
+disabled. A publisher-global group serializes regression issue list/create as
+well as history writes; immutable replay remains protection against other
+history writers. The documented platform ceiling is 100 pending jobs; excess
+jobs can still be canceled, with source artifacts retained on their runs.
+See [GitHub concurrency](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
 
 `bench.yml` only measures, with `contents: read` and `actions: write` for
 benchmark artifact upload. Publishing is `bench-publish.yml`, the job that

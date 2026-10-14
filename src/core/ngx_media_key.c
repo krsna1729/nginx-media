@@ -82,7 +82,6 @@ ngx_media_key_derive(const u_char *master, size_t master_len,
      */
     material_len = 4 + id->len + NGX_MEDIA_KEY_NONCE_LEN;
 
-    p = material;
     material[0] = (u_char) (id->len & 0xff);
     material[1] = (u_char) ((id->len >> 8) & 0xff);
     material[2] = (u_char) ((id->len >> 16) & 0xff);

@@ -76,13 +76,16 @@ esac
 echo "== stop"
 "$NGINX" -p "$RUN" -c conf/nginx.conf -s quit
 
-for _ in $(seq 1 50); do
-    kill -0 "$PID" 2>/dev/null || break
+for _ in $(seq 1 100); do
+    if ! kill -0 "$PID" 2>/dev/null || [ "$(awk '/State:/ {print $2}' "/proc/$PID/status" 2>/dev/null)" = "Z" ]; then
+        break
+    fi
     sleep 0.1
 done
 
-if kill -0 "$PID" 2>/dev/null; then
+if kill -0 "$PID" 2>/dev/null && [ "$(awk '/State:/ {print $2}' "/proc/$PID/status" 2>/dev/null)" != "Z" ]; then
     echo "nginx did not shut down" >&2
+    [ -f "$RUN/logs/error.log" ] && cat "$RUN/logs/error.log" >&2
     kill -9 "$PID" || true
     exit 1
 fi

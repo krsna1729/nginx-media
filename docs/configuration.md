@@ -14,12 +14,21 @@ media_ingest_secret /var/lib/nginx/media/ingest.secret;
 
 http {
     server {
-        listen 127.0.0.1:8080;
+        listen 8080;
         location /hls/ { alias /var/lib/nginx/media/hls/; }
-        location /media/api/ { media_api; }
+        location = /media/api { deny all; }
+        location ^~ /media/api/ { deny all; }
         location /ingest/ {
             access_log off; # request URI contains the HLS source key
             media_hls_ingest /var/lib/nginx/media/ingest;
+        }
+    }
+    server {
+        listen 127.0.0.1:8081;
+        location /media/api/ {
+            allow 127.0.0.1;
+            deny all;
+            media_api;
         }
     }
 }
@@ -27,16 +36,44 @@ http {
 
 ## Program model
 
+### `media_stream_limit`, `media_source_limit`, `media_destination_limit`
+
+Finite allocation budgets in the `main` context:
+
+| Directive | Default | Admitted range |
+|---|---:|---:|
+| `media_stream_limit <count>;` | 256 | 0–256 |
+| `media_source_limit <count>;` | 4096 | 0–4294967295 |
+| `media_destination_limit <count>;` | 4096 | 0–4294967295 |
+
+Zero refuses new objects; it does not mean unlimited. Counts are per worker
+and cover all of that worker's streams, including removed objects still held
+by a reader, publisher, write lease, connection or send. A deleted object
+returns its slot only after its last holder releases it. Existing-object
+replay does not allocate a second object or consume another slot.
+
+API creation returns HTTP 503 when the local budget has no room. A desired
+document preflights its distinct new objects before changing configuration;
+deletions do not provide speculative credits for objects that may still be
+retained. Transport-specific queue/session limits can refuse admission sooner.
+The 256-stream ceiling also matches the shared owner-directory capacity.
+
+These object counts are not a process memory, thread or FD limit. Use
+`worker_connections`, `media_egress_workers` and the service/container budgets
+in [`deployment.md`](deployment.md) for those separate resources.
+
 ### `media_hls <directory>;`
 
-Writes segmented HLS output under `<directory>`, one directory per program:
-`<directory>/<application>/<name>` holds that program's playlist and segments.
-Serve the root with a normal `alias`/`root` location, and a viewer fetches
-`/hls/<application>/<name>/index.m3u8`; programs do not share a playlist name or
-a set of segment names, so two of them writing at once cannot overwrite each
-other's media.  The two components come from the program's identity, with
-anything outside `[A-Za-z0-9_-]` replaced by `_`, so a name cannot choose a
-directory outside the root.  The segmenter starts on a keyframe; no directive
+Writes segmented HLS output under `<directory>`, one directory per program.
+Application and name components containing 1–255 bytes from `[A-Za-z0-9_-]`
+remain literal. Other admitted identities use `~<UTF-8-byte-length>` followed
+by lower-case hexadecimal path components encoding at most 120 original bytes
+each. The two identities are encoded independently: `live/news.one` becomes
+`live/~8/6e6577732e6f6e65`, while `live/news_one` remains `live/news_one`.
+Serve the root with a normal `alias`/`root` location. Each resulting directory
+holds `index.m3u8` and its segments, without aliasing another program or escaping
+the root. API identities admit at most 256 UTF-8 bytes. The segmenter starts
+on a keyframe; no directive
 configures segment duration yet.  A segment's file is written under a temporary
 name and renamed into place, the way the playlist is, so a viewer fetching a
 listed segment or the segmenter notifying a destination never sees a partial
@@ -203,10 +240,10 @@ every program, so the key is what says which source a publisher is:
 # create the program, then a source; the response carries the key once
 curl -X POST -H 'Content-Type: application/json' \
   -d '{"application":"live","name":"news"}' \
-  http://127.0.0.1:8080/media/api/v1/streams
+  http://127.0.0.1:8081/media/api/v1/streams
 curl -X POST -H 'Content-Type: application/json' \
   -d '{"id":"enc1","type":"srt","priority":100}' \
-  http://127.0.0.1:8080/media/api/v1/streams/live/news/sources
+  http://127.0.0.1:8081/media/api/v1/streams/live/news/sources
 # {"id":"enc1","key":"CW3AB274M5NCZQX4896JH86PR7","key_print":"dcc2de7b5788",...}
 
 ffmpeg ... -f mpegts "srt://127.0.0.1:9000?streamid=CW3AB274M5NCZQX4896JH86PR7"
@@ -508,6 +545,13 @@ an optional `ca_file` supplies a trust anchor for an origin whose certificate
 is not in the system store, and when the playlist has nothing new the reader
 waits for the origin rather than spinning.
 
+Each fetch has a ten-second total monotonic budget, including DNS, address
+fallback, TCP/TLS setup and complete response decoding. Removal/worker shutdown
+cancels the active operation rather than waiting for an idle socket timeout.
+Invalid/conflicting framing, premature EOF and body-cap exhaustion fail the
+fetch; a partial playlist or segment is never accepted as complete.
+
+
 ```json
 {"id":"upstream","type":"hls_pull",
  "path":"https://origin.example/live/news/index.m3u8"}
@@ -515,10 +559,16 @@ waits for the origin rather than spinning.
 
 A **`hls_push` destination** uploads segmenter notifications for sealed HLS
 segments and playlists; it does not scan the output directory.  Its `path` must
-match the program's output directory exactly — with `media_hls <root>`, that is
-`<root>/<application>/<name>` — or no files match the destination.  The
-segmenter opens each file after atomic rename and queues that inode snapshot,
+match the program's output directory exactly, using the collision-free identity
+encoding described under `media_hls`; a literal unsafe name is not that path.
+The segmenter opens each file after atomic rename and queues that inode snapshot,
 which remains readable if HLS retention unlinks or replaces its path.
+
+Each upload operation has a ten-second total DNS/connect/TLS/transfer/response
+budget. The segment-duration retry window is separate: a completed first
+operation is not rejected merely because it took longer than one segment.
+Removal and worker shutdown cancel an in-flight operation promptly.
+
 
 Each destination has one upload in flight and a 64-file queue; overflow drops
 the oldest queued file and is counted.  A shared four-thread-ceiling pool starts

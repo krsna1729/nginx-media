@@ -49,4 +49,30 @@ SRT_DIR="$prefix" MEDIA_SRT_PKG="$pkg" \
 NGINX_LD_OPT="-Wl,-rpath,$prefix/lib" \
     "$root/scripts/build-nginx.sh"
 
+# Bind the checkout evidence to both the binary and the library that ldd
+# actually resolves. A matching configured pin alone never establishes this.
+python3 - "$build/install/sbin/nginx" "$prefix/lib/$pkg.provenance.json" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
+transport = json.loads(pathlib.Path(sys.argv[2]).read_text())
+library = pathlib.Path(transport["artifact"]["path"]).resolve(strict=True)
+linked = subprocess.run(["ldd", str(binary)], check=True,
+                        capture_output=True, text=True).stdout
+resolved = [pathlib.Path(line.split("=>", 1)[1].split()[0]).resolve()
+            for line in linked.splitlines() if "srt" in line and "=>" in line
+            and "not found" not in line]
+if (library not in resolved
+        or hashlib.sha256(library.read_bytes()).hexdigest() != transport["artifact"]["sha256"]):
+    raise SystemExit("pinned nginx did not resolve the content-bound pinned SRT library")
+evidence = {
+    "schema": "nginx-media.binary-build/1",
+    "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+    "transport_build": transport,
+}
+path = pathlib.Path(str(binary) + ".provenance.json")
+temporary = pathlib.Path(str(path) + ".tmp")
+temporary.write_text(json.dumps(evidence, indent=1) + "\n")
+temporary.replace(path)
+PY
+
 echo "pinned nginx: $build/install/sbin/nginx ($pkg at $ref)"

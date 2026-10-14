@@ -4,11 +4,10 @@
 Two subcommands:
 
   sample   take a "before" snapshot, sleep, take an "after" snapshot.  Each
-           snapshot is a text file of thread rows plus, when --extended-before
-           and --extended-after are given, a JSON document with the host,
-           cgroup, affinity, kernel network counters and per-socket UDP drop
-           counters captured at the same instant.  Prints
-           "<window_s> <before_ms> <after_ms>" for the shell harness.
+           snapshot is a text file of thread rows. Optional JSON documents
+           retain the extended host/network captures outside the CPU window,
+           with their own actual capture brackets rather than CPU timestamps.
+           Prints "<window_s> <before_ms> <after_ms>" for the shell harness.
 
   report   per (pid, role) CPU between two thread snapshots, as a percentage
            of one core.  Threads that exist in only one snapshot, or whose TID
@@ -202,6 +201,15 @@ def read_threads(path, processes=None):
     return clk, stamp, rows
 
 
+def snapshot_bracket(path):
+    with open(path, encoding="ascii") as source:
+        for line in source:
+            if "monotonic_ns=" in line:
+                start, end = map(int, line.split("monotonic_ns=", 1)[1].split()[:2])
+                return ((start + end) / 2, (end - start) / 2)
+    return None, None
+
+
 def cpu_deltas(before_path, after_path, window_s=None):
     """Return ({(pid, role): pct}, accounting dict)."""
     procs_b, procs_a = {}, {}
@@ -216,6 +224,12 @@ def cpu_deltas(before_path, after_path, window_s=None):
     acct = {"threads_both": 0, "threads_born": 0, "threads_exited": 0,
             "tid_reused": 0, "negative_rejected": 0,
             "clk_tck": clk, "window_s": window_s}
+    start, start_uncertainty = snapshot_bracket(before_path)
+    end, end_uncertainty = snapshot_bracket(after_path)
+    acct["window"] = {"clock_domain": "controller-monotonic",
+                      "start_ns": start, "end_ns": end,
+                      "start_uncertainty_ns": start_uncertainty,
+                      "end_uncertainty_ns": end_uncertainty}
     for key, (role, ticks, start) in after.items():
         prior = before.get(key)
         if prior is None:
@@ -473,10 +487,11 @@ def process_info(pid):
     return info
 
 
-def extended_snapshot(pids, affinity, started_ns):
+def extended_snapshot(pids, affinity, thread_started_ns, thread_finished_ns):
     begin = time.monotonic_ns()
     snap = {
-        "monotonic_ns": started_ns,
+        "thread_capture_start_ns": thread_started_ns,
+        "thread_capture_end_ns": thread_finished_ns,
         "clk_tck": CLK_TCK,
         "host": {
             "nproc_online": os.cpu_count(),
@@ -498,8 +513,36 @@ def extended_snapshot(pids, affinity, started_ns):
         "processes": {str(pid): process_info(pid) for pid in pids},
         "threads": affinity,
     }
-    snap["capture_ms"] = (time.monotonic_ns() - begin) / 1e6
+    end = time.monotonic_ns()
+    snap["monotonic_ns"] = (begin + end) // 2
+    snap["capture_start_ns"] = begin
+    snap["capture_end_ns"] = end
+    snap["capture_ms"] = (end - begin) / 1e6
     return snap
+
+
+def boundary(args, phase):
+    if not args.boundary_dir:
+        return
+    from pathlib import Path
+    directory = Path(args.boundary_dir)
+    (directory / f"cpu.ready.{phase}").touch()
+    deadline = time.monotonic() + 60
+    while not (directory / f"cpu.release.{phase}").exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"controller did not release CPU {phase} boundary")
+        time.sleep(0.001)
+
+
+def captured(args, phase, started, finished):
+    if not args.boundary_dir:
+        return
+    from pathlib import Path
+    path = Path(args.boundary_dir) / f"cpu.captured.{phase}.json"
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"capture_start_ns": started,
+                                     "capture_end_ns": finished}))
+    os.replace(temporary, path)
 
 
 def sample(args):
@@ -509,20 +552,28 @@ def sample(args):
     extended = bool(args.extended_before and args.extended_after)
     cpu0 = time.process_time_ns()
 
-    b_start, b_end, rows, aff = thread_snapshot(args.pids, roles, extended)
-    write_threads(args.before, b_start, b_end, rows)
     if extended:
+        host_start, host_end, _, affinity = thread_snapshot(args.pids, roles, True)
         with open(args.extended_before, "w", encoding="utf-8") as out:
-            json.dump(extended_snapshot(args.pids, aff, b_start), out)
+            json.dump(extended_snapshot(args.pids, affinity, host_start, host_end), out)
+    boundary(args, "before")
+    b_start, b_end, rows, _ = thread_snapshot(args.pids, roles, False)
+    write_threads(args.before, b_start, b_end, rows)
+    captured(args, "before", b_start, b_end)
     overhead_before = time.process_time_ns() - cpu0
 
-    time.sleep(args.sleep)
-
+    # Both hosts wait at the closing barrier before capturing. SSH readiness,
+    # receiver signals and joining monitors never become part of a CPU sample.
+    time.sleep(max(0.0, (b_start + b_end) / 2e9 + args.sleep - time.monotonic()))
+    boundary(args, "after")
     cpu1 = time.process_time_ns()
-    a_start, a_end, rows, aff = thread_snapshot(args.pids, roles, extended)
+    a_start, a_end, rows, _ = thread_snapshot(args.pids, roles, False)
     write_threads(args.after, a_start, a_end, rows)
+    captured(args, "after", a_start, a_end)
+
     if extended:
-        snap = extended_snapshot(args.pids, aff, a_start)
+        host_start, host_end, _, affinity = thread_snapshot(args.pids, roles, True)
+        snap = extended_snapshot(args.pids, affinity, host_start, host_end)
         snap["sampler_cpu_ms"] = {
             "before": overhead_before / 1e6,
             "after": (time.process_time_ns() - cpu1) / 1e6,
@@ -557,6 +608,7 @@ def main():
     s.add_argument("--after", required=True)
     s.add_argument("--extended-before")
     s.add_argument("--extended-after")
+    s.add_argument("--boundary-dir")
     s.add_argument("pids", nargs="+")
 
     r = sub.add_parser("report")

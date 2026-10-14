@@ -17,18 +17,19 @@
 #
 # Then create a program and give it something to carry:
 #
-#   curl -X POST -H 'Content-Type: application/json' \
+#   docker exec media curl -fsS -X POST -H 'Content-Type: application/json' \
 #     -d '{"application":"live","name":"demo"}' \
-#     http://127.0.0.1:8080/media/api/v1/streams
+#     http://127.0.0.1:8081/media/api/v1/streams
 #
-#   curl -X POST -H 'Content-Type: application/json' \
-#     -d '{"id":"file1","type":"file","path":"/media/source.ts"}' \
-#     http://127.0.0.1:8080/media/api/v1/streams/live/demo/sources
+#   docker cp sample.ts media:/sample.ts
+#   docker exec media curl -fsS -X POST -H 'Content-Type: application/json' \
+#     -d '{"id":"file1","type":"file","path":"/sample.ts"}' \
+#     http://127.0.0.1:8081/media/api/v1/streams/live/demo/sources
 #
-# HLS comes out at http://127.0.0.1:8080/hls/index.m3u8.  Or publish live:
-#
-#   srt://host:9000?streamid=#!::r=live/demo,m=publish
-#   rtmp://host:1935/live/demo
+# HLS comes out at http://127.0.0.1:8080/hls/live/demo/index.m3u8.
+# Live publishers first provision a source and use its issued key; see
+# container/examples/02-srt-ingest.conf and 03-rtmp-ingest.conf.
+# Admin listens only on container loopback, not on a published Docker port.
 #
 # The configuration can be changed without rebuilding.  container/nginx.conf
 # is a real file and the entrypoint leaves it alone, so mounting it is live:
@@ -73,8 +74,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential pkg-config ca-certificates curl \
-        libpcre2-dev zlib1g-dev libssl-dev libsrt-openssl-dev \
+        build-essential pkg-config ca-certificates curl python3 \
+        libpcre2-dev zlib1g-dev libssl-dev libc-ares-dev libsrt-openssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -82,6 +83,7 @@ WORKDIR /src
 # The build reads the tree, the config and the pinned version; copy those
 # first so a source edit does not invalidate the dependency layer above.
 COPY scripts/build-nginx.sh /src/scripts/build-nginx.sh
+COPY scripts/record-compiler.py /src/scripts/record-compiler.py
 COPY config /src/config
 COPY src /src/src
 
@@ -183,7 +185,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 #   ffmpeg          the supervised external profile executor
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ffmpeg libpcre2-8-0 zlib1g libssl3t64 libsrt1.5-openssl \
+        ffmpeg libpcre2-8-0 zlib1g libssl3t64 libcares2 libsrt1.5-openssl \
         ca-certificates curl gettext-base \
     && rm -rf /var/lib/apt/lists/*
 # The installed prefix from the build stage: the binary, and the compiled-in
@@ -219,7 +221,7 @@ RUN mkdir -p /var/lib/nginx/media/hls \
 EXPOSE 9000/udp
 # RTMP ingest.
 EXPOSE 1935
-# The control API, and the local HLS output.
+# Public media HTTP only; admin remains on container loopback 8081.
 EXPOSE 8080
 
 # The media directory is the state worth keeping: HLS output, recordings and
@@ -233,7 +235,7 @@ STOPSIGNAL SIGQUIT
 # Asks the control API, which only answers when the worker is up and serving.
 # `nginx -t` would pass with no worker running at all, which is not health.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
-    CMD curl -fsS http://127.0.0.1:8080/media/api/v1/streams >/dev/null \
+    CMD curl -fsS http://127.0.0.1:8081/media/api/v1/streams >/dev/null \
         || exit 1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

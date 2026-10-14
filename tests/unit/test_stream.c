@@ -1,5 +1,6 @@
 #include "ngx_media_test.h"
 #include "ngx_media_stream.h"
+#include "ngx_media_graph.h"
 
 #define STREAM_UNITS 64
 
@@ -313,11 +314,16 @@ main(void)
         TEST_ASSERT_EQ_U64(ngx_media_stream_source_count(&stream), 1);
     }
 
-    TEST_CASE("removal of a leased source is deferred until the lease drains");
+    TEST_CASE("removal unlinks immediately but retains a leased source");
     TEST_ASSERT_EQ_INT(ngx_media_stream_lease_begin(&stream, b), NGX_OK);
     ngx_media_stream_source_remove(&stream, b);
-    TEST_ASSERT_EQ_U64(ngx_media_stream_source_count(&stream), 1);
+    TEST_ASSERT_EQ_U64(ngx_media_stream_source_count(&stream), 0);
     TEST_ASSERT_EQ_U64(b->pending_remove, 1);
+    TEST_ASSERT_EQ_U64(b->references, 1);
+    TEST_ASSERT(b->stream == &stream);
+    TEST_ASSERT_EQ_INT(ngx_media_stream_lease_begin(&stream, b), NGX_ERROR);
+    TEST_ASSERT_EQ_INT(publish(&stream, b, NGX_MEDIA_TYPE_VIDEO, 9000, 1, 4),
+                       NGX_ERROR);
 
     ngx_media_stream_lease_end(&stream, b);
     ngx_media_stream_switch_resolve(&stream);
@@ -506,6 +512,131 @@ main(void)
         TEST_ASSERT_EQ_U64(stream.revision, 102);
 
         ngx_media_stream_source_remove(&stream, source);
+    }
+
+    TEST_CASE("graph admission bounds do not mutate the stream");
+    {
+        u_char               bytes[NGX_MEDIA_GRAPH_MAX_NAME + 1];
+        ngx_str_t            maximum = { NGX_MEDIA_GRAPH_MAX_NAME, bytes };
+        ngx_str_t            excess = { sizeof(bytes), bytes };
+        ngx_media_source_t  *source;
+        ngx_media_stream_t   boundary;
+        ngx_int_t            rc;
+        ngx_uint_t           count;
+        uint64_t             revision;
+        size_t               allocations;
+
+        memset(bytes, 'x', sizeof(bytes));
+        rc = ngx_media_stream_init(&boundary, pool, NULL, &maximum, &maximum,
+                                   &feed_conf);
+        TEST_ASSERT_EQ_INT(rc, NGX_OK);
+        if (rc == NGX_OK) {
+            ngx_media_stream_touch(&boundary);
+            revision = boundary.revision;
+            allocations = ngx_media_test_allocs;
+            TEST_ASSERT_EQ_INT(ngx_media_stream_init(&boundary, pool, NULL,
+                                                     &excess, &maximum,
+                                                     &feed_conf), NGX_ERROR);
+            TEST_ASSERT_EQ_INT(ngx_media_stream_init(&boundary, pool, NULL,
+                                                     &maximum, &excess,
+                                                     &feed_conf), NGX_ERROR);
+            TEST_ASSERT_EQ_U64(boundary.revision, revision);
+            TEST_ASSERT_EQ_U64(boundary.application.len, maximum.len);
+            TEST_ASSERT_EQ_U64(boundary.name.len, maximum.len);
+            TEST_ASSERT_EQ_U64(ngx_media_test_allocs, allocations);
+            ngx_media_stream_destroy(&boundary);
+        }
+        source = ngx_media_stream_source_add(&stream, &maximum,
+                                            NGX_MEDIA_SOURCE_SRT,
+                                            UINT32_MAX, NULL);
+        TEST_ASSERT_NOT_NULL(source);
+        count = ngx_media_stream_source_count(&stream);
+        revision = stream.revision;
+        allocations = ngx_media_test_allocs;
+        TEST_ASSERT_NULL(ngx_media_stream_source_add(&stream, &excess,
+                                                     NGX_MEDIA_SOURCE_SRT,
+                                                     0, NULL));
+        TEST_ASSERT_EQ_U64(ngx_media_stream_source_count(&stream), count);
+        TEST_ASSERT_EQ_U64(stream.revision, revision);
+        TEST_ASSERT_EQ_U64(ngx_media_test_allocs, allocations);
+#if UINTPTR_MAX > UINT32_MAX
+        TEST_ASSERT_NULL(ngx_media_stream_source_add(&stream, S("overflow"),
+                                                     NGX_MEDIA_SOURCE_SRT,
+                                                     (ngx_uint_t) UINT32_MAX + 1,
+                                                     NULL));
+        TEST_ASSERT_EQ_U64(ngx_media_stream_source_count(&stream), count);
+        TEST_ASSERT_EQ_U64(stream.revision, revision);
+#endif
+        if (source != NULL) {
+            ngx_media_stream_source_remove(&stream, source);
+        }
+    }
+
+    TEST_CASE("source quota covers retired holders and churn reclaims allocations");
+    {
+        ngx_cycle_t cycle = { .pool = pool };
+        ngx_media_policy_t *policy = ngx_media_policy_get(&cycle);
+        ngx_media_source_t *held, *probe;
+        ngx_uint_t old_limit, baseline_count, i;
+        size_t outstanding, allocations;
+
+        TEST_ASSERT_NOT_NULL(policy);
+        old_limit = policy->source_limit;
+        baseline_count = ngx_media_model_count(NGX_MEDIA_MODEL_SOURCE);
+        policy->source_limit = baseline_count + 1;
+        held = ngx_media_stream_source_add(&stream, S("quota"),
+                                           NGX_MEDIA_SOURCE_SRT, 71, NULL);
+        TEST_ASSERT_NOT_NULL(held);
+        ngx_media_source_retain(held);
+        ngx_media_stream_source_remove(&stream, held);
+        TEST_ASSERT_EQ_U64(ngx_media_model_room(NGX_MEDIA_MODEL_SOURCE), 0);
+        allocations = ngx_media_test_allocs;
+        TEST_ASSERT_NULL(ngx_media_stream_source_add(&stream, S("next"),
+                            NGX_MEDIA_SOURCE_SRT, 72, NULL));
+        TEST_ASSERT_EQ_U64(ngx_media_test_allocs, allocations);
+        TEST_ASSERT_EQ_U64(held->priority, 71);
+        TEST_ASSERT(held->stream == &stream);
+        ngx_media_source_release(held);
+        TEST_ASSERT_EQ_U64(ngx_media_model_count(NGX_MEDIA_MODEL_SOURCE),
+                           baseline_count);
+        outstanding = ngx_media_test_allocs - ngx_media_test_frees;
+        for (i = 0; i < 4096; i++) {
+            probe = ngx_media_stream_source_add(&stream, S("reused"),
+                              NGX_MEDIA_SOURCE_SRT, i, NULL);
+            TEST_ASSERT_NOT_NULL(probe);
+            TEST_ASSERT_EQ_INT(ngx_media_string_set(&probe->path,
+                                S("/owned/path"), NULL), NGX_OK);
+            TEST_ASSERT_EQ_INT(ngx_media_string_set(&probe->path,
+                                S("/replacement/path"), NULL), NGX_OK);
+            TEST_ASSERT_EQ_INT(ngx_media_string_set(&probe->ca_file,
+                                S("/owned/ca"), NULL), NGX_OK);
+            ngx_media_stream_source_remove(&stream, probe);
+            TEST_ASSERT_EQ_U64(ngx_media_test_allocs - ngx_media_test_frees,
+                               outstanding);
+            TEST_ASSERT_EQ_U64(ngx_media_model_count(NGX_MEDIA_MODEL_SOURCE),
+                               baseline_count);
+        }
+        policy->source_limit = old_limit;
+    }
+
+    TEST_CASE("stream retirement with a write lease is nonblocking and safe");
+    {
+        ngx_media_stream_t leased;
+        ngx_media_source_t *held;
+        TEST_ASSERT_EQ_INT(ngx_media_stream_init(&leased, pool, NULL, S("live"),
+                             S("leased"), &feed_conf), NGX_OK);
+        held = ngx_media_stream_source_add(&leased, S("writer"),
+                                           NGX_MEDIA_SOURCE_SRT, 1, NULL);
+        TEST_ASSERT_NOT_NULL(held);
+        TEST_ASSERT_EQ_INT(ngx_media_stream_lease_begin(&leased, held), NGX_OK);
+        ngx_media_stream_destroy(&leased);
+        TEST_ASSERT_EQ_U64(leased.references, 1);
+        TEST_ASSERT_EQ_U64(held->writers, 1);
+        TEST_ASSERT_EQ_U64(held->pending_remove, 1);
+        TEST_ASSERT_EQ_INT(publish(&leased, held, NGX_MEDIA_TYPE_VIDEO,
+                                   9000, 1, 4), NGX_ERROR);
+        ngx_media_stream_lease_end(&leased, held);
+        TEST_ASSERT_EQ_U64(leased.references, 0);
     }
 
     TEST_CASE("teardown");

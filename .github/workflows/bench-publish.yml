@@ -7,7 +7,8 @@ name: bench-publish
 # Separate from bench.yml because publishing needs contents: write and issue
 # creation needs issues: write. Pull requests run bench.yml only; publishing is
 # called after main, nightly and weekly benchmarks so it collects their
-# artifacts. One publish at a time across all workflows keeps appends ordered.
+# artifacts. The global publication queue also serializes regression issue
+# list/create; immutable input replay still protects history after a push race.
 
 on:
   workflow_call:
@@ -22,36 +23,75 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     concurrency:
-      group: bench-pages
+      group: nginx-media-benchmark-publication
+      queue: max
       cancel-in-progress: false
 
     permissions:
       contents: write
       issues: write
+      actions: read
 
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve visible source artifacts
+        id: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TIER: ${{ inputs.tier }}
+          SOURCE_ATTEMPT: ${{ github.run_attempt }}
+          CONFIGURATION_JOBS: ${{ inputs.configs }}
+        run: |
+          for poll in $(seq 1 12); do
+            if gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" > source-pages.tmp; then
+              mv source-pages.tmp source-pages.json
+            fi
+            if gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$SOURCE_ATTEMPT/jobs" > source-jobs.tmp; then
+              mv source-jobs.tmp source-jobs.json
+            fi
+            if python3 scripts/select-bench-artifacts.py source-pages.json \
+              --current-jobs source-jobs.json --tier "$SOURCE_TIER" \
+              --attempt "$SOURCE_ATTEMPT" --configurations "$CONFIGURATION_JOBS" \
+              --out source-artifacts.json; then
+              break
+            fi
+            sleep 10
+          done
+          python3 scripts/select-bench-artifacts.py source-pages.json \
+            --current-jobs source-jobs.json --tier "$SOURCE_TIER" \
+            --attempt "$SOURCE_ATTEMPT" --configurations "$CONFIGURATION_JOBS" \
+            --out source-artifacts.json --github-output "$GITHUB_OUTPUT" || status=$?
+          if [ "${status:-0}" != 0 ]; then
+            echo "::warning::Source evidence is incomplete or unavailable; preserving that verdict."
+          fi
+
       - name: Collect every job's results
+        if: ${{ steps.artifacts.outputs.artifact_ids != '' }}
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
-          pattern: bench-${{ inputs.tier }}-*
+          artifact-ids: ${{ steps.artifacts.outputs.artifact_ids }}
           path: results
           merge-multiple: true
 
       - name: Collect same-runner trend samples
+        if: ${{ steps.artifacts.outputs.trend_artifact_id != '' }}
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: bench-trend-${{ inputs.tier }}
+          artifact-ids: ${{ steps.artifacts.outputs.trend_artifact_id }}
           path: trend
+          merge-multiple: true
       - name: Summarize
+        id: summary
         run: |
           python3 tests/bench/bench_history.py summarize results \
             --tier "${{ inputs.tier }}" --out summary.json \
-            --expected-configs '${{ inputs.configs }}'
+            --expected-configs '${{ inputs.configs }}' \
+            --source-artifacts source-artifacts.json
 
       - name: Prepare gh-pages history
         id: pages
@@ -125,24 +165,29 @@ jobs:
           done < <(jq -c '.[]' regressions.json)
 
       - name: Append to the gh-pages history
-        if: always() && steps.pages.outcome == 'success' && steps.findings.outcome == 'success'
+        if: always() && steps.pages.outcome == 'success' && steps.summary.outcome == 'success'
         run: |
           sample_args=()
           if [ -s trend/samples.jsonl ]; then
             sample_args=(--samples trend/samples.jsonl)
           fi
-          python3 tests/bench/bench_history.py publish summary.json --pages pages "${sample_args[@]}"
-          git -C pages add -A
-          git -C pages commit -m "bench: ${{ inputs.tier }} ${GITHUB_SHA::8}"
-          for attempt in 1 2 3; do
-            git -C pages push origin gh-pages && exit 0
-            sleep $(( attempt * 5 ))
-            git -C pages pull --rebase origin gh-pages
+          # Reapply immutable records to the newest tree instead of rebasing
+          # competing JSONL appends (which can conflict or discard attempts).
+          for attempt in $(seq 1 12); do
+            python3 tests/bench/bench_history.py publish summary.json --pages pages "${sample_args[@]}"
+            git -C pages add -A
+            if git -C pages diff --cached --quiet; then exit 0; fi
+            git -C pages commit -m "bench: ${{ inputs.tier }} $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+            git -C pages push origin HEAD:gh-pages && exit 0
+            sleep $(( attempt * 2 ))
+            git -C pages fetch origin gh-pages
+            git -C pages checkout --detach origin/gh-pages
           done
+          echo "::error::History publication retries exhausted; source artifacts remain attached to this run."
           exit 1
 
       - name: Report regression issue creation failure
         if: steps.issues.outcome == 'failure'
         run: |
-          echo "::error title=benchmark regression issue::History was published, but issue automation failed."
+          echo "::error title=benchmark regression issue::Issue automation failed; consult the history publication step for its independent outcome."
           exit 1

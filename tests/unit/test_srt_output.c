@@ -18,6 +18,7 @@
 
 #include "ngx_media_srt_output_queue.h"
 #include "ngx_media_srt_udp.h"
+#include "ngx_media_stream.h"
 
 #include <pthread.h>
 
@@ -689,6 +690,128 @@ test_lane_multiplexer_groups(void)
     ngx_media_srt_set_backend(&ngx_media_srt_udp_ops);
 }
 
+static pthread_mutex_t connect_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t connect_cond = PTHREAD_COND_INITIALIZER;
+static int connect_entered, connect_continue, connect_strings_intact;
+
+static ngx_media_srt_session_t *
+held_connect(const u_char *host, ngx_uint_t port, const u_char *streamid,
+    size_t streamid_len, ngx_msec_t timeout_ms,
+    const ngx_media_srt_params_t *params, ngx_uint_t group, ngx_log_t *log)
+{
+    (void) group;
+    (void) pthread_mutex_lock(&connect_mutex);
+    connect_entered = 1;
+    (void) pthread_cond_broadcast(&connect_cond);
+    while (!connect_continue) {
+        (void) pthread_cond_wait(&connect_cond, &connect_mutex);
+    }
+    connect_strings_intact = strcmp((const char *) host, "127.0.0.1") == 0
+        && streamid_len == 5 && memcmp(streamid, "owned", 5) == 0;
+    (void) pthread_mutex_unlock(&connect_mutex);
+    return ngx_media_srt_udp_ops.connect(host, port, streamid, streamid_len,
+                                         timeout_ms, params, log);
+}
+
+static void
+test_connecting_removal_owns_strings_and_model(void)
+{
+    ngx_media_srt_ops_t ops = ngx_media_srt_udp_ops;
+    ngx_media_srt_outputs_t *outs = NULL;
+    ngx_media_srt_output_conf_t conf;
+    ngx_media_stream_t stream;
+    ngx_media_destination_t *destination;
+    ngx_pool_t *pool;
+    ngx_cycle_t cycle;
+    ngx_media_policy_t *policy;
+    ngx_media_feed_conf_t feed = { .max_units = 4 };
+    ngx_str_t app = { 4, (u_char *) "live" };
+    ngx_str_t name = { 4, (u_char *) "news" };
+    ngx_str_t id = { 4, (u_char *) "edge" };
+    ngx_str_t host = { 9, (u_char *) "127.0.0.1" };
+    ngx_str_t sid = { 5, (u_char *) "owned" };
+    ngx_uint_t index, old_limit, tries;
+    struct timespec deadline;
+
+    TEST_CASE("connecting removal is nonblocking and retains immutable strings");
+    pool = ngx_create_pool(4096, NULL);
+    TEST_ASSERT_NOT_NULL(pool);
+    cycle.pool = pool;
+    cycle.log = NULL;
+    policy = ngx_media_policy_get(&cycle);
+    TEST_ASSERT_NOT_NULL(policy);
+    old_limit = policy->destination_limit;
+    policy->destination_limit = 1;
+    TEST_ASSERT_EQ_INT(ngx_media_stream_init(&stream, pool, NULL, &app, &name,
+                                            &feed), NGX_OK);
+    destination = ngx_media_destination_add(&stream, &id, NGX_MEDIA_DEST_SRT,
+                                             NULL);
+    TEST_ASSERT_NOT_NULL(destination);
+    TEST_ASSERT_EQ_INT(ngx_media_string_set(&destination->host, &host, NULL),
+                       NGX_OK);
+    TEST_ASSERT_EQ_INT(ngx_media_string_set(&destination->streamid, &sid, NULL),
+                       NGX_OK);
+    memset(&conf, 0, sizeof(conf));
+    conf.application = stream.application;
+    conf.stream = stream.name;
+    conf.host = destination->host;
+    conf.streamid = destination->streamid;
+    conf.port = 24592;
+    conf.max_units = 4;
+    conf.max_bytes = 4096;
+    conf.connect_timeout = 100;
+    conf.program_identity = (uintptr_t) &stream;
+    conf.incarnation = stream.incarnation;
+    conf.model = destination;
+    connect_entered = connect_continue = connect_strings_intact = 0;
+    ops.connect_shared = held_connect;
+    ngx_media_srt_set_backend(&ops);
+    TEST_ASSERT_EQ_INT(ngx_media_srt_outputs_start(&outs, NULL, 0, 16, NULL),
+                       NGX_OK);
+    TEST_ASSERT_EQ_INT(ngx_media_srt_outputs_add(outs, &conf, &index, NULL),
+                       NGX_OK);
+    (void) clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += 3;
+    (void) pthread_mutex_lock(&connect_mutex);
+    while (!connect_entered) {
+        if (pthread_cond_timedwait(&connect_cond, &connect_mutex, &deadline)
+            != 0)
+        {
+            break;
+        }
+    }
+    TEST_ASSERT(connect_entered);
+    (void) pthread_mutex_unlock(&connect_mutex);
+    /* The paused connect must see the slot's immutable copy, not these bytes. */
+    memset(destination->host.data, 'x', destination->host.len);
+    memset(destination->streamid.data, 'y', destination->streamid.len);
+    ngx_media_srt_outputs_remove(outs, index);
+    ngx_media_destination_remove(&stream, destination);
+    TEST_ASSERT_EQ_U64(ngx_media_model_count(NGX_MEDIA_MODEL_DESTINATION), 1);
+    TEST_ASSERT_EQ_U64(stream.references, 1);
+    TEST_ASSERT_NULL(ngx_media_destination_add(&stream, &id,
+                                               NGX_MEDIA_DEST_SRT, NULL));
+    ngx_media_stream_retire(&stream);
+    (void) pthread_mutex_lock(&connect_mutex);
+    connect_continue = 1;
+    (void) pthread_cond_broadcast(&connect_cond);
+    (void) pthread_mutex_unlock(&connect_mutex);
+    for (tries = 0; tries < 600; tries++) {
+        if (ngx_media_model_count(NGX_MEDIA_MODEL_DESTINATION) == 0) {
+            break;
+        }
+        (void) nanosleep(&(struct timespec) { 0, 5000000 }, NULL);
+    }
+    ngx_media_srt_outputs_stop(outs);
+    TEST_ASSERT(connect_strings_intact);
+    TEST_ASSERT_EQ_U64(ngx_media_model_count(NGX_MEDIA_MODEL_DESTINATION), 0);
+    TEST_ASSERT_EQ_U64(stream.references, 0);
+    policy->destination_limit = old_limit;
+    ngx_media_stream_destroy(&stream);
+    ngx_destroy_pool(pool);
+    ngx_media_srt_set_backend(&ngx_media_srt_udp_ops);
+}
+
 int
 main(void)
 {
@@ -702,6 +825,7 @@ main(void)
     test_references();
     test_shared_sender_pool();
     test_lane_multiplexer_groups();
+    test_connecting_removal_owns_strings_and_model();
 
     TEST_LEAKS();
     TEST_MAIN_END();

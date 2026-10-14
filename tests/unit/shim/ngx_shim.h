@@ -26,6 +26,8 @@
 #include <strings.h>
 
 #define ngx_strlen(s)  strlen((const char *) (s))
+#define ngx_string(str) { sizeof(str) - 1, (u_char *) (str) }
+#define ngx_null_string { 0, NULL }
 #define ngx_strncmp(s1, s2, n) \
     strncmp((const char *) (s1), (const char *) (s2), (n))
 #define ngx_strncasecmp(s1, s2, n) \
@@ -146,8 +148,8 @@ void ngx_media_test_free(void *ptr);
 
 /*
  * Minimal pool: the test double tracks every allocation so leaks are visible
- * and frees them all on destroy.  Unlike ngx_palloc(), memory is zeroed, which
- * can only make tests stricter than production.
+ * and frees them all on destroy.  Like nginx, palloc/pnalloc leave memory
+ * uninitialized (or poisoned in explicit poison mode); only pcalloc zeroes it.
  */
 ngx_pool_t *ngx_create_pool(size_t size, ngx_log_t *log);
 void *ngx_palloc(ngx_pool_t *pool, size_t size);

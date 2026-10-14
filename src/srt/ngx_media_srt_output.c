@@ -47,6 +47,7 @@ typedef struct {
 
 typedef struct {
     ngx_media_srt_output_conf_t  conf;
+    u_char                     *strings; /* immutable until connect/send drains */
     ngx_media_srt_queue_t        queue;
     ngx_media_srt_session_t     *session;
     ngx_media_buf_t             *inflight_burst;
@@ -113,6 +114,46 @@ struct ngx_media_srt_outputs_s {
     int                             notify_fd;
     ngx_log_t                      *log;
 };
+
+static u_char *
+ngx_media_srt_output_strings(const ngx_media_srt_output_conf_t *src,
+    ngx_media_srt_output_conf_t *dst, ngx_log_t *log)
+{
+    const ngx_str_t *values[4];
+    ngx_str_t *copies[4];
+    size_t total = 0, i;
+    u_char *storage, *p;
+
+    *dst = *src;
+    values[0] = &src->application; copies[0] = &dst->application;
+    values[1] = &src->stream; copies[1] = &dst->stream;
+    values[2] = &src->host; copies[2] = &dst->host;
+    values[3] = &src->streamid; copies[3] = &dst->streamid;
+    for (i = 0; i < 4; i++) {
+        if ((values[i]->len && values[i]->data == NULL)
+            || values[i]->len == SIZE_MAX
+            || total > SIZE_MAX - values[i]->len - 1)
+        {
+            return NULL;
+        }
+        total += values[i]->len + 1;
+    }
+    storage = ngx_alloc(total, log);
+    if (storage == NULL) {
+        return NULL;
+    }
+    p = storage;
+    for (i = 0; i < 4; i++) {
+        copies[i]->data = p;
+        copies[i]->len = values[i]->len;
+        if (values[i]->len) {
+            ngx_memcpy(p, values[i]->data, values[i]->len);
+        }
+        p[values[i]->len] = '\0';
+        p += values[i]->len + 1;
+    }
+    return storage;
+}
 
 static uint64_t ngx_media_srt_now_ns(void);
 
@@ -549,6 +590,8 @@ ngx_media_srt_out_service(ngx_media_srt_outputs_t *outs,
     ngx_media_srt_session_t     *session;
     ngx_media_srt_stats_t        transport_stats;
     ngx_media_buf_t             *burst;
+    ngx_media_destination_t     *model;
+    u_char                     *strings;
     const ngx_media_srt_unit_t  *unit;
     uint64_t                     epoch;
     size_t                       take, offset, remaining;
@@ -592,10 +635,16 @@ ngx_media_srt_out_service(ngx_media_srt_outputs_t *outs,
 
         if (dest->epoch != epoch || !dest->used || !dest->running) {
             dest->connecting = 0;
+            strings = dest->strings;
+            model = dest->conf.model;
+            dest->strings = NULL;
+            dest->conf.model = NULL;
             if (session != NULL) {
                 ngx_media_srt_session_close(session);
             }
             (void) pthread_mutex_unlock(&dest->mutex);
+            ngx_free(strings);
+            ngx_media_destination_release(model);
             return 1;
         }
 
@@ -675,7 +724,13 @@ ngx_media_srt_out_service(ngx_media_srt_outputs_t *outs,
         }
         dest->inflight_len = 0;
         dest->inflight_offset = 0;
+        strings = dest->strings;
+        model = dest->conf.model;
+        dest->strings = NULL;
+        dest->conf.model = NULL;
         (void) pthread_mutex_unlock(&dest->mutex);
+        ngx_free(strings);
+        ngx_media_destination_release(model);
         return 1;
     }
 
@@ -915,16 +970,22 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
         dest = &outs->destinations[i];
         dest->shard = i % NGX_MEDIA_SRT_EGRESS_SHARDS;
         (void) pthread_mutex_init(&dest->mutex, NULL);
-
-        if (i < count) {
-            dest->conf = confs[i];
-            dest->running = 1;
-            dest->used = 1;
-            ngx_media_srt_queue_init(&dest->queue, dest->conf.max_units,
-                                     dest->conf.max_bytes);
-            if (dest->conf.program_identity == 0) {
-                outs->static_slots[outs->static_count++] = i;
-            }
+    }
+    for (i = 0; i < count; i++) {
+        dest = &outs->destinations[i];
+        dest->strings = ngx_media_srt_output_strings(&confs[i],
+                                                     &dest->conf, log);
+        if (dest->strings == NULL) {
+            dest->conf.model = NULL;
+            goto failed;
+        }
+        ngx_media_destination_retain(dest->conf.model);
+        dest->running = 1;
+        dest->used = 1;
+        ngx_media_srt_queue_init(&dest->queue, dest->conf.max_units,
+                                 dest->conf.max_bytes);
+        if (dest->conf.program_identity == 0) {
+            outs->static_slots[outs->static_count++] = i;
         }
     }
 
@@ -1085,6 +1146,8 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
     ngx_media_srt_program_route_t  *route = NULL;
     ngx_media_srt_output_t         *dest = NULL;
     ngx_uint_t                      i;
+    ngx_media_srt_output_conf_t      owned;
+    u_char                         *strings;
 
     if (outs == NULL || conf == NULL || conf->host.data == NULL
         || conf->port == 0 || conf->application.data == NULL
@@ -1095,10 +1158,16 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
         return NGX_ERROR;
     }
 
+    strings = ngx_media_srt_output_strings(conf, &owned, log);
+    if (strings == NULL) {
+        return NGX_ERROR;
+    }
+
     (void) pthread_rwlock_wrlock(&outs->destinations_lock);
 
     if (outs->count >= NGX_MEDIA_SRT_MAX_OUTPUTS) {
         (void) pthread_rwlock_unlock(&outs->destinations_lock);
+        ngx_free(strings);
         ngx_log_error(NGX_LOG_WARN, log, 0,
                       "media: no free srt destination slot");
         return NGX_ERROR;
@@ -1117,6 +1186,7 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
 
     if (i == NGX_MEDIA_SRT_MAX_OUTPUTS) {
         (void) pthread_rwlock_unlock(&outs->destinations_lock);
+        ngx_free(strings);
         ngx_log_error(NGX_LOG_WARN, log, 0,
                       "media: no reusable srt destination slot");
         return NGX_ERROR;
@@ -1132,6 +1202,7 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
         if (route == NULL) {
             (void) pthread_mutex_unlock(&dest->mutex);
             (void) pthread_rwlock_unlock(&outs->destinations_lock);
+            ngx_free(strings);
             ngx_log_error(NGX_LOG_WARN, log, 0,
                           "media: no free srt program route");
             return NGX_ERROR;
@@ -1140,7 +1211,9 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
 
     ngx_media_srt_queue_destroy(&dest->queue);
     ngx_media_srt_queue_init(&dest->queue, conf->max_units, conf->max_bytes);
-    dest->conf = *conf;
+    dest->conf = owned;
+    dest->strings = strings;
+    ngx_media_destination_retain(dest->conf.model);
     dest->route = (route != NULL) ? route->token : 0;
     dest->running = 1;
     dest->used = 1;
@@ -1188,6 +1261,8 @@ ngx_media_srt_outputs_remove(ngx_media_srt_outputs_t *outs, ngx_uint_t index)
 {
     ngx_media_srt_output_t  *dest;
     ngx_uint_t              j;
+    ngx_media_destination_t *model = NULL;
+    u_char                 *strings = NULL;
 
     if (outs == NULL || index >= NGX_MEDIA_SRT_MAX_OUTPUTS) {
         return;
@@ -1228,6 +1303,12 @@ ngx_media_srt_outputs_remove(ngx_media_srt_outputs_t *outs, ngx_uint_t index)
         dest->inflight_len = 0;
         dest->inflight_offset = 0;
     }
+    if (!dest->sending && !dest->connecting) {
+        strings = dest->strings;
+        model = dest->conf.model;
+        dest->strings = NULL;
+        dest->conf.model = NULL;
+    }
 
     ngx_media_srt_queue_destroy(&dest->queue);
     if (outs->count > 0) {
@@ -1236,6 +1317,8 @@ ngx_media_srt_outputs_remove(ngx_media_srt_outputs_t *outs, ngx_uint_t index)
 
     (void) pthread_mutex_unlock(&dest->mutex);
     (void) pthread_rwlock_unlock(&outs->destinations_lock);
+    ngx_free(strings);
+    ngx_media_destination_release(model);
 
     ngx_media_srt_out_wake_lane(outs, dest->shard);
 }
@@ -1300,6 +1383,8 @@ ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
             dest->inflight_burst = NULL;
         }
         ngx_media_srt_queue_destroy(&dest->queue);
+        ngx_free(dest->strings);
+        ngx_media_destination_release(dest->conf.model);
         (void) pthread_mutex_destroy(&dest->mutex);
     }
 

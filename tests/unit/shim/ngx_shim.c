@@ -109,8 +109,6 @@ ngx_palloc(ngx_pool_t *pool, size_t size)
         return NULL;
     }
 
-    ngx_memzero(p, size);
-
     block->ptr = p;
     block->next = pool->blocks;
     pool->blocks = block;
@@ -127,7 +125,14 @@ ngx_pnalloc(ngx_pool_t *pool, size_t size)
 void *
 ngx_pcalloc(ngx_pool_t *pool, size_t size)
 {
-    return ngx_palloc(pool, size);
+    void  *p;
+
+    p = ngx_palloc(pool, size);
+    if (p != NULL) {
+        ngx_memzero(p, size);
+    }
+
+    return p;
 }
 
 void
@@ -170,18 +175,26 @@ ngx_log_error(ngx_uint_t level, ngx_log_t *log, int err, const char *fmt, ...)
     (void) fmt;
 }
 
-/* Unit suites do not perform network I/O; HLS push integration does. */
+/* Most unit suites do not perform network I/O; test_http uses the real client. */
+#ifndef NGX_MEDIA_TEST_REAL_HTTP
 void
 ngx_media_http_conn_init(ngx_media_http_conn_t *c)
 {
     ngx_memzero(c, sizeof(*c));
     c->fd = -1;
+    c->timeout_ms = 10000;
 }
 
 void
 ngx_media_http_conn_close(ngx_media_http_conn_t *c)
 {
     c->fd = -1;
+}
+
+void
+ngx_media_http_conn_cancel(ngx_media_http_conn_t *c)
+{
+    (void) ngx_atomic_cmp_set(&c->cancelled, 0, 1);
 }
 
 ngx_int_t
@@ -203,3 +216,4 @@ ngx_media_http_send(ngx_media_http_conn_t *c, const ngx_str_t *url,
 
     return NGX_DECLINED;
 }
+#endif

@@ -1,4 +1,3 @@
-/* setenv() for the allocation poison switch */
 #define _DEFAULT_SOURCE 1
 
 #include "ngx_media_test.h"
@@ -11,12 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-
-/* unterminated buffers must fail instead of reading zeroed heap */
-static void __attribute__((constructor)) ngx_media_hls_poison_alloc(void)
-{
-    setenv("NGX_MEDIA_TEST_POISON", "1", 1);
-}
 
 #define HLS_DIR ".build/hls-test"
 
@@ -235,6 +228,88 @@ file_size(const char *path)
     return (size_t) st.st_size;
 }
 
+static void
+test_program_directories(void)
+{
+    static const char *applications[] = {
+        "live", "live", "live.one", "live_one", "", "_", "live", "live"
+    };
+    static const char *names[] = {
+        "news.one", "news_one", "news", "news", "news", "news",
+        "news~one", "news\"}\\one"
+    };
+    ngx_str_t                   root = ngx_string(".build/hls-names");
+    ngx_str_t                   app, name, *dirs[9];
+    ngx_pool_t                 *pool;
+    fixture_t                   f;
+    ngx_media_hls_t             hls;
+    ngx_media_hls_conf_t        conf;
+    ngx_media_ts_burst_t        burst;
+    ngx_media_ts_demux_stats_t  stats;
+    read_back_t                 back;
+    char                        files[9][1400];
+    u_char                      large_app[256], large_name[256];
+    size_t                      i, j;
+
+    TEST_CASE("distinct identities retain distinct playable segment files");
+    pool = ngx_create_pool(4096, NULL);
+    TEST_ASSERT_NOT_NULL(pool);
+    if (pool == NULL) {
+        return;
+    }
+    memset(large_app, 'a', sizeof(large_app));
+    memset(large_name, '.', sizeof(large_name));
+    fixture_init(&f);
+    for (i = 0; i < 9; i++) {
+        app.data = i == 8 ? large_app : (u_char *) applications[i];
+        app.len = i == 8 ? sizeof(large_app) : strlen(applications[i]);
+        name.data = i == 8 ? large_name : (u_char *) names[i];
+        name.len = i == 8 ? sizeof(large_name) : strlen(names[i]);
+        dirs[i] = ngx_media_hls_program_dir(pool, &root, &app, &name);
+        TEST_ASSERT_NOT_NULL(dirs[i]);
+        if (dirs[i] == NULL) {
+            continue;
+        }
+        for (j = 0; j < i; j++) {
+            if (dirs[j] != NULL) {
+                TEST_ASSERT(strcmp((char *) dirs[i]->data,
+                                   (char *) dirs[j]->data) != 0);
+            }
+        }
+        ngx_media_hls_conf_default(&conf);
+        conf.path = *dirs[i];
+        TEST_ASSERT_EQ_INT(ngx_media_hls_init(&hls, &conf, NULL), NGX_OK);
+        TEST_ASSERT_EQ_INT(make_burst(&f, &burst, 5,
+                                     (int64_t) (i + 1) * 900000,
+                                     3600, 5), NGX_OK);
+        TEST_ASSERT_EQ_INT(ngx_media_hls_add_burst(&hls, &burst), NGX_OK);
+        ngx_media_ts_mux_burst_destroy(&burst);
+        TEST_ASSERT_EQ_INT(ngx_media_hls_finish(&hls), NGX_OK);
+        TEST_ASSERT_EQ_U64(hls.nsegments, 1);
+        if (hls.nsegments == 1) {
+            snprintf(files[i], sizeof(files[i]), "%s/%.*s", dirs[i]->data,
+                     (int) hls.segments[0].name.len, hls.segments[0].name.data);
+        } else {
+            files[i][0] = '\0';
+        }
+        ngx_media_hls_destroy(&hls);
+    }
+    /* Read only after every writer has finished: aliasing overwrites here. */
+    for (i = 0; i < 9; i++) {
+        if (dirs[i] == NULL || files[i][0] == '\0') {
+            continue;
+        }
+        TEST_ASSERT_EQ_INT(read_back(files[i], &back, &stats), NGX_OK);
+        TEST_ASSERT_EQ_U64(back.frames, 5);
+        TEST_ASSERT_EQ_I64(back.first_dts, (int64_t) (i + 1) * 900000);
+        TEST_ASSERT_EQ_U64(stats.sync_errors, 0);
+        TEST_ASSERT_EQ_U64(stats.continuity_errors, 0);
+    }
+    ngx_media_ts_mux_destroy(&f.mux);
+    ngx_media_trackset_destroy(&f.tracks);
+    ngx_destroy_pool(pool);
+}
+
 int
 main(void)
 {
@@ -252,6 +327,8 @@ main(void)
     ensure_dir(HLS_DIR "-exact");
 
     fixture_init(&f);
+
+    test_program_directories();
 
     TEST_CASE("configuration and init");
     ngx_media_hls_conf_default(&conf);

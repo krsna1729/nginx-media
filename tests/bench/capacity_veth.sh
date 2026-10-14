@@ -31,9 +31,7 @@
 #     machine, so CPU placement (CAPACITY_NGINX_CPUS, CAPACITY_RECEIVER_CPUS)
 #     is what keeps the attribution honest.
 #
-# The HLS-origin workload is not available over this topology: its readers
-# fetch a playlist from the sender's own nginx, which listens on the host's
-# loopback.  SRT, RTMP and HLS push are.
+# HLS-origin readers use the sender's media-only listener over the veth.
 
 set -uo pipefail
 
@@ -76,6 +74,7 @@ case "$ACTION" in
         ip netns exec "$NS" sysctl -qw net.core.wmem_max=8388608 2>/dev/null || true
         echo "CAPACITY_RECEIVER_EXEC='nsenter --net=/run/netns/$NS --no-fork'"
         echo "CAPACITY_RECEIVER_ADDR='10.200.0.2'"
+        echo "CAPACITY_SENDER_ADDR='10.200.0.1'"
         ;;
     down)
         need_root "$@"

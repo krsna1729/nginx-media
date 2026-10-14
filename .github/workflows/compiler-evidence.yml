@@ -1,0 +1,133 @@
+name: compiler-evidence
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: compiler-evidence-${{ github.ref }}
+  cancel-in-progress: true
+
+# These are additive: ci.yml retains Ubuntu/Debian distro compiler baselines.
+# Upstream availability checked before selecting these versions:
+# https://github.com/docker-library/official-images/blob/master/library/gcc
+# https://apt.llvm.org/ (noble's explicit llvm-toolchain-noble-21 branch)
+# GCC is pinned to its complete upstream release; LLVM is pinned to release 21,
+# not apt.llvm.org's rolling default. Logs record the exact installed patch build.
+jobs:
+  gcc-modern:
+    runs-on: ubuntu-24.04
+    container: gcc:16.2.0-trixie
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies and distro comparison compiler
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            python3 build-essential pkg-config curl ca-certificates binutils \
+            libssl-dev libc-ares-dev libsrt-openssl-dev
+          apt-get install -y --reinstall gcc gcc-14 || true
+          [ -x /usr/bin/gcc ] || ln -sf "$(which gcc-14 2>/dev/null || which x86_64-linux-gnu-gcc-14 2>/dev/null || which gcc)" /usr/bin/gcc
+      - name: Record the pinned compiler
+        run: |
+          gcc --version
+          test "$(gcc -dumpfullversion)" = 16.2.0
+          /usr/bin/gcc --version
+      - name: Compiler tooling checks
+        run: python3 scripts/test-compiler-tools.py
+      - name: Build, unit tests and smoke
+        env:
+          CC: gcc
+        run: |
+          make nginx
+          make unit
+          make smoke
+      - name: GCC fanalyzer with exact triage and raw diagnostics
+        run: python3 scripts/analyze-compiler.py gcc --compiler gcc
+      - name: Actual compiler flip and cache reuse
+        if: ${{ !cancelled() }}
+        run: python3 scripts/check-compiler-cache.py --first gcc --second /usr/bin/gcc
+      - name: Baseline versus opt-in hardening correctness evidence
+        if: ${{ !cancelled() }}
+        run: python3 scripts/hardening-evidence.py --compiler gcc
+      - name: Preserve compiler evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-evidence-gcc-16.2.0
+          include-hidden-files: true
+          path: |
+            .build/compile_commands.json
+            .build/.compiler
+            .build/configure.log
+            .build/build.log
+            .build/analysis/gcc
+            .build/compiler-cache-check/*.json
+            .build/compiler-cache-check/*.log
+            .build/hardening/**/summary.json
+            .build/hardening/**/commands.json
+            .build/hardening/**/*.log
+          if-no-files-found: error
+
+  clang-modern:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned LLVM release and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential python3 pkg-config curl ca-certificates gnupg \
+            libssl-dev libc-ares-dev libsrt-openssl-dev
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o /tmp/llvm-key.asc
+          fingerprint=$(gpg --show-keys --with-colons /tmp/llvm-key.asc | grep '^fpr:' | cut -d: -f10 | head -n 1)
+          test "$fingerprint" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+          sudo install -m 0644 /tmp/llvm-key.asc /usr/share/keyrings/llvm-archive-keyring.asc
+          printf '%s\n' 'deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' \
+            | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-21 libclang-rt-21-dev llvm-21
+      - name: Record the pinned compiler
+        run: |
+          clang-21 --version
+          clang-21 --version | grep -E 'clang version 21\.'
+      - name: Compiler tooling checks
+        run: python3 scripts/test-compiler-tools.py
+      - name: Build, unit tests and smoke
+        env:
+          CC: clang-21
+        run: |
+          make nginx
+          make unit
+          make smoke
+      - name: Clang static analysis with exact triage and raw diagnostics
+        run: python3 scripts/analyze-compiler.py clang --compiler clang-21
+      - name: Dependency-isolated MemorySanitizer core and parsers
+        if: ${{ !cancelled() }}
+        env:
+          MSAN_SYMBOLIZER_PATH: /usr/bin/llvm-symbolizer-21
+        run: python3 scripts/msan-isolated.py --compiler clang-21
+      - name: Preserve compiler evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compiler-evidence-clang-21
+          include-hidden-files: true
+          path: |
+            .build/compile_commands.json
+            .build/.compiler
+            .build/configure.log
+            .build/build.log
+            .build/analysis/clang
+            .build/msan/*.json
+            .build/msan/*.txt
+            .build/msan/*.log
+          if-no-files-found: error

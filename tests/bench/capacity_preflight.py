@@ -46,6 +46,7 @@ import argparse
 import glob
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -55,6 +56,7 @@ import subprocess
 import sys
 import threading
 import time
+import shutil
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import proc_cpu_sampler  # noqa: E402
@@ -193,18 +195,107 @@ def softnet():
     return stats
 
 
-def shared_library_version(path):
-    """The library's own version string, from the file itself."""
+def file_sha256(path):
+    value = hashlib.sha256()
+    with open(path, "rb") as source:
+        for block in iter(lambda: source.read(1 << 20), b""):
+            value.update(block)
+    return value.hexdigest()
+
+
+def bound_metadata(path, schema, hash_key="sha256"):
+    """Ignore absent, malformed or stale sidecars, even at a pinned prefix."""
     try:
-        out = subprocess.run(["strings", "-a", path], capture_output=True,
-                             text=True, timeout=30)
+        with open(os.path.realpath(path) + ".provenance.json", encoding="utf-8") as source:
+            evidence = json.load(source)
+        expected = (evidence.get("artifact") or {}).get("sha256") \
+            if hash_key == "artifact" else evidence.get(hash_key)
+        if (evidence.get("schema") == schema
+                and expected == file_sha256(path)):
+            return evidence
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return None
+
+
+def shared_library_version(path):
+    """Ask the resolved SRT library's API, in an isolated helper process."""
+    program = (
+        "import ctypes,sys; lib=ctypes.CDLL(sys.argv[1]); "
+        "lib.srt_getversion.restype=ctypes.c_uint; "
+        "v=lib.srt_getversion(); "
+        "print(f'{v >> 16}.{(v >> 8) & 255}.{v & 255}')")
+    try:
+        out = subprocess.run([sys.executable, "-c", program, path],
+                             capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
+    value = out.stdout.strip()
+    return value if out.returncode == 0 and re.fullmatch(r"\d+\.\d+\.\d+", value) else None
+
+
+def transport_provenance(binary):
+    """Actual library identity; a configured ref is never source evidence."""
+    if not binary or not os.path.isfile(binary):
+        return None
+    evidence = {"source_commit": None, "source_commit_status": "unknown",
+                "library_version": None, "linkage": "unknown"}
+    try:
+        out = subprocess.run(["ldd", binary], capture_output=True, text=True,
+                             timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return evidence
     for line in out.stdout.splitlines():
-        match = re.search(r"^(\d+\.\d+\.\d+)$", line.strip())
-        if match:
-            return match.group(1)
-    return None
+        if "srt" not in line or "=>" not in line:
+            continue
+        resolved = line.split("=>", 1)[1].strip().split()[0]
+        evidence["linkage"] = "shared"
+        if not os.path.isfile(resolved):
+            evidence["source_commit_status"] = "unknown-unresolved-library"
+            return evidence
+        resolved = os.path.realpath(resolved)
+        evidence["library_path"] = resolved
+        try:
+            evidence["library_sha256"] = file_sha256(resolved)
+        except OSError:
+            evidence["source_commit_status"] = "unknown-unreadable-library"
+            return evidence
+        evidence["library_version"] = shared_library_version(resolved)
+        evidence["library_version_method"] = "srt_getversion" \
+            if evidence["library_version"] else None
+        metadata = bound_metadata(resolved, "nginx-media.transport-build/1", "artifact")
+        if metadata:
+            source = metadata.get("source")
+            commit = source.get("commit") if isinstance(source, dict) else None
+            if isinstance(commit, str) and re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+                evidence["source_commit"] = commit
+                evidence["source_commit_status"] = "verified-artifact-metadata"
+                evidence["build"] = {key: metadata[key] for key in
+                                     ("schema", "source", "artifact", "package", "compiler", "flags",
+                                      "cmake", "linkage") if key in metadata}
+        return evidence
+    # No dynamic SRT dependency is not proof of a static SRT checkout.
+    evidence["source_commit_status"] = "unknown-no-resolved-srt-library"
+    return evidence
+
+
+def receiver_tool_versions():
+    tools = {"python": {"path": sys.executable, "version": sys.version}}
+    for name, flags in (("cc", ["--version"]), ("pkg-config", ["--version"]),
+                        ("ffmpeg", ["-version"]), ("curl", ["--version"])):
+        path = shutil.which(name)
+        entry = {"path": path, "version": None, "status": "unavailable"}
+        if path:
+            try:
+                out = subprocess.run([path] + flags, capture_output=True,
+                                     text=True, timeout=10)
+                if out.returncode == 0:
+                    entry.update(version=out.stdout.strip(), status="observed",
+                                 sha256=file_sha256(path))
+            except (OSError, subprocess.SubprocessError):
+                pass
+        tools[name] = entry
+    return tools
 
 
 def transport_version(binary):
@@ -261,22 +352,24 @@ def nginx_build(binary):
     if not binary or not os.path.exists(binary):
         return None
     build = {}
+    metadata = bound_metadata(binary, "nginx-media.binary-build/1")
+    if metadata:
+        build.update({key: metadata[key] for key in (
+            "compiler", "compiler_command", "cflags", "ldflags", "compile_command",
+            "source", "package") if key in metadata})
+    if not (metadata and metadata.get("source")):
+        try:
+            out = subprocess.run([binary, "-V"], capture_output=True, text=True,
+                                 timeout=10)
+            for line in out.stderr.splitlines():
+                if line.startswith("built by "):
+                    build["compiler"] = line[len("built by "):].strip()
+                elif line.startswith("configure arguments:"):
+                    build["configure_arguments"] = line.split(":", 1)[1].strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
     try:
-        out = subprocess.run([binary, "-V"], capture_output=True, text=True,
-                             timeout=10)
-        for line in out.stderr.splitlines():
-            if line.startswith("built by "):
-                build["compiler"] = line[len("built by "):].strip()
-            elif line.startswith("configure arguments:"):
-                build["configure_arguments"] = line.split(":", 1)[1].strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    try:
-        digest = hashlib.sha256()
-        with open(binary, "rb") as source:
-            for block in iter(lambda: source.read(1 << 20), b""):
-                digest.update(block)
-        build["sha256"] = digest.hexdigest()
+        build["sha256"] = file_sha256(binary)
     except OSError:
         pass
     return build or None
@@ -288,6 +381,10 @@ def host_report(role, binary=None, pid=None):
     busy_end = proc_cpu_sampler.proc_stat_cpu()
     report = {
         "role": role,
+        "hostname": platform.node(),
+        "architecture": platform.machine(),
+        "boot_id": read_first_line("/proc/sys/kernel/random/boot_id"),
+        "binary": os.path.realpath(binary) if binary else None,
         "kernel": platform.release(),
         "cpu_model": cpu_model(),
         "nproc_online": os.cpu_count(),
@@ -309,7 +406,10 @@ def host_report(role, binary=None, pid=None):
         "softnet": softnet(),
         "transport": transport_version(binary),
         "build": nginx_build(binary),
+        "transport_provenance": transport_provenance(binary),
     }
+    if role == "receiver":
+        report["tools"] = receiver_tool_versions()
     if pid:
         report["process"] = proc_cpu_sampler.process_info(pid)
     for name in ("eth0", "enp0s31f6", "wlo1"):
@@ -402,11 +502,6 @@ def probe_listen(port, seconds, packet_bytes, bind, threads=1):
                 continue
             except OSError:
                 break
-            now = time.monotonic_ns()
-            if counter["first_ns"] is None:
-                counter["first_ns"] = now
-            counter["last_ns"] = now
-            counter["largest"] = max(counter["largest"], len(data))
             if data.startswith(MAGIC) and len(data) >= HEADER.size:
                 _, kind, sequence = HEADER.unpack_from(data)
                 if kind == PING:
@@ -418,6 +513,15 @@ def probe_listen(port, seconds, packet_bytes, bind, threads=1):
                     except OSError:
                         pass
                     continue
+            if not data.startswith(MAGIC) or len(data) != packet_bytes:
+                continue
+            if HEADER.unpack_from(data)[1] != FLOOD:
+                continue
+            now = time.monotonic_ns()
+            if counter["first_ns"] is None:
+                counter["first_ns"] = now
+            counter["last_ns"] = now
+            counter["largest"] = max(counter["largest"], len(data))
             counter["bytes"] += len(data)
             counter["packets"] += 1
 
@@ -605,6 +709,43 @@ def foreign_cpu_consumers(window_s=0.5, limit=5):
 
 
 def judge(args):
+    # Invalid measurements outrank hardware limits: a broken instrument cannot
+    # identify an infrastructure boundary, even when another resource is short.
+    errors = []
+    for label, path in (("sender", args.sender), ("network", args.network),
+                        ("probe-sender", args.probe_sender),
+                        *((f"receiver-{i}", p) for i, p in enumerate(args.receiver or []))):
+        if not path:
+            continue
+        try:
+            document = load(path)
+            if not isinstance(document, dict):
+                raise ValueError("expected a JSON object")
+            fields = (("received_bytes", "window_s") if label == "network" else
+                      ("sent_bytes", "send_window_s") if label == "probe-sender" else ())
+            for field in fields:
+                value = document.get(field)
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value < 0
+                        or (field.endswith("_s") and value == 0)):
+                    raise ValueError(f"invalid or missing {field}")
+            if "socket_drops" in document and document["socket_drops"] is not None:
+                drops = document["socket_drops"]
+                if isinstance(drops, bool) or not isinstance(drops, int) or drops < 0:
+                    raise ValueError("invalid socket_drops")
+        except (OSError, ValueError) as error:
+            errors.append(f"{label}: {error}")
+    if errors:
+        result = {"schema": "nginx-media.capacity-preflight/1",
+                  "verdict": "setup-failure", "errors": errors,
+                  "limits": [], "unknown": []}
+        if args.json:
+            with open(args.json, "w", encoding="utf-8") as output:
+                json.dump(result, output, indent=1)
+        print("preflight_verdict=setup-failure")
+        for error in errors:
+            print(f"preflight_error={error}")
+        return 1
     sender = load(args.sender)
     network = load(args.network)
     if args.probe_sender:
@@ -914,6 +1055,8 @@ def main():
     args = parser.parse_args()
 
     if args.command == "host":
+        if args.binary and not os.path.isfile(args.binary):
+            parser.error("--binary must name the actual existing binary")
         report = host_report(args.role, args.binary, args.pid)
         with open(args.json, "w", encoding="utf-8") as output:
             json.dump(report, output, indent=1, default=str)

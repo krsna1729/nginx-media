@@ -80,6 +80,7 @@ struct ngx_media_hls_push_t {
      * threads are raw heap-owned, never tied to an NGINX pool.
      */
     ngx_atomic_t             refs;
+    ngx_media_destination_t *model; /* retained through the last upload */
 
 
     ngx_str_t                directory;    /* output directory */
@@ -229,6 +230,7 @@ ngx_media_hls_push_release(ngx_media_hls_push_t *push)
     free(push->directory.data);
     free(push->url.data);
     free(push->ca_file.data);
+    ngx_media_destination_release(push->model);
     free(push);
 }
 
@@ -904,6 +906,8 @@ ngx_media_hls_push_add(ngx_media_stream_t *stream,
         return NGX_ERROR;
     }
 
+    push->model = destination;
+    ngx_media_destination_retain(destination);
 
     (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
     push->next = ngx_media_hls_push_all;
@@ -969,6 +973,7 @@ ngx_media_hls_push_remove(ngx_media_stream_t *stream,
 
     (void) pthread_mutex_lock(&push->mutex);
     push->stopping = 1;
+    ngx_media_http_conn_cancel(&push->conn);
     while (push->count > 0) {
         ngx_media_hls_push_file_release(push->queue[push->head].file);
         ngx_memzero(&push->queue[push->head],
@@ -1035,9 +1040,27 @@ ngx_media_hls_push_register(ngx_log_t *log)
 void
 ngx_media_hls_push_stop(void)
 {
-    ngx_uint_t  i;
+    ngx_uint_t            i;
+    ngx_media_hls_push_t *push;
 
     (void) ngx_atomic_cmp_set(&ngx_media_hls_push_stopping, 0, 1);
+    (void) pthread_mutex_lock(&ngx_media_hls_push_all_mutex);
+    for (push = ngx_media_hls_push_all; push != NULL; push = push->next) {
+        (void) pthread_mutex_lock(&push->mutex);
+        push->stopping = 1;
+        ngx_media_http_conn_cancel(&push->conn);
+        while (push->count > 0) {
+            ngx_media_hls_push_file_release(push->queue[push->head].file);
+            ngx_memzero(&push->queue[push->head],
+                        sizeof(push->queue[push->head]));
+            push->head = (push->head + 1) % NGX_MEDIA_HLS_PUSH_QUEUE;
+            push->count--;
+            push->dropped++;
+        }
+        push->tail = push->head;
+        (void) pthread_mutex_unlock(&push->mutex);
+    }
+    (void) pthread_mutex_unlock(&ngx_media_hls_push_all_mutex);
     for (i = 0; i < ngx_media_hls_push_pool_size; i++) {
         (void) pthread_join(ngx_media_hls_push_pool[i], NULL);
     }

@@ -1,4 +1,6 @@
 #include "ngx_media_source.h"
+#include "ngx_media_stream.h"
+#include "ngx_media_graph.h"
 
 static ngx_media_revision_pt  ngx_media_revision_cb;
 
@@ -285,11 +287,65 @@ ngx_media_source_preroll_ready(const ngx_media_source_t *source)
             && source->preroll.head > source->preroll.tail) ? 1 : 0;
 }
 
+ngx_int_t
+ngx_media_string_set(ngx_str_t *dst, const ngx_str_t *src, ngx_log_t *log)
+{
+    u_char *copy = NULL;
+    size_t len = src ? src->len : 0;
+
+    if (dst == NULL || len > NGX_MEDIA_GRAPH_MAX_PATH || (len && src->data == NULL)) {
+        return NGX_ERROR;
+    }
+    if (len != 0) {
+        copy = ngx_alloc(len + 1, log);
+        if (copy == NULL) {
+            return NGX_ERROR;
+        }
+        ngx_memcpy(copy, src->data, len);
+        copy[len] = '\0';
+    }
+    ngx_free(dst->data);
+    dst->data = copy;
+    dst->len = len;
+    return NGX_OK;
+}
+
+void
+ngx_media_source_retain(ngx_media_source_t *source)
+{
+    if (source != NULL) {
+        source->references++;
+    }
+}
+
+void
+ngx_media_source_release(ngx_media_source_t *source)
+{
+    ngx_media_stream_t *stream;
+
+    if (source == NULL || source->references == 0) {
+        return;
+    }
+    if (--source->references != 0) {
+        return;
+    }
+    stream = source->stream;
+    ngx_media_source_preroll_destroy(source);
+    ngx_media_source_tracks_destroy(source);
+    ngx_free(source->id.data);
+    ngx_free(source->path.data);
+    ngx_free(source->ca_file.data);
+    ngx_free(source);
+    ngx_media_model_release(NGX_MEDIA_MODEL_SOURCE);
+    ngx_media_stream_release(stream);
+}
+
 void
 ngx_media_source_lease_begin(ngx_media_source_t *source)
 {
     if (source != NULL) {
         source->writers++;
+        ngx_media_source_retain(source);
     }
 }
 
@@ -298,6 +354,7 @@ ngx_media_source_lease_end(ngx_media_source_t *source)
 {
     if (source != NULL && source->writers > 0) {
         source->writers--;
+        ngx_media_source_release(source);
     }
 }
 

@@ -20,13 +20,28 @@ prefix="${3:?}"
 pkg="${4:-srt}"
 work="${SRT_BUILD_DIR:-$(mktemp -d)}"
 
-# Already built at this ref?  Then this is a no-op, which is what makes the
-# make targets safe to call from CI on every run and from a laptop that has
-# the library from last time.  The ref is checked, not assumed: a moved pin
-# must rebuild.
+# Reuse only content-bound metadata from a completed build. A pkg-config
+# Version containing the configured ref is not proof of the installed source.
 pc="$prefix/lib/pkgconfig/$pkg.pc"
-if [ -f "$pc" ] && grep -q "^Version: $ref$" "$pc" \
-        && { [ "${SRT_SHARED:-yes}" = no ] || ls "$prefix"/lib/libsrt.* >/dev/null 2>&1; }; then
+metadata="$prefix/lib/$pkg.provenance.json"
+if [ -f "$pc" ] && python3 - "$metadata" "$repo" "$ref" "${SRT_SHARED:-yes}" <<'PY'
+import hashlib, json, pathlib, sys
+try:
+    evidence = json.loads(pathlib.Path(sys.argv[1]).read_text())
+    library = pathlib.Path(evidence["artifact"]["path"])
+    valid = (evidence["schema"] == "nginx-media.transport-build/1"
+             and evidence["source"]["repository"] == sys.argv[2]
+             and evidence["source"]["commit"] == sys.argv[3]
+             and evidence["linkage"] == ("static" if sys.argv[4] == "no" else "shared")
+             and hashlib.sha256(library.read_bytes()).hexdigest()
+                 == evidence["artifact"]["sha256"]
+             and json.loads(pathlib.Path(str(library) + ".provenance.json").read_text())
+                 == evidence)
+except (OSError, ValueError, KeyError, TypeError):
+    valid = False
+sys.exit(0 if valid else 1)
+PY
+then
     echo "$pkg already built at $ref in $prefix"
     exit 0
 fi
@@ -52,6 +67,7 @@ esac
 
 cmake -S "$work/src" -B "$work/build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DBUILD_SHARED_LIBS="$([ "${SRT_SHARED:-yes}" = no ] && echo OFF || echo ON)" \
     -DCMAKE_INSTALL_PREFIX="$prefix" \
     -DCMAKE_INSTALL_LIBDIR=lib \
@@ -98,6 +114,44 @@ fi
 # a .pc of its own: the package name is what the build stamps and what the
 # diagnostics report.  Its own .pc is left alone - this one is separate.
 mkdir -p "$(dirname "$pc")"
+# Capture the installed library before publishing the selection .pc. The
+# sidecar lives beside the resolved artifact, not beside a movable symlink.
+python3 - "$prefix/lib/${archive:-${shared:-}}" "$metadata" "$repo" "$head" \
+    "$work/build" "$pkg" "${SRT_SHARED:-yes}" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+library = pathlib.Path(sys.argv[1]).resolve(strict=True)
+cache = {}
+for line in (pathlib.Path(sys.argv[5]) / "CMakeCache.txt").read_text().splitlines():
+    if "=" in line and not line.startswith(("//", "#")):
+        key, value = line.split("=", 1)
+        cache[key.split(":", 1)[0]] = value
+compiler = cache.get("CMAKE_CXX_COMPILER") or cache.get("CMAKE_C_COMPILER")
+try:
+    version = subprocess.run([compiler, "--version"], check=True,
+                             capture_output=True, text=True).stdout.strip()
+except (OSError, subprocess.SubprocessError, TypeError):
+    version = None
+evidence = {
+    "schema": "nginx-media.transport-build/1",
+    "source": {"repository": sys.argv[3], "commit": sys.argv[4]},
+    "package": sys.argv[6],
+    "linkage": "static" if sys.argv[7] == "no" else "shared",
+    "artifact": {"path": str(library),
+                 "sha256": hashlib.sha256(library.read_bytes()).hexdigest()},
+    "compiler": {"path": compiler, "version": version},
+    "cmake": {key: value for key, value in cache.items()
+              if key in ("CMAKE_BUILD_TYPE", "BUILD_SHARED_LIBS")
+              or key.startswith(("CMAKE_C_FLAGS", "CMAKE_CXX_FLAGS",
+                                 "CMAKE_SHARED_LINKER_FLAGS", "CMAKE_STATIC_LINKER_FLAGS"))},
+}
+# compile_commands carries per-target flags that are not all in CMakeCache.
+commands = pathlib.Path(sys.argv[5]) / "compile_commands.json"
+evidence["compile_commands"] = json.loads(commands.read_text()) if commands.exists() else None
+for path in (pathlib.Path(str(library) + ".provenance.json"), pathlib.Path(sys.argv[2])):
+    temporary = pathlib.Path(str(path) + ".tmp")
+    temporary.write_text(json.dumps(evidence, indent=1) + "\n")
+    temporary.replace(path)
+PY
 cat > "$pc" <<EOF
 prefix=$prefix
 exec_prefix=\${prefix}
