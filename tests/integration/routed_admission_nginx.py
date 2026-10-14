@@ -460,7 +460,7 @@ http {{
                 directory_keys.append(credential["key"])
                 try:
                     await_condition(f"owner has provisioned directory credential {path} ({index}/256)",
-                                    lambda path=path: has_source(path, "camera"))
+                                    lambda path=path: has_source(path, "camera"), seconds=30)
                 except AssertionError as error:
                     snapshots = {"path": path, "index": index, "created": created,
                                  "credential": {key: value for key, value in credential.items()

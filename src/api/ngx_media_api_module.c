@@ -5713,13 +5713,15 @@ ngx_media_api_response_capacity(ngx_http_request_t *r,
         include_destinations = 0;
         include_egress = 1;
 
-    } else if (r->uri.len == streams_uri_len
-               && ngx_memcmp(r->uri.data, "/media/api/v1/streams",
-                             streams_uri_len) == 0)
+    } else if ((r->uri.len == streams_uri_len
+                && ngx_memcmp(r->uri.data, "/media/api/v1/streams",
+                              streams_uri_len) == 0)
+               || (r->uri.len == sizeof("/media/api/v1/desired") - 1
+                   && ngx_memcmp(r->uri.data, "/media/api/v1/desired",
+                                 sizeof("/media/api/v1/desired") - 1) == 0))
     {
         all_streams = 1;
         include_destinations = 1;
-
     } else if (r->uri.len > streams_uri_len
                && ngx_memcmp(r->uri.data, "/media/api/v1/streams",
                              streams_uri_len) == 0
