@@ -21,5 +21,22 @@
 #endif
 
 #include <stdint.h>
+#include <stdbool.h>
+
+#if defined(__has_include)
+#  if __has_include(<stdckdint.h>)
+#    include <stdckdint.h>
+#  endif
+#endif
+
+#ifndef ckd_add
+#  define ckd_add(r, a, b) __builtin_add_overflow((a), (b), (r))
+#endif
+#ifndef ckd_sub
+#  define ckd_sub(r, a, b) __builtin_sub_overflow((a), (b), (r))
+#endif
+#ifndef ckd_mul
+#  define ckd_mul(r, a, b) __builtin_mul_overflow((a), (b), (r))
+#endif
 
 #endif /* NGX_MEDIA_PLATFORM_H */

@@ -22,13 +22,6 @@
   },
   {
     "lane": "gcc",
-    "fingerprint": "1f07b3e595387164f4514e8c8dc6b3c08767584389f4affc41a8eb596fa27df1",
-    "reason": "GCC16 takes the first config NAL's need<=cfg_cap branch with cfg=NULL and cfg_len=cfg_cap=0. nal_iter_next returns a nonempty slice, so need=4+nal.len>=5 forces allocation. Failure breaks before writes; success assigns cfg before positive cfg_cap. Production AU ceilings are <=4MiB, nonoverlapping normalized prefixes bound config bytes to <=5MiB, so need/capacity arithmetic cannot wrap on this x64 lane. Existing TS-demux config-bearing keyframe regression exercises allocation and intact media output.",
-    "owner": "nginx-media maintainers",
-    "expires": "2027-01-31"
-  },
-  {
-    "lane": "gcc",
     "fingerprint": "2ea1eed27044f2a88b64ec2e326fa5a37e998e07fd88dc9c0768b8cac450dd4b",
     "reason": "dup2(input_pipe[0],STDIN_FILENO) intentionally establishes child standard input for exec. Only the pid==0 branch duplicates descriptors; original pipe ends and inherited descriptors >=3 are closed, while stdin/stdout/stderr survive exec by design. Any duplication/exec failure calls _exit, whose process teardown closes all descriptors. No parent descriptor is created by child dup2. The raw GCC16 trace reports a leak at the duplication itself, before these lifetime/exec transitions.",
     "owner": "nginx-media maintainers",
@@ -66,13 +59,6 @@
     "lane": "clang",
     "fingerprint": "b7e8aabb334c37cc8faaf9869e4a2c3689f214d61e50b8475d3c315de2f10371",
     "reason": "The RTMP module plist assumes i>=packet.nparts at i=0 and executes chain construction zero times after the external writer succeeds. rtmp_writer_message emits at least one chunk header on every success, including zero-length messages (rtmp_wire.c:917-1015). Each part then obtains a checked non-NULL buffer/link before publication in rtmp_module.c:666-724; failure returns immediately. Thus out_last and its buf are non-NULL at line741. The trace violates the writer postcondition rather than exposing a reachable empty chain.",
-    "owner": "nginx-media maintainers",
-    "expires": "2027-01-31"
-  },
-  {
-    "lane": "clang",
-    "fingerprint": "9e4b1c3d7f75cbde13ae57f55bfb3eb80a9e55e4f3eb4fafba8b428f5e5a657a",
-    "reason": "Configuration NAL allocation invariant also reviewed for GCC16: cfg starts NULL only with cfg_cap=cfg_len=0; nal_iter_next supplies nonempty NALs, forcing first need>=5 and allocation. Failure breaks before writes; success sets cfg before positive capacity. Subsequent appends are covered by capacity. Production AU limits <=4MiB and normalized config bytes <=5MiB exclude arithmetic/capacity wrap on this x64 lane. The TS-demux configuration-bearing keyframe regression exercises the valid allocation path.",
     "owner": "nginx-media maintainers",
     "expires": "2027-01-31"
   },

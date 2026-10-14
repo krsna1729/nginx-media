@@ -110,19 +110,18 @@ ngx_media_ts_demux_init(ngx_media_ts_demux_t *demux,
     demux->max_au_bytes = (conf != NULL && conf->max_au_bytes != 0)
                           ? conf->max_au_bytes : NGX_MEDIA_TS_DEFAULT_AU_BYTES;
 
-    if (demux->max_tracks > (size_t) -1 / sizeof(ngx_media_ts_track_t)) {
+    size_t track_bytes;
+
+    if (ckd_mul(&track_bytes, demux->max_tracks, sizeof(ngx_media_ts_track_t))) {
         return NGX_ERROR;
     }
 
-    demux->tracks = ngx_alloc(demux->max_tracks * sizeof(ngx_media_ts_track_t),
-                              log);
+    demux->tracks = ngx_alloc(track_bytes, log);
     if (demux->tracks == NULL) {
         return NGX_ERROR;
     }
 
-    ngx_memzero(demux->tracks,
-                demux->max_tracks * sizeof(ngx_media_ts_track_t));
-
+    ngx_memzero(demux->tracks, track_bytes);
     demux->sink = *sink;
     demux->sink_ctx = sink_ctx;
 
@@ -813,9 +812,7 @@ ngx_media_ts_au_append(ngx_media_ts_demux_t *demux, ngx_media_ts_track_t *track,
         return;
     }
 
-    need = track->au_len + len;
-
-    if (need > demux->max_au_bytes) {
+    if (ckd_add(&need, track->au_len, len) || need > demux->max_au_bytes) {
         /* drop the partial unit: a truncated access unit must not be emitted */
         demux->stats.au_overflows++;
         track->au_len = 0;
@@ -1004,7 +1001,9 @@ ngx_media_ts_au_flush(ngx_media_ts_demux_t *demux, ngx_media_ts_track_t *track)
         type = ngx_media_nal_type(track->codec, nal.data, nal.len);
 
         if (ngx_media_nal_is_config(track->codec, type)) {
-            need = cfg_len + 4 + nal.len;
+            if (ckd_add(&need, cfg_len, 4) || ckd_add(&need, need, nal.len)) {
+                break;
+            }
 
             if (need > cfg_cap) {
                 size_t  cap = cfg_cap ? cfg_cap : 256;
@@ -1029,6 +1028,9 @@ ngx_media_ts_au_flush(ngx_media_ts_demux_t *demux, ngx_media_ts_track_t *track)
                 cfg_cap = cap;
             }
 
+            if (cfg == NULL) {
+                break;
+            }
             cfg[cfg_len++] = 0x00;
             cfg[cfg_len++] = 0x00;
             cfg[cfg_len++] = 0x00;
