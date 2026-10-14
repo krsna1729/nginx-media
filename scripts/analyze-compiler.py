@@ -90,8 +90,8 @@ def main():
         if entry["lane"] != args.lane:
             continue
         if "compiler" in entry:
-            pattern = entry["compiler"]
-            if pattern not in version.decode(errors="replace") and pattern not in args.compiler:
+            pattern = rf"version {entry['compiler']}\."
+            if not re.search(pattern, version.decode(errors="replace")) and entry["compiler"] not in args.compiler:
                 continue
         if not entry["reason"].strip() or not entry["owner"].strip():
             raise RuntimeError("triage requires evidence and an accountable owner")
