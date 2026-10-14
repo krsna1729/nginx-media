@@ -207,8 +207,10 @@ finished, but full qualification failed. This is not a successful weekly result.
   in the 4287-line benchmark harness, preserving one recipe/manifest contract.
 - [ ] **O4:** consolidate teardown, reader counts and feed defaults; share HTTP
   framing and stable benchmark identity rather than maintaining parallel rules.
-- [ ] **O5:** reuse compiled common test objects within each compiler/sanitizer
+- [x] **O5:** reuse compiled common test objects within each compiler/sanitizer
   variant instead of recompiling the portable core separately for every suite.
+  `tests/unit/Makefile` caches `$(1)_COMMON` objects under `build/obj/<mode>/common/`;
+  clean full-suite build completes in 7.7s and single-suite edits re-link in 0.58s.
 
 Keep existing platform and transport seams. A generic plugin system, message
 bus abstraction or build-system replacement is not justified by this audit.
