@@ -36,9 +36,11 @@ is not an assertion of an independently reproduced exploit.
   frame and CLOSE matching use program hash and stream incarnation, not
   publisher identity (`ngx_media_runtime.c:1710-1735,1896-1906,1960-1963`). Test
   two redundant sources routed through non-owner workers and independent CLOSE.
-- [ ] **R2b / P2: explicit routed slot-exhaustion feedback.** The owner counts
-  `routed_slot_overflows` but the publisher is neither refused nor told; its
-  frames are silently ignored.
+- [x] **R2b / P2: explicit routed slot-exhaustion feedback.** The owner sends an
+  immediate `NGX_MEDIA_IPC_MSG_REJECT` reply when `routed_slot_overflows` occurs.
+  The ingress worker terminates admission and disconnects the client (SRT session
+  close or RTMP `NetStream.Publish.BadName`) before payload transfer begins.
+  Verified in `routed_admission_nginx.py` with 32 accepted and 33rd publisher refused.
 - [x] **S1 / P1: clean up rejected HLS upload bodies and admit before buffering.**
   At the baseline, three rejected 4096-byte uploads retained 12288 bytes.
   The handler now selects nginx clean file-only mode, checks URI/key admission
