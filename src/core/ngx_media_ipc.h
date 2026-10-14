@@ -101,6 +101,9 @@ typedef struct {
     uint64_t    session;        /* publisher connection identity, 0 if none */
 } ngx_media_ipc_header_t;
 
+static_assert(sizeof(ngx_media_ipc_header_t) == NGX_MEDIA_IPC_HEADER_MAX,
+              "IPC header must fit in NGX_MEDIA_IPC_HEADER_MAX");
+
 #define NGX_MEDIA_IPC_FLAG_MORE      1   /* more chunks follow for this frame */
 
 /* a decoded message: the header plus a view of its payload */

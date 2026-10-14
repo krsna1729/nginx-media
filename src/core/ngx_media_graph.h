@@ -108,6 +108,9 @@ typedef struct {
     uint32_t   key_nonce_set;     /* the nonce the key is derived from */
 } ngx_media_graph_wire_t;
 
+static_assert(sizeof(ngx_media_graph_wire_t) == 144,
+              "graph wire struct size invariant");
+
 /* a decoded operation; the strings point into the message payload */
 typedef struct {
     ngx_uint_t  kind;

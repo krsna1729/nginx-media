@@ -4,12 +4,13 @@ ngx_media_buf_t *
 ngx_media_buf_alloc(size_t capacity)
 {
     ngx_media_buf_t  *buf;
+    size_t            total;
 
-    if (capacity > (size_t) -1 - sizeof(ngx_media_buf_t)) {
+    if (ckd_add(&total, sizeof(ngx_media_buf_t), capacity)) {
         return NULL;
     }
 
-    buf = ngx_alloc(sizeof(ngx_media_buf_t) + capacity, NULL);
+    buf = ngx_alloc(total, NULL);
     if (buf == NULL) {
         return NULL;
     }
