@@ -87,7 +87,9 @@ ngx_media_hls_program_dir(ngx_pool_t *pool, const ngx_str_t *root,
     name_plain = ngx_media_hls_plain_name(name);
     extra = ngx_media_hls_identity_size(application, app_plain)
             + ngx_media_hls_identity_size(name, name_plain);
-    if (root->len > SIZE_MAX - extra - 1) {
+    if (root->len == 0 || root->len > NGX_MEDIA_GRAPH_MAX_PATH
+        || extra > NGX_MEDIA_GRAPH_MAX_PATH)
+    {
         return NULL;
     }
     path = ngx_pcalloc(pool, sizeof(*path));

@@ -1,5 +1,6 @@
 #include "ngx_media_source.h"
 #include "ngx_media_stream.h"
+#include "ngx_media_graph.h"
 
 static ngx_media_revision_pt  ngx_media_revision_cb;
 
@@ -292,7 +293,7 @@ ngx_media_string_set(ngx_str_t *dst, const ngx_str_t *src, ngx_log_t *log)
     u_char *copy = NULL;
     size_t len = src ? src->len : 0;
 
-    if (dst == NULL || len == (size_t) -1 || (len && src->data == NULL)) {
+    if (dst == NULL || len > NGX_MEDIA_GRAPH_MAX_PATH || (len && src->data == NULL)) {
         return NGX_ERROR;
     }
     if (len != 0) {
