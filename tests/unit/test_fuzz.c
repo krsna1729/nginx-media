@@ -494,7 +494,7 @@ test_ts_demux(void)
     ngx_media_ts_demux_t       demux;
     ngx_media_ts_demux_stats_t stats;
     u_char                     buf[4096];
-    ngx_uint_t                 frames, i;
+    ngx_uint_t                 sink_counts[2], i;
 
     TEST_CASE("fuzz: mpeg-ts demux");
 
@@ -509,9 +509,10 @@ test_ts_demux(void)
 
         fuzz_fill(buf, len);
 
-        frames = 0;
+        sink_counts[0] = 0;
+        sink_counts[1] = 0;
 
-        if (ngx_media_ts_demux_init(&demux, &conf, &sink, &frames, NULL)
+        if (ngx_media_ts_demux_init(&demux, &conf, &sink, sink_counts, NULL)
             != NGX_OK)
         {
             continue;
@@ -522,7 +523,7 @@ test_ts_demux(void)
         ngx_media_ts_demux_stats(&demux, &stats);
 
         /* random bytes must never produce a valid frame */
-        CHECK(frames == 0, "random ts produced %lu frames", frames);
+        CHECK(sink_counts[0] == 0, "random ts produced %lu frames", sink_counts[0]);
 
         ngx_media_ts_demux_destroy(&demux);
     }

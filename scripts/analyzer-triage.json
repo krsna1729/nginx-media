@@ -85,6 +85,7 @@
   },
   {
     "lane": "clang",
+    "compiler": "22",
     "fingerprint": "6188ee57f05d7b3b03ac1152bc68fbdcd5c2fa8ca7760266fd9b7e735e044abb",
     "reason": "The trace invents a malformed C ngx_str_t CA argument {len>0,data=NULL}, not network input or an allocation-failure path. All production sends use immutable push CA snapshots published only after checked strdup succeeds; GETs use pull CA copied by ngx_media_string_set, which rejects positive-length NULL storage and publishes only successful allocation. API JSON/graph slices have valid allocated/body-backed storage, and reader joins precede CA frees. This review relies on the valid-slice C precondition; it does not claim malformed arbitrary C arguments are safe or permit fallback to system trust.",
     "owner": "nginx-media maintainers",
@@ -99,6 +100,7 @@
   },
   {
     "lane": "clang",
+    "compiler": "22",
     "fingerprint": "929427cf51dc1d0ac7cafd5eead33a253e726fb6fb4702c52c3401f1c60a038a",
     "reason": "The notifier retains file->refs=1 through the entire locked destination traversal. Each attempted enqueue adds a provisional reference; enqueue failure consumes none, so the following failure release observes at least2 and cannot free. Success transfers that one reference to the queue. Atomic refcount invariant is 1 notifier + queued/upload holders + provisional enqueue; the plist's assumed free at line1249 followed by another iteration violates this invariant. List removal/stop is serialized by the global mutex.",
     "owner": "nginx-media maintainers",
@@ -106,7 +108,24 @@
   },
   {
     "lane": "clang",
+    "compiler": "22",
     "fingerprint": "dc2d39ce6360bcae370d67e2d6aacdfc9445ade830054564de35651505b16f51",
+    "reason": "Same impossible notifier-reference loss as the adjacent sealed-file diagnostic. The notifier's durable reference is released only at1259; dequeue transfers queue ownership to an upload, retry transfers it back, terminal/eviction/remove/stop each release only their owned reference. After unlocking, other holders may finish but cannot consume the notifier reference. Final release sees1+remaining holders and frees only when1; an earlier failure release cannot free this file.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "clang",
+    "compiler": "21",
+    "fingerprint": "b93553167d2099e8f672c70157da70f6166973a74bda7e7eec16e55026913e44",
+    "reason": "The notifier retains file->refs=1 through the entire locked destination traversal. Each attempted enqueue adds a provisional reference; enqueue failure consumes none, so the following failure release observes at least2 and cannot free. Success transfers that one reference to the queue. Atomic refcount invariant is 1 notifier + queued/upload holders + provisional enqueue; the plist's assumed free at line1249 followed by another iteration violates this invariant. List removal/stop is serialized by the global mutex.",
+    "owner": "nginx-media maintainers",
+    "expires": "2027-01-31"
+  },
+  {
+    "lane": "clang",
+    "compiler": "21",
+    "fingerprint": "171ad3ef87470f4be5e29b6ee2ac08f5c39b4d392374ea68074e50aedf601065",
     "reason": "Same impossible notifier-reference loss as the adjacent sealed-file diagnostic. The notifier's durable reference is released only at1259; dequeue transfers queue ownership to an upload, retry transfers it back, terminal/eviction/remove/stop each release only their owned reference. After unlocking, other holders may finish but cannot consume the notifier reference. Final release sees1+remaining holders and frees only when1; an earlier failure release cannot free this file.",
     "owner": "nginx-media maintainers",
     "expires": "2027-01-31"

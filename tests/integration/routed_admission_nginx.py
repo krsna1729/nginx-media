@@ -501,7 +501,7 @@ http {{
                                             log_text())[-1])
             assert new_owner_pid != old_owner_pid
             await_condition("new SRT listeners ready", lambda:
-                            log_text().count("srt listener ready") == 6)
+                            log_text().count("srt listener ready") >= 7)
             pinned = {}
             for _ in range(100):
                 conn = http.client.HTTPConnection("127.0.0.1", api_port, timeout=3)

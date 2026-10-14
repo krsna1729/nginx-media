@@ -83,6 +83,7 @@ WORKDIR /src
 # The build reads the tree, the config and the pinned version; copy those
 # first so a source edit does not invalidate the dependency layer above.
 COPY scripts/build-nginx.sh /src/scripts/build-nginx.sh
+COPY scripts/record-compiler.py /src/scripts/record-compiler.py
 COPY config /src/config
 COPY src /src/src
 

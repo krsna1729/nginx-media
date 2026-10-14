@@ -29,7 +29,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            python3 build-essential pkg-config curl ca-certificates binutils \
+            gcc python3 build-essential pkg-config curl ca-certificates binutils \
             libssl-dev libc-ares-dev libsrt-openssl-dev
       - name: Record the pinned compiler
         run: |

@@ -89,6 +89,10 @@ def main():
             raise RuntimeError("triage lane must be gcc or clang")
         if entry["lane"] != args.lane:
             continue
+        if "compiler" in entry:
+            pattern = entry["compiler"]
+            if pattern not in version.decode(errors="replace") and pattern not in args.compiler:
+                continue
         if not entry["reason"].strip() or not entry["owner"].strip():
             raise RuntimeError("triage requires evidence and an accountable owner")
         if datetime.date.fromisoformat(entry["expires"]) < datetime.date.today():

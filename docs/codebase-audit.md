@@ -123,9 +123,9 @@ were not executed during the audit.
   SRT removal while sending, stream deletion while leased, HLS push queue/retry
   ownership and actual HTTP/TLS behavior. Use barriers for real cross-thread
   lifetimes, not concurrent calls to APIs whose contract is single-owner.
-- [x] **T9:** add valid PAT/PMT/PES, AVC/HEVC/ADTS, AMF and FLV fuzz seeds, stateful
+- [ ] **T9:** add valid PAT/PMT/PES, AVC/HEVC/ADTS, AMF and FLV fuzz seeds, stateful
   feed partitions, progress/allocation invariants and coverage-guided fuzzing.
-  Keep deterministic regressions; uniform random TS primarily rejects input.
+  Deterministic seeds and partitions are implemented; coverage feedback and HEVC seeds remain.
 - [ ] **T10:** isolate scratch directories/ports and inject time where useful.
   Add an ASan nginx integration lane for teardown/churn/ingest rather than
   assuming the unit shim represents nginx's event loop and allocator.
@@ -232,9 +232,9 @@ verification used GCC 16.2.1 and Clang 22.1.8; no compiler was installed/upgrade
 - [x] **C4:** retain CodeQL and add triaged GCC fanalyzer/Clang analysis lanes.
   Start MemorySanitizer with isolated core/parser targets because dependency
   instrumentation limits prevent treating it as a blanket production flag.
-- [x] **C5:** evaluate FORTIFY_SOURCE=3, stack-clash protection and target-appropriate
-  control-flow protection with compatibility/performance checks. The inspected
-  artifact already had PIE, RELRO, immediate binding and a non-executable stack.
+- [ ] **C5:** evaluate FORTIFY_SOURCE=3, stack-clash protection and target-appropriate
+  control-flow protection with compatibility/performance checks. Compiler-flag
+  verification and smoke inspection are automated; performance benchmarking remains.
 - [ ] **C6:** add pinned modern compiler lanes while retaining supported distro
   lanes. Defer C2y, wholesale atomics replacement, blanket O3 and LTO/PGO rollout
   until behavior and measurement are trustworthy.
