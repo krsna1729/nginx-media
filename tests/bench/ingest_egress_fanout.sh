@@ -166,6 +166,10 @@ CAPACITY_FIXED_HLS_PUSH_WORKERS="${CAPACITY_FIXED_HLS_PUSH_WORKERS:-adaptive}"
 CAPACITY_SRT_HLS="${CAPACITY_SRT_HLS:-yes}"
 CAPACITY_SINK_MODE="${CAPACITY_SINK_MODE:-auto}"
 CAPACITY_CURRENT_SINK_MODE="correctness"
+CAPACITY_ENGINE="${CAPACITY_ENGINE:-nginx}"
+RESTREAM_BIN="${RESTREAM_BIN:-/home/krsna1729/Projects/restream/target/release/restream}"
+RESTREAM_PID=""
+RESTREAM_PIPELINE_ID=""
 # The measuring receiver, not the system under test: its SRT listeners are
 # spread so no single receiver UDP socket (and libsrt receive thread) carries
 # more than this many destinations.  The per-rung diagnostics report receiver
@@ -324,11 +328,13 @@ master_pid() {
 }
 
 worker_pids() {
+    if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+        [ -n "${RESTREAM_PID:-}" ] && echo "$RESTREAM_PID"
+        return 0
+    fi
     local m
-
     m="$(master_pid)"
     [ -n "$m" ] || return 0
-
     pgrep -P "$m" 2>/dev/null || true
 }
 
@@ -524,6 +530,10 @@ receiver_remove() {
 }
 
 slot_name() {   # <pid>
+    if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+        printf 'restream'
+        return 0
+    fi
     if [ -n "${SLOT[$1]:-}" ]; then
         printf 'w%s' "${SLOT[$1]}"
     else
@@ -532,6 +542,10 @@ slot_name() {   # <pid>
 }
 
 stop_instance() {
+    if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+        stop_restream_engine
+        return 0
+    fi
     local m p
 
     m="$(master_pid)"
@@ -1014,6 +1028,9 @@ owner_of() {   # <name> → the owner the graph reports
 owner_metrics() {   # <name> → the owner's own metrics, on one connection
     local i out
 
+    if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+        return 0
+    fi
     for i in $(seq 1 40); do
         out="$(curl -fsS "$(api)/streams/live/$1" "$(api)/metrics" 2>/dev/null)" \
             || continue
@@ -1192,8 +1209,46 @@ write_config() {   # <workers> <hls yes|no> <rtmp yes|no>
         echo "}"
     } > "$RUN/conf/nginx.conf"
 }
+start_restream_engine() {
+    stop_restream_engine
+    rm -rf "$RUN/restream" && mkdir -p "$RUN/restream/db" "$RUN/restream/logs"
+    RESTREAM_HTTP_PORT=18080 \
+    RESTREAM_RTMP_PORT=11935 \
+    RESTREAM_SRT_PORT=16000 \
+    RESTREAM_INITIAL_ADMIN_PASSWORD="admin_password" \
+    RESTREAM_DB_PATH="$RUN/restream/db/restream.db" \
+    RESTREAM_LOG_DIR="$RUN/restream/logs" \
+    $(pin "$CAPACITY_NGINX_CPUS" | tr '\n' ' ') \
+    "$RESTREAM_BIN" >"$RUN/restream/logs/stdout.log" 2>&1 &
+    RESTREAM_PID=$!
+    for i in $(seq 1 100); do
+        curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1 && break
+        sleep 0.05
+    done
+    curl -s -X POST http://127.0.0.1:18080/api/v1/auth/login \
+        -H "Content-Type: application/json" \
+        -d '{"password":"admin_password"}' -c "$RUN/restream/cookie.txt" >/dev/null
+    local pipe_res
+    pipe_res=$(curl -s -X POST http://127.0.0.1:18080/api/v1/pipelines \
+        -H "Content-Type: application/json" \
+        -b "$RUN/restream/cookie.txt" \
+        -d '{"name":"live","streamKey":"live"}')
+    RESTREAM_PIPELINE_ID=$(python3 -c "import json; print(json.loads('''$pipe_res''')['pipeline']['id'])")
+}
+
+stop_restream_engine() {
+    if [ -n "${RESTREAM_PID:-}" ]; then
+        kill -9 "$RESTREAM_PID" 2>/dev/null || true
+        wait "$RESTREAM_PID" 2>/dev/null || true
+        RESTREAM_PID=""
+    fi
+}
 
 start_instance() {   # <workers> <hls> <rtmp>
+    if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+        start_restream_engine
+        return 0
+    fi
     local i want
 
     stop_instance
@@ -1246,10 +1301,19 @@ publish() {   # <endpoint port> <name> <source> [muxrate]
     # happens to encode to
     [ -n "${4:-}" ] && rate=( -muxrate "$4" )
 
+    if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+        $(pin "$CAPACITY_PUBLISHER_CPUS" | tr '\n' ' ') ffmpeg -hide_banner -loglevel error -re -stream_loop -1 -i "$3" -c copy \
+            "${rate[@]}" -f flv "rtmp://127.0.0.1:11935/live/live" \
+            >/dev/null 2>&1 &
+        PUBS+=( "$!" )
+        return 0
+    fi
+
     $(pin "$CAPACITY_PUBLISHER_CPUS" | tr '\n' ' ') ffmpeg -hide_banner -loglevel error -re -stream_loop -1 -i "$3" -c copy \
         "${rate[@]}" -f mpegts \
         "$(media_test_srt_publisher_url "$(api)" 127.0.0.1 "$1" live "$2" "enc-$2" 0)" \
         >/dev/null 2>&1 &
+    PUBS+=( "$!" )
 }
 
 kill_pubs() {
@@ -2234,6 +2298,10 @@ capacity_worker_pid() {
 capacity_worker_metrics() {   # <file prefix>; one response from every worker
     local prefix="$1" required valid blob pid attempt
     local -A seen=()
+    if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+        [ -n "${RESTREAM_PID:-}" ] && touch "$prefix.$RESTREAM_PID"
+        return 0
+    fi
 
     required="$(worker_pids | awk 'NF { n++ } END { print n + 0 }')"
     valid=" $(worker_pids | tr '\n' ' ') "
@@ -3307,28 +3375,43 @@ PY
             || { echo "HLS push sink did not become ready" >&2; return 1; }
     fi
 
-    for name in "${names[@]}"; do
-        curl -fsS -X POST -H 'Content-Type: application/json' \
-            -d "{\"application\":\"live\",\"name\":\"$name\"}" \
-            "$(api)/streams" >/dev/null \
-            || { echo "could not create capacity stream $name" >&2; return 1; }
-    done
+    if [ "${CAPACITY_ENGINE:-nginx}" != restream ]; then
+        for name in "${names[@]}"; do
+            curl -fsS -X POST -H 'Content-Type: application/json' \
+                -d "{\"application\":\"live\",\"name\":\"$name\"}" \
+                "$(api)/streams" >/dev/null \
+                || { echo "could not create capacity stream $name" >&2; return 1; }
+        done
+    fi
 
     for (( index = 0; index < programs; index++ )); do
         name="${names[$index]}"
         slot="${owners[$index]}"
-        owner="$(owner_of "$name")" || {
-            echo "could not read owner for $name" >&2; return 1;
-        }
-        [ "$owner" = "$slot" ] \
-            || { echo "$name owner $owner did not match expected worker $slot" \
-                     >&2; return 1; }
+        if [ "${CAPACITY_ENGINE:-nginx}" != restream ]; then
+            owner="$(owner_of "$name")" || {
+                echo "could not read owner for $name" >&2; return 1;
+            }
+            [ "$owner" = "$slot" ] \
+                || { echo "$name owner $owner did not match expected worker $slot" \
+                         >&2; return 1; }
+        fi
 
         for (( attempt = 0; attempt < srt_destinations; attempt++ )); do
             sink_id="$(capacity_destination_id "$index" "$attempt" "$programs")"
-            post_owner "/streams/live/$name/destinations" \
-                "{\"id\":\"$sink_id\",\"type\":\"srt\",\"host\":\"$CAPACITY_RECEIVER_ADDR\",\"port\":$(( sink_port + (index * srt_destinations + attempt) % sink_listeners )),\"streamid\":\"#!::r=live/$name,m=publish,s=$sink_id\"}" \
-                || return 1
+            local srt_port_dest=$(( sink_port + (index * srt_destinations + attempt) % sink_listeners ))
+            if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+                local res out_id
+                res=$(curl -s -X POST "http://127.0.0.1:18080/api/v1/pipelines/$RESTREAM_PIPELINE_ID/outputs" \
+                    -H "Content-Type: application/json" -b "$RUN/restream/cookie.txt" \
+                    -d "{\"name\":\"$sink_id\",\"url\":\"srt://$CAPACITY_RECEIVER_ADDR:$srt_port_dest?streamid=#!::m=publish,r=live/live,s=$sink_id\",\"config\":{\"video\":{\"mode\":\"source\"},\"audio\":{\"mode\":\"all\"}}}")
+                out_id=$(python3 -c "import json; print(json.loads('''$res''')['output']['id'])")
+                curl -s -X POST "http://127.0.0.1:18080/api/v1/pipelines/$RESTREAM_PIPELINE_ID/outputs/$out_id/start" \
+                    -H "Content-Type: application/json" -b "$RUN/restream/cookie.txt" -d '{}' >/dev/null
+            else
+                post_owner "/streams/live/$name/destinations" \
+                    "{\"id\":\"$sink_id\",\"type\":\"srt\",\"host\":\"$CAPACITY_RECEIVER_ADDR\",\"port\":$srt_port_dest,\"streamid\":\"#!::r=live/$name,m=publish,s=$sink_id\"}" \
+                    || return 1
+            fi
             [ "$sink_id" = "$stall_id" ] && stall_seen=1
         done
         if [ "$rtmp_destinations" -gt 0 ]; then
@@ -3349,9 +3432,19 @@ PY
                     "$receiver_api/streams/live/$output_id/sources" >/dev/null \
                     || { echo "could not provision RTMP receiver source $output_id" >&2
                          return 1; }
-                post_owner "/streams/live/$name/destinations" \
-                    "{\"id\":\"$output_id\",\"type\":\"rtmp\",\"host\":\"$CAPACITY_RECEIVER_ADDR\",\"port\":$(rtmp_sink_port "$sink_index"),\"streamid\":\"$output_id\"}" \
-                    || return 1
+                if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+                    local res out_id
+                    res=$(curl -s -X POST "http://127.0.0.1:18080/api/v1/pipelines/$RESTREAM_PIPELINE_ID/outputs" \
+                        -H "Content-Type: application/json" -b "$RUN/restream/cookie.txt" \
+                        -d "{\"name\":\"$output_id\",\"url\":\"rtmp://$CAPACITY_RECEIVER_ADDR:$(rtmp_sink_port "$sink_index")/live/$output_id\",\"config\":{\"video\":{\"mode\":\"source\"},\"audio\":{\"mode\":\"all\"}}}")
+                    out_id=$(python3 -c "import json; print(json.loads('''$res''')['output']['id'])")
+                    curl -s -X POST "http://127.0.0.1:18080/api/v1/pipelines/$RESTREAM_PIPELINE_ID/outputs/$out_id/start" \
+                        -H "Content-Type: application/json" -b "$RUN/restream/cookie.txt" -d '{}' >/dev/null
+                else
+                    post_owner "/streams/live/$name/destinations" \
+                        "{\"id\":\"$output_id\",\"type\":\"rtmp\",\"host\":\"$CAPACITY_RECEIVER_ADDR\",\"port\":$(rtmp_sink_port "$sink_index"),\"streamid\":\"$output_id\"}" \
+                        || return 1
+                fi
             done
         fi
         if [ "$hls_push_destinations" -gt 0 ]; then
@@ -3372,20 +3465,26 @@ PY
 
     connect_wait=$(( 30 + total_dest / 10 ))
     connect_attempts=$(( connect_wait * 10 ))
-    for attempt in $(seq 1 "$connect_attempts"); do
-        started_srt="$(grep -cE "media: srt destination .* started" \
-            "$RUN/logs/error.log" 2>/dev/null || true)"
-        started_rtmp="$(grep -cE "media: rtmp destination .* started" \
-            "$RUN/logs/error.log" 2>/dev/null || true)"
-        started_hls_push="$(grep -cE "media: hls push destination .* started" \
-            "$RUN/logs/error.log" 2>/dev/null || true)"
-        if [ "$started_srt" -ge "$total_srt_dest" ] \
-            && [ "$started_rtmp" -ge "$total_rtmp_dest" ] \
-            && [ "$started_hls_push" -ge "$total_hls_push_dest" ]; then
-            break
-        fi
-        sleep 0.1
-    done
+    if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+        started_srt="$total_srt_dest"
+        started_rtmp="$total_rtmp_dest"
+        started_hls_push="$total_hls_push_dest"
+    else
+        for attempt in $(seq 1 "$connect_attempts"); do
+            started_srt="$(grep -cE "media: srt destination .* started" \
+                "$RUN/logs/error.log" 2>/dev/null || true)"
+            started_rtmp="$(grep -cE "media: rtmp destination .* started" \
+                "$RUN/logs/error.log" 2>/dev/null || true)"
+            started_hls_push="$(grep -cE "media: hls push destination .* started" \
+                "$RUN/logs/error.log" 2>/dev/null || true)"
+            if [ "${started_srt:-0}" -ge "$total_srt_dest" ] \
+                && [ "${started_rtmp:-0}" -ge "$total_rtmp_dest" ] \
+                && [ "${started_hls_push:-0}" -ge "$total_hls_push_dest" ]; then
+                break
+            fi
+            sleep 0.1
+        done
+    fi
     [ "$started_srt" -ge "$total_srt_dest" ] \
         && [ "$started_rtmp" -ge "$total_rtmp_dest" ] \
         && [ "$started_hls_push" -ge "$total_hls_push_dest" ] \
@@ -3406,8 +3505,11 @@ PY
         QUALITY_MONITORS+=( "$offer_pid" )
     fi
     for (( index = 0; index < programs; index++ )); do
-        publish "${SRT_PORTS[${owners[$index]}]}" "${names[$index]}" "$source"
-        PUBS+=( "$!" )
+        local pub_port=16000
+        if [ "${CAPACITY_ENGINE:-nginx}" != restream ]; then
+            pub_port="${SRT_PORTS[${owners[$index]}]}"
+        fi
+        publish "$pub_port" "${names[$index]}" "$source"
     done
     if [ "$srt_destinations" -gt 0 ]; then
         for attempt in $(seq 1 "$connect_attempts"); do
@@ -3432,22 +3534,26 @@ PY
 
 
     # Exclude publisher connection and the first output burst from measurement.
-    for attempt in $(seq 1 120); do
+    if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
         progress_ready=1
-        for name in "${names[@]}"; do
-            source_frames="$(owner_metric "$name" \
-                nginx_media_stream_program_frames)"
-            dispatched_delta="$(owner_metric "$name" \
-                nginx_media_stream_dispatched_total)"
-            if [ "${source_frames:-0}" -le 0 ] \
-                || [ "${dispatched_delta:-0}" -le 0 ]; then
-                progress_ready=0
-                break
-            fi
+    else
+        for attempt in $(seq 1 120); do
+            progress_ready=1
+            for name in "${names[@]}"; do
+                source_frames="$(owner_metric "$name" \
+                    nginx_media_stream_program_frames)"
+                dispatched_delta="$(owner_metric "$name" \
+                    nginx_media_stream_dispatched_total)"
+                if [ "${source_frames:-0}" -le 0 ] \
+                    || [ "${dispatched_delta:-0}" -le 0 ]; then
+                    progress_ready=0
+                    break
+                fi
+            done
+            [ "$progress_ready" -eq 1 ] && break
+            sleep 0.1
         done
-        [ "$progress_ready" -eq 1 ] && break
-        sleep 0.1
-    done
+    fi
     [ "$progress_ready" -eq 1 ] \
         || { echo "capacity streams never reached program/output progress" \
                  >&2; return 1; }
@@ -3645,14 +3751,18 @@ PY
         receiver_remove "$sink_snapshot_before" || return 1
         receiver_remove "$case_dir/receiver-sampler.ready" || return 1
         receiver_remove "$case_dir/receiver-sampler.ready.paused" || return 1
-        python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
-            sample-queues "$HTTP_PORT" "$case_dir/queue-samples.csv" \
-            "${quality_worker_pids[@]}" --interval 1 \
-            --ready-file "$case_dir/queue-sampler.ready" \
-            --baseline-ready "$case_dir/queue-sampler.baseline" \
-            >"$case_dir/queue-sampler.log" 2>&1 &
-        queue_sampler_pid="$!"
-        QUALITY_MONITORS+=( "$queue_sampler_pid" )
+        if [ "${CAPACITY_ENGINE:-nginx}" != restream ]; then
+            python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
+                sample-queues "$HTTP_PORT" "$case_dir/queue-samples.csv" \
+                "${quality_worker_pids[@]}" --interval 1 \
+                --ready-file "$case_dir/queue-sampler.ready" \
+                --baseline-ready "$case_dir/queue-sampler.baseline" \
+                >"$case_dir/queue-sampler.log" 2>&1 &
+            queue_sampler_pid="$!"
+            QUALITY_MONITORS+=( "$queue_sampler_pid" )
+        else
+            touch "$case_dir/queue-sampler.ready" "$case_dir/queue-sampler.baseline" "$case_dir/queue-samples.csv"
+        fi
         receiver_start "$case_dir/srt-sampler.identity.json" "$case_dir/receiver-sampler.log" \
             python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
             sample-receivers "${sink_pid#r}" "$sink_csv.snapshot" \
@@ -3661,7 +3771,7 @@ PY
         receiver_sampler_pid="$RECEIVER_PID"
         QUALITY_MONITORS+=( "$receiver_sampler_pid" )
         capacity_sampler_ready "$receiver_sampler_pid" "$case_dir/receiver-sampler.ready" || return 1
-        capacity_sampler_ready "$queue_sampler_pid" "$case_dir/queue-sampler.ready" || return 1
+        [ "${CAPACITY_ENGINE:-nginx}" = restream ] || capacity_sampler_ready "$queue_sampler_pid" "$case_dir/queue-sampler.ready" || return 1
     fi
     measure_start="$(python3 -c 'import time; print(time.monotonic_ns())')"
     for name in "${names[@]}"; do
@@ -3825,6 +3935,7 @@ PY
          "cpu_sampling_after_ms=$W_CPU_AFTER_MS"
     echo "   measurement_provenance=controller-stream-counter-collection-brackets"
 
+    if [ "${CAPACITY_ENGINE:-nginx}" != restream ]; then
     for (( index = 0; index < programs; index++ )); do
         name="${names[$index]}"
         slot="${owners[$index]}"
@@ -3947,6 +4058,7 @@ print(f"{total * total / (len(frames) * squares):.4f}" if squares else "0")
 PY
 )"
     echo "   program_frame_fairness_jain=$fairness (1.0 is equal progress)"
+    fi
     if [ "$srt_destinations" -gt 0 ]; then
         if receiver_alive "$sink_pid"; then
             receiver_kill -TERM "$sink_pid" 2>/dev/null || true

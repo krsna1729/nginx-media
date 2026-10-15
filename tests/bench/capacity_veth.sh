@@ -58,7 +58,8 @@ case "$ACTION" in
             echo "capacity_veth: namespace $NS already exists; reusing it" >&2
         else
             ip netns add "$NS" || fail "cannot create namespace $NS"
-            ip link add "$HOST_IF" type veth peer name "$NS_IF" \
+            ip link add "$HOST_IF" numtxqueues 8 numrxqueues 8 type veth \
+                peer name "$NS_IF" numtxqueues 8 numrxqueues 8 \
                 || fail "cannot create the veth pair"
             ip link set "$NS_IF" netns "$NS" || fail "cannot move $NS_IF"
             ip addr add "$HOST_ADDR" dev "$HOST_IF" || fail "cannot address $HOST_IF"
@@ -70,8 +71,8 @@ case "$ACTION" in
             ip -n "$NS" link set "$NS_IF" mtu "$MTU" || fail "cannot set the MTU"
             ip -n "$NS" link set lo up || fail "cannot bring up the namespace loopback"
         fi
-        ip netns exec "$NS" sysctl -qw net.core.rmem_max=8388608 2>/dev/null || true
-        ip netns exec "$NS" sysctl -qw net.core.wmem_max=8388608 2>/dev/null || true
+        sysctl -qw net.core.netdev_max_backlog=100000 net.core.rmem_max=67108864 net.core.wmem_max=67108864 net.ipv4.tcp_tw_reuse=1 2>/dev/null || true
+        ip netns exec "$NS" sysctl -qw net.core.netdev_max_backlog=100000 net.core.rmem_max=67108864 net.core.wmem_max=67108864 net.ipv4.tcp_tw_reuse=1 2>/dev/null || true
         echo "CAPACITY_RECEIVER_EXEC='nsenter --net=/run/netns/$NS --no-fork'"
         echo "CAPACITY_RECEIVER_ADDR='10.200.0.2'"
         echo "CAPACITY_SENDER_ADDR='10.200.0.1'"
