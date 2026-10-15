@@ -18,3 +18,4 @@ docs/capacity-evidence/three-way-comparison/
 # run snapshots of the harness: a live run must not see the working file change
 tests/bench/.run-*.sh
 tests/bench/.sweep-*.sh
+tests/bench/.sweep-*-helpers/

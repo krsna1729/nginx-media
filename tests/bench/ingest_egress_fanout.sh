@@ -79,6 +79,13 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Where this harness's own Python helpers live.  A run that must not be
+# changed underneath - a long sweep - copies them beside its snapshot of the
+# harness and points this at the copy: freezing the shell script alone is not
+# enough, because this script calls the helpers from the live tree on every
+# rung, so an edit partway through a run changes the verdicts of the rungs
+# after it.
+BENCH_DIR="${CAPACITY_BENCH_DIR:-$ROOT/tests/bench}"
 source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${CAPACITY_NGINX:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="${CAPACITY_RUN:-$ROOT/.build/ingest-egress-fanout}"
@@ -481,7 +488,7 @@ receiver_run() {
 }
 
 receiver_transport() {
-    python3 "$ROOT/tests/bench/capacity_receiver.py" \
+    python3 "$BENCH_DIR/capacity_receiver.py" \
         --config "$CAPACITY_RECEIVER_CONFIG" "$@"
 }
 
@@ -497,7 +504,7 @@ receiver_capture() {
         fi
         trap '[ -z "$client" ] || { kill "$client" 2>/dev/null || true; wait "$client" 2>/dev/null || true; }' EXIT
         trap 'exit 1' TERM INT
-        python3 "$ROOT/tests/bench/capacity_receiver.py" \
+        python3 "$BENCH_DIR/capacity_receiver.py" \
             --config "$CAPACITY_RECEIVER_CONFIG" "${gate[@]}" "$@" &
         client="$!"
         if [ -n "${CAPTURE_READY_FILE:-}" ]; then
@@ -546,7 +553,7 @@ receiver_start() {   # <identity file> <log> <argv...>; sets RECEIVER_PID
         return 0
     fi
     receiver_mkdir "$(dirname "$identity")" || return 1
-    python3 "$ROOT/tests/bench/capacity_receiver.py" --config "$CAPACITY_RECEIVER_CONFIG" \
+    python3 "$BENCH_DIR/capacity_receiver.py" --config "$CAPACITY_RECEIVER_CONFIG" \
         --owner-pid "$$" start "$identity" "$@" >"$log" 2>&1 &
     client="$!"
     for attempt in $(seq 1 100); do
@@ -772,7 +779,7 @@ with socket.socket() as listener:
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     listener.bind(("127.0.0.1", int(sys.argv[1])))
 PY
-            python3 "$ROOT/tests/bench/capacity_receiver.py" --config "$CAPACITY_RECEIVER_CONFIG" \
+            python3 "$BENCH_DIR/capacity_receiver.py" --config "$CAPACITY_RECEIVER_CONFIG" \
                 --owner-pid "$$" tunnel "$(( BASE + 256 + k ))" "$(rtmp_sink_http_port "$k")" \
                 >"$dir/tunnel.log" 2>&1 &
             RECEIVER_TUNNELS+=( "$!" )
@@ -926,7 +933,7 @@ with open(sys.argv[2], "w") as output:
 PY
         receiver_transport push "$dir/receiver.roles" || return 1
         receiver_start "$dir/receiver-cpu.identity.json" "$dir/receiver-cpu.log" \
-            python3 "$ROOT/tests/bench/proc_cpu_sampler.py" sample \
+            python3 "$BENCH_DIR/proc_cpu_sampler.py" sample \
             --sleep "$1" --roles "$dir/receiver.roles" \
             --before "$dir/receiver.cpu.before" --after "$dir/receiver.cpu.after" \
             --extended-before "$dir/receiver.host.before.json" \
@@ -934,7 +941,7 @@ PY
             --boundary-dir "$dir/receiver-boundary" "${remote_pids[@]}" || return 1
         remote_sampler="$RECEIVER_PID"
     fi
-    python3 "$ROOT/tests/bench/proc_cpu_sampler.py" sample \
+    python3 "$BENCH_DIR/proc_cpu_sampler.py" sample \
         --sleep "$1" --roles "$RUN/roles" --before "$W_BEFORE" --after "$W_AFTER" \
         "${extended[@]}" "${boundaries[@]}" "${pids[@]}" >"$dir/cpu.window.log" &
     local_sampler="$!"
@@ -956,7 +963,7 @@ PY
             remote_request=""
             callback_pid=""
             if [ -n "$remote_sampler" ]; then
-                python3 "$ROOT/tests/bench/capacity_receiver.py" \
+                python3 "$BENCH_DIR/capacity_receiver.py" \
                     --config "$CAPACITY_RECEIVER_CONFIG" \
                     --capture-ready-file "$gate_dir/cpu.ready" \
                     --capture-release-file "$dir/cpu.release.$boundary" \
@@ -1042,7 +1049,7 @@ PY
 report_cpu() {   # <before> <after> <seconds>
     local pid role pct
 
-    python3 "$ROOT/tests/bench/proc_cpu_sampler.py" report "$1" "$2" \
+    python3 "$BENCH_DIR/proc_cpu_sampler.py" report "$1" "$2" \
         --window "$3" | sort -k2,2 -k1,1 | while read -r pid role pct; do
         printf '%s %s %s\n' "$(slot_name "$pid")" "$role" "$pct"
     done
@@ -2502,7 +2509,7 @@ capacity_rtmp_sink_metrics() {   # <file prefix>
     # divides by the interval that brackets these counters; one file per
     # sink, summed by the analyzer
     for (( k = 0; k < RTMP_SINK_COUNT; k++ )); do
-        python3 "$ROOT/tests/bench/rtmp_capacity_quality.py" scrape \
+        python3 "$BENCH_DIR/rtmp_capacity_quality.py" scrape \
             "$(rtmp_sink_api "$k")/metrics" \
             "$prefix.${RTMP_SINK_PIDS[$k]}" &
         requests+=( "$!" )
@@ -2597,7 +2604,7 @@ PY
 }
 capacity_build_srt_sink() {
     python3 "$ROOT/scripts/build-capacity-receiver.py" \
-        --source "$ROOT/tests/bench/srt_fanout_sink.c" \
+        --source "$BENCH_DIR/srt_fanout_sink.c" \
         --binary "$RUN/srt_fanout_sink"
 }
 
@@ -3382,7 +3389,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     rm -rf "$case_dir"
     mkdir -p "$case_dir"
     receiver_mkdir "$case_dir" || return 1
-    python3 "$ROOT/tests/bench/capacity_media_offer.py" prepare \
+    python3 "$BENCH_DIR/capacity_media_offer.py" prepare \
         "$source" "$case_dir/prepared-media.json" || return 1
     if [ -n "$CAPACITY_RECEIVER_CONFIG" ]; then
         python3 - "$CAPACITY_RECEIVER_CONFIG" "$case_dir" <<'PY'
@@ -3539,7 +3546,7 @@ PY
         hls_push_sink_port=$(( BASE + 30 ))
         receiver_start "$case_dir/hls-push.identity.json" "$case_dir/hls-push-sink.log" \
             $(pin "$CAPACITY_RECEIVER_CPUS") \
-            python3 "$ROOT/tests/bench/hls_push_capacity.py" serve \
+            python3 "$BENCH_DIR/hls_push_capacity.py" serve \
             --port "$hls_push_sink_port" --bind "$CAPACITY_RECEIVER_ADDR" || return 1
         hls_push_sink_pid="$RECEIVER_PID"
         SINKS+=( "$hls_push_sink_pid" )
@@ -3608,14 +3615,14 @@ PY
         [ -n "${CAPACITY_RECEIVER_CONFIG:-}" ] && provision_args+=( --receiver-config )
 
         if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
-            provision_out="$(sender_run python3 "$ROOT/tests/bench/capacity_client.py" \
+            provision_out="$(sender_run python3 "$BENCH_DIR/capacity_client.py" \
                 --api "$(restream_api)/api/v1" --workers "$CAPACITY_WORKERS" \
                 provision --engine restream \
                 --pipeline "$RESTREAM_PIPELINE_ID" \
                 --cookie-file "$RUN/restream/cookie.txt" \
                 "${provision_args[@]}" 2>&1)" || provision_rc=$?
         else
-            provision_out="$(sender_run python3 "$ROOT/tests/bench/capacity_client.py" \
+            provision_out="$(sender_run python3 "$BENCH_DIR/capacity_client.py" \
                 --api "$(api)" --workers "$CAPACITY_WORKERS" \
                 provision --engine nginx \
                 "${provision_args[@]}" 2>&1)" || provision_rc=$?
@@ -3671,7 +3678,7 @@ PY
     fi
     if [ "$hls_readers" -gt 0 ] || [ "$hls_push_destinations" -gt 0 ]; then
         if [ "${CAPACITY_ENGINE:-nginx}" != restream ]; then
-            python3 "$ROOT/tests/bench/capacity_media_offer.py" observe \
+            python3 "$BENCH_DIR/capacity_media_offer.py" observe \
                 "$RUN/hls/live/${names[0]}/index.m3u8" "$case_dir/hls-production.json" \
                 >"$case_dir/hls-production.log" 2>&1 &
             offer_pid="$!"
@@ -3792,7 +3799,7 @@ PY
         hls_log="$case_dir/hls-reader.log"
         rm -f "$hls_ready" "$hls_report_file"
         receiver_start "$case_dir/hls.identity.json" "$hls_log" \
-            $(pin "$CAPACITY_RECEIVER_CPUS") python3 "$ROOT/tests/bench/hls_capacity_readers.py" \
+            $(pin "$CAPACITY_RECEIVER_CPUS") python3 "$BENCH_DIR/hls_capacity_readers.py" \
             --url "$reader_url" \
             --readers "$hls_readers" --duration "$(( seconds + 60 ))" \
             --report "$hls_report_file" --ready-file "$hls_ready" \
@@ -3885,7 +3892,7 @@ PY
                     > "$hls_push_progress_file" || true
                 receiver_curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__snapshot" \
                     > "$case_dir/hls-push.readiness.json" || true
-                python3 "$ROOT/tests/bench/hls_push_capacity.py" \
+                python3 "$BENCH_DIR/hls_push_capacity.py" \
                     readiness-report \
                     --metrics-prefix "$case_dir/workers.readiness" \
                     --stream "${names[0]}" \
@@ -3935,7 +3942,7 @@ PY
     # receiver samplers are ready and wait for their opening baseline releases.
     if [ "$rtmp_destinations" -gt 0 ] && [ "$quality_mode" = yes ]; then
         rm -f "$case_dir"/rtmp-sampler.ready* "$case_dir/rtmp-sampler.baseline"
-        python3 "$ROOT/tests/bench/rtmp_capacity_quality.py" sample \
+        python3 "$BENCH_DIR/rtmp_capacity_quality.py" sample \
             "$(rtmp_sink_metric_urls)" "$case_dir/rtmp-receiver.before" \
             "$case_dir/rtmp-receiver-intervals.csv" --interval 1 \
             --ready-file "$case_dir/rtmp-sampler.ready" \
@@ -3956,7 +3963,7 @@ PY
             # sender's API, so it runs where that API is reachable.  exec, not
             # a plain call: it is backgrounded, and the harness records $! as
             # the sampler it must stop, so the PID has to be python's.
-            sender_exec python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
+            sender_exec python3 "$BENCH_DIR/srt_capacity_quality.py" \
                 sample-queues "$HTTP_PORT" "$case_dir/queue-samples.csv" \
                 "${quality_worker_pids[@]}" --interval 1 \
                 --ready-file "$case_dir/queue-sampler.ready" \
@@ -3968,7 +3975,7 @@ PY
             touch "$case_dir/queue-sampler.ready" "$case_dir/queue-sampler.baseline" "$case_dir/queue-samples.csv"
         fi
         receiver_start "$case_dir/srt-sampler.identity.json" "$case_dir/receiver-sampler.log" \
-            python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
+            python3 "$BENCH_DIR/srt_capacity_quality.py" \
             sample-receivers "${sink_pid#r}" "$sink_csv.snapshot" \
             "$sink_snapshot_before" "$case_dir/receiver-intervals.csv" \
             --interval 1 --ready-file "$case_dir/receiver-sampler.ready" || return 1
@@ -4289,7 +4296,7 @@ PY
         if [ "$quality_mode" = yes ]; then
             quality_report_file="$case_dir/quality-report.txt"
             quality_reference_bps="${CAPACITY_QUALITY_REFERENCE_BPS:-0}"
-            python3 "$ROOT/tests/bench/srt_capacity_quality.py" report \
+            python3 "$BENCH_DIR/srt_capacity_quality.py" report \
                 --clock-domain "$receiver_clock" \
                 --baseline "$sink_snapshot_before" \
                 --final "$sink_snapshot_after" \
@@ -4338,7 +4345,7 @@ PY
         if [ "$quality_mode" = yes ]; then
             rtmp_reference_bps="${CAPACITY_QUALITY_REFERENCE_RTMP_BPS:-0}"
             rtmp_report_file="$case_dir/rtmp-quality.txt"
-            python3 "$ROOT/tests/bench/rtmp_capacity_quality.py" \
+            python3 "$BENCH_DIR/rtmp_capacity_quality.py" \
                 --before-prefix "$case_dir/rtmp-receiver.before" \
                 --after-prefix "$case_dir/rtmp-receiver.after" \
                 --queue-before-prefix "$case_dir/workers.before" \
@@ -4381,7 +4388,7 @@ PY
     fi
     if [ "$hls_readers" -gt 0 ]; then
         receiver_fetch "$hls_report_file" || return 1
-        python3 "$ROOT/tests/bench/hls_capacity_readers.py" judge \
+        python3 "$BENCH_DIR/hls_capacity_readers.py" judge \
             --report "$hls_report_file" \
             --prepared-media "$case_dir/prepared-media.json" \
             --produced-segments "$case_dir/hls-production.json" \
@@ -4413,7 +4420,7 @@ PY
     if [ "$hls_push_destinations" -gt 0 ]; then
         hls_push_quality_report="$case_dir/hls-push-quality.txt"
         hls_push_reference_bps="${CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS:-0}"
-        python3 "$ROOT/tests/bench/hls_push_capacity.py" report \
+        python3 "$BENCH_DIR/hls_push_capacity.py" report \
             --before-prefix "$case_dir/workers.before" \
             --after-prefix "$case_dir/workers.after" \
             --stream "${names[0]}" \
@@ -4787,7 +4794,7 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT cou
     # is told the configured sets as well, since a fingerprint taken through
     # ssh sees the ssh session's affinity.
     sender_run $(pin "$CAPACITY_NGINX_CPUS") \
-        python3 "$ROOT/tests/bench/capacity_preflight.py" host --role sender \
+        python3 "$BENCH_DIR/capacity_preflight.py" host --role sender \
         --binary "$NGINX" --json "$case_dir/preflight.sender.json" \
         >"$case_dir/preflight.sender.log" 2>&1 \
         || { echo "preflight: sender fingerprint failed" >&2; return 1; }
@@ -4801,7 +4808,7 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT cou
         receiver_binary="$(receiver_run python3 -c 'import sys; print(sys.executable)')" \
             || { echo "preflight: receiver interpreter lookup failed" >&2; return 1; }
     fi
-    receiver_run python3 "$ROOT/tests/bench/capacity_preflight.py" \
+    receiver_run python3 "$BENCH_DIR/capacity_preflight.py" \
         host --role receiver --binary "$receiver_binary" \
         --json "$case_dir/preflight.receiver.json" \
         >"$case_dir/preflight.receiver.log" 2>&1 \
@@ -4809,7 +4816,7 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT cou
     receiver_remove "$case_dir/preflight.rx.json" || return 1
     rm -f "$case_dir/preflight.tx.json"
     receiver_start "$case_dir/probe.identity.json" "$case_dir/preflight.rx.log" \
-        python3 "$ROOT/tests/bench/capacity_preflight.py" probe \
+        python3 "$BENCH_DIR/capacity_preflight.py" probe \
         --listen --port "$probe_port" --seconds "$seconds" --threads "$threads" \
         --json "$case_dir/preflight.rx.json" || return 1
     local rx_pid="$RECEIVER_PID"
@@ -4819,7 +4826,7 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT cou
     # route to - the veth pair joins the two namespaces and the host is not on
     # it - and report either a failed probe or total loss, both of which are
     # verdicts about the harness rather than the path.
-    sender_run python3 "$ROOT/tests/bench/capacity_preflight.py" probe \
+    sender_run python3 "$BENCH_DIR/capacity_preflight.py" probe \
         --peer "$CAPACITY_RECEIVER_ADDR" --port "$probe_port" \
         --seconds "$(( seconds - 1 ))" --threads "$threads" \
         --json "$case_dir/preflight.tx.json" \
@@ -4873,7 +4880,7 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT cou
         || judge_args+=( --sender-cpu-per-gbps "$PREFLIGHT_SENDER_COST" )
     [ -z "$PREFLIGHT_RECEIVER_COST" ] \
         || judge_args+=( --receiver-cpu-per-gbps "$PREFLIGHT_RECEIVER_COST" )
-    python3 "$ROOT/tests/bench/capacity_preflight.py" judge "${judge_args[@]}" \
+    python3 "$BENCH_DIR/capacity_preflight.py" judge "${judge_args[@]}" \
         | sed 's/^/   /'
     local judge_status="${PIPESTATUS[0]}"
     return "$judge_status"
@@ -4932,12 +4939,12 @@ capacity_write_diagnostics() {   # <case dir> <outcome> [key=value ...]
     # the cgroup, the NIC and the transport library it was taken on.  Half a
     # second, best effort, never a reason to fail a rung.
     [ -s "$case_dir/host-fingerprint.json" ] \
-        || python3 "$ROOT/tests/bench/capacity_preflight.py" host \
+        || python3 "$BENCH_DIR/capacity_preflight.py" host \
                --role sender --binary "$NGINX" \
                --json "$case_dir/host-fingerprint.json" \
                >"$case_dir/host-fingerprint.log" 2>&1 \
         || echo "   host fingerprint could not be taken for $case_dir" >&2
-    python3 "$ROOT/tests/bench/capacity_diagnostics.py" build "$case_dir" \
+    python3 "$BENCH_DIR/capacity_diagnostics.py" build "$case_dir" \
         --meta outcome="$outcome" --meta mix="$CAPACITY_CURRENT_MIX" \
         --meta sink_mode="${CAPACITY_CURRENT_SINK_MODE:-correctness}" \
         --meta srt_senders="$CAPACITY_FIXED_SRT_WORKERS" \
@@ -5242,7 +5249,7 @@ phase_capacity_quality_ladder() {
     local requested found
     local -a executed_mixes=() requested_mixes=() selected_mix_specs=()
     local -a mix_specs=()
-    local mixes_file="$ROOT/tests/bench/capacity-mixes.conf"
+    local mixes_file="$BENCH_DIR/capacity-mixes.conf"
 
     # The workloads are listed once, in capacity-mixes.conf, which the CI
     # driver reads too: one set of mixes for the manifest and the execution.
@@ -5298,7 +5305,7 @@ phase_capacity_quality_ladder() {
             status="$?"
             # a setup failure ends that mix's ladder but not the others
             if [ "$status" -ne 2 ] && [ "$status" -ne 3 ]; then
-                python3 "$ROOT/tests/bench/capacity_diagnostics.py" matrix \
+                python3 "$BENCH_DIR/capacity_diagnostics.py" matrix \
                     "$RUN" || true
                 return "$status"
             fi
@@ -5308,7 +5315,7 @@ phase_capacity_quality_ladder() {
                 || failed_mixes+=" $mix"
         fi
     done
-    python3 "$ROOT/tests/bench/capacity_diagnostics.py" matrix "$RUN" || true
+    python3 "$BENCH_DIR/capacity_diagnostics.py" matrix "$RUN" || true
     if [ "$failures" -gt 0 ]; then
         echo "quality_ladders_with_failures=$failed_mixes"
         return 1

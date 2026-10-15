@@ -97,17 +97,35 @@ def engine_binary(engine):
 
 
 def snapshot_harness():
-    """One immutable copy of the harness for the whole sweep.
+    """One immutable copy of the harness *and its helpers* for the sweep.
 
-    The harness resolves its own root two levels up, so the copy has to sit in
-    the same directory; it is dot-prefixed and ignored by git.
+    The harness resolves its own root two levels up, so the script copy has to
+    sit in the same directory; it is dot-prefixed and ignored by git.
+
+    Freezing the shell script alone is not enough. The harness invokes its
+    Python helpers by path on every rung - the preflight, the receiver, the
+    samplers, the quality tools - so an edit to any of them partway through a
+    sweep changes the verdicts of every rung after it, in cells that look
+    otherwise identical. The helpers are copied beside the snapshot and
+    `CAPACITY_BENCH_DIR` points the harness at the copy.
     """
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    path = os.path.join(PROJECT_ROOT, "tests/bench",
-                        ".sweep-%s.sh" % stamp)
+    bench = os.path.join(PROJECT_ROOT, "tests/bench")
+    helpers = os.path.join(bench, ".sweep-%s-helpers" % stamp)
+    os.makedirs(helpers, exist_ok=True)
+
+    copied = 0
+    for name in sorted(os.listdir(bench)):
+        if not name.endswith(".py") or name.startswith("test_"):
+            continue
+        shutil.copy(os.path.join(bench, name), os.path.join(helpers, name))
+        copied += 1
+
+    path = os.path.join(bench, ".sweep-%s.sh" % stamp)
     shutil.copy(HARNESS, path)
     os.chmod(path, 0o755)
-    return path
+    log("froze the harness and %d Python helpers" % copied)
+    return path, helpers
 
 
 def cell_id(engine, cpus):
@@ -115,7 +133,7 @@ def cell_id(engine, cpus):
     return "%s-%dc" % (engine["id"], len(cpus))
 
 
-def run_cell(engine, cpus, snapshot, args, out_dir):
+def run_cell(engine, cpus, snapshot, helpers, args, out_dir):
     """Run the seven-workload ladder for one engine at one CPU count."""
     identifier = cell_id(engine, cpus)
     case_dir = os.path.join(out_dir, identifier)
@@ -152,6 +170,7 @@ def run_cell(engine, cpus, snapshot, args, out_dir):
         "CAPACITY_QUALITY_SECONDS": str(args.seconds),
         "CAPACITY_QUALITY_MIXES": args.mixes,
         "CAPACITY_QUALITY_STEPS": args.steps,
+        "CAPACITY_BENCH_DIR": helpers,
         "CAPACITY_QUALITY_STOP_AFTER_FAILURES": "1",
         "CAPACITY_SINK_MODE": "correctness",
         "PHASES": "capacity-quality-ladder",
@@ -311,7 +330,7 @@ def main():
             key, value = line.split("=", 1)
             args.veth_env[key.strip()] = value.strip().strip("'\"")
 
-    snapshot = snapshot_harness()
+    snapshot, helpers = snapshot_harness()
     log("harness snapshot: %s" % os.path.relpath(snapshot, PROJECT_ROOT))
     log("%d cells, %ds per rung, %d workloads each"
         % (len(cells), args.seconds, len(args.mixes.split())))
@@ -344,7 +363,7 @@ def main():
             % (identifier, len(cpus), "" if len(cpus) == 1 else "s",
                ",".join(str(c) for c in cpus)))
         try:
-            record = run_cell(engine, cpus, snapshot, args, args.out)
+            record = run_cell(engine, cpus, snapshot, helpers, args, args.out)
         except KeyboardInterrupt:
             log("interrupted; %s is not recorded and will re-run"
                 % identifier)
