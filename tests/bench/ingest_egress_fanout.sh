@@ -2756,7 +2756,7 @@ capacity_srt_receiver_snapshot() {   # <receiver PID> <snapshot path> <copy path
     # is the only artifact that says how many peers connected: losing it is
     # why a large rung reported a bare setup error with no reason recorded.
     # The wait still ends as soon as the file appears.
-    local deadline=$(( SECONDS + ${CAPACITY_SRT_SNAPSHOT_SECONDS:-30} ))
+    local deadline=$(( SECONDS + ${SRT_SNAPSHOT_SECONDS:-30} ))
     while [ "$SECONDS" -lt "$deadline" ]; do
         receiver_file_ready "$snapshot" && break
         receiver_alive "$pid" \
@@ -2765,7 +2765,7 @@ capacity_srt_receiver_snapshot() {   # <receiver PID> <snapshot path> <copy path
     done
     receiver_file_ready "$snapshot" \
         || { echo "SRT receiver wrote no snapshot within" \
-                  "${CAPACITY_SRT_SNAPSHOT_SECONDS:-30}s" >&2; return 1; }
+                  "${SRT_SNAPSHOT_SECONDS:-30}s" >&2; return 1; }
     receiver_fetch "$snapshot" || return 1
     [ -s "$snapshot" ] \
         || { echo "SRT receiver snapshot was not written" >&2; return 1; }
@@ -3504,8 +3504,9 @@ PY
         # The sink serialises its whole peer table when asked for a snapshot,
         # so the budget scales with the table.  Without this the snapshot - and
         # with it the only record of how many peers connected - was lost first
-        # on the largest rungs.
-        CAPACITY_SRT_SNAPSHOT_SECONDS="${CAPACITY_SRT_SNAPSHOT_SECONDS:-$(( 10 + total_srt_dest / 8 ))}"
+        # on the largest rungs.  Assigned unconditionally so every rung gets
+        # its own value rather than inheriting the first rung's.
+        SRT_SNAPSHOT_SECONDS="${CAPACITY_SRT_SNAPSHOT_SECONDS:-$(( 10 + total_srt_dest / 8 ))}"
     fi
     if [ "$srt_destinations" -gt 0 ]; then
         sink_ready="$case_dir/srt.ready"
@@ -3698,10 +3699,13 @@ PY
             else
                 echo "could not capture incomplete SRT receiver snapshot" >&2
             fi
-            echo "shared SRT receiver accepted fewer than $total_srt_dest peers" \
-                 "within ${waited}00ms of the ${connect_wait}s connect window" >&2
-            echo "   the receiver's own CPU and the sink log distinguish a" \
-                 "sender that offered too few from a receiver that accepted too few" >&2
+            # `waited` counts 100ms iterations of the readiness loop.
+            printf 'shared SRT receiver accepted fewer than %s peers: %d.%ds of a %ss connect window elapsed\n' \
+                "$total_srt_dest" "$(( waited / 10 ))" "$(( waited % 10 ))" \
+                "$connect_wait" >&2
+            echo "   the receiver's CPU, the sink log and the per-rung restream" \
+                 "output count separate a sender that offered too few from a" \
+                 "receiver that accepted too few" >&2
             return 1
         fi
     fi
@@ -4855,6 +4859,28 @@ capacity_write_diagnostics() {   # <case dir> <outcome> [key=value ...]
         && [ "$(cat "$RUN/active-capacity-case")" = "$case_dir" ]; then
         mkdir -p "$case_dir/runtime-logs"
         [ ! -d "$RUN/logs" ] || cp -a "$RUN/logs" "$case_dir/runtime-logs/sender"
+
+    # Restream keeps one database and one log directory for the whole engine,
+    # not one per rung, so the next rung overwrites whatever explained this
+    # one. Copy what belongs to this rung into its own case directory while it
+    # is still current: without this a restream setup failure leaves nothing to
+    # read afterwards, which is exactly how the 1024-destination rung above
+    # became un-attributable.
+    if [ "${CAPACITY_ENGINE:-nginx}" = restream ] && [ -d "$RUN/restream" ]; then
+        mkdir -p "$case_dir/restream"
+        for artifact in logs db cookie.txt; do
+            [ -e "$RUN/restream/$artifact" ] || continue
+            cp -r "$RUN/restream/$artifact" "$case_dir/restream/" 2>/dev/null || true
+        done
+        # The rung's own output count, which is what a failed rung must be able
+        # to report: an engine that created 1024 outputs and an engine that
+        # created none look identical from the receiver's side.
+        if [ -f "$RUN/restream/db/restream.db" ]; then
+            sqlite3 -header -csv "$RUN/restream/db/restream.db" \
+                'select desired_state, count(*) as outputs from outputs group by desired_state' \
+                >"$case_dir/restream-outputs.csv" 2>/dev/null || true
+        fi
+    fi
         local sink_dir
         for sink_dir in "$RTMP_SINK_RUN"-*; do
             [ -f "$sink_dir/active-case" ] \
