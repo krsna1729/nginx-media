@@ -4773,7 +4773,7 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT cou
     # role's affinity - nginx's, the receivers', not this shell's.  The judge
     # is told the configured sets as well, since a fingerprint taken through
     # ssh sees the ssh session's affinity.
-    $(pin "$CAPACITY_NGINX_CPUS") \
+    sender_run $(pin "$CAPACITY_NGINX_CPUS") \
         python3 "$ROOT/tests/bench/capacity_preflight.py" host --role sender \
         --binary "$NGINX" --json "$case_dir/preflight.sender.json" \
         >"$case_dir/preflight.sender.log" 2>&1 \
@@ -4801,7 +4801,12 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT cou
         --json "$case_dir/preflight.rx.json" || return 1
     local rx_pid="$RECEIVER_PID"
     sleep 0.5
-    python3 "$ROOT/tests/bench/capacity_preflight.py" probe \
+    # The probe measures the sender's path to the receiver, so it runs where
+    # the sender is.  From the host it would probe an address the host has no
+    # route to - the veth pair joins the two namespaces and the host is not on
+    # it - and report either a failed probe or total loss, both of which are
+    # verdicts about the harness rather than the path.
+    sender_run python3 "$ROOT/tests/bench/capacity_preflight.py" probe \
         --peer "$CAPACITY_RECEIVER_ADDR" --port "$probe_port" \
         --seconds "$(( seconds - 1 ))" --threads "$threads" \
         --json "$case_dir/preflight.tx.json" \
@@ -4823,6 +4828,10 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT cou
         || judge_args+=( --sender-cpus "$CAPACITY_NGINX_CPUS" )
     [ -z "$CAPACITY_RECEIVER_CPUS" ] \
         || judge_args+=( --receiver-cpus "$CAPACITY_RECEIVER_CPUS" )
+    # The sender is what a capacity ladder measures, so its CPU need is
+    # recorded rather than judged; the receiver is the harness's own
+    # infrastructure and is still gated.
+    judge_args+=( --sender-under-test )
     capacity_preflight_calibration "$case_dir"
     # The CPUs the run is pinned to: foreign work on those is the run's
     # limit, foreign work elsewhere is not.

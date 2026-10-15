@@ -875,6 +875,14 @@ def judge(args):
         needed = payload_bps / 1e9 * cost / 100.0
         details[f"{role}_cpu_needed_cores"] = round(needed, 2)
         if needed > permitted:
+            if role == "sender" and args.sender_under_test:
+                # Recorded, not judged.  The sender's CPU cost per delivered
+                # Gbit/s at a given core count *is* the capacity being
+                # measured; a rung where it needs more cores than it has is
+                # the rung that answers the question, so calling it a host
+                # limit would discard the result.
+                details["sender_cpu_exceeds_permitted_cpus"] = True
+                continue
             limits.append({
                 "side": role, "resource": "cpu",
                 "measured": permitted, "required": round(needed, 2),
@@ -1021,6 +1029,12 @@ def main():
     j.add_argument("--overhead-factor", type=float,
                    default=DEFAULT_OVERHEAD_FACTOR)
     j.add_argument("--max-probe-loss", type=float, default=0.01)
+    j.add_argument("--sender-under-test", action="store_true",
+                   help="the sender is the system being measured, so its CPU "
+                        "need is recorded but is never a host limit: a "
+                        "capacity ladder deliberately gives the sender few "
+                        "cores, and calling that configuration inadequate "
+                        "would skip the rungs that define the answer")
     j.add_argument("--sender-cpu-per-gbps", type=float)
     j.add_argument("--receiver-cpu-per-gbps", type=float)
     j.add_argument("--sender-cpus",
