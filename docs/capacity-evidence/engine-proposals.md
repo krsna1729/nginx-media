@@ -50,12 +50,14 @@ quality-pure-srt-512 ... result=pass
 ```
 
 The receiver used 462% of one core at 512 destinations for 4 Gbit/s of SRT.
-Doubling the destination count doubles the packet rate for the same total
-bandwidth, so 1024 destinations implies roughly 924% of one core. The receiver
-is pinned to eight E-cores, which is 800% of one core before counting that
-E-cores are narrower than P-cores. The receiver is therefore the most likely
-side to run out first - but this is arithmetic on one measurement, not a
-measurement of the failing rung, whose CPU figures are unavailable.
+Every destination carries its own 8 Mbit/s, so 1024 destinations means
+8 Gbit/s and doubles both the packet rate and the bandwidth - the harness
+recorded `offered_egress=8192.0Mbit/s` for that rung. That implies roughly
+924% of one core. The receiver is pinned to eight E-cores, which is 800% of
+one core before counting that E-cores are narrower than P-cores. The receiver
+is therefore the most likely side to run out first - but this is arithmetic on
+one measurement, not a measurement of the failing rung, whose CPU figures are
+unavailable.
 
 **Why it cannot be attributed further from this run.** `start_restream_engine`
 removes `$RUN/restream` on every start, so restream's database and logs for

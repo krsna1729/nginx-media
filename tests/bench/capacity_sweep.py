@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -126,7 +127,15 @@ def run_cell(engine, cpus, snapshot, args, out_dir):
     # the publisher and the receiver stay on the E-cores.
     binary = engine_binary(engine)
     environment = dict(os.environ, **{
-        "CAPACITY_PREFLIGHT": "no",
+        # `auto`, the harness default, not `no`.  It fingerprints the hosts and
+        # measures the path before a rung at or above
+        # CAPACITY_PREFLIGHT_MIN_DESTINATIONS, and records a rung the
+        # environment cannot carry as infrastructure-limited rather than
+        # measuring it.  With preflight off, a receiver that runs out of CPU
+        # first is reported as the engine losing capacity, and every cell would
+        # flatten at the same rung for a reason that has nothing to do with the
+        # engine.  It costs one short calibration per workload.
+        "CAPACITY_PREFLIGHT": "auto",
         "CAPACITY_ENGINE": "restream" if engine["id"] == "restream" else "nginx",
         "CAPACITY_NGINX": binary,
         "RESTREAM_BIN": binary,
@@ -189,7 +198,29 @@ def run_cell(engine, cpus, snapshot, args, out_dir):
             record["matrix"] = json.load(handle)
     else:
         record["note"] = "the harness wrote no matrix for this cell"
+
+    # The receiver's own CPU at the top rung each workload reached.  A cell
+    # whose ladders all stop with the receiver near its core count stopped on
+    # the harness, and the summary has to be able to say so.
+    record["receiver_cpu_of_one_core"] = top_receiver_cpu(bench_log)
     return record
+
+
+def top_receiver_cpu(path):
+    """The largest `receivers N% of one core` the harness logged for a cell."""
+    worst = None
+    try:
+        with open(path) as handle:
+            for line in handle:
+                if "vs receivers" not in line:
+                    continue
+                match = re.search(r"receivers (\d+)% of one core", line)
+                if match:
+                    value = int(match.group(1))
+                    worst = value if worst is None else max(worst, value)
+    except OSError:
+        return None
+    return worst
 
 
 def summarise(records):
@@ -214,8 +245,12 @@ def summarise(records):
                 limited.append("%s=%s" % (mix, entry["infrastructure_limited"]))
             if entry.get("setup_failure_rung_params") or entry.get("setup_limited"):
                 failing.append("%s setup@%s" % (mix, entry.get("setup_limited")))
-        lines.append("%-18s %-9s pass:%s" % (record["cell"], record["cores"],
-                                             ",".join(passing) or "none"))
+        receiver = record.get("receiver_cpu_of_one_core")
+        lines.append("%-18s %-9s pass:%s%s"
+                     % (record["cell"], record["cores"],
+                        ",".join(passing) or "none",
+                        "" if receiver is None
+                        else "  (receiver peaked at %d%% of one core)" % receiver))
         if failing:
             lines.append("%-28s first quality failures: %s"
                          % ("", ",".join(failing)))
