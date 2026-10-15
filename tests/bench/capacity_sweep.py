@@ -112,20 +112,49 @@ def snapshot_harness():
     stamp = time.strftime("%Y%m%d-%H%M%S")
     bench = os.path.join(PROJECT_ROOT, "tests/bench")
     helpers = os.path.join(bench, ".sweep-%s-helpers" % stamp)
+    scripts = os.path.join(bench, ".sweep-%s-scripts" % stamp)
     os.makedirs(helpers, exist_ok=True)
+    os.makedirs(scripts, exist_ok=True)
 
-    copied = 0
-    for name in sorted(os.listdir(bench)):
-        if not name.endswith(".py") or name.startswith("test_"):
-            continue
-        shutil.copy(os.path.join(bench, name), os.path.join(helpers, name))
-        copied += 1
+    # The list is read out of the harness rather than hardcoded, so a helper
+    # added later is frozen without anyone remembering to add it here. An
+    # earlier attempt copied only `*.py` and missed `capacity-mixes.conf` and
+    # `srt_fanout_sink.c`, which stopped every cell at start-up.
+    needed = {"bench": set(), "scripts": set()}
+    for match in re.finditer(
+            r"\$(BENCH_DIR|SCRIPTS_DIR|ROOT/scripts)/([A-Za-z0-9_.-]+)",
+            open(HARNESS, errors="ignore").read()):
+        needed["bench" if match.group(1) == "BENCH_DIR" else "scripts"].add(
+            match.group(2))
+
+    missing = []
+    for kind, target in (("bench", helpers), ("scripts", scripts)):
+        for name in sorted(needed[kind]):
+            source = os.path.join(
+                bench if kind == "bench" else os.path.join(PROJECT_ROOT, "scripts"),
+                name)
+            if not os.path.exists(source):
+                missing.append(name)
+                continue
+            shutil.copy(source, os.path.join(target, name))
+    if missing:
+        raise SystemExit("the harness reads files that do not exist: %s"
+                         % ", ".join(missing))
+    # An empty directory here means the pattern above missed a reference, and
+    # the run would fail at the first rung with a missing-file error rather
+    # than at start-up with this one.
+    for kind, names in needed.items():
+        if not names:
+            raise SystemExit(
+                "no %s helpers found in the harness; the freeze would be "
+                "incomplete and the run would fail on its first rung" % kind)
 
     path = os.path.join(bench, ".sweep-%s.sh" % stamp)
     shutil.copy(HARNESS, path)
     os.chmod(path, 0o755)
-    log("froze the harness and %d Python helpers" % copied)
-    return path, helpers
+    log("froze the harness, %d benchmark helpers and %d script helpers"
+        % (len(needed["bench"]), len(needed["scripts"])))
+    return path, helpers, scripts
 
 
 def cell_id(engine, cpus):
@@ -133,7 +162,7 @@ def cell_id(engine, cpus):
     return "%s-%dc" % (engine["id"], len(cpus))
 
 
-def run_cell(engine, cpus, snapshot, helpers, args, out_dir):
+def run_cell(engine, cpus, snapshot, helpers, scripts, args, out_dir):
     """Run the seven-workload ladder for one engine at one CPU count."""
     identifier = cell_id(engine, cpus)
     case_dir = os.path.join(out_dir, identifier)
@@ -171,6 +200,7 @@ def run_cell(engine, cpus, snapshot, helpers, args, out_dir):
         "CAPACITY_QUALITY_MIXES": args.mixes,
         "CAPACITY_QUALITY_STEPS": args.steps,
         "CAPACITY_BENCH_DIR": helpers,
+        "CAPACITY_SCRIPTS_DIR": scripts,
         "CAPACITY_QUALITY_STOP_AFTER_FAILURES": "1",
         "CAPACITY_SINK_MODE": "correctness",
         "PHASES": "capacity-quality-ladder",
@@ -300,6 +330,15 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
+    # Become the leader of its own process group and record it, so a later
+    # stop targets this sweep by identity. Matching on a command line can
+    # match the shell running the stop command itself.
+    try:
+        os.setpgrp()
+    except OSError:
+        pass
+    with open(os.path.join(args.out, "sweep.pid"), "w") as handle:
+        handle.write("%d\n" % os.getpgid(0))
 
     engines = ENGINES
     if args.engines:
@@ -331,7 +370,7 @@ def main():
             key, value = line.split("=", 1)
             args.veth_env[key.strip()] = value.strip().strip("'\"")
 
-    snapshot, helpers = snapshot_harness()
+    snapshot, helpers, scripts = snapshot_harness()
     log("harness snapshot: %s" % os.path.relpath(snapshot, PROJECT_ROOT))
     log("%d cells, %ds per rung, %d workloads each"
         % (len(cells), args.seconds, len(args.mixes.split())))
@@ -364,7 +403,8 @@ def main():
             % (identifier, len(cpus), "" if len(cpus) == 1 else "s",
                ",".join(str(c) for c in cpus)))
         try:
-            record = run_cell(engine, cpus, snapshot, helpers, args, args.out)
+            record = run_cell(engine, cpus, snapshot, helpers, scripts,
+                              args, args.out)
         except KeyboardInterrupt:
             log("interrupted; %s is not recorded and will re-run"
                 % identifier)
@@ -375,6 +415,22 @@ def main():
         records.append(record)
         log("%-18s done in %.0fs, exit %s"
             % (identifier, record["wall_seconds"], record["exit_status"]))
+
+        # A cell that dies in seconds wrote no matrix because the harness
+        # failed to start, not because it measured a small capacity. Grinding
+        # through the remaining cells would produce a sweep of identical
+        # faults and hide the one line that explains them, so stop and say so.
+        if record["matrix"] is None and record["wall_seconds"] < 30:
+            log("")
+            log("%s died after %.1fs without a matrix - this is a harness "
+                "fault, not a capacity result. Stopping rather than recording "
+                "the same fault %d more times."
+                % (identifier, record["wall_seconds"], len(cells) - 1))
+            log("the cell's own log is %s"
+                % os.path.relpath(
+                    os.path.join(args.out, identifier, "bench.log"),
+                    PROJECT_ROOT))
+            return 1
 
     elapsed = time.time() - started
     summary = {

@@ -86,6 +86,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # rung, so an edit partway through a run changes the verdicts of the rungs
 # after it.
 BENCH_DIR="${CAPACITY_BENCH_DIR:-$ROOT/tests/bench}"
+# The same for the build helpers this harness calls out to.
+SCRIPTS_DIR="${CAPACITY_SCRIPTS_DIR:-$ROOT/scripts}"
 source "$ROOT/tests/integration/ingest_test_helpers.sh"
 NGINX="${CAPACITY_NGINX:-$ROOT/.build/nginx-install/sbin/nginx}"
 RUN="${CAPACITY_RUN:-$ROOT/.build/ingest-egress-fanout}"
@@ -2603,7 +2605,7 @@ print(bps)
 PY
 }
 capacity_build_srt_sink() {
-    python3 "$ROOT/scripts/build-capacity-receiver.py" \
+    python3 "$SCRIPTS_DIR/build-capacity-receiver.py" \
         --source "$BENCH_DIR/srt_fanout_sink.c" \
         --binary "$RUN/srt_fanout_sink"
 }
