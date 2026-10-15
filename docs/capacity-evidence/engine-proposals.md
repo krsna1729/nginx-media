@@ -1,19 +1,20 @@
 # Engine-side proposals from the capacity harness
 
 These are changes to `restream` and to libsrt usage inside it. This repository
-does not contain those trees, so nothing here is applied. Each one is written
+does not contain those trees, so nothing here is applied. Each item is written
 as evidence plus a concrete change, and each was found while qualifying
 `nginx-media` against a receiver-verified measurement.
 
-Nothing below is a capacity claim. Every number is from a run whose artifacts
-are in `docs/capacity-evidence/`.
+**Status: nothing here is a capacity claim.** The 1024-destination rung below
+is unresolved, and the run that produced it came from a harness that has since
+been fixed. Re-measure before acting on any of it.
 
 ---
 
-## P1. The 1024-destination rung is un-attributable as recorded
+## P1. The 1024-destination restream rung: cause unresolved
 
-**What the harness recorded.** The `restream` pure-SRT ladder at 1024
-destinations ended `setup-error`. The gate that fired:
+**What happened.** The ladder ended `setup-error` at 1024 destinations. The
+gate that fired:
 
 ```
 quality_rung_start mix=pure-srt destinations=1024 srt=1024 ...
@@ -24,42 +25,73 @@ shared SRT receiver accepted fewer than 1024 peers
 quality_rung_result mix=pure-srt destinations=1024 result=setup-error status=1
 ```
 
-**What is known.** The receiver connected 255 distinct destinations and then
-reported 256 transport errors against them:
+The receiver's log shows peers connecting and then being torn down within about
+seven seconds, in three error classes:
 
 | error | count |
 |:---|---:|
 | `Connection was broken` | 161 |
 | `SRT_EPOLL_ERR` | 51 |
 | `Operation not supported: Invalid socket ID` | 44 |
-| libsrt `remove_usock: ... not found as either socket or group` | 81 |
 
-The receiver's own CPU was not the limit: at comparable rungs the harness
-recorded `sender 2% vs receivers 2% of one core`. The receiver was idle while
-peers were failing to establish.
+**What this does *not* say.** The receiver log records transport errors only.
+Peers that connected and stayed healthy produce no line at all, so 255 distinct
+destinations appear in it because 255 *broke* - not because only 255 ever
+connected. How many connected is exactly what the lost snapshot would have
+said.
 
-**What is *not* known, and why.** The harness reused one run directory for
-every rung and every mix, and eight further ladders ran after this rung. So
-restream's own database and logs for the rung no longer exist; the surviving
-`outputs` table holds one row, `d0000`, from a one-destination rung. The
-snapshot that would have named the connected count was lost because its
-timeout was fixed at one second regardless of peer count.
+**The leading hypothesis is receiver CPU, and it is an extrapolation.**
+Measured on the rung below the failure, which passed:
 
-This is a harness defect and is being fixed here (snapshot budget scales with
-the peer table, and the failure now states the connected count and how much of
-the connect window was used). The consequence for the engine is below.
+```
+quality-pure-srt-512 ... result=pass
+   diag: host CPU busy 39.1% of all online CPUs
+   diag: sender 169% vs receivers 462% of one core
+```
 
-**Proposal.** Nothing yet. The correct next step is to re-run the rung with the
-harness fixed so that the split between "the sender never offered the
-destinations" and "the receiver could not accept them" is measured rather than
-inferred. **Do not act on P1 until that rung is re-measured.**
+The receiver used 462% of one core at 512 destinations for 4 Gbit/s of SRT.
+Doubling the destination count doubles the packet rate for the same total
+bandwidth, so 1024 destinations implies roughly 924% of one core. The receiver
+is pinned to eight E-cores, which is 800% of one core before counting that
+E-cores are narrower than P-cores. The receiver is therefore the most likely
+side to run out first - but this is arithmetic on one measurement, not a
+measurement of the failing rung, whose CPU figures are unavailable.
+
+**Why it cannot be attributed further from this run.** `start_restream_engine`
+removes `$RUN/restream` on every start, so restream's database and logs for
+this rung were overwritten by eight later ladders. The surviving `outputs`
+table holds one row, `d0000`, from a one-destination rung. The snapshot that
+would have named the connected count was lost because the sink checks for
+SIGUSR1 only between one-second `srt_epoll_uwait` calls, and the harness gave
+it one second.
+
+**What this repository has already fixed**, so that the re-run can answer it:
+
+* the snapshot budget now exceeds one uwait period, so the capture survives a
+  quiet sink and the peer count is recorded
+* the failure states how much of the connect window elapsed
+* the rung's `restream/{logs,db,cookie.txt}` and an output-state count are
+  copied into its own case directory inside `capacity_write_diagnostics`, which
+  runs for setup failures and not only for passes
+
+**The re-run that would settle it**, in order of discriminating power:
+
+1. 1024 destinations on restream, with the receiver given more cores. If it
+   passes, the limit was the receiver and not the engine.
+2. The same rung with `CAPACITY_SINK_MODE=fast`. If it passes, the sink's
+   correctness checking was the cost.
+3. If it still fails, count `egress.failed` reasons in the preserved restream
+   log to see whether the sender gave up on outputs or the receiver dropped
+   them.
+
+**Proposal: none yet.** Do not change restream on the strength of this rung.
 
 ---
 
-## P2. SRT egress has no connection-establishment telemetry
+## P2. SRT egress exposes no connection-state counters
 
-**Evidence.** Restream's own counters for one output, at a rung where it did
-establish:
+**Evidence.** Restream's own counters, from a **single-output rung** of an
+earlier mix - the only place they survive, because per-rung state was not kept:
 
 ```
 srt egress owner final counters family="v4" managed_rx=true service_visits=5590
@@ -70,86 +102,48 @@ srt egress owner final counters family="v4" managed_rx=true service_visits=5590
 ```
 
 `tx_exhaustions=593` against `tx_completed_ok=11910` is the only signal that
-the transmit path was ever under pressure, and there is no counter for the
-state a controller actually needs when a large rung stalls: how many outputs
-are connecting, connected, retrying, or backed off.
+the transmit path was ever under pressure. There is no counter for the state a
+controller needs when a large rung stalls: how many outputs are connecting,
+connected, retrying, or backed off.
 
-**Why it matters to a qualification run.** A rung that fails during
-establishment currently produces one aggregate message. With a per-output
-connection state and a reconnect counter, the harness could say "683 of 1024
-outputs were still in backoff when the window expired" instead of "fewer than
-1024 peers", which is the difference between a diagnosis and a symptom.
+`managed_rx=true` and the `rx_packets` figure are **expected** and not a
+defect: an SRT sender in publish mode still receives ACK, NAK and keepalive
+control packets on the same socket.
+
+**Why it matters.** A rung that fails during establishment produces one
+aggregate message. With per-output connection state and a reconnect counter,
+the harness could say "683 of 1024 outputs were still in backoff when the
+window expired" instead of "fewer than 1024 peers", which is the difference
+between a diagnosis and a symptom - and it is the single change that would
+have made P1 answerable from the artifacts.
 
 **Proposal.** Expose, per pipeline and in aggregate:
 
 * `outputs_connecting`, `outputs_connected`, `outputs_backoff`
 * `connection_attempts_total`, `connection_failures_total`
-* a histogram or max of time-in-backoff
+* a max or histogram of time-in-backoff
 
-These are cheap counters on an existing state machine, and they are the
-missing half of the `tx_exhaustions` family that already exists.
-
----
-
-## P3. SRT leaf failure is terminal for the output, so a rung measures a fall
-
-**Evidence.**
-
-```
-WARN srt egress leaf closed unexpectedly output_id=output_cf05ad1a187343da
-  reason="peer disconnected"
-WARN output failed pipeline_id=... output_id=... event_class="lifecycle"
-  event_type="egress.failed" phase=srt_fabric_leaf
-  error=SRT fabric leaf terminated unexpectedly (peer closed, protocol failure,
-  or stall recovery)
-```
-
-One peer disconnect turns into `egress.failed` for the whole output. In a
-capacity measurement that is indistinguishable from the output never having
-started: a rung that needs 1024 outputs will be reported as a setup failure
-the moment any single peer blips, even if the other 1023 are healthy.
-
-This interacts directly with P1: 255 peers had transport errors, and if each
-one became `egress.failed`, the sender's effective destination count can only
-fall during a rung.
-
-**Proposal.** Separate "this output's current peer disconnected" from "this
-output cannot run". SRT is designed to survive a peer reconnect; the output
-state machine should retry with backoff and only escalate to `failed` after a
-documented attempt budget, with the retry visible in the counters from P2.
-Whether that is already the intent is not something this repository can
-determine — hence a proposal, not a patch.
+Cheap counters on an existing state machine, and the missing half of the
+`tx_exhaustions` family that already exists.
 
 ---
 
-## P4. `rx` is enabled on a publish-only SRT leaf
+## Withdrawn
 
-**Evidence.** The same counters report `managed_rx=true` and `rx_packets=1183`
-for an output whose streamid is `#!::m=publish,...`. A publish-mode SRT sender
-negociates a receive direction it never uses.
+Two items were drafted here and are withdrawn, because the evidence did not
+support them:
 
-**Proposal.** Confirm whether `managed_rx=true` is required for the streamid
-mode in use. If it is not, disabling it removes a socket, a buffer and a read
-registration per destination, which at 1024 destinations is 1024 fewer things
-for the egress fabric to service per cycle.
+* **"a peer disconnect escalates an output to `egress.failed`"** - the single
+  line behind this came from a later one-output rung and most likely records
+  the harness stopping the sink at teardown. It does not show that one blip
+  kills a healthy output. Verify on the re-run before raising it.
+* **"publish-mode SRT enables a receive direction it never uses"** - wrong.
+  An SRT sender must receive ACK, NAK and keepalive packets, so `managed_rx`
+  and `rx_packets` are required for publish mode to work at all.
 
-This is a micro-optimisation and last on the list deliberately: P1 has to be
-re-measured, and P2 and P3 change what a rung reports, before a per-destination
-cost difference is worth chasing.
-
----
-
-## What the harness already attributes correctly
-
-Not everything here is a proposal. These were measured and are recorded with
-their evidence:
-
-| engine | highest passing | first failure | ladder wall |
-|:---|---:|---:|---:|
-| `nginx-robotweax` | 256 | 512 (quality, 0.774 delivered) | 4406 s |
-| `nginx-haivision` | 512 | 1024 (quality) | 5716 s |
-| `restream` | 512 | 1024 (setup, see P1) | 464 s |
-
-The two nginx builds fail differently at the same rung, which localises the
-difference to the send path rather than the harness. Restream reaches 512 in
-under an eighth of the wall time of either.
+And one correction to a table that was here: the three-way wall times
+(4406 s, 5716 s, 464 s) are **harness cost, not engine speed**. The two nginx
+ladders paid the old `post_owner` `sleep 0.2` at roughly 0.65 s per
+destination with four workers; restream does not route by owner and did not
+pay it. That gap has since been removed from the harness, so the numbers say
+nothing about the engines and are omitted.

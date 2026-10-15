@@ -123,6 +123,19 @@ class Server:
 
 # -- the destination scheme ------------------------------------------------
 
+def test_exports_exist():
+    """Every name in __all__ must resolve.
+
+    `__all__` named a function that had been removed, so `from
+    capacity_client import *` raised AttributeError while every direct call
+    still worked - which no test here would have noticed.
+    """
+    print("\nmodule exports")
+    missing = [name for name in cc.__all__ if not hasattr(cc, name)]
+    check(not missing, "every exported name resolves", ", ".join(missing))
+    check("provision" in cc.__all__, "the unified provisioner is exported")
+
+
 def test_destination_id_matches_shell():
     """The scheme is defined twice; a divergence corrupts results silently."""
     print("\ndestination id parity with the harness")
@@ -393,6 +406,7 @@ def test_cookie_jar():
 
 def main():
     print("capacity_client: data plane, bodies and retries")
+    test_exports_exist()
     test_destination_id_matches_shell()
     test_sink_port()
     test_rtmp_ports()

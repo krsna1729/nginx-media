@@ -1404,7 +1404,11 @@ stop_restream_engine() {
 
 start_instance() {   # <workers> <hls> <rtmp>
     if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
-        start_restream_engine
+        # The status is propagated, not discarded.  A restream engine that
+        # came up without a pipeline id would otherwise be reported as a
+        # provisioning failure several steps later, pointing at the wrong
+        # thing.
+        start_restream_engine || return 1
         return 0
     fi
     local i want
@@ -3478,7 +3482,13 @@ PY
         hls_enabled=no
     fi
     printf '%s\n' "$case_dir" >"$RUN/active-capacity-case"
-    start_instance "$workers" "$hls_enabled" no
+    # Checked, unlike the older measurement phases above: if the engine does
+    # not come up, every later step fails with a message about provisioning or
+    # peers, and the real cause is two steps behind it.
+    start_instance "$workers" "$hls_enabled" no || {
+        echo "the $CAPACITY_ENGINE engine did not start for $case_dir" >&2
+        return 1
+    }
     if [ "$rtmp_destinations" -gt 0 ]; then
         local peers_per_sink="$CAPACITY_RTMP_RECEIVER_PEERS"
         if [ "${CAPACITY_CURRENT_SINK_MODE:-correctness}" = fast ] && [ "$peers_per_sink" -lt 256 ]; then
