@@ -1,0 +1,255 @@
+[
+  {
+    "engine": "nginx-robotweax",
+    "mix": "pure-srt",
+    "wall_time_s": 4406.0112183094025,
+    "highest_passing": 256,
+    "highest_passing_correctness": 256,
+    "highest_passing_fast": null,
+    "first_quality_failure": 512,
+    "rungs": [
+      {
+        "destinations": 1,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1/diagnostics.json"
+      },
+      {
+        "destinations": 16,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99699,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-16/diagnostics.json"
+      },
+      {
+        "destinations": 64,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99837,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-64/diagnostics.json"
+      },
+      {
+        "destinations": 128,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99508,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-128/diagnostics.json"
+      },
+      {
+        "destinations": 256,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99485,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-256/diagnostics.json"
+      },
+      {
+        "destinations": 512,
+        "outcome": "quality-failure",
+        "sink_mode": "fast",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.77408,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-512/diagnostics.json"
+      }
+    ]
+  },
+  {
+    "engine": "nginx-haivision",
+    "mix": "pure-srt",
+    "wall_time_s": 5715.645618677139,
+    "highest_passing": 512,
+    "highest_passing_correctness": 512,
+    "highest_passing_fast": null,
+    "first_quality_failure": 1024,
+    "rungs": [
+      {
+        "destinations": 1,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1/diagnostics.json"
+      },
+      {
+        "destinations": 16,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99636,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-16/diagnostics.json"
+      },
+      {
+        "destinations": 64,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99633,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-64/diagnostics.json"
+      },
+      {
+        "destinations": 128,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99399,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-128/diagnostics.json"
+      },
+      {
+        "destinations": 256,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99223,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-256/diagnostics.json"
+      },
+      {
+        "destinations": 512,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99267,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-512/diagnostics.json"
+      },
+      {
+        "destinations": 1024,
+        "outcome": "quality-failure",
+        "sink_mode": "fast",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.00286,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1024/diagnostics.json"
+      }
+    ]
+  },
+  {
+    "engine": "restream",
+    "mix": "pure-srt",
+    "wall_time_s": 463.853235244751,
+    "highest_passing": 512,
+    "highest_passing_correctness": 512,
+    "highest_passing_fast": null,
+    "first_quality_failure": null,
+    "rungs": [
+      {
+        "destinations": 1,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1/diagnostics.json"
+      },
+      {
+        "destinations": 16,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1.00466,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-16/diagnostics.json"
+      },
+      {
+        "destinations": 64,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1.00917,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-64/diagnostics.json"
+      },
+      {
+        "destinations": 128,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1.00535,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-128/diagnostics.json"
+      },
+      {
+        "destinations": 256,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99168,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-256/diagnostics.json"
+      },
+      {
+        "destinations": 512,
+        "outcome": "pass",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99462,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-512/diagnostics.json"
+      },
+      {
+        "destinations": 1024,
+        "outcome": "setup-failure",
+        "sink_mode": "correctness",
+        "srt_senders": "adaptive",
+        "hls": null,
+        "observed_delivery_ratio": null,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "unavailable",
+        "diagnostics": "capacity/quality-pure-srt-1024/diagnostics.json"
+      }
+    ]
+  }
+]

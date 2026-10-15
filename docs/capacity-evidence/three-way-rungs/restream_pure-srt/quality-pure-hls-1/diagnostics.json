@@ -1,0 +1,367 @@
+{
+ "schema": "nginx-media.capacity-diagnostics/2",
+ "case": {
+  "outcome": "setup-failure",
+  "mix": "pure-hls",
+  "sink_mode": "correctness",
+  "srt_senders": "adaptive",
+  "hls_push_uploaders": "adaptive",
+  "srt_backend": "",
+  "nginx_cpus": "0,2,4,6",
+  "receiver_cpus": "12,13,14,15,16,17,18,19",
+  "receiver_topology": "loopback",
+  "receiver_address": "127.0.0.1",
+  "destinations": 1,
+  "srt": 0,
+  "rtmp": 0,
+  "hls_readers": 1,
+  "hls_push": 0,
+  "status": 1
+ },
+ "outcome": "setup-failure",
+ "intervals": {
+  "stream_counter_measurement": {
+   "value": null,
+   "unit": "s",
+   "status": "ok",
+   "provenance": null,
+   "window": null
+  },
+  "extended_host": {
+   "value": null,
+   "unit": "s",
+   "status": "unavailable",
+   "reason": "actual extended host capture brackets are unavailable"
+  },
+  "cpu": {
+   "value": null,
+   "unit": "s",
+   "status": "unavailable",
+   "reason": "no CPU window"
+  },
+  "requested": {
+   "value": null,
+   "unit": "s",
+   "status": "ok"
+  }
+ },
+ "cpu": {
+  "status": "unavailable",
+  "reason": "no CPU snapshots in case directory"
+ },
+ "cpu_environment": {
+  "status": "unavailable",
+  "reason": "no extended host snapshot"
+ },
+ "network": {
+  "status": "unavailable",
+  "reason": "no extended snapshots"
+ },
+ "event_loop_max_delay": {
+  "value": null,
+  "unit": "ms",
+  "status": "unavailable",
+  "reason": "no worker metrics"
+ },
+ "srt": {
+  "status": "unavailable",
+  "reason": "no SRT destinations"
+ },
+ "rtmp": {
+  "status": "unavailable",
+  "reason": "no RTMP scheduler metrics"
+ },
+ "hls_push": {
+  "status": "unavailable",
+  "reason": "no HLS push destinations"
+ },
+ "delivery": {
+  "status": "unavailable",
+  "reason": "no quality reports"
+ },
+ "resources": {
+  "worker_memory": {
+   "value": null,
+   "unit": "kB",
+   "status": "unavailable",
+   "reason": "no memory snapshots"
+  },
+  "sockstat": {
+   "value": null,
+   "unit": "text",
+   "status": "unavailable",
+   "reason": "no sockstat snapshots"
+  }
+ },
+ "preflight": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no preflight for this rung"
+ },
+ "host_fingerprint": {
+  "role": "sender",
+  "hostname": "PARAM",
+  "architecture": "x86_64",
+  "boot_id": "020146be-a151-4fc8-869f-b8ad0783ac8a",
+  "binary": "/home/krsna1729/Projects/restream/target/release/restream",
+  "kernel": "7.2.5-3-omarchy",
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900H",
+  "nproc_online": 20,
+  "permitted_cpus": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15,
+   16,
+   17,
+   18,
+   19
+  ],
+  "cgroup": {
+   "cpu_max": "max 100000",
+   "cpu_stat": {
+    "usage_usec": 454030016082,
+    "user_usec": 393005214904,
+    "system_usec": 61024801178,
+    "nice_usec": 3355498,
+    "core_sched.force_idle_usec": 0,
+    "nr_periods": 0,
+    "nr_throttled": 0,
+    "throttled_usec": 0,
+    "nr_bursts": 0,
+    "burst_usec": 0
+   }
+  },
+  "cpu_freq_khz": {
+   "cpu11": 1072692,
+   "cpu9": 5200000,
+   "cpu7": 4870234,
+   "cpu18": 2903862,
+   "cpu5": 4757074,
+   "cpu16": 4100000,
+   "cpu3": 5200000,
+   "cpu14": 1744365,
+   "cpu1": 5200000,
+   "cpu12": 4100000,
+   "cpu10": 400225,
+   "cpu8": 1802815,
+   "cpu19": 4100000,
+   "cpu6": 1843219,
+   "cpu17": 400241,
+   "cpu4": 1440061,
+   "cpu15": 4100000,
+   "cpu2": 400285,
+   "cpu13": 4100000,
+   "cpu0": 399916
+  },
+  "governor": "performance",
+  "no_turbo": "0",
+  "energy_preference": "performance",
+  "numa": {
+   "node0": "0-19"
+  },
+  "loadavg": "31.91 18.06 7.84 2/1971 1764256",
+  "host_busy_fraction": 0.0218,
+  "memory": {
+   "MemTotal": "15982540 kB",
+   "MemFree": "7534380 kB",
+   "MemAvailable": "8415104 kB"
+  },
+  "interfaces": {
+   "docker0": {
+    "operstate": "down",
+    "mtu": "1500",
+    "speed_mbps": "-1",
+    "driver": null,
+    "virtual": true
+   },
+   "lo": {
+    "operstate": "unknown",
+    "mtu": "65536",
+    "speed_mbps": null,
+    "driver": null,
+    "virtual": true
+   },
+   "tailscale0": {
+    "operstate": "unknown",
+    "mtu": "1280",
+    "speed_mbps": "-1",
+    "driver": null,
+    "virtual": true
+   },
+   "wlo1": {
+    "operstate": "up",
+    "mtu": "1500",
+    "speed_mbps": null,
+    "driver": "iwlwifi",
+    "virtual": false
+   }
+  },
+  "kernel_udp_limits": {
+   "net.core.rmem_max": "67108864",
+   "net.core.wmem_max": "67108864",
+   "net.core.rmem_default": "212992",
+   "net.core.wmem_default": "212992",
+   "net.core.netdev_max_backlog": "1000",
+   "net.ipv4.udp_mem": "371172\t494899\t742344",
+   "net.core.somaxconn": "4096"
+  },
+  "softnet": {
+   "cpu0": {
+    "processed": 142507714,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu1": {
+    "processed": 24551784,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu2": {
+    "processed": 78152314,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu3": {
+    "processed": 23817336,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu4": {
+    "processed": 90644245,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu5": {
+    "processed": 26473199,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu6": {
+    "processed": 96470496,
+    "dropped": 0,
+    "time_squeeze": 12
+   },
+   "cpu7": {
+    "processed": 26764047,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu8": {
+    "processed": 29150708,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu9": {
+    "processed": 24239054,
+    "dropped": 0,
+    "time_squeeze": 7
+   },
+   "cpu10": {
+    "processed": 25040816,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu11": {
+    "processed": 26898481,
+    "dropped": 0,
+    "time_squeeze": 6
+   },
+   "cpu12": {
+    "processed": 31032554,
+    "dropped": 0,
+    "time_squeeze": 45
+   },
+   "cpu13": {
+    "processed": 22379404,
+    "dropped": 0,
+    "time_squeeze": 6
+   },
+   "cpu14": {
+    "processed": 23809712,
+    "dropped": 0,
+    "time_squeeze": 16
+   },
+   "cpu15": {
+    "processed": 16345528,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu16": {
+    "processed": 16009784,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu17": {
+    "processed": 16701530,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu18": {
+    "processed": 15814170,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu19": {
+    "processed": 15881744,
+    "dropped": 0,
+    "time_squeeze": 1
+   }
+  },
+  "transport": null,
+  "build": {
+   "sha256": "e542ce688940d9455ce21b0f30a111076601b5849c68f683b90cbc107b15317c"
+  },
+  "transport_provenance": {
+   "source_commit": null,
+   "source_commit_status": "unknown-no-resolved-srt-library",
+   "library_version": null,
+   "linkage": "unknown"
+  }
+ },
+ "receiver_host_fingerprint": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no native receiver host fingerprint"
+ },
+ "receiver_nginx_fingerprint": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no native receiver nginx fingerprint"
+ },
+ "counter_windows": {
+  "stream": {
+   "value": null,
+   "unit": "mixed",
+   "status": "unavailable",
+   "reason": "no stream counter collection brackets"
+  },
+  "workers": {
+   "value": null,
+   "unit": "mixed",
+   "status": "unavailable",
+   "reason": "no workers counter collection brackets"
+  }
+ },
+ "receiver_windows": {},
+ "efficiency": {
+  "status": "unavailable",
+  "reason": "no receiver-counted byte total or measurement interval"
+ },
+ "saturation_notes": []
+}
