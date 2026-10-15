@@ -557,10 +557,40 @@ def probe_listen(port, seconds, packet_bytes, bind, threads=1):
     }
 
 
+def probe_route_is_local(peer):
+    """Whether the kernel would send to `peer` without a gateway.
+
+    A media peer sits on the far side of a veth pair or on loopback, so its
+    route is directly connected.  If the kernel wants a gateway, this process
+    is in the wrong network namespace - which is how an unwrapped probe once
+    resolved the receiver's address through the host's default route and would
+    have pushed several seconds of Gbit/s UDP at a home router instead of down
+    the veth.  Returns (ok, detail).
+    """
+    if os.environ.get("CAPACITY_PREFLIGHT_ALLOW_ROUTED_PEER"):
+        return True, "routed peer allowed by CAPACITY_PREFLIGHT_ALLOW_ROUTED_PEER"
+    try:
+        result = subprocess.run(["ip", "route", "get", peer],
+                                text=True, capture_output=True, timeout=5)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return True, f"cannot check the route to {peer}: {exc}"
+    if result.returncode != 0:
+        return False, f"{peer} has no route in this namespace"
+    line = result.stdout.strip()
+    if " via " in line:
+        return False, (f"{peer} resolves through a gateway here ({line}); the "
+                       f"probe belongs in the sender's namespace, where the "
+                       f"receiver is directly connected")
+    return True, line
+
+
 def probe_send(peer, port, seconds, packet_bytes, threads=1):
     """Send side: one ping sample for the path's latency and loss, then as
     much UDP payload as the threads can push.  The receiver's count is the
     measurement; this side's count says whether the load was ever offered."""
+    ok, detail = probe_route_is_local(peer)
+    if not ok:
+        raise SystemExit(f"refusing to probe: {detail}")
     address = (peer, port)
     ping_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     ping_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
