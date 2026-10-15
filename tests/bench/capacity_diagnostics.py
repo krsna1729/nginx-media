@@ -1029,6 +1029,7 @@ def matrix(args):
         entry["rungs"].append({
             "destinations": case.get("destinations"),
             "outcome": bundle.get("outcome"),
+            "sink_mode": case.get("sink_mode", "correctness"),
             "srt_senders": case.get("srt_senders"),
             "hls": case.get("hls"),
             "observed_delivery_ratio": observed_ratio(bundle),
@@ -1040,6 +1041,12 @@ def matrix(args):
         rungs = sorted(entry["rungs"], key=lambda r: r["destinations"] or 0)
         entry["rungs"] = rungs
         passing = [r["destinations"] for r in rungs if r["outcome"] == "pass"]
+        passing_correctness = [r["destinations"] for r in rungs
+                               if r["outcome"] == "pass"
+                               and r.get("sink_mode") == "correctness"]
+        passing_fast = [r["destinations"] for r in rungs
+                        if r["outcome"] == "pass"
+                        and r.get("sink_mode") == "fast"]
         failing = [r["destinations"] for r in rungs
                    if r["outcome"] == "quality-failure"]
         setup = [r["destinations"] for r in rungs
@@ -1047,6 +1054,10 @@ def matrix(args):
         limited = [r["destinations"] for r in rungs
                    if r["outcome"] == "infrastructure-limited"]
         entry["highest_passing"] = max(passing) if passing else None
+        entry["highest_passing_correctness"] = (max(passing_correctness)
+                                               if passing_correctness else None)
+        entry["highest_passing_fast"] = (max(passing_fast)
+                                         if passing_fast else None)
         entry["first_quality_failure"] = min(failing) if failing else None
         entry["setup_limited"] = setup
         entry["infrastructure_limited"] = limited
@@ -1066,6 +1077,8 @@ def matrix(args):
     print(f"capacity_matrix_json={out}")
     for mix, entry in mixes.items():
         print(f"matrix mix={mix} highest_passing={entry['highest_passing']} "
+              f"highest_passing_correctness={entry['highest_passing_correctness']} "
+              f"highest_passing_fast={entry['highest_passing_fast']} "
               f"first_quality_failure={entry['first_quality_failure']} "
               f"setup_limited={','.join(map(str, entry['setup_limited'])) or 'none'} "
               f"infrastructure_limited="

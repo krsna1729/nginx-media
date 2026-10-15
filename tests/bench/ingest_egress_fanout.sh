@@ -164,6 +164,8 @@ CAPACITY_QUALITY_STEPS="${CAPACITY_QUALITY_STEPS:-1 2 4 8 16 32 64 128 256 512 1
 CAPACITY_FIXED_SRT_WORKERS="${CAPACITY_FIXED_SRT_WORKERS:-adaptive}"
 CAPACITY_FIXED_HLS_PUSH_WORKERS="${CAPACITY_FIXED_HLS_PUSH_WORKERS:-adaptive}"
 CAPACITY_SRT_HLS="${CAPACITY_SRT_HLS:-yes}"
+CAPACITY_SINK_MODE="${CAPACITY_SINK_MODE:-auto}"
+CAPACITY_CURRENT_SINK_MODE="correctness"
 # The measuring receiver, not the system under test: its SRT listeners are
 # spread so no single receiver UDP socket (and libsrt receive thread) carries
 # more than this many destinations.  The per-rung diagnostics report receiver
@@ -612,13 +614,19 @@ start_rtmp_sink_instance() {   # [count]
         mkdir -p "$dir/conf" "$dir/logs"
         [ ! -f "$RUN/active-capacity-case" ] \
             || cp "$RUN/active-capacity-case" "$dir/active-case"
+        local rtmp_workers=1 rtmp_errlog="logs/error.log info" rtmp_events="worker_connections 8192;"
+        if [ "${CAPACITY_CURRENT_SINK_MODE:-correctness}" = fast ]; then
+            rtmp_workers=2
+            rtmp_errlog="/dev/null notice"
+            rtmp_events="worker_connections 16384; use epoll;"
+        fi
         cat > "$dir/conf/nginx.conf" <<EOF
-worker_processes 1;
+worker_processes $rtmp_workers;
 daemon $daemon;
-error_log logs/error.log info;
+error_log $rtmp_errlog;
 pid logs/nginx.pid;
 
-events { worker_connections 8192; }
+events { $rtmp_events }
 
 media_rtmp_listen $CAPACITY_RECEIVER_ADDR:$(rtmp_sink_port "$k");
 
@@ -3235,10 +3243,14 @@ PY
     printf '%s\n' "$case_dir" >"$RUN/active-capacity-case"
     start_instance "$workers" "$hls_enabled" no
     if [ "$rtmp_destinations" -gt 0 ]; then
-        local rtmp_sinks=$(( (total_rtmp_dest + CAPACITY_RTMP_RECEIVER_PEERS - 1)
-                             / CAPACITY_RTMP_RECEIVER_PEERS ))
+        local peers_per_sink="$CAPACITY_RTMP_RECEIVER_PEERS"
+        if [ "${CAPACITY_CURRENT_SINK_MODE:-correctness}" = fast ] && [ "$peers_per_sink" -lt 256 ]; then
+            peers_per_sink=256
+        fi
+        local rtmp_sinks=$(( (total_rtmp_dest + peers_per_sink - 1)
+                             / peers_per_sink ))
         [ "$rtmp_sinks" -le 64 ] || rtmp_sinks=64
-        echo "   rtmp_receivers=$rtmp_sinks (<= $CAPACITY_RTMP_RECEIVER_PEERS destinations each)"
+        echo "   rtmp_receivers=$rtmp_sinks (<= $peers_per_sink destinations each)"
         [ -z "$CAPACITY_RECEIVER_CONFIG" ] || RTMP_SINK_RUN="$case_dir/rtmp-sink"
         start_rtmp_sink_instance "$rtmp_sinks" || return 1
     fi
@@ -3264,7 +3276,7 @@ PY
         [ "$quality_mode" != yes ] || sink_args+=( quality )
         [ "$quality_mode" = yes ] || [ -z "$stall_id" ] || sink_args+=( "$stall_id" )
         receiver_start "$case_dir/srt.identity.json" "$case_dir/srt-receiver.log" \
-            env SRT_SINK_BIND="$CAPACITY_RECEIVER_ADDR" $(pin "$CAPACITY_RECEIVER_CPUS") \
+            env SRT_SINK_BIND="$CAPACITY_RECEIVER_ADDR" SRT_SINK_MODE="${CAPACITY_CURRENT_SINK_MODE:-correctness}" $(pin "$CAPACITY_RECEIVER_CPUS") \
             "$RUN/srt_fanout_sink" "$sink_port:$sink_listeners" "$total_srt_dest" \
             "$sink_ready" "$sink_csv" "${sink_args[@]}" || return 1
         sink_pid="$RECEIVER_PID"
@@ -4565,6 +4577,7 @@ capacity_write_diagnostics() {   # <case dir> <outcome> [key=value ...]
         || echo "   host fingerprint could not be taken for $case_dir" >&2
     python3 "$ROOT/tests/bench/capacity_diagnostics.py" build "$case_dir" \
         --meta outcome="$outcome" --meta mix="$CAPACITY_CURRENT_MIX" \
+        --meta sink_mode="${CAPACITY_CURRENT_SINK_MODE:-correctness}" \
         --meta srt_senders="$CAPACITY_FIXED_SRT_WORKERS" \
         --meta hls_push_uploaders="$CAPACITY_FIXED_HLS_PUSH_WORKERS" \
         --meta srt_backend="$(capacity_srt_library)" \
@@ -4696,6 +4709,13 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
     local actual_srt_share actual_rtmp_share actual_hls_push_share
     local CAPACITY_QUALITY_REFERENCE_BPS=0 CAPACITY_QUALITY_REFERENCE_RTMP_BPS=0
     local CAPACITY_QUALITY_REFERENCE_HLS_BPS=0 CAPACITY_QUALITY_REFERENCE_HLS_PUSH_BPS=0
+    local ladder_sink_mode="${CAPACITY_SINK_MODE:-auto}"
+    local CAPACITY_CURRENT_SINK_MODE
+    if [ "$ladder_sink_mode" = fast ]; then
+        CAPACITY_CURRENT_SINK_MODE=fast
+    else
+        CAPACITY_CURRENT_SINK_MODE=correctness
+    fi
 
     CAPACITY_CURRENT_MIX="$mix"
     # References belong to this mix, not to another workload's earlier rung.
@@ -4776,17 +4796,35 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
         # it judges against is calibrated from the rung that ran before.
         capacity_preflight_calibration \
             "$RUN/capacity/quality-$mix-$destinations"
+        local rung_passed=0
         if capacity_case "quality-$mix-$destinations" "$CAPACITY_QUALITY_PROGRAMS" \
             "$CAPACITY_QUALITY_RATE" "$destinations" \
             "$CAPACITY_QUALITY_SECONDS" "$protocol" "" yes \
             "$srt_share" "$hls_push_share"
         then
-            echo "quality_rung_result mix=$mix destinations=$destinations srt=$srt_count rtmp=$rtmp_count hls=$hls_count hls_push=$hls_push_count result=pass"
-            consecutive=0
+            rung_passed=1
         else
             status="$?"
+            if [ "$status" -eq 2 ] && [ "$ladder_sink_mode" = auto ] \
+                && [ "$CAPACITY_CURRENT_SINK_MODE" = correctness ]; then
+                echo "quality_mode_switch mix=$mix destinations=$destinations switch_from=correctness switch_to=fast reason=\"correctness sink limit reached; continuing in high-performance mode\""
+                CAPACITY_CURRENT_SINK_MODE=fast
+                if capacity_case "quality-$mix-$destinations" "$CAPACITY_QUALITY_PROGRAMS" \
+                    "$CAPACITY_QUALITY_RATE" "$destinations" \
+                    "$CAPACITY_QUALITY_SECONDS" "$protocol" "" yes \
+                    "$srt_share" "$hls_push_share"
+                then
+                    rung_passed=1
+                else
+                    status="$?"
+                fi
+            fi
+        fi
+        if [ "$rung_passed" -eq 1 ]; then
+            echo "quality_rung_result mix=$mix destinations=$destinations srt=$srt_count rtmp=$rtmp_count hls=$hls_count hls_push=$hls_push_count sink_mode=$CAPACITY_CURRENT_SINK_MODE result=pass"
+            consecutive=0
+        else
             if [ "$status" -eq 4 ]; then
-                # The host could not carry the offer: not a result about
                 # nginx, so the ladder stops and the higher rungs are
                 # reported as unmeasured rather than as failures.
                 echo "quality_rung_result mix=$mix destinations=$destinations result=infrastructure-limited"

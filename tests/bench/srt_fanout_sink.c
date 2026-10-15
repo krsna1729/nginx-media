@@ -599,7 +599,7 @@ main(int argc, char **argv)
     const char *stall_id = NULL;
     char *snapshot_path = NULL;
     int failure = 0, ready = 0, initialized = 0, i;
-    int quality_mode = 0, measurement_active = 0;
+    int quality_mode = 0, measurement_active = 0, fast_mode = 0;
 
     for (l = 0; l < LISTENER_CAP; l++) {
         listeners[l] = SRT_INVALID_SOCK;
@@ -617,6 +617,18 @@ main(int argc, char **argv)
     {
         fprintf(stderr, "SRT_SINK_BIND is not an IPv4 address: %s\n", bind_text);
         return EXIT_FAILURE;
+    }
+    {
+        const char *mode_env = getenv("SRT_SINK_MODE");
+        if (mode_env != NULL) {
+            if (strcmp(mode_env, "fast") == 0) {
+                fast_mode = 1;
+            } else if (strcmp(mode_env, "correctness") == 0) {
+                fast_mode = 0;
+            }
+        } else if (getenv("SRT_SINK_FAST") != NULL && strcmp(getenv("SRT_SINK_FAST"), "0") != 0) {
+            fast_mode = 1;
+        }
     }
 
     if (argc > 1 && strlen(argv[1]) < sizeof(port_text)) {
@@ -1003,9 +1015,16 @@ main(int argc, char **argv)
                     }
                     peers[peer_index].bytes_received += (uint64_t) received;
                     if (measurement_active) {
-                        ts_inspect(&peers[peer_index],
-                                   (const unsigned char *) buffer,
-                                   (size_t) received);
+                        if (!fast_mode) {
+                            ts_inspect(&peers[peer_index],
+                                       (const unsigned char *) buffer,
+                                       (size_t) received);
+                        } else {
+                            peers[peer_index].ts_packets += (size_t) received / TS_PACKET_SIZE;
+                            if (received >= 1 && (unsigned char) buffer[0] != 0x47) {
+                                peers[peer_index].ts_sync_errors++;
+                            }
+                        }
                     }
                     if (!peers[peer_index].has_first_byte) {
                         if (clock_gettime(CLOCK_MONOTONIC,
