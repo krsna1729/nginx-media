@@ -772,6 +772,59 @@ per-revision builds, mixed-workload calibration, startup and retries. The
 trend job has a 180-minute ceiling, separate from the full qualification job.
 
 
+#### The data plane is Python: `tests/bench/capacity_client.py`
+
+`ingest_egress_fanout.sh` keeps the half of the harness that shell is good at:
+process lifecycle, ordering, cleanup traps, CPU pinning, namespace entry and
+signal delivery. The other half - HTTP, JSON, retries and the destination
+numbering - lives in `capacity_client.py`, because every defect found in this
+harness so far has been in that half:
+
+* a request body assembled by shell concatenation and then handed to Python
+  through a `'''$res'''` literal, which a body containing a quote ends early
+* a `sleep 0.2` on a retry path that runs about three times per destination,
+  which put 93% of a rung's wall time into setup nothing measured
+* a retry loop bounded by attempt count, which would report a slow owner as a
+  setup error within half a second
+
+The shell calls it once per program, never once per destination. This is not a
+style preference: measured on the same sender, one process per destination
+costs **64.86 ms** against **6.13 ms** for a `curl` invocation, because
+interpreter start-up dominates. Batched, the same work costs **0.40 ms** per
+destination at one worker, **27.64 ms** at four and **35.62 ms** at six - the
+same shape as the old loop, which cost 8.80, 635.27 and 972.58 ms at those
+worker counts because it slept on every owner miss.
+
+`tests/bench/provision_cost.py` re-measures that comparison:
+
+```sh
+tests/bench/provision_cost.py --destinations 256 --workers 1,4,6
+```
+
+Two behaviours in the client are load-bearing and tested in
+`tests/bench/test_capacity_client.py`:
+
+* **Owner-routed calls open a new connection per attempt.** A stream is served
+  by one worker, chosen by hashing its name, and a `reuseport` listener hashes
+  each new connection to choose the acceptor. A reused connection is pinned to
+  the worker that already refused it, so retrying on one could never succeed.
+  Ordinary calls reuse a connection deliberately.
+* **Retries end at a deadline, not an attempt count.** A 404 means "the owner
+  cannot see this stream yet" as often as "wrong worker".
+
+The shell still owns the destination *id scheme* - `capacity_destination_id` -
+and the client holds the same scheme because a report, the receiver slot
+mapping and the stall contract all key off it. The two are compared directly,
+with the shell's own function, by:
+
+```sh
+python3 tests/bench/capacity_client.py self-test
+```
+
+That check is part of `make bench-reporting`, and it fails on a one-character
+divergence, so a change to either definition cannot land silently.
+
+
 ### ffmpeg interoperability
 
 `make ffmpeg-interop` drives every way media enters with ffmpeg and reads

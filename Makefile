@@ -29,6 +29,7 @@ msan:
 # Reporting and provenance: Python3/Node and isolated native fixtures, no nginx.
 bench-reporting:
 	python3 tests/bench/test_reporting.py
+	python3 tests/bench/test_capacity_client.py
 	python3 tests/bench/test_commit_selection.py
 	python3 tests/bench/test_capacity_receiver.py
 	python3 tests/bench/test_receiver_control.py
