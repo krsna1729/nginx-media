@@ -4704,20 +4704,32 @@ receiver_fetch() {   # <path>
 capacity_preflight_calibration() {   # <case dir>
     local case_dir="$1" bundle
 
-    [ -n "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
-        && [ -n "$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS" ] && return 0
+    # Re-derived for every rung rather than latched at the first rung that
+    # produced a cost.  CPU per delivered Gbit/s falls as a rung grows, because
+    # a small rung is mostly fixed overhead: a cost taken once and reused
+    # judges a 512-destination rung by a 64-destination measurement, and the
+    # error is in the direction that stops ladders early.  The environment
+    # variables remain the explicit override, and are read here, not written.
+    local sender_override="$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS"
+    local receiver_override="$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS"
+
     # A CPU per delivered Gbit/s is a property of the workload, so the
     # calibration only reads bundles from the same mix: carrying pure SRT's
     # cost into a pure RTMP ladder would judge one workload by another's.
     local mix_label="${case_dir##*/}"
     mix_label="${mix_label#quality-}"
     mix_label="${mix_label%-*}"
+    # Newest first, so the cost comes from the largest rung that has passed.
     bundle="$(ls -1t "$RUN"/capacity/quality-$mix_label-*/diagnostics.json \
               2>/dev/null | while read -r candidate; do
                     [ "$candidate" = "$case_dir/diagnostics.json" ] && continue
                     grep -q '"outcome": "pass"' "$candidate" && { echo "$candidate"; break; }
                 done)"
-    [ -n "$bundle" ] || return 0
+    [ -n "$bundle" ] || {
+        PREFLIGHT_SENDER_COST="$sender_override"
+        PREFLIGHT_RECEIVER_COST="$receiver_override"
+        return 0
+    }
     local values
     values="$(python3 - "$bundle" <<'PY'
 import json, sys
@@ -4730,14 +4742,13 @@ print(value("sender_cpu_per_gbps") or "", value("receiver_cpu_per_gbps") or "")
 PY
 )"
     set -- $values
-    [ -n "${1:-}" ] && [ -z "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
-        && CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS="$1"
-    [ -n "${2:-}" ] && [ -z "$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS" ] \
-        && CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS="$2"
-    [ -z "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
-        || echo "   preflight: calibrated from $(basename "$(dirname "$bundle")")" \
-                "(sender ${CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS}%core/Gbit/s," \
-                "receiver ${CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS:-?}%core/Gbit/s)"
+    PREFLIGHT_SENDER_COST="${sender_override:-${1:-}}"
+    PREFLIGHT_RECEIVER_COST="${receiver_override:-${2:-}}"
+    [ -n "$PREFLIGHT_SENDER_COST" ] || [ -n "$PREFLIGHT_RECEIVER_COST" ] \
+        || return 0
+    echo "   preflight: calibrated from $(basename "$(dirname "$bundle")")" \
+            "(sender ${PREFLIGHT_SENDER_COST:-?}%core/Gbit/s," \
+            "receiver ${PREFLIGHT_RECEIVER_COST:-?}%core/Gbit/s)"
     return 0
 }
 
@@ -4748,6 +4759,8 @@ PY
 # never as a capacity result about nginx, and never as a sender failure.
 capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT count> <RTMP count>
     local case_dir="$1" destinations="$2" rate="$3"
+    # This rung's costs, resolved by capacity_preflight_calibration below.
+    local PREFLIGHT_SENDER_COST="" PREFLIGHT_RECEIVER_COST=""
     local srt_count="$4" rtmp_count="$5" receiver_binary
     local seconds="$CAPACITY_PREFLIGHT_SECONDS"
     local threads="$CAPACITY_PREFLIGHT_THREADS"
@@ -4832,6 +4845,10 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT cou
     # recorded rather than judged; the receiver is the harness's own
     # infrastructure and is still gated.
     judge_args+=( --sender-under-test )
+    # Re-derived per rung, so it is called before the args are assembled and
+    # its outputs are the ones this rung is judged with.
+    PREFLIGHT_SENDER_COST="$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS"
+    PREFLIGHT_RECEIVER_COST="$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS"
     capacity_preflight_calibration "$case_dir"
     # The CPUs the run is pinned to: foreign work on those is the run's
     # limit, foreign work elsewhere is not.
@@ -4852,12 +4869,10 @@ capacity_preflight_rung() {   # <case dir> <destinations> <rate Mbit/s> <SRT cou
     # response to a foreign load is verifiable without waiting for one.
     [ -z "${CAPACITY_PREFLIGHT_BUSY_JSON:-}" ] \
         || judge_args+=( --benchmark-cpu-busy-json "$CAPACITY_PREFLIGHT_BUSY_JSON" )
-    [ -z "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" ] \
-        || judge_args+=( --sender-cpu-per-gbps \
-                         "$CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS" )
-    [ -z "$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS" ] \
-        || judge_args+=( --receiver-cpu-per-gbps \
-                         "$CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS" )
+    [ -z "$PREFLIGHT_SENDER_COST" ] \
+        || judge_args+=( --sender-cpu-per-gbps "$PREFLIGHT_SENDER_COST" )
+    [ -z "$PREFLIGHT_RECEIVER_COST" ] \
+        || judge_args+=( --receiver-cpu-per-gbps "$PREFLIGHT_RECEIVER_COST" )
     python3 "$ROOT/tests/bench/capacity_preflight.py" judge "${judge_args[@]}" \
         | sed 's/^/   /'
     local judge_status="${PIPESTATUS[0]}"
