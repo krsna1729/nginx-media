@@ -65,6 +65,7 @@ ENGINES = [
 #: The receiver runs on the E-cores so it cannot steal from the sender, which
 #: is what the published ladders use.
 RECEIVER_CPUS = "12,13,14,15,16,17,18,19"
+E_CORES = [12, 13, 14, 15, 16, 17, 18, 19]
 PUBLISHER_CPUS = "12,13"
 
 
@@ -91,7 +92,8 @@ def snapshot_harness():
 
 
 def cell_id(engine, cpus):
-    return "%s:%d" % (engine["id"], len(cpus))
+    """A name that is safe as a path, in a URL and in later tooling."""
+    return "%s-%dc" % (engine["id"], len(cpus))
 
 
 def run_cell(engine, cpus, snapshot, args, out_dir):
@@ -113,11 +115,15 @@ def run_cell(engine, cpus, snapshot, args, out_dir):
         # The RTMP sink is always a media build, whichever engine is under test.
         "CAPACITY_RTMP_SINK_NGINX": os.path.join(
             PROJECT_ROOT, ".build/nginx-haivision/install/sbin/nginx"),
+        # Workers scale with the measured cores.  The point of the sweep is
+        # what each additional core buys, and a fixed worker count would put
+        # four workers on a one-core cell and measure contention instead.
+        "CAPACITY_WORKERS": str(len(cpus)),
         "CAPACITY_NGINX_CPUS": cpu_list,
         "CAPACITY_RECEIVER_CPUS": RECEIVER_CPUS,
         "CAPACITY_PUBLISHER_CPUS": PUBLISHER_CPUS,
         "CAPACITY_QUALITY_SECONDS": str(args.seconds),
-        "CAPACITY_QUALITY_MIXES": MIXES,
+        "CAPACITY_QUALITY_MIXES": args.mixes,
         "CAPACITY_QUALITY_STOP_AFTER_FAILURES": "1",
         "CAPACITY_SINK_MODE": "correctness",
         "PHASES": "capacity-quality-ladder",
@@ -128,8 +134,19 @@ def run_cell(engine, cpus, snapshot, args, out_dir):
         if args.veth_env.get(key):
             environment[key] = args.veth_env[key]
 
-    command = ["omarchy-benchmark", "--cpu", cpu_list, "--isolate",
-               "--turbo", "on", "--", "bash", snapshot]
+    # Every CPU the harness will place a role on, so no role's taskset call
+    # falls outside the cgroup cpuset.  Confining the helper to the sender's
+    # cores instead makes the receiver's placement fail with EINVAL and the
+    # sink exits before it accepts a peer.  SMT siblings are excluded, so the
+    # measured cores are one thread each of a physical core.
+    # No `--isolate`: it confines the child to a cpuset, and the harness then
+    # places the receivers on their own cores with taskset, which fails with
+    # EINVAL outside that cpuset and takes the sink down before it accepts a
+    # peer.  Selecting CPUs without isolating still offlines the selected
+    # cores' SMT siblings, so the measured cores are one thread each.
+    helper_cpus = ",".join(str(cpu) for cpu in cpus + E_CORES)
+    command = ["omarchy-benchmark", "--cpu", helper_cpus, "--turbo", "on",
+               "--", "bash", snapshot]
     started = time.time()
     with open(os.path.join(case_dir, "bench.log"), "w") as handle:
         result = subprocess.run(command, cwd=PROJECT_ROOT, env=environment,
@@ -165,16 +182,19 @@ def summarise(records):
             lines.append("%-18s %-9s %s" % (record["cell"], record["cores"],
                                             "no matrix"))
             continue
-        entries = matrix if isinstance(matrix, list) else matrix.get("mixes", [])
+        mixes = matrix.get("mixes") or {}
         passing, failing, limited = [], [], []
-        for entry in entries:
-            mix = entry.get("mix", "?")
+        for mix, entry in sorted(mixes.items()):
+            if not isinstance(entry, dict):
+                continue
             if entry.get("highest_passing") is not None:
                 passing.append("%s=%s" % (mix, entry["highest_passing"]))
             if entry.get("first_quality_failure") is not None:
                 failing.append("%s=%s" % (mix, entry["first_quality_failure"]))
             if entry.get("infrastructure_limited"):
                 limited.append("%s=%s" % (mix, entry["infrastructure_limited"]))
+            if entry.get("setup_failure_rung_params") or entry.get("setup_limited"):
+                failing.append("%s setup@%s" % (mix, entry.get("setup_limited")))
         lines.append("%-18s %-9s pass:%s" % (record["cell"], record["cores"],
                                              ",".join(passing) or "none"))
         if failing:
@@ -199,6 +219,8 @@ def main():
                         help="re-run cells that already have a result")
     parser.add_argument("--engines", default="",
                         help="comma-separated engine ids to restrict to")
+    parser.add_argument("--mixes", default=MIXES,
+                        help="workloads to run per cell; default is all seven")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -236,7 +258,7 @@ def main():
     snapshot = snapshot_harness()
     log("harness snapshot: %s" % os.path.relpath(snapshot, PROJECT_ROOT))
     log("%d cells, %ds per rung, %d workloads each"
-        % (len(cells), args.seconds, len(MIXES.split())))
+        % (len(cells), args.seconds, len(args.mixes.split())))
 
     records = []
     started = time.time()
@@ -244,10 +266,19 @@ def main():
         identifier = cell_id(engine, cpus)
         result_path = os.path.join(args.out, identifier, "result.json")
         if os.path.exists(result_path) and not args.force:
-            log("%-18s already measured, skipping" % identifier)
             with open(result_path) as handle:
-                records.append(json.load(handle))
-            continue
+                previous = json.load(handle)
+            # Only a cell that produced a matrix is finished.  A cell that was
+            # killed, or that exited without a matrix, has a record too, and
+            # treating that as done would leave a hole in the sweep that no
+            # later run ever fills.
+            if previous.get("matrix") and previous.get("exit_status") == 0:
+                log("%-18s already measured, skipping" % identifier)
+                records.append(previous)
+                continue
+            log("%-18s previous attempt was incomplete (exit %s, matrix %s); "
+                "re-running" % (identifier, previous.get("exit_status"),
+                                "present" if previous.get("matrix") else "absent"))
 
         log("%-18s %d core%s (%s)"
             % (identifier, len(cpus), "" if len(cpus) == 1 else "s",
@@ -270,7 +301,7 @@ def main():
         "started_at": datetime.fromtimestamp(started, timezone.utc)
                                 .isoformat(timespec="seconds"),
         "seconds_per_rung": args.seconds,
-        "mixes": MIXES.split(),
+        "mixes": args.mixes.split(),
         "elapsed_seconds": round(elapsed, 1),
         "cells": records,
     }
