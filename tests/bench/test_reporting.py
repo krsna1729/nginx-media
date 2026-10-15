@@ -240,6 +240,50 @@ def test_preflight_classifies_a_short_environment(work):
           f"the short side must be the receiver: {result.stdout}")
 
 
+
+def test_probe_overshoot_is_not_a_network_limit(work):
+    """Loss at a rate far above the rung's need is not a verdict on the rung.
+
+    The probe floods at whatever it can manage, which in the namespace
+    topology was 2.84 Gbit/s for a rung needing 1.02. It lost 11.66% of its
+    datagrams and the judge skipped the rung as a network limit - on a veth
+    that had already carried 4.7 Gbit/s, and for a rate the rung never asked
+    for. What arrived was 2.51 Gbit/s, well above the 1.02 requested.
+    """
+    case = os.path.join(work, "preflight-overshoot")
+    sender = os.path.join(case, "sender.json")
+    rx = os.path.join(case, "rx.json")
+    tx = os.path.join(case, "tx.json")
+    write_json(sender, {"role": "sender", "permitted_cpus": [0],
+                        "cpu_model": "test",
+                        "memory": {"MemAvailable": "8000000 kB"}})
+    # 2.84 Gbit/s offered and 11.66% of it lost, which still delivers
+    # 2.51 Gbit/s for a 128 x 8 Mbit/s request that needs about 1.23.
+    write_json(rx, {"side": "receiver", "received_bytes": 1_254_000_000,
+                    "received_packets": 883_400, "window_s": 4.0,
+                    "socket_drops": 0, "rate_gbps": 2.51})
+    write_json(tx, {"side": "sender", "sent_bytes": 1_420_000_000,
+                    "sent_packets": 1_000_000, "send_window_s": 4.0,
+                    "ping_loss": 0.0, "ping_loss_offered_gbps": None})
+
+    result = preflight("judge", "--destinations", "128", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx, "--sender-cpus", "0",
+                       "--sender-under-test", "--json",
+                       os.path.join(case, "judge.json"))
+    with open(os.path.join(case, "judge.json"), encoding="utf-8") as source:
+        judged = json.load(source)
+    loss_limits = [limit for limit in judged["limits"]
+                   if limit.get("resource") == "loss"]
+    check(not loss_limits,
+          f"loss while overshooting the request is not a limit: {loss_limits}")
+    check(result.returncode != 2,
+          f"the rung must still be measured: {result.stdout}")
+    check("sender_cpu_exceeds_permitted_cpus" in judged.get("details", {})
+          or not [limit for limit in judged["limits"]
+                  if limit.get("side") == "sender"],
+          "the sender's CPU need is recorded, not judged")
+
 def test_preflight_probe_is_measured_at_both_ends(work):
     """A path probe over loopback: the receiver's count is the measurement,
     the sender's count says the load was offered, and neither is inferred."""
@@ -3077,6 +3121,7 @@ def main():
         test_preflight_classifies_a_short_environment(work)
         test_preflight_names_a_foreign_load_on_the_pinned_cpus(work)
         test_preflight_probe_is_measured_at_both_ends(work)
+        test_probe_overshoot_is_not_a_network_limit(work)
         test_distributed_preflight_rejects_invalid_instrument_before_limits(work)
         test_reader_percentile_helpers()
         test_reader_reports_observed_not_threshold(os.path.join(work, "readers"))

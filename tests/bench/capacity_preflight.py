@@ -834,18 +834,34 @@ def judge(args):
         details["probe_loss"] = round(loss, 5)
         offered_bps = details.get("offered_network_gbps")
         offered_bps = offered_bps * 1e9 if offered_bps else None
-        # Loss measured while the path was driven far harder than the request
-        # needs says nothing about the request, so it is only a limit when
-        # the probe was run near the operating point.
+        # Two conditions, and both are needed.
+        #
+        # The probe must have offered at least the required rate, or it never
+        # asked the path to carry the load: a probe that offered 5.84 Gbit/s
+        # against 9.60 Gbit/s required is the probe's own shortfall, and is
+        # already recorded as an unknown rather than a limit.
+        #
+        # And the rate that arrived must fall short of the requirement. The
+        # probe floods at whatever it can manage, often several times what the
+        # rung needs: in the namespace topology it offered 2.84 Gbit/s for a
+        # rung needing 1.02 and lost 11.66%, which still delivers 2.51 Gbit/s -
+        # more than the request - on a veth that had already carried 4.7
+        # Gbit/s. Judging that as a limit skips the rung on the probe's
+        # overshoot rather than on its requirement.
+        delivered_bps = offered_bps * (1.0 - loss) if offered_bps else None
+        if delivered_bps is not None:
+            details["probe_delivered_gbps"] = round(delivered_bps / 1e9, 4)
         if (loss > args.max_probe_loss and offered_bps
-                and required_bps <= offered_bps <= 4 * required_bps):
+                and offered_bps >= required_bps
+                and delivered_bps < required_bps):
             limits.append({
                 "side": "network", "resource": "loss",
                 "measured": round(loss, 5), "required": args.max_probe_loss,
                 "unit": "fraction",
-                "reason": f"{loss:.2%} of the probe's datagrams never arrived "
-                          f"at {offered_bps / 1e9:.2f} Gbit/s offered, which is "
-                          f"the rate the request needs"})
+                "reason": f"{loss:.2%} of the probe's datagrams never arrived, "
+                          f"leaving {delivered_bps / 1e9:.2f} Gbit/s against "
+                          f"the {required_bps / 1e9:.2f} Gbit/s this request "
+                          f"needs (offered {offered_bps / 1e9:.2f} Gbit/s)"})
 
     # --- the sender and receiver CPUs, against a measured cost per Gbit/s
     for role, report, cost, stated in (
