@@ -331,10 +331,10 @@ def main():
     parser.add_argument("--paired-stall", action="store_true")
     parser.add_argument("--out", type=Path, default=ROOT / ".build/receiver-control")
     args = parser.parse_args()
-    if args.destinations > 1000 or args.seconds < 5 or args.bitrate_bps > 10_000_000_000:
-        parser.error("requires 1..1000 destinations, at least 5 seconds and at most 10 Gbit/s per peer")
-    if args.listeners and (args.listeners > 64 or args.listeners > args.destinations):
-        parser.error("listeners must not exceed 64 or the destination count")
+    if args.destinations > 2048 or args.seconds < 5 or args.bitrate_bps > 10_000_000_000:
+        parser.error("requires 1..2048 destinations, at least 5 seconds and at most 10 Gbit/s per peer")
+    if args.listeners and (args.listeners > 256 or args.listeners > args.destinations):
+        parser.error("listeners must not exceed 256 or the destination count")
     if args.paired_stall and args.destinations < 2:
         parser.error("paired stall needs a healthy control destination")
     if not args.source.is_file() or args.source.stat().st_size == 0:

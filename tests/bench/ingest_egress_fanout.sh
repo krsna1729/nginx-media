@@ -149,7 +149,7 @@ CAPACITY_PROGRAM_DESTS="${CAPACITY_PROGRAM_DESTS:-1}"
 CAPACITY_BITRATE_STEPS="${CAPACITY_BITRATE_STEPS:-2M 6M 12M 20M}"
 CAPACITY_BITRATE_PROGRAMS="${CAPACITY_BITRATE_PROGRAMS:-4}"
 CAPACITY_BITRATE_DESTS="${CAPACITY_BITRATE_DESTS:-1}"
-CAPACITY_DEST_STEPS="${CAPACITY_DEST_STEPS:-1 8 32 64 128 256 512 1000}"
+CAPACITY_DEST_STEPS="${CAPACITY_DEST_STEPS:-1 8 32 64 128 256 512 1024}"
 CAPACITY_DEST_RATE="${CAPACITY_DEST_RATE:-6M}"
 CAPACITY_SLOW_RATE="${CAPACITY_SLOW_RATE:-20M}"
 CAPACITY_SLOW_SECONDS="${CAPACITY_SLOW_SECONDS:-30}"
@@ -160,7 +160,7 @@ CAPACITY_SUSTAINED_DESTS="${CAPACITY_SUSTAINED_DESTS:-4}"
 CAPACITY_SATURATED_SECONDS="${CAPACITY_SATURATED_SECONDS:-15}"
 CAPACITY_QUALITY_RATE="${CAPACITY_QUALITY_RATE:-8M}"
 CAPACITY_QUALITY_SECONDS="${CAPACITY_QUALITY_SECONDS:-120}"
-CAPACITY_QUALITY_STEPS="${CAPACITY_QUALITY_STEPS:-1 2 4 8 16 32 64 128 256 512 1000}"
+CAPACITY_QUALITY_STEPS="${CAPACITY_QUALITY_STEPS:-1 2 4 8 16 32 64 128 256 512 1024}"
 CAPACITY_FIXED_SRT_WORKERS="${CAPACITY_FIXED_SRT_WORKERS:-adaptive}"
 CAPACITY_FIXED_HLS_PUSH_WORKERS="${CAPACITY_FIXED_HLS_PUSH_WORKERS:-adaptive}"
 CAPACITY_SRT_HLS="${CAPACITY_SRT_HLS:-yes}"
@@ -2177,7 +2177,7 @@ capacity_mix_minimum_rung() {   # <protocol> <srt share> <hls push share>
     local protocol="$1" srt_share="${2:-0}" hls_push_share="${3:-0}"
     local n srt_count primary hls_push_count
 
-    for (( n = 1; n <= 1000; n++ )); do
+    for (( n = 1; n <= 2048; n++ )); do
         if [ "$protocol" = srt ]; then
             srt_count="$n"
         else
@@ -3096,12 +3096,12 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
         || { echo "capacity window must be at most 3600 seconds" \
                  >&2; return 1; }
     [ "$workers" -le 16 ] && [ "$programs" -le 32 ] \
-        && [ "$destinations" -le 1000 ] \
-        && [ "$(( programs * destinations ))" -le 1000 ] \
+        && [ "$destinations" -le 2048 ] \
+        && [ "$(( programs * destinations ))" -le 2048 ] \
         || { echo "capacity case exceeds bounded worker/output limits" \
                  >&2; return 1; }
     owner_streams=$(( (programs + workers - 1) / workers ))
-    [ "$(( owner_streams * destinations ))" -le 1000 ] \
+    [ "$(( owner_streams * destinations ))" -le 2048 ] \
         || { echo "capacity case exceeds per-owner output limit" >&2; return 1; }
     command -v ss >/dev/null \
         || { echo "ss is required for socket memory snapshots" >&2; return 1; }
@@ -3110,7 +3110,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     fi
 
     rate_bps="$(capacity_rate_bps "$rate")" || return 1
-    [ "$(( rate_bps * programs * destinations ))" -le 8000000000 ] \
+    [ "$(( rate_bps * programs * destinations ))" -le 20000000000 ] \
         || { echo "capacity case nominal egress exceeds 8000 Mbit/s" \
                  >&2; return 1; }
     offered_in="$(awk -v b="$(( programs * rate_bps ))" \
@@ -3250,7 +3250,7 @@ PY
         sink_listeners=$(( (total_srt_dest + CAPACITY_SRT_RECEIVER_PEERS - 1)
                            / CAPACITY_SRT_RECEIVER_PEERS ))
         [ "$sink_listeners" -ge 1 ] || sink_listeners=1
-        [ "$sink_listeners" -le 64 ] || sink_listeners=64
+        [ "$sink_listeners" -le 256 ] || sink_listeners=256
         echo "   srt_receiver_listeners=$sink_listeners (<= $CAPACITY_SRT_RECEIVER_PEERS destinations each)"
     fi
     if [ "$srt_destinations" -gt 0 ]; then
@@ -4724,9 +4724,9 @@ capacity_quality_ladder() {   # <mix> <primary protocol> <SRT share> [HLS push s
     fi
     for destinations in $CAPACITY_QUALITY_STEPS; do
         [[ "$destinations" =~ ^[1-9][0-9]*$ ]] \
-            && [ "$destinations" -le 1000 ] \
+            && [ "$destinations" -le 2048 ] \
             && [ "$destinations" -gt "$previous" ] \
-            || { echo "quality ladder must be strictly increasing within 1..1000" \
+            || { echo "quality ladder must be strictly increasing within 1..2048" \
                      >&2; return 1; }
         # The ladder begins at the smallest rung at which every protocol in
         # the mix has a destination: one for a pure workload and for the

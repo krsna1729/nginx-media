@@ -33,7 +33,7 @@
 #include "ngx_media_rtmp_wire.h"
 #include "ngx_media_egress_manager.h"
 
-#define NGX_MEDIA_RTMP_DEST_MAX          1000
+#define NGX_MEDIA_RTMP_DEST_MAX          2048
 #define NGX_MEDIA_RTMP_DEST_CHUNK        4096
 #define NGX_MEDIA_RTMP_DEST_READ_BUFFER  16384
 #define NGX_MEDIA_RTMP_DEST_MAX_QUEUE    128

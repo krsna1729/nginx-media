@@ -26,7 +26,7 @@ typedef struct ngx_media_owner_dir_s ngx_media_owner_dir_t;
  * active-stream capacity for owner metadata; a claim beyond it is refused
  * rather than leaving a stream silently without liveness/progress.
  */
-#define NGX_MEDIA_OWNER_DIR_SLOTS 256
+#define NGX_MEDIA_OWNER_DIR_SLOTS 4096
 
 
 /*

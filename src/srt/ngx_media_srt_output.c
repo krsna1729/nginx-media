@@ -88,6 +88,8 @@ typedef struct {
     pthread_mutex_t              wake_mutex;
     pthread_cond_t               wake_cond;
     uint64_t                     wake_generation;
+    ngx_uint_t                   active_slots[NGX_MEDIA_SRT_MAX_OUTPUTS / NGX_MEDIA_SRT_EGRESS_SHARDS + 1];
+    ngx_uint_t                   nactive;
 } ngx_media_srt_sender_t;
 
 struct ngx_media_srt_outputs_s {
@@ -103,6 +105,7 @@ struct ngx_media_srt_outputs_s {
     ngx_atomic_t                  active_senders;
     uint64_t                        last_adapt_ns;
     ngx_uint_t                      cpu_sampled;
+    ngx_uint_t                      mux_groups;
 
     ngx_media_srt_out_event_t      *events;
     ngx_uint_t                      events_capacity;
@@ -153,6 +156,34 @@ ngx_media_srt_output_strings(const ngx_media_srt_output_conf_t *src,
         p += values[i]->len + 1;
     }
     return storage;
+}
+static void
+ngx_media_srt_lane_add_slot(ngx_media_srt_sender_t *sender, ngx_uint_t slot)
+{
+    ngx_uint_t  i;
+
+    for (i = 0; i < sender->nactive; i++) {
+        if (sender->active_slots[i] == slot) {
+            return;
+        }
+    }
+    if (sender->nactive < NGX_MEDIA_SRT_MAX_OUTPUTS / NGX_MEDIA_SRT_EGRESS_SHARDS + 1) {
+        sender->active_slots[sender->nactive++] = slot;
+    }
+}
+
+static void
+ngx_media_srt_lane_remove_slot(ngx_media_srt_sender_t *sender, ngx_uint_t slot)
+{
+    ngx_uint_t  i;
+
+    for (i = 0; i < sender->nactive; i++) {
+        if (sender->active_slots[i] == slot) {
+            sender->active_slots[i] = sender->active_slots[sender->nactive - 1];
+            sender->nactive--;
+            return;
+        }
+    }
 }
 
 static uint64_t ngx_media_srt_now_ns(void);
@@ -625,11 +656,15 @@ ngx_media_srt_out_service(ngx_media_srt_outputs_t *outs,
          * the fanout.  Lanes are stable for a destination's lifetime, which
          * a shared endpoint needs - a session cannot move between them.
          */
+        ngx_uint_t mux_groups = outs->mux_groups ? outs->mux_groups
+                                                 : NGX_MEDIA_SRT_EGRESS_SHARDS;
+        uintptr_t  group = (dest->shard % mux_groups) + 1;
+
         session = ngx_media_srt_connect_shared(
             connect_conf.host.data, connect_conf.port,
             connect_conf.streamid.len ? connect_conf.streamid.data : NULL,
             connect_conf.streamid.len, connect_conf.connect_timeout,
-            connect_conf.params, dest->shard + 1, outs->log);
+            connect_conf.params, group, outs->log);
 
         (void) pthread_mutex_lock(&dest->mutex);
 
@@ -781,13 +816,12 @@ ngx_media_srt_out_dispatch(ngx_media_srt_sender_t *sender,
 {
     ngx_media_srt_outputs_t  *outs = sender->outs;
     ngx_media_srt_output_t   *dest;
-    ngx_uint_t                i;
+    ngx_uint_t                j, i;
 
     (void) pthread_rwlock_rdlock(&outs->destinations_lock);
 
-    for (i = sender->id; i < NGX_MEDIA_SRT_MAX_OUTPUTS;
-         i += NGX_MEDIA_SRT_EGRESS_SHARDS)
-    {
+    for (j = 0; j < sender->nactive; j++) {
+        i = sender->active_slots[j];
         dest = &outs->destinations[i];
         (void) pthread_mutex_lock(&dest->mutex);
 
@@ -813,7 +847,8 @@ ngx_media_srt_out_thread(void *data)
     ngx_media_srt_output_t      *dest;
     ngx_msec_t                   now;
     uint64_t                     observed;
-    ngx_uint_t                   active, lane, i, worked;
+    ngx_uint_t                   active, lane, i, j, worked, nslots;
+    ngx_uint_t                   slots[NGX_MEDIA_SRT_MAX_OUTPUTS / NGX_MEDIA_SRT_EGRESS_SHARDS + 1];
     char                         name[16];
 
     (void) snprintf(name, sizeof(name), "srt-egress-%02lu",
@@ -856,15 +891,20 @@ ngx_media_srt_out_thread(void *data)
 
                 now = ngx_media_srt_now();
 
-                for (i = lane; i < NGX_MEDIA_SRT_MAX_OUTPUTS;
-                     i += NGX_MEDIA_SRT_EGRESS_SHARDS)
-                {
+                (void) pthread_rwlock_rdlock(&outs->destinations_lock);
+                nslots = lane_sender->nactive;
+                for (j = 0; j < nslots; j++) {
+                    slots[j] = lane_sender->active_slots[j];
+                }
+                (void) pthread_rwlock_unlock(&outs->destinations_lock);
+
+                for (j = 0; j < nslots; j++) {
+                    i = slots[j];
                     dest = &outs->destinations[i];
                     if (ngx_media_srt_out_service(outs, dest, i, now)) {
                         worked = 1;
                     }
                 }
-
                 (void) pthread_mutex_unlock(&lane_sender->lane_mutex);
             }
         }
@@ -896,7 +936,7 @@ ngx_media_srt_out_thread(void *data)
 ngx_int_t
 ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
     const ngx_media_srt_output_conf_t *confs, ngx_uint_t count,
-    ngx_uint_t max_events, ngx_log_t *log)
+    ngx_uint_t max_events, ngx_uint_t mux_groups, ngx_log_t *log)
 {
     ngx_media_srt_outputs_t  *outs;
     ngx_media_srt_sender_t   *sender;
@@ -919,6 +959,7 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
     outs->log = log;
     outs->notify_fd = -1;
     outs->count = count;
+    outs->mux_groups = mux_groups ? mux_groups : NGX_MEDIA_SRT_EGRESS_SHARDS;
     outs->events_capacity = max_events ? max_events
                                        : NGX_MEDIA_SRT_OUT_MAX_EVENTS;
 
@@ -984,6 +1025,7 @@ ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
         dest->used = 1;
         ngx_media_srt_queue_init(&dest->queue, dest->conf.max_units,
                                  dest->conf.max_bytes);
+        ngx_media_srt_lane_add_slot(&outs->shards[dest->shard], i);
         if (dest->conf.program_identity == 0) {
             outs->static_slots[outs->static_count++] = i;
         }
@@ -1224,6 +1266,7 @@ ngx_media_srt_outputs_add(ngx_media_srt_outputs_t *outs,
     dest->sent_bytes = 0;
     dest->sent_bursts = 0;
     dest->blocked_sends = 0;
+    ngx_media_srt_lane_add_slot(&outs->shards[dest->shard], i);
     dest->retransmitted_packets = 0;
     dest->reconnects = 0;
     dest->transport_errors = 0;
@@ -1281,6 +1324,7 @@ ngx_media_srt_outputs_remove(ngx_media_srt_outputs_t *outs, ngx_uint_t index)
     dest->running = 0;
     dest->used = 0;
     dest->epoch++;
+    ngx_media_srt_lane_remove_slot(&outs->shards[dest->shard], index);
     if (dest->conf.program_identity == 0) {
         for (j = 0; j < outs->static_count; j++) {
             if (outs->static_slots[j] == index) {
@@ -1345,6 +1389,7 @@ ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs)
         dest->running = 0;
         dest->used = 0;
         dest->epoch++;
+        ngx_media_srt_lane_remove_slot(&outs->shards[dest->shard], i);
         if (dest->session != NULL) {
             ngx_media_srt_session_shutdown(dest->session);
         }

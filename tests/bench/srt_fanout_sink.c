@@ -19,7 +19,7 @@
 #define TS_PACKET_SIZE 188
 #define TS_PID_COUNT 8192
 #define TS_SEEN_BYTES (TS_PID_COUNT / 8)
-#define LISTENER_CAP 64
+#define LISTENER_CAP 256
 
 typedef struct {
     SRTSOCKET sock;
@@ -747,6 +747,13 @@ main(int argc, char **argv)
             failure = 1;
             goto done;
         }
+        {
+            int rcvbuf = 16 * 1024 * 1024;
+            (void) srt_setsockopt(listener, 0, SRTO_UDP_RCVBUF, &rcvbuf,
+                                  sizeof(rcvbuf));
+            (void) srt_setsockopt(listener, 0, SRTO_RCVBUF, &rcvbuf,
+                                  sizeof(rcvbuf));
+        }
 
         memset(&address, 0, sizeof(address));
         address.sin_family = AF_INET;
@@ -897,6 +904,11 @@ main(int argc, char **argv)
                         (void) srt_close(accepted);
                         failure = 1;
                         break;
+                    }
+                    {
+                        int rcvbuf = 16 * 1024 * 1024;
+                        (void) srt_setsockopt(accepted, 0, SRTO_RCVBUF, &rcvbuf,
+                                              sizeof(rcvbuf));
                     }
                     if (quality_mode
                         && (peers[peer_index].ts_last_cc == NULL

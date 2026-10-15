@@ -615,8 +615,8 @@ def parse_args(argv=None):
     parts = urlsplit(args.url)
     if parts.scheme != "http" or not parts.hostname or parts.username or parts.password:
         parser.error("--url must be an unauthenticated http:// URL")
-    if not 1 <= args.readers <= 1000:
-        parser.error("--readers must be between 1 and 1000")
+    if not 1 <= args.readers <= 2048:
+        parser.error("--readers must be between 1 and 2048")
     if not all(math.isfinite(number) for number in (
             args.duration, args.poll_interval, args.reference_bps,
             args.min_delivery_ratio)):

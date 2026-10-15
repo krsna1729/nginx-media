@@ -57,7 +57,7 @@ done
 [ -n "$MIXES" ] && [ -n "$STEPS" ] || die 'empty workload/ladder'
 previous=0
 for step in $STEPS; do
-    [[ "$step" =~ ^[0-9]+$ ]] && (( step > previous && step <= 1000 )) || die 'steps must be increasing within 1..1000'
+    [[ "$step" =~ ^[0-9]+$ ]] && (( step > previous && step <= 2048 )) || die 'steps must be increasing within 1..2048'
     previous="$step"
 done
 if [[ " $MIXES " == *" pure-hls "* ]] && [ -z "$SENDER_ADDR" ]; then

@@ -140,6 +140,7 @@ typedef struct {
     /* SRT destinations fed from the shared program preparation */
     ngx_media_srt_output_conf_t  outputs[NGX_MEDIA_SRT_MAX_OUTPUTS];
     ngx_uint_t                   noutputs;
+    ngx_uint_t                   mux_groups;
 
     /* SRT encryption: the listener default, and per-stream overrides */
     ngx_media_srt_crypto_conf_t      crypto;
@@ -305,6 +306,12 @@ static ngx_command_t ngx_media_srt_commands[] = {
       ngx_media_srt_output_cmd,
       0,
       0,
+      NULL },
+    { ngx_string("media_srt_mux_groups"),
+      NGX_MAIN_CONF|NGX_DIRECT_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      0,
+      offsetof(ngx_media_srt_main_conf_t, mux_groups),
       NULL },
 
       ngx_null_command
@@ -1418,6 +1425,7 @@ ngx_media_srt_create_conf(ngx_cycle_t *cycle)
     if (mcf->listens == NULL) {
         return NULL;
     }
+    mcf->mux_groups = NGX_CONF_UNSET_UINT;
 
     return mcf;
 }
@@ -1703,6 +1711,12 @@ ngx_media_srt_init_main_conf(ngx_cycle_t *cycle, void *conf)
                       n, workers, n - workers);
     }
 
+    if (mcf->mux_groups == NGX_CONF_UNSET_UINT || mcf->mux_groups == 0) {
+        mcf->mux_groups = 4;
+    }
+    if (mcf->mux_groups > 16) {
+        mcf->mux_groups = 16;
+    }
     return NGX_CONF_OK;
 }
 
@@ -1885,6 +1899,7 @@ ngx_media_srt_init_process(ngx_cycle_t *cycle)
 
         if (ngx_media_srt_outputs_start(&outs, mcf->outputs, mcf->noutputs,
                                         NGX_MEDIA_SRT_OUT_MAX_EVENTS,
+                                        mcf->mux_groups,
                                         cycle->log) != NGX_OK)
         {
             ngx_log_error(NGX_LOG_EMERG, cycle->log, 0,

@@ -18,12 +18,12 @@ SRT_VERSION="v1.5.7"
 SRT_PKG="srt-pinned"
 
 # robotweax/srt - the clean-slate implementation of the same C API, latest
-# release v0.2.6.  Its own pkg-config file is called robotweax-srt; ours is
+# release v0.2.9.  Its own pkg-config file is called robotweax-srt; ours is
 # robotweax-srt-pinned so the pinned library is never confused with an
 # installed one.
 ROBOTWEAX_REPO="https://github.com/robotweax/srt"
-ROBOTWEAX_REF="50cba37bc89f423ee7c0a292c3c3eae71b5fc7f9"
-ROBOTWEAX_VERSION="v0.2.6"
+ROBOTWEAX_REF="a87779d9c3d831583d32b2f61cae5b81edb05537"
+ROBOTWEAX_VERSION="v0.2.9"
 ROBOTWEAX_PKG="robotweax-srt-pinned"
 
 if [ "${1:-}" = "--print" ]; then
