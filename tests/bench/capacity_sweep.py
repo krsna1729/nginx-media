@@ -48,6 +48,12 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 HARNESS = os.path.join(PROJECT_ROOT, "tests/bench/ingest_egress_fanout.sh")
 MIXES = "pure-srt pure-rtmp pure-hls pure-hls-push rtmp-95-srt-5 hls-push-95-srt-5 rtmp-50-hls-push-45-srt-5"
 
+#: The harness's own default ladder stops at 1024, so a sweep that leaves it
+#: alone measures every cell up to 1024 and never reaches the 2048 the
+#: qualification target names.  Ladders still stop at their first failure, so
+#: a weak cell pays for the low rungs only.
+STEPS = "1 2 4 8 16 32 64 128 256 512 1024 2048"
+
 #: One CPU per cell, and only P-cores: 0-11 are the six physical P-cores with
 #: their SMT siblings, 12-19 are the eight E-cores.  Taking every second CPU
 #: from the P-core range gives one thread per physical core.
@@ -71,6 +77,18 @@ PUBLISHER_CPUS = "12,13"
 
 def log(message):
     print("[%s] %s" % (datetime.now().strftime("%H:%M:%S"), message), flush=True)
+
+
+def workloads_in(matrix):
+    """The workload names a cell's matrix actually reports."""
+    if not isinstance(matrix, dict):
+        return set()
+    return set((matrix.get("mixes") or {}).keys())
+
+
+def complete(matrix, wanted):
+    """Whether a cell measured every workload it was asked for."""
+    return bool(wanted) and workloads_in(matrix) >= set(wanted)
 
 
 def engine_binary(engine):
@@ -124,6 +142,7 @@ def run_cell(engine, cpus, snapshot, args, out_dir):
         "CAPACITY_PUBLISHER_CPUS": PUBLISHER_CPUS,
         "CAPACITY_QUALITY_SECONDS": str(args.seconds),
         "CAPACITY_QUALITY_MIXES": args.mixes,
+        "CAPACITY_QUALITY_STEPS": args.steps,
         "CAPACITY_QUALITY_STOP_AFTER_FAILURES": "1",
         "CAPACITY_SINK_MODE": "correctness",
         "PHASES": "capacity-quality-ladder",
@@ -221,6 +240,8 @@ def main():
                         help="comma-separated engine ids to restrict to")
     parser.add_argument("--mixes", default=MIXES,
                         help="workloads to run per cell; default is all seven")
+    parser.add_argument("--steps", default=STEPS,
+                        help="destination ladder per workload")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -268,17 +289,21 @@ def main():
         if os.path.exists(result_path) and not args.force:
             with open(result_path) as handle:
                 previous = json.load(handle)
-            # Only a cell that produced a matrix is finished.  A cell that was
-            # killed, or that exited without a matrix, has a record too, and
-            # treating that as done would leave a hole in the sweep that no
-            # later run ever fills.
-            if previous.get("matrix") and previous.get("exit_status") == 0:
+            # A cell is finished when its matrix names every workload that was
+            # asked for.  The exit status cannot decide it: a ladder that stops
+            # at its first quality failure exits non-zero on purpose, and that
+            # is a complete cell.  A cell killed part way has either no matrix
+            # or a matrix missing workloads, and must re-run.
+            done = complete(previous.get("matrix"), args.mixes.split())
+            if done:
                 log("%-18s already measured, skipping" % identifier)
                 records.append(previous)
                 continue
-            log("%-18s previous attempt was incomplete (exit %s, matrix %s); "
-                "re-running" % (identifier, previous.get("exit_status"),
-                                "present" if previous.get("matrix") else "absent"))
+            log("%-18s previous attempt incomplete (%d of %d workloads, exit %s);"
+                " re-running" % (identifier,
+                                 len(workloads_in(previous.get("matrix"))),
+                                 len(args.mixes.split()),
+                                 previous.get("exit_status")))
 
         log("%-18s %d core%s (%s)"
             % (identifier, len(cpus), "" if len(cpus) == 1 else "s",
