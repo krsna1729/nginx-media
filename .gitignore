@@ -14,3 +14,6 @@ __pycache__/
 # raw capacity run trees: media files, nginx temp directories and per-process
 # logs. The summaries and per-rung diagnostics beside them are the evidence.
 docs/capacity-evidence/three-way-comparison/
+
+# run snapshots of the harness: a live run must not see the working file change
+tests/bench/.run-*.sh

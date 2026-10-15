@@ -269,13 +269,23 @@ def read_cookie_jar(path):
     The harvester logs in with curl and keeps the jar; these calls are made
     without curl, so the jar is read directly rather than shelling out to
     something that can parse it.
+
+    curl marks an HttpOnly cookie by prefixing the *domain* field with
+    `#HttpOnly_`, and restream's session cookie is HttpOnly.  A jar can
+    therefore consist of one such line and nothing else, so treating every
+    leading `#` as a comment would drop the only credential and send every
+    request unauthenticated: a whole engine failing setup, with no error
+    anyone sees.
     """
     pairs = []
     with open(path, "r", errors="replace") as handle:
         for line in handle:
-            if line.startswith("#") or not line.strip():
+            line = line.rstrip("\n")
+            if line.startswith("#HttpOnly_"):
+                line = line[len("#HttpOnly_"):]
+            elif line.startswith("#") or not line.strip():
                 continue
-            fields = line.rstrip("\n").split("\t")
+            fields = line.split("\t")
             if len(fields) >= 7:
                 pairs.append("%s=%s" % (fields[5], fields[6]))
     return "; ".join(pairs)

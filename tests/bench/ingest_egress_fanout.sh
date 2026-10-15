@@ -231,6 +231,107 @@ CAPACITY_RECEIVER_MKDIR="${CAPACITY_RECEIVER_MKDIR:-}"
 # Distributed transport uses a JSON configuration, not interpolated shell argv.
 CAPACITY_RECEIVER_CONFIG="${CAPACITY_RECEIVER_CONFIG:-}"
 CAPACITY_SENDER_ADDR="${CAPACITY_SENDER_ADDR:-127.0.0.1}"
+# The address the sender binds for media.  With the sender on this host that
+# is loopback; with a namespaced sender it is the sender's own namespace
+# address, which is the only one its peers can reach.
+CAPACITY_MEDIA_ADDR="${CAPACITY_MEDIA_ADDR:-}"
+# Where the sender (nginx) runs.  Unset runs it on this host, which is the
+# default for every tier that runs on a shared runner.  A network-namespace
+# sender is what makes the veth topology free of host firewall traversal:
+# both sides of the wire live in their own namespaces, so no measured packet
+# enters the host's filter tables and no ACCEPT rule has to be installed or
+# removed.  The sender's own namespace address is CAPACITY_SENDER_ADDR, and
+# its loopback is reachable only through this exec prefix.
+CAPACITY_SENDER_EXEC="${CAPACITY_SENDER_EXEC:-}"
+case "$CAPACITY_SENDER_EXEC" in
+    ssh*|*" ssh "*)
+        echo "SSH senders are not supported; senders are local or namespaced" >&2
+        exit 1 ;;
+esac
+# A sender in a network namespace still shares the PID namespace, so its PIDs
+# are host PIDs and /proc accounting is unchanged; only the network is its own.
+# A namespaced sender binds its own namespace address for media; a host
+# sender binds loopback.  Explicit CAPACITY_MEDIA_ADDR wins.
+if [ -z "$CAPACITY_MEDIA_ADDR" ]; then
+    if [ -n "$CAPACITY_SENDER_EXEC" ]; then
+        CAPACITY_MEDIA_ADDR="$CAPACITY_SENDER_ADDR"
+    else
+        CAPACITY_MEDIA_ADDR=127.0.0.1
+    fi
+fi
+sender_run() {   # <argv...>
+    if [ -z "$CAPACITY_SENDER_EXEC" ]; then
+        "$@"
+        return
+    fi
+    local -a prefix=()
+    read -r -a prefix <<< "$CAPACITY_SENDER_EXEC"
+    "${prefix[@]}" "$@"
+}
+
+# The namespace the harness's own media participants live in: the publisher
+# and every measuring receiver.  With a host sender this is this host and the
+# prefix is empty; with a namespaced sender it is the far end of the wire, and
+# the media address is only reachable from inside it.  It defaults to the
+# receiver exec because that is the namespace the harness already owns.
+CAPACITY_HARNESS_EXEC="${CAPACITY_HARNESS_EXEC:-$CAPACITY_RECEIVER_EXEC}"
+harness_run() {   # <argv...>
+    if [ -z "$CAPACITY_HARNESS_EXEC" ]; then
+        "$@"
+        return
+    fi
+    local -a prefix=()
+    read -r -a prefix <<< "$CAPACITY_HARNESS_EXEC"
+    "${prefix[@]}" "$@"
+}
+
+# Every HTTP call to a receiver-side server (the RTMP sink's administration
+# API, the HLS push sink's readiness and snapshot endpoints) is made from
+# inside the harness namespace, because that is the only place its address
+# resolves.  A caller must not have to know which topology it is running in.
+receiver_curl() {   # <curl args...>
+    harness_run curl "$@"
+}
+
+# The shared publisher helper fetches the ingest key over the API, which
+# binds the sender's loopback, so its curl must enter the sender's namespace.
+# See tests/integration/ingest_test_helpers.sh.
+# A plain assignment, not an export: shell functions do not survive exec, so
+# an exported MEDIA_TEST_CURL=api_curl would make every other script that
+# sources the helper from this environment fail with "api_curl: command not
+# found".  The helper is sourced into this shell, which is the only place the
+# name has to resolve.
+MEDIA_TEST_CURL="api_curl"
+
+# The same two routings for a *backgrounded* participant.  Backgrounding a
+# shell function forks a subshell, so the PID the harness records as the
+# publisher would be bash's and not ffmpeg's: killing it would orphan the
+# encoder and leave it publishing into every later rung.  These forms exec
+# the target in the forked subshell, so the recorded PID is the media process
+# itself and a signal reaches exactly that process.
+harness_exec() {   # <argv...>; background with &: $! is <argv[0]>
+    # Only meaningful in a forked child.  Called in the foreground it would
+    # replace the harness itself and end the run with no error at all, so say
+    # so instead.
+    [ "$BASHPID" != "$$" ] \
+        || { echo "harness_exec must be backgrounded with &" >&2; exit 1; }
+    if [ -z "$CAPACITY_HARNESS_EXEC" ]; then
+        exec "$@"
+    fi
+    local -a prefix=()
+    read -r -a prefix <<< "$CAPACITY_HARNESS_EXEC"
+    exec "${prefix[@]}" "$@"
+}
+sender_exec() {   # <argv...>; background with &: $! is <argv[0]>
+    [ "$BASHPID" != "$$" ] \
+        || { echo "sender_exec must be backgrounded with &" >&2; exit 1; }
+    if [ -z "$CAPACITY_SENDER_EXEC" ]; then
+        exec "$@"
+    fi
+    local -a prefix=()
+    read -r -a prefix <<< "$CAPACITY_SENDER_EXEC"
+    exec "${prefix[@]}" "$@"
+}
 declare -A RECEIVER_IDENTITIES=() RECEIVER_CLIENTS=()
 RECEIVER_PID=""
 RECEIVER_TUNNELS=()
@@ -353,7 +454,7 @@ map_slots() {
     for p in $(worker_pids); do
         for i in "${SRT_PORTS[@]}"; do
             [ "$(pid_of "$RUN/logs/error.log" \
-                  "srt listener ready on 127.0.0.1:$i\$")" = "$p" ] \
+                  "srt listener ready on $CAPACITY_MEDIA_ADDR:$i\$")" = "$p" ] \
                 && SLOT["$p"]="${ENDPOINT_INDEX[$i]}"
         done
     done
@@ -615,6 +716,9 @@ start_rtmp_sink_instance() {   # [count]
     [ "$count" -ge 1 ] && [ "$count" -le 64 ] \
         || { echo "RTMP sink count must be 1..64" >&2; return 1; }
     local receiver_nginx="$NGINX" api_bind="$CAPACITY_RECEIVER_ADDR" daemon=on
+    if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+        receiver_nginx="${CAPACITY_RTMP_SINK_NGINX:-$ROOT/.build/nginx-haivision/install/sbin/nginx}"
+    fi
     if [ -n "$CAPACITY_RECEIVER_CONFIG" ]; then
         receiver_nginx="$(receiver_path "$ROOT/.build/nginx-install/sbin/nginx")"
         api_bind=127.0.0.1
@@ -673,10 +777,10 @@ PY
                 >"$dir/tunnel.log" 2>&1 &
             RECEIVER_TUNNELS+=( "$!" )
         else
-            "$NGINX" -p "$dir" -c conf/nginx.conf -t >"$dir/conf.log" 2>&1 \
+            receiver_run "$receiver_nginx" -p "$dir" -c conf/nginx.conf -t >"$dir/conf.log" 2>&1 \
                 || { cat "$dir/conf.log" >&2; return 1; }
             receiver_run $(pin "$CAPACITY_RECEIVER_CPUS") \
-                "$NGINX" -p "$dir" -c conf/nginx.conf || return 1
+                "$receiver_nginx" -p "$dir" -c conf/nginx.conf || return 1
         fi
     done
 
@@ -972,6 +1076,32 @@ cpu_total() {   # <before> <after> <seconds>
 
 api() { printf 'http://127.0.0.1:%s/media/api/v1' "$HTTP_PORT"; }
 
+# restream serves its control API and its HLS preview from one HTTP server,
+# so unlike nginx it cannot keep administration on loopback while media goes
+# on the wire.  That server therefore binds the media address and the harness
+# reaches it there; api_curl enters the sender's namespace, where the media
+# address is local.
+RESTREAM_HTTP_PORT="${RESTREAM_HTTP_PORT:-18080}"
+RESTREAM_RTMP_PORT="${RESTREAM_RTMP_PORT:-11935}"
+RESTREAM_SRT_PORT="${RESTREAM_SRT_PORT:-16000}"
+restream_api() { printf 'http://%s:%s' "$CAPACITY_MEDIA_ADDR" "$RESTREAM_HTTP_PORT"; }
+
+# Every administration and metrics call goes through the sender's own network
+# namespace.  The API binds that namespace's loopback and is never exposed on
+# the wire, so with a namespaced sender the request has to be made from
+# inside the namespace; with a host sender this is a plain curl.  A caller
+# must not care which of the two it got, or the same ladder would need two
+# code paths for the same evidence.
+api_curl() {   # <curl args...>
+    if [ -z "$CAPACITY_SENDER_EXEC" ]; then
+        curl "$@"
+        return
+    fi
+    local -a prefix=()
+    read -r -a prefix <<< "$CAPACITY_SENDER_EXEC"
+    "${prefix[@]}" curl "$@"
+}
+
 rtmp_sink_api() {   # [sink index]
     local address="$CAPACITY_RECEIVER_ADDR" port
     port="$(rtmp_sink_http_port "${1:-0}")"
@@ -993,7 +1123,7 @@ rtmp_sink_metric_urls() {
 }
 
 stream_field() {   # <name> <field>
-    curl -fsS "$(api)/streams/live/$1" 2>/dev/null \
+    api_curl -fsS "$(api)/streams/live/$1" 2>/dev/null \
         | sed -n "s/.*\"$2\":\([0-9]*\).*/\1/p" | head -1
 }
 
@@ -1032,7 +1162,7 @@ owner_metrics() {   # <name> → the owner's own metrics, on one connection
         return 0
     fi
     for i in $(seq 1 40); do
-        out="$(curl -fsS "$(api)/streams/live/$1" "$(api)/metrics" 2>/dev/null)" \
+        out="$(api_curl -fsS "$(api)/streams/live/$1" "$(api)/metrics" 2>/dev/null)" \
             || continue
 
         case "$out" in
@@ -1068,7 +1198,7 @@ endpoint_worker() {   # <port> → the worker that logged the listener
     local pid
 
     pid="$(pid_of "$RUN/logs/error.log" \
-        "srt listener ready on 127.0.0.1:$1\$")"
+        "srt listener ready on $CAPACITY_MEDIA_ADDR:$1\$")"
 
     if [ -n "$pid" ]; then
         slot_name "$pid"
@@ -1085,23 +1215,37 @@ owner_percentile() {   # <name> <percentile>
 }
 
 post_owner() {   # <path> <json> ; retried until the owner answers it
-    local i code
+    # The loop is bounded by time, not by an attempt count.  Retries are
+    # immediate while misses are few, because `reuseport` hashes the *new
+    # connection* and every attempt here is its own connection with its own
+    # source port, so the next attempt re-rolls the worker.  A sustained run
+    # of misses means the owner is busy rather than merely unhashed, and only
+    # then does a delay help.  A count-bounded loop of immediate retries would
+    # give up in about half a second and report a setup error where a slow
+    # owner was the truth; this waits the same twelve seconds the old
+    # 60 x 0.2s delay did, and usually finishes in three round trips.
+    local budget="${CAPACITY_OWNER_RETRY_BUDGET:-12}"
+    local deadline=$(( SECONDS + budget ))
+    local misses=0 code
 
-    for i in $(seq 1 60); do
-        code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        code="$(api_curl -sS -o /dev/null -w '%{http_code}' -X POST \
             -H 'Content-Type: application/json' -d "$2" "$(api)$1" 2>/dev/null)"
 
         case "$code" in
             2*) return 0 ;;
-            # 409 not_owner and 404 both mean "this worker cannot answer for
-            # that stream": with more than one worker the request lands on a
-            # replica, so the next attempt is the point, not an error
-            409|404) sleep 0.2 ;;
+            # 409 not_owner means this worker cannot answer for that stream.
+            # 404 also covers "the owner cannot see the stream yet", which is
+            # a wait and not a wrong worker.
+            409|404)
+                misses=$(( misses + 1 ))
+                [ "$misses" -lt "$(( 2 * CAPACITY_WORKERS ))" ] || sleep 0.05
+                ;;
             *)  echo "   POST $1 answered $code" >&2; return 1 ;;
         esac
     done
 
-    echo "   POST $1 never reached the owner" >&2
+    echo "   POST $1 never reached the owner within ${budget}s" >&2
     return 1
 }
 
@@ -1175,11 +1319,17 @@ write_config() {   # <workers> <hls yes|no> <rtmp yes|no>
 
         [ "$2" = yes ] && echo "media_hls $RUN/hls;"
 
+        # Media listeners bind the address the peers can actually reach:
+        # loopback when the sender shares this host, and the sender's own
+        # namespace address when it does not.  Administration stays on
+        # loopback either way, so the unauthenticated API is never on the
+        # wire just because the media had to be.
+        local media_addr="$CAPACITY_MEDIA_ADDR"
         for i in "${SRT_PORTS[@]}"; do
-            echo "media_srt_listen 127.0.0.1:$i;"
+            echo "media_srt_listen $media_addr:$i;"
         done
 
-        [ "$3" = yes ] && echo "media_rtmp_listen 127.0.0.1:$RTMP_PORT;"
+        [ "$3" = yes ] && echo "media_rtmp_listen $media_addr:$RTMP_PORT;"
 
         echo
         echo "http {"
@@ -1203,7 +1353,7 @@ write_config() {   # <workers> <hls yes|no> <rtmp yes|no>
             echo "    server {"
             echo "        listen $CAPACITY_SENDER_ADDR:$(( HTTP_PORT + 31 ));"
             echo "        location /hls/ { alias $RUN/hls/; }"
-            echo "        location / { return 404; }"
+            echo "        location / { }"
             echo "    }"
         fi
         echo "}"
@@ -1212,28 +1362,36 @@ write_config() {   # <workers> <hls yes|no> <rtmp yes|no>
 start_restream_engine() {
     stop_restream_engine
     rm -rf "$RUN/restream" && mkdir -p "$RUN/restream/db" "$RUN/restream/logs"
-    RESTREAM_HTTP_PORT=18080 \
-    RESTREAM_RTMP_PORT=11935 \
-    RESTREAM_SRT_PORT=16000 \
+    RESTREAM_HTTP_PORT="$RESTREAM_HTTP_PORT" \
+    RESTREAM_HTTP_BIND_ADDR="$CAPACITY_MEDIA_ADDR" \
+    RESTREAM_RTMP_PORT="$RESTREAM_RTMP_PORT" \
+    RESTREAM_SRT_PORT="$RESTREAM_SRT_PORT" \
     RESTREAM_INITIAL_ADMIN_PASSWORD="admin_password" \
     RESTREAM_DB_PATH="$RUN/restream/db/restream.db" \
     RESTREAM_LOG_DIR="$RUN/restream/logs" \
-    $(pin "$CAPACITY_NGINX_CPUS" | tr '\n' ' ') \
-    "$RESTREAM_BIN" >"$RUN/restream/logs/stdout.log" 2>&1 &
+    sender_exec $(pin "$CAPACITY_NGINX_CPUS" | tr '\n' ' ') \
+        "$RESTREAM_BIN" >"$RUN/restream/logs/stdout.log" 2>&1 &
     RESTREAM_PID=$!
     for i in $(seq 1 100); do
-        curl -fsS http://127.0.0.1:18080/healthz >/dev/null 2>&1 && break
+        api_curl -fsS "$(restream_api)/healthz" >/dev/null 2>&1 && break
         sleep 0.05
     done
-    curl -s -X POST http://127.0.0.1:18080/api/v1/auth/login \
+    api_curl -s -X POST "$(restream_api)/api/v1/auth/login" \
         -H "Content-Type: application/json" \
         -d '{"password":"admin_password"}' -c "$RUN/restream/cookie.txt" >/dev/null
     local pipe_res
-    pipe_res=$(curl -s -X POST http://127.0.0.1:18080/api/v1/pipelines \
+    pipe_res=$(api_curl -s -X POST "$(restream_api)/api/v1/pipelines" \
         -H "Content-Type: application/json" \
         -b "$RUN/restream/cookie.txt" \
         -d '{"name":"live","streamKey":"live"}')
-    RESTREAM_PIPELINE_ID=$(python3 -c "import json; print(json.loads('''$pipe_res''')['pipeline']['id'])")
+    # The response is read from stdin, never interpolated into the Python
+    # source: a body containing a quote or a triple quote would otherwise end
+    # the literal early and produce a syntax error rather than a pipeline id.
+    RESTREAM_PIPELINE_ID=$(printf '%s' "$pipe_res" | python3 -c \
+        'import json, sys; print(json.load(sys.stdin)["pipeline"]["id"])' 2>/dev/null) || true
+    [ -n "$RESTREAM_PIPELINE_ID" ] \
+        || { echo "restream did not report a pipeline id: ${pipe_res:0:200}" >&2
+             return 1; }
 }
 
 stop_restream_engine() {
@@ -1257,10 +1415,11 @@ start_instance() {   # <workers> <hls> <rtmp>
 
     write_config "$1" "$2" "$3"
 
-    "$NGINX" -p "$RUN" -c conf/nginx.conf -t >"$RUN/conf.log" 2>&1 \
+    sender_run "$NGINX" -p "$RUN" -c conf/nginx.conf -t >"$RUN/conf.log" 2>&1 \
         || { cat "$RUN/conf.log" >&2; echo "configuration rejected" >&2; exit 1; }
 
-    $(pin "$CAPACITY_NGINX_CPUS" | tr '\n' ' ') "$NGINX" -p "$RUN" -c conf/nginx.conf
+    sender_run $(pin "$CAPACITY_NGINX_CPUS" | tr '\n' ' ') \
+        "$NGINX" -p "$RUN" -c conf/nginx.conf
 
     for i in $(seq 1 400); do
         want="$(grep -c 'srt listener ready' "$RUN/logs/error.log" 2>/dev/null || true)"
@@ -1287,7 +1446,7 @@ start_instance() {   # <workers> <hls> <rtmp>
     # endpoint, read back from the log
     PLACEMENT=""
     for i in $(seq 0 $(( $1 - 1 ))); do
-        PLACEMENT="$PLACEMENT ${SRT_PORTS[$i]}->$(slot_name "$(pid_of "$RUN/logs/error.log" "srt listener ready on 127.0.0.1:${SRT_PORTS[$i]}\$")")"
+        PLACEMENT="$PLACEMENT ${SRT_PORTS[$i]}->$(slot_name "$(pid_of "$RUN/logs/error.log" "srt listener ready on $CAPACITY_MEDIA_ADDR:${SRT_PORTS[$i]}\$")")"
     done
 
     return 0
@@ -1302,16 +1461,16 @@ publish() {   # <endpoint port> <name> <source> [muxrate]
     [ -n "${4:-}" ] && rate=( -muxrate "$4" )
 
     if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
-        $(pin "$CAPACITY_PUBLISHER_CPUS" | tr '\n' ' ') ffmpeg -hide_banner -loglevel error -re -stream_loop -1 -i "$3" -c copy \
-            "${rate[@]}" -f flv "rtmp://127.0.0.1:11935/live/live" \
+        harness_exec $(pin "$CAPACITY_PUBLISHER_CPUS" | tr '\n' ' ') ffmpeg -hide_banner -loglevel error -re -stream_loop -1 -i "$3" -c copy \
+            "${rate[@]}" -f flv "rtmp://$CAPACITY_MEDIA_ADDR:$RESTREAM_RTMP_PORT/live/live" \
             >/dev/null 2>&1 &
         PUBS+=( "$!" )
         return 0
     fi
 
-    $(pin "$CAPACITY_PUBLISHER_CPUS" | tr '\n' ' ') ffmpeg -hide_banner -loglevel error -re -stream_loop -1 -i "$3" -c copy \
+    harness_exec $(pin "$CAPACITY_PUBLISHER_CPUS" | tr '\n' ' ') ffmpeg -hide_banner -loglevel error -re -stream_loop -1 -i "$3" -c copy \
         "${rate[@]}" -f mpegts \
-        "$(media_test_srt_publisher_url "$(api)" 127.0.0.1 "$1" live "$2" "enc-$2" 0)" \
+        "$(media_test_srt_publisher_url "$(api)" "$CAPACITY_MEDIA_ADDR" "$1" live "$2" "enc-$2" 0)" \
         >/dev/null 2>&1 &
     PUBS+=( "$!" )
 }
@@ -2307,7 +2466,7 @@ capacity_worker_metrics() {   # <file prefix>; one response from every worker
     valid=" $(worker_pids | tr '\n' ' ') "
 
     for attempt in $(seq 1 "$(( required * 50 ))"); do
-        blob="$(curl -fsS "$(api)/metrics" 2>/dev/null || true)"
+        blob="$(api_curl -fsS "$(api)/metrics" 2>/dev/null || true)"
         pid="$(printf '%s\n' "$blob" | capacity_worker_pid | head -1)"
 
         case "$valid" in
@@ -2591,12 +2750,22 @@ capacity_srt_receiver_snapshot() {   # <receiver PID> <snapshot path> <copy path
     capacity_capture_gate || return 1
     receiver_kill -USR1 "$pid" 2>/dev/null \
         || { echo "could not request SRT receiver snapshot" >&2; return 1; }
-    for attempt in $(seq 1 100); do
+    # The sink serialises its whole peer table on SIGUSR1, which costs roughly
+    # linear time in the number of peers.  A fixed one-second budget therefore
+    # failed first on exactly the rungs that needed it most, and the snapshot
+    # is the only artifact that says how many peers connected: losing it is
+    # why a large rung reported a bare setup error with no reason recorded.
+    # The wait still ends as soon as the file appears.
+    local deadline=$(( SECONDS + ${CAPACITY_SRT_SNAPSHOT_SECONDS:-30} ))
+    while [ "$SECONDS" -lt "$deadline" ]; do
         receiver_file_ready "$snapshot" && break
         receiver_alive "$pid" \
             || { echo "SRT receiver exited before writing a snapshot" >&2; return 1; }
         sleep 0.01
     done
+    receiver_file_ready "$snapshot" \
+        || { echo "SRT receiver wrote no snapshot within" \
+                  "${CAPACITY_SRT_SNAPSHOT_SECONDS:-30}s" >&2; return 1; }
     receiver_fetch "$snapshot" || return 1
     [ -s "$snapshot" ] \
         || { echo "SRT receiver snapshot was not written" >&2; return 1; }
@@ -2728,7 +2897,7 @@ capacity_hls_push_snapshot() {   # <port> <output> <start|end> <sink PID>
     else
         capacity_capture_gate || return 1
         request_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
-        curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$port/__snapshot" >"$output" || return 1
+        receiver_curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$port/__snapshot" >"$output" || return 1
         reply_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
     fi
     python3 - "$output" "$(dirname "$output")/hls-push.measurement.window" \
@@ -3068,7 +3237,7 @@ capacity_case() {   # <label> <programs> <bitrate> <destinations> <seconds> [srt
     local connect_wait connect_attempts sink_port sink_ready sink_csv
     local sink_snapshot_before sink_snapshot_after stall_seen rtmp_ready
     local sink_pid="" publisher_pid="" receiver_pid hls_pid="" hls_ready hls_log hls_playlist
-    local hls_push_sink_pid="" hls_push_sink_port hls_push_ready ready_status
+    local hls_push_sink_pid="" hls_push_sink_port=0 hls_push_ready ready_status
     local hls_push_progress_file hls_push_progress_received
     local hls_push_progress_remaining hls_push_progress_elapsed
     local before_frames after_frames before_dispatched after_dispatched
@@ -3332,6 +3501,11 @@ PY
         [ "$sink_listeners" -ge 1 ] || sink_listeners=1
         [ "$sink_listeners" -le 256 ] || sink_listeners=256
         echo "   srt_receiver_listeners=$sink_listeners (<= $CAPACITY_SRT_RECEIVER_PEERS destinations each)"
+        # The sink serialises its whole peer table when asked for a snapshot,
+        # so the budget scales with the table.  Without this the snapshot - and
+        # with it the only record of how many peers connected - was lost first
+        # on the largest rungs.
+        CAPACITY_SRT_SNAPSHOT_SECONDS="${CAPACITY_SRT_SNAPSHOT_SECONDS:-$(( 10 + total_srt_dest / 8 ))}"
     fi
     if [ "$srt_destinations" -gt 0 ]; then
         sink_ready="$case_dir/srt.ready"
@@ -3360,7 +3534,7 @@ PY
         SINKS+=( "$hls_push_sink_pid" )
         hls_push_ready=0
         for attempt in $(seq 1 100); do
-            if curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__health" \
+            if receiver_curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__health" \
                 >/dev/null 2>&1
             then
                 hls_push_ready=1
@@ -3377,7 +3551,7 @@ PY
 
     if [ "${CAPACITY_ENGINE:-nginx}" != restream ]; then
         for name in "${names[@]}"; do
-            curl -fsS -X POST -H 'Content-Type: application/json' \
+            api_curl -fsS -X POST -H 'Content-Type: application/json' \
                 -d "{\"application\":\"live\",\"name\":\"$name\"}" \
                 "$(api)/streams" >/dev/null \
                 || { echo "could not create capacity stream $name" >&2; return 1; }
@@ -3396,67 +3570,54 @@ PY
                          >&2; return 1; }
         fi
 
-        for (( attempt = 0; attempt < srt_destinations; attempt++ )); do
-            sink_id="$(capacity_destination_id "$index" "$attempt" "$programs")"
-            local srt_port_dest=$(( sink_port + (index * srt_destinations + attempt) % sink_listeners ))
-            if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
-                local res out_id
-                res=$(curl -s -X POST "http://127.0.0.1:18080/api/v1/pipelines/$RESTREAM_PIPELINE_ID/outputs" \
-                    -H "Content-Type: application/json" -b "$RUN/restream/cookie.txt" \
-                    -d "{\"name\":\"$sink_id\",\"url\":\"srt://$CAPACITY_RECEIVER_ADDR:$srt_port_dest?streamid=#!::m=publish,r=live/live,s=$sink_id\",\"config\":{\"video\":{\"mode\":\"source\"},\"audio\":{\"mode\":\"all\"}}}")
-                out_id=$(python3 -c "import json; print(json.loads('''$res''')['output']['id'])")
-                curl -s -X POST "http://127.0.0.1:18080/api/v1/pipelines/$RESTREAM_PIPELINE_ID/outputs/$out_id/start" \
-                    -H "Content-Type: application/json" -b "$RUN/restream/cookie.txt" -d '{}' >/dev/null
-            else
-                post_owner "/streams/live/$name/destinations" \
-                    "{\"id\":\"$sink_id\",\"type\":\"srt\",\"host\":\"$CAPACITY_RECEIVER_ADDR\",\"port\":$srt_port_dest,\"streamid\":\"#!::r=live/$name,m=publish,s=$sink_id\"}" \
-                    || return 1
-            fi
-            [ "$sink_id" = "$stall_id" ] && stall_seen=1
-        done
-        if [ "$rtmp_destinations" -gt 0 ]; then
-            for (( attempt = srt_destinations;
-                  attempt < srt_destinations + rtmp_destinations;
-                  attempt++ )); do
-                output_id="$(capacity_destination_id "$index" "$attempt" "$programs")"
-                sink_index=$(((index * rtmp_destinations + attempt - srt_destinations) \
-                              % RTMP_SINK_COUNT))
-                receiver_api="$(rtmp_sink_api "$sink_index")"
-                curl -fsS -X POST -H 'Content-Type: application/json' \
-                    -d "{\"application\":\"live\",\"name\":\"$output_id\"}" \
-                    "$receiver_api/streams" >/dev/null \
-                    || { echo "could not create RTMP receiver stream $output_id" >&2
-                         return 1; }
-                curl -fsS -X POST -H 'Content-Type: application/json' \
-                    -d "{\"id\":\"$output_id\",\"type\":\"rtmp\",\"key\":\"$output_id\"}" \
-                    "$receiver_api/streams/live/$output_id/sources" >/dev/null \
-                    || { echo "could not provision RTMP receiver source $output_id" >&2
-                         return 1; }
-                if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
-                    local res out_id
-                    res=$(curl -s -X POST "http://127.0.0.1:18080/api/v1/pipelines/$RESTREAM_PIPELINE_ID/outputs" \
-                        -H "Content-Type: application/json" -b "$RUN/restream/cookie.txt" \
-                        -d "{\"name\":\"$output_id\",\"url\":\"rtmp://$CAPACITY_RECEIVER_ADDR:$(rtmp_sink_port "$sink_index")/live/$output_id\",\"config\":{\"video\":{\"mode\":\"source\"},\"audio\":{\"mode\":\"all\"}}}")
-                    out_id=$(python3 -c "import json; print(json.loads('''$res''')['output']['id'])")
-                    curl -s -X POST "http://127.0.0.1:18080/api/v1/pipelines/$RESTREAM_PIPELINE_ID/outputs/$out_id/start" \
-                        -H "Content-Type: application/json" -b "$RUN/restream/cookie.txt" -d '{}' >/dev/null
-                else
-                    post_owner "/streams/live/$name/destinations" \
-                        "{\"id\":\"$output_id\",\"type\":\"rtmp\",\"host\":\"$CAPACITY_RECEIVER_ADDR\",\"port\":$(rtmp_sink_port "$sink_index"),\"streamid\":\"$output_id\"}" \
-                        || return 1
-                fi
-            done
+        # A whole program's destinations in one process.  Three loops used to
+        # live here, one per kind, each spending a curl invocation -- and up to
+        # four owner round trips -- on every destination and assembling every
+        # request body by string concatenation.  The client keeps one
+        # connection for the calls that may reuse it, opens a fresh one for the
+        # owner-routed calls that must not, and owns the id, listener and sink
+        # scheme so those are computed in one place for all three kinds.
+        local provision_out provision_rc=0
+        local -a provision_args=(
+            --stream "live/$name"
+            --spec "srt:$srt_destinations"
+            --spec "rtmp:$rtmp_destinations"
+            --spec "hls_push:$hls_push_destinations"
+            --program-index "$index"
+            --programs "$programs"
+            --receiver-addr "$CAPACITY_RECEIVER_ADDR"
+            --srt-base-port "$sink_port"
+            --srt-listeners "$sink_listeners"
+            --rtmp-base "$BASE"
+            --rtmp-sinks "$RTMP_SINK_COUNT"
+            --hls-push-port "$hls_push_sink_port"
+            --path "$RUN/hls/live/$name"
+        )
+        [ -n "$stall_id" ] && provision_args+=( --stall-id "$stall_id" )
+        [ -n "${CAPACITY_RECEIVER_CONFIG:-}" ] && provision_args+=( --receiver-config )
+
+        if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+            provision_out="$(sender_run python3 "$ROOT/tests/bench/capacity_client.py" \
+                --api "$(restream_api)/api/v1" --workers "$CAPACITY_WORKERS" \
+                provision --engine restream \
+                --pipeline "$RESTREAM_PIPELINE_ID" \
+                --cookie-file "$RUN/restream/cookie.txt" \
+                "${provision_args[@]}" 2>&1)" || provision_rc=$?
+        else
+            provision_out="$(sender_run python3 "$ROOT/tests/bench/capacity_client.py" \
+                --api "$(api)" --workers "$CAPACITY_WORKERS" \
+                provision --engine nginx \
+                "${provision_args[@]}" 2>&1)" || provision_rc=$?
         fi
-        if [ "$hls_push_destinations" -gt 0 ]; then
-            for (( attempt = srt_destinations + rtmp_destinations;
-                  attempt < srt_destinations + rtmp_destinations + hls_push_destinations;
-                  attempt++ )); do
-                output_id="$(capacity_destination_id "$index" "$attempt" "$programs")"
-                post_owner "/streams/live/$name/destinations" \
-                    "{\"id\":\"$output_id\",\"type\":\"hls_push\",\"host\":\"http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/$output_id/\",\"path\":\"$RUN/hls/live/$name\"}" \
-                    || return 1
-            done
+
+        if [ "$provision_rc" -ne 0 ]; then
+            printf '%s\n' "$provision_out" >&2
+            echo "could not provision the destinations for $name" >&2
+            return 1
         fi
+        case "$provision_out" in
+            *stall-destination-seen*) stall_seen=1 ;;
+        esac
     done
     if [ -n "$stall_id" ] && [ "${stall_seen:-0}" -ne 1 ]; then
         echo "slow-reader destination ID $stall_id was not configured" >&2
@@ -3493,16 +3654,18 @@ PY
     # Start media while nonblocking SRT handshakes settle; send errors trigger the
     # output's normal retry path for a connection that did not establish.
     if [ "$hls_push_destinations" -gt 0 ]; then
-        curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__mark" \
+        receiver_curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__mark" \
             >"$case_dir/hls-push.mark.json" \
             || { echo "could not mark HLS push first-segment timing" >&2; return 1; }
     fi
     if [ "$hls_readers" -gt 0 ] || [ "$hls_push_destinations" -gt 0 ]; then
-        python3 "$ROOT/tests/bench/capacity_media_offer.py" observe \
-            "$RUN/hls/live/${names[0]}/index.m3u8" "$case_dir/hls-production.json" \
-            >"$case_dir/hls-production.log" 2>&1 &
-        offer_pid="$!"
-        QUALITY_MONITORS+=( "$offer_pid" )
+        if [ "${CAPACITY_ENGINE:-nginx}" != restream ]; then
+            python3 "$ROOT/tests/bench/capacity_media_offer.py" observe \
+                "$RUN/hls/live/${names[0]}/index.m3u8" "$case_dir/hls-production.json" \
+                >"$case_dir/hls-production.log" 2>&1 &
+            offer_pid="$!"
+            QUALITY_MONITORS+=( "$offer_pid" )
+        fi
     fi
     for (( index = 0; index < programs; index++ )); do
         local pub_port=16000
@@ -3512,14 +3675,22 @@ PY
         publish "$pub_port" "${names[$index]}" "$source"
     done
     if [ "$srt_destinations" -gt 0 ]; then
+        local waited=0
         for attempt in $(seq 1 "$connect_attempts"); do
             receiver_file_ready "$sink_ready" && break
             receiver_alive "$sink_pid" \
                 || { echo "shared SRT receiver exited before accepting all peers" \
                      >&2; return 1; }
             sleep 0.1
+            waited=$(( waited + 1 ))
         done
         if ! receiver_file_ready "$sink_ready"; then
+            # The snapshot names how many peers connected, which is the fact
+            # that separates "the sender never offered them" from "the
+            # receiver could not accept them".  Report it before failing, and
+            # say how long the receiver had, because a rung that failed on an
+            # expired window is not the same result as one that failed on a
+            # full window.
             if capacity_srt_receiver_snapshot "$sink_pid" \
                 "$sink_csv.snapshot" "$case_dir/srt.incomplete.csv"; then
                 capacity_srt_incomplete_report "$case_dir/srt.incomplete.csv" \
@@ -3527,7 +3698,10 @@ PY
             else
                 echo "could not capture incomplete SRT receiver snapshot" >&2
             fi
-            echo "shared SRT receiver accepted fewer than $total_srt_dest peers" >&2
+            echo "shared SRT receiver accepted fewer than $total_srt_dest peers" \
+                 "within ${waited}00ms of the ${connect_wait}s connect window" >&2
+            echo "   the receiver's own CPU and the sink log distinguish a" \
+                 "sender that offered too few from a receiver that accepted too few" >&2
             return 1
         fi
     fi
@@ -3579,21 +3753,33 @@ PY
                  >&2; return 1; }
     fi
     if [ "$hls_readers" -gt 0 ]; then
-        hls_playlist="$RUN/hls/live/${names[0]}/index.m3u8"
-        echo "   waiting for first completed HLS segment"
-        for attempt in $(seq 1 "$connect_attempts"); do
-            [ -s "$hls_playlist" ] && break
-            sleep 0.1
-        done
-        [ -s "$hls_playlist" ] \
-            || { echo "HLS segmenter did not publish $hls_playlist" >&2; return 1; }
+        local reader_url="http://$CAPACITY_SENDER_ADDR:$([ "$CAPACITY_SENDER_ADDR" = 127.0.0.1 ] && echo "$HTTP_PORT" || echo "$(( HTTP_PORT + 31 ))")/hls/live/${names[0]}/index.m3u8"
+        if [ "${CAPACITY_ENGINE:-nginx}" = restream ]; then
+            reader_url="http://$CAPACITY_MEDIA_ADDR:$RESTREAM_HTTP_PORT/hls/$RESTREAM_PIPELINE_ID/index.m3u8"
+            echo "   waiting for first completed HLS segment from restream"
+            for attempt in $(seq 1 "$connect_attempts"); do
+                receiver_curl -fsS "$reader_url" >/dev/null 2>&1 && break
+                sleep 0.1
+            done
+            receiver_curl -fsS "$reader_url" >/dev/null 2>&1 \
+                || { echo "restream HLS server did not publish $reader_url" >&2; return 1; }
+        else
+            hls_playlist="$RUN/hls/live/${names[0]}/index.m3u8"
+            echo "   waiting for first completed HLS segment"
+            for attempt in $(seq 1 "$connect_attempts"); do
+                [ -s "$hls_playlist" ] && break
+                sleep 0.1
+            done
+            [ -s "$hls_playlist" ] \
+                || { echo "HLS segmenter did not publish $hls_playlist" >&2; return 1; }
+        fi
         hls_ready="$case_dir/hls.ready"
         hls_report_file="$case_dir/hls-readers.csv"
         hls_log="$case_dir/hls-reader.log"
         rm -f "$hls_ready" "$hls_report_file"
         receiver_start "$case_dir/hls.identity.json" "$hls_log" \
             $(pin "$CAPACITY_RECEIVER_CPUS") python3 "$ROOT/tests/bench/hls_capacity_readers.py" \
-            --url "http://$CAPACITY_SENDER_ADDR:$([ "$CAPACITY_SENDER_ADDR" = 127.0.0.1 ] && echo "$HTTP_PORT" || echo "$(( HTTP_PORT + 31 ))")/hls/live/${names[0]}/index.m3u8" \
+            --url "$reader_url" \
             --readers "$hls_readers" --duration "$(( seconds + 60 ))" \
             --report "$hls_report_file" --ready-file "$hls_ready" \
             --reference-bps "${CAPACITY_QUALITY_REFERENCE_HLS_BPS:-0}" \
@@ -3618,11 +3804,11 @@ PY
         echo "elapsed_s,received,expected,remaining" \
             > "$case_dir/hls-push-readiness.csv"
         for attempt in $(seq 1 "$connect_attempts"); do
-            ready_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            ready_status="$(receiver_curl -sS -o /dev/null -w '%{http_code}' \
                 "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__ready?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                 2>/dev/null || true)"
             if [ $(( attempt % 10 )) -eq 0 ] || [ "$ready_status" = 200 ]; then
-                curl -fsS \
+                receiver_curl -fsS \
                     "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                     > "$hls_push_progress_file" \
                     || { echo "could not query HLS push readiness progress" \
@@ -3663,7 +3849,7 @@ PY
             sleep 0.1
         done
         if [ "$hls_push_ready" -ne 1 ]; then
-            curl -fsS \
+            receiver_curl -fsS \
                 "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                 > "$hls_push_progress_file" || true
             python3 - "$hls_push_progress_file" <<'PY'
@@ -3680,10 +3866,10 @@ print(
 PY
             if cpu_window 3 "$hls_push_sink_pid"; then
                 capacity_worker_metrics "$case_dir/workers.readiness" || true
-                curl -fsS \
+                receiver_curl -fsS \
                     "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__progress?destinations=$hls_push_destinations&offset=$((srt_destinations + rtmp_destinations))" \
                     > "$hls_push_progress_file" || true
-                curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__snapshot" \
+                receiver_curl -fsS "http://$CAPACITY_RECEIVER_ADDR:$hls_push_sink_port/__snapshot" \
                     > "$case_dir/hls-push.readiness.json" || true
                 python3 "$ROOT/tests/bench/hls_push_capacity.py" \
                     readiness-report \
@@ -3752,7 +3938,11 @@ PY
         receiver_remove "$case_dir/receiver-sampler.ready" || return 1
         receiver_remove "$case_dir/receiver-sampler.ready.paused" || return 1
         if [ "${CAPACITY_ENGINE:-nginx}" != restream ]; then
-            python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
+            # The queue sampler reads the sender's own metrics over the
+            # sender's API, so it runs where that API is reachable.  exec, not
+            # a plain call: it is backgrounded, and the harness records $! as
+            # the sampler it must stop, so the PID has to be python's.
+            sender_exec python3 "$ROOT/tests/bench/srt_capacity_quality.py" \
                 sample-queues "$HTTP_PORT" "$case_dir/queue-samples.csv" \
                 "${quality_worker_pids[@]}" --interval 1 \
                 --ready-file "$case_dir/queue-sampler.ready" \

@@ -2180,6 +2180,43 @@ def bash_function(name):
     return match.group(0) if match else None
 
 
+def bash_function_names():
+    """Every function the harness defines, by name.
+
+    Indentation is allowed: some functions are defined inside another one and
+    unset after use, so a scan that insisted on column zero would miss them
+    and the closure would drop a name its callers still need.
+    """
+    return {m.group(1) for m in re.finditer(
+        r"^[ \t]*(?P<name>[a-z_][a-z0-9_]*)\(\) \{", read_text(HARNESS), re.M)}
+
+
+def bash_function_closure(names, exclude=()):
+    """The named functions plus every harness function they call.
+
+    A function extracted on its own only runs if every name it expands is a
+    shell builtin or was extracted with it, so a fixture has to carry the
+    transitive closure.  Resolving that here means a fixture keeps working
+    when a function it exercises grows a new dependency -- which is how this
+    broke when the sender gained a namespace and every receiver-side call
+    started going through `receiver_curl`, then `harness_run`.
+    """
+    defined = bash_function_names()
+    skip = set(exclude) | set(names)
+    wanted, frontier = set(names), set(names)
+    while frontier:
+        body = "\n".join(filter(None, (bash_function(n) for n in frontier)))
+        referenced = {n for n in defined
+                      if n not in skip and re.search(rf"\b{n}\b", body)}
+        frontier = referenced - wanted
+        wanted |= referenced
+    # Definition order is preserved so a function is defined before its users.
+    ordered = [n for n in re.findall(
+        r"^[ \t]*(?P<name>[a-z_][a-z0-9_]*)\(\) \{", read_text(HARNESS), re.M)
+        if n in wanted]
+    return [bash_function(n) for n in ordered]
+
+
 def test_protocol_samplers_stop_independently(work):
     helper = os.path.join(work, "sampler.py")
     write(helper, "import signal, sys\n"
@@ -2237,14 +2274,23 @@ if capacity_quality_stop_monitors "$failed"; then exit 1; fi
 
 def test_cpu_window_prepares_every_capture_before_release(work):
     """Actual CPU/sink captures stay parked through preparation and aborts."""
-    functions = [bash_function(name) for name in (
-        "cpu_window", "capacity_capture_gate", "capacity_window_boundary",
-        "capacity_hls_push_snapshot", "capacity_sampler_ready",
-        "capacity_rtmp_sink_metrics")]
-    if any(function is None for function in functions):
+    # receiver_curl reaches the receiver's own capture API.  It is part of the
+    # harness's contract now that the sender can live in its own namespace, so
+    # any extracted function that captures must bring it along; with an empty
+    # exec prefix it is plain curl, which is what this fixture needs.
+    functions = bash_function_closure(
+        ("cpu_window", "capacity_window_boundary",
+         "capacity_hls_push_snapshot", "capacity_sampler_ready",
+         "capacity_rtmp_sink_metrics"),
+        # The gate is replaced below by a version that parks the run, so the
+        # original must not be pulled in under its own name.
+        exclude=("capacity_capture_gate",))
+    gate_function = bash_function("capacity_capture_gate")
+    if gate_function is None or any(function is None for function in functions):
         return
-    local_gate = functions[1].replace("capacity_capture_gate", "local_capture_gate", 1)
-    script = "\n".join(functions + [local_gate]) + r'''
+    local_gate = gate_function.replace("capacity_capture_gate",
+                                      "local_capture_gate", 1)
+    script = "\n".join(functions + [gate_function, local_gate]) + r'''
 set -euo pipefail
 case_dir="$1"
 mode="$2"
@@ -2254,6 +2300,12 @@ CPU_SNAPSHOT_DIR="$case_dir"
 CPU_BOUNDARY_CALLBACK=capacity_window_boundary
 CAPACITY_RECEIVER_CONFIG=""
 CAPACITY_RECEIVER_ADDR=127.0.0.1
+# The fixture runs on this host, so both namespace prefixes are empty.  They
+# are declared rather than omitted because the extracted functions read them
+# under `set -u`.
+CAPACITY_RECEIVER_EXEC=""
+CAPACITY_HARNESS_EXEC=""
+CAPACITY_SENDER_EXEC=""
 srt_destinations=0
 rtmp_destinations=0
 hls_push_destinations=1
