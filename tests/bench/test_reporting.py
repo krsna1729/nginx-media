@@ -2339,6 +2339,7 @@ set -euo pipefail
 case_dir="$1"
 mode="$2"
 ROOT="$3"
+BENCH_DIR="$ROOT/tests/bench"
 RUN="$case_dir"
 CPU_SNAPSHOT_DIR="$case_dir"
 CPU_BOUNDARY_CALLBACK=capacity_window_boundary
@@ -2518,7 +2519,8 @@ def test_harness_runs_the_mixes_of_the_one_list(work):
     script = function + (
         '\ncapacity_quality_ladder() { echo "ladder $1"; }\n'
         "phase_capacity_quality_ladder\n")
-    env = dict(os.environ, ROOT=ROOT, RUN=os.path.join(work, "stub-run"),
+    env = dict(os.environ, ROOT=ROOT, BENCH_DIR=os.path.join(ROOT, "tests/bench"),
+               RUN=os.path.join(work, "stub-run"),
                CAPACITY_QUALITY_STEPS="1 16 32", CAPACITY_QUALITY_RATE="8M",
                CAPACITY_QUALITY_SECONDS="15",
                CAPACITY_QUALITY_STOP_AFTER_FAILURES="2",

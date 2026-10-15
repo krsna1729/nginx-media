@@ -201,6 +201,7 @@ def run_cell(engine, cpus, snapshot, helpers, args, out_dir):
     elapsed = time.time() - started
 
     matrix = os.path.join(run_dir, "capacity-matrix.json")
+    bench_log = os.path.join(case_dir, "bench.log")
     record = {
         "cell": identifier,
         "engine": engine["id"],
