@@ -162,6 +162,28 @@ def cell_id(engine, cpus):
     return "%s-%dc" % (engine["id"], len(cpus))
 
 
+CHILD = None
+
+
+def stop_children(signum, frame):
+    """Pass a stop request on to the harness and everything it started.
+
+    The sweep leads its own process group, so a signal sent to the sweep alone
+    leaves nginx, the senders and the receiver running with nobody to reap
+    them. That runaway has already poisoned one cell: a sender left pinned to
+    a benchmark CPU changed the verdict of every rung after it.
+    """
+    if CHILD is not None:
+        try:
+            os.killpg(os.getpgid(CHILD.pid), signal.SIGTERM)
+            CHILD.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(CHILD.pid), signal.SIGKILL)
+        except OSError:
+            pass
+    raise SystemExit(128 + signum)
+
+
 def run_cell(engine, cpus, snapshot, helpers, scripts, args, out_dir):
     """Run the seven-workload ladder for one engine at one CPU count."""
     identifier = cell_id(engine, cpus)
@@ -225,9 +247,18 @@ def run_cell(engine, cpus, snapshot, helpers, scripts, args, out_dir):
     command = ["omarchy-benchmark", "--cpu", helper_cpus, "--turbo", "on",
                "--", "bash", snapshot]
     started = time.time()
+    global CHILD
     with open(os.path.join(case_dir, "bench.log"), "w") as handle:
-        result = subprocess.run(command, cwd=PROJECT_ROOT, env=environment,
-                                stdout=handle, stderr=subprocess.STDOUT)
+        # Its own session, so a stop aimed at the harness reaches the harness's
+        # children and not this process, and so a stop aimed at this process
+        # can reach all of them.
+        CHILD = subprocess.Popen(command, cwd=PROJECT_ROOT, env=environment,
+                                 stdout=handle, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+        try:
+            status = CHILD.wait()
+        finally:
+            CHILD = None
     elapsed = time.time() - started
 
     matrix = os.path.join(run_dir, "capacity-matrix.json")
@@ -238,7 +269,7 @@ def run_cell(engine, cpus, snapshot, helpers, scripts, args, out_dir):
         "cpus": cpu_list,
         "cores": len(cpus),
         "seconds_per_rung": args.seconds,
-        "exit_status": result.returncode,
+        "exit_status": status,
         "wall_seconds": round(elapsed, 1),
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "matrix": None,
@@ -339,6 +370,8 @@ def main():
         pass
     with open(os.path.join(args.out, "sweep.pid"), "w") as handle:
         handle.write("%d\n" % os.getpgid(0))
+    for name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        signal.signal(getattr(signal, name), stop_children)
 
     engines = ENGINES
     if args.engines:
