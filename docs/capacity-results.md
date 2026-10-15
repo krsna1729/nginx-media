@@ -1088,6 +1088,25 @@ Three media streaming engines were evaluated under identical conditions, 8.0 Mbi
 ### Bloat-free cross-layer solutions
 
 Rather than introducing external containers, virtual bridges or user-space proxies, loopback scaling is resolved using native Linux built-ins:
+```
+┌───────────────────────────────────────┐          ┌────────────────────────────────────────────────────────┐
+│             NAMESPACE: sut            │          │                   NAMESPACE: harness                   │
+│         [ P-Cores: 0, 2, 4, 6 ]       │          │              [ E-Cores: 12, 13, ..., 19 ]              │
+│                                       │          │                                                        │
+│  ┌─────────────────────────────────┐  │          │  ┌─────────────────────────┐  ┌─────────────────────┐  │
+│  │       NGINX Media Server        │  │          │  │     FFmpeg Publisher    │  │   Fanout Receiver   │  │
+│  │                                 │  │          │  │   (Pinned to Core 12)   │  │ (Pinned Cores 13-19)│  │
+│  └────────────────▲────────────────┘  │          │  └────────────┬────────────┘  └──────────▲──────────┘  │
+│                   │                   │          │               │                          │             │
+│                   │                   │          │               ▼ (8 Mbit/s Ingress)       │             │
+│              [ veth-sut ]             │          │          [ veth-harness ]                │             │
+│          (IP: 10.200.0.1/24)          │◄═════════┼════════► (IP: 10.200.0.2/24)             │             │
+│          (8 Hardware Queues)          │          │          (8 Hardware Queues)             │             │
+│                                       │          │               │ (8 Gbit/s Fanout Egress) │             │
+│                                       │          │               └──────────────────────────┘             │
+└───────────────────────────────────────┘          └────────────────────────────────────────────────────────┘
+```
+
 
 1. **Dual-Namespace Multi-Queue Veth (`tests/bench/capacity_veth.sh`)**:
    * Creates an isolated `sut` namespace for NGINX and a `harness` namespace for publishers and sinks.
