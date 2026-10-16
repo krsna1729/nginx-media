@@ -476,7 +476,17 @@ The measuring side is kept from becoming the measured limit:
   namespace.  In loopback mode one device carries both directions, so the
   single mask is the receiver CPUs, which also moves the sender's own ingress
   off its cores; that asymmetry is the reason the namespace mode is the
-  qualification topology and loopback is the single-host reference.
+  qualification topology and loopback is the single-host reference.  RFS would
+  attribute per flow instead and remove the asymmetry, at the cost of two more
+  host-global knobs (`rps_sock_flow_entries`, one `rps_flow_cnt` per queue)
+  for a reverse direction that is acknowledgements and requests against a
+  fanout of segments, so it is not used.  Loopback mode sets
+  `net.ipv4.tcp_tw_reuse` (the namespace mode sets it per namespace) because
+  every destination of a rung shares one address, and it restores whatever the
+  host had, together with the mask, when it goes down.  The shared address is
+  also loopback's own ceiling: past roughly a thousand TCP destinations one
+  rung's sockets exhaust the 4-tuple space against `127.0.0.1`, which is a
+  limit of the mode and not of the engine.
 - **The preflight decides whether a rung can be measured at all.**  Before a
   rung at or above `CAPACITY_PREFLIGHT_MIN_DESTINATIONS` (128 by default,
   `CAPACITY_PREFLIGHT=auto|yes|no`), the harness fingerprints the sender and

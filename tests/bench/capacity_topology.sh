@@ -195,22 +195,31 @@ namespace_down() {
 # has to serve them: the fanout direction is the volume that matters.
 loopback_up() {
     tune_limits "-"
-    # Whatever this host had before the run is what it gets back: the mask is a
-    # host-global setting and outlives the sweep.
-    local before
-    before="$(cat /sys/class/net/$LO_IF/queues/rx-0/rps_cpus 2>/dev/null)" \
+    # Whatever this host had before the run is what it gets back: the mask and
+    # the reuse flag are host-global settings that outlive the sweep.
+    local mask_before reuse_before
+    mask_before="$(cat /sys/class/net/$LO_IF/queues/rx-0/rps_cpus 2>/dev/null)" \
         || fail "cannot read $LO_IF steering"
+    reuse_before="$(sysctl -n net.ipv4.tcp_tw_reuse 2>/dev/null)" \
+        || fail "cannot read net.ipv4.tcp_tw_reuse"
     if [ ! -e "$LO_STATE" ]; then
         mkdir -p "$(dirname "$LO_STATE")" || fail "cannot write $LO_STATE"
-        echo "${before:-0}" > "$LO_STATE" || fail "cannot record $LO_STATE"
+        printf '%s %s\n' "${mask_before:-0}" "${reuse_before:-0}" > "$LO_STATE" \
+            || fail "cannot record $LO_STATE"
     fi
+    # Every destination of one rung shares 127.0.0.1, so the TCP mixes need the
+    # sockets of the previous rung reusable; one namespace gets this per
+    # namespace, a shared stack needs it here.
+    sysctl -qw net.ipv4.tcp_tw_reuse=1 || fail "cannot set net.ipv4.tcp_tw_reuse"
     set_rps "-" "$LO_IF" "$(mask_of "$RPS_RECV_CPUS")" "shared ingress"
 }
 
 loopback_down() {
-    local before="0"
-    [ ! -e "$LO_STATE" ] || before="$(cat "$LO_STATE")"
-    set_rps "-" "$LO_IF" "${before:-0}" "shared ingress"
+    local state="0 0"
+    [ ! -e "$LO_STATE" ] || state="$(cat "$LO_STATE")"
+    set_rps "-" "$LO_IF" "${state%% *}" "shared ingress"
+    sysctl -qw net.ipv4.tcp_tw_reuse="${state##* }" \
+        || fail "cannot restore net.ipv4.tcp_tw_reuse"
     rm -f "$LO_STATE"
 }
 
