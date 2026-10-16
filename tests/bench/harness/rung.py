@@ -17,6 +17,9 @@ import sys
 import threading
 import time
 
+from capacity_client import read_cookie_jar
+from hls_push_capacity import by_sequence
+
 from . import api, cpu, media, proc, receivers, sender
 
 KEYS = ("srt", "rtmp", "hls", "hls_push")
@@ -226,6 +229,29 @@ def _write(path, text):
         handle.write(text)
 
 
+def _push_production(sink_after, output):
+    """Push production for restream, whose push segmenter cannot be observed
+    (it serves only its separate fMP4 preview). Each segment, identified by
+    sequence as restream names it per output, is the union over this rung's
+    push sinks: its cut is no later than its earliest receipt, and its true size
+    is the one most destinations received. A segment no destination received
+    is absent, which the prepared-rate check still catches as low production.
+    Returns `output`."""
+    with open(sink_after) as handle:
+        destinations = by_sequence(json.load(handle))["destinations"].values()
+    receipts = collections.defaultdict(list)
+    for destination in destinations:
+        for sequence, entry in destination.get("segment_detail", {}).items():
+            receipts[sequence].append(entry)
+    segments = {sequence: {"bytes": collections.Counter(e["bytes"] for e in seen).most_common(1)[0][0],
+                           "at": min(e["at"] for e in seen), "clock_uncertainty_s": 0.0}
+                for sequence, seen in receipts.items()}
+    _write(output, json.dumps({
+        "segments": segments, "clock_domain": "controller-monotonic",
+        "provenance": "push-sink union: earliest receipt and modal size across destinations"}))
+    return output
+
+
 class Rung:
     """One rung's state, so a failure at any step can still say what ran."""
 
@@ -348,8 +374,6 @@ class Rung:
     def prepare(self):
         """What the preflight and the window need: the SRT sink and the source."""
         n = self.spec.counts
-        if self.cfg.engine == "restream" and (n["hls"] or n["hls_push"]):
-            raise proc.Failed("restream HLS cannot be judged: the HLS offer observer reads the nginx playlist")
         if n["srt"]:
             receivers.build_srt_sink(self.cfg)
         self.source = self.cfg.path("media", "capacity-%s.ts" % self.cfg.quality_rate)
@@ -415,9 +439,26 @@ class Rung:
                             % (total["srt"], total["rtmp"], total["hls_push"]), started, connect, 0.1)
         if self.push:
             self.push.mark()
-        playlist = cfg.path("hls", "live", name, "index.m3u8")
-        if n["hls"] or n["hls_push"]:
-            receivers.observe_offer(scope, cfg, playlist, self.dir)
+        cookie = ""
+        if restream:
+            # restream serves pull HLS (fMP4) from memory to a session; it
+            # writes no playlist file, so it is observed and read over HTTP.
+            # Its push outputs come from a separate TS segmenter that is not
+            # served at all; see _push_production.
+            cookie = read_cookie_jar(inst.cookie)
+            playlist = "http://%s:%d/hls/%s/index.m3u8" % (
+                cfg.media_addr, cfg.restream_http_port, inst.pipeline_id)
+            reader_url = playlist
+        else:
+            playlist = cfg.path("hls", "live", name, "index.m3u8")
+            reader_url = "%s/hls/live/%s/index.m3u8" % (
+                "http://127.0.0.1:%d" % cfg.api_port if cfg.sender_addr == "127.0.0.1"
+                else "http://%s:%d" % (cfg.sender_addr, cfg.api_port + 31), name)
+        # Polling restream's preview would start its fMP4 segmenter, load a
+        # push-only rung never has, so restream is observed only for pull.
+        if n["hls"] or (n["hls_push"] and not restream):
+            receivers.observe_offer(scope, cfg, playlist, self.dir,
+                                    ns=proc.HARNESS if restream else None, cookie=cookie)
         publisher = media.publish(scope, cfg, inst.srt_ports[0], name, source)
         if self.srt:
             self.srt.wait_ready(connect, spec.programs, n["srt"])
@@ -434,14 +475,16 @@ class Rung:
             self.rtmp.wait_receiving(spec.programs, n["rtmp"], n["srt"], connect)
         if n["hls"]:
             print("   waiting for first completed HLS segment", flush=True)
-            proc.wait_until("HLS segmenter publishing %s" % playlist,
-                            lambda: os.path.exists(playlist) and os.path.getsize(playlist) > 0,
+            if restream:
+                published = lambda: proc.curl(playlist, proc.HARNESS, timeout=5, check=False,
+                                              headers=("Cookie: " + cookie,))[0] == 200
+            else:
+                published = lambda: os.path.exists(playlist) and os.path.getsize(playlist) > 0
+            proc.wait_until("HLS segmenter publishing %s" % playlist, published,
                             connect, 0.1, alive=[publisher])
-            url = ("http://127.0.0.1:%d" % cfg.api_port if cfg.sender_addr == "127.0.0.1"
-                   else "http://%s:%d" % (cfg.sender_addr, cfg.api_port + 31))
             self.readers = receivers.HlsReaders.start(
-                scope, cfg, self.dir, "%s/hls/live/%s/index.m3u8" % (url, name), n["hls"],
-                cfg.quality_seconds, refs.get("hls", "0"))
+                scope, cfg, self.dir, reader_url, n["hls"],
+                cfg.quality_seconds, refs.get("hls", "0"), cookie)
             self.readers.wait_ready(connect)
         if self.push:
             offset = n["srt"] + n["rtmp"]
@@ -563,13 +606,17 @@ class Rung:
                   "--clock-domain", receivers.CLOCK]
         passed = True
         if self.srt:
-            csv_path = self.srt.stop()
+            # Judge the receiver as it stood at the window's end: the exit
+            # summary also counts teardown, where a sender that closes its
+            # outputs when the publisher stops (restream) reads as SRT_EPOLL_ERR.
+            self.srt.stop()
             print("   per-destination rates, MPEG-TS counters, and queue quality:")
             passed &= self._judge(refs, "srt", tool(
                 "srt_capacity_quality.py", "report", "--clock-domain", receivers.CLOCK,
                 "--baseline", path("srt.before.csv"), "--final", path("srt.after.csv"),
                 "--intervals", path("receiver-intervals.csv"), "--queues", path("queue-samples.csv"),
-                "--queue-window", path("receiver.measurement.window"), "--receiver-results", csv_path,
+                "--queue-window", path("receiver.measurement.window"),
+                "--receiver-results", path("srt.after.csv"),
                 "--metrics-before", path("workers.before"), "--metrics-after", path("workers.after"),
                 "--stream-before", path("stream.%s.before" % name),
                 "--stream-after", path("stream.%s.after" % name),
@@ -605,14 +652,19 @@ class Rung:
                 raise proc.Failed("HLS reader quality report is missing")
             print("   hls_destination_quality_csv=%s" % self.readers.report)
         if self.push:
+            # restream exports no push metrics and serves its push segmenter nowhere
+            produced = path("hls-production.json")
+            metrics = ["--before-prefix", path("workers.before"), "--after-prefix", path("workers.after")]
+            if cfg.engine == "restream":
+                produced = _push_production(path("hls-push.after.json"), path("hls-push-production.json"))
+                metrics = ["--segment-identity", "sequence"]
             passed &= self._judge(refs, "hls_push", tool(
-                "hls_push_capacity.py", "report", "--before-prefix", path("workers.before"),
-                "--after-prefix", path("workers.after"), "--stream", name,
+                "hls_push_capacity.py", "report", *metrics, "--stream", name,
                 "--destination-offset", n["srt"] + n["rtmp"], "--destinations", n["hls_push"],
                 "--programs", self.spec.programs, "--sink-before", path("hls-push.before.json"),
                 "--sink-after", path("hls-push.after.json"),
                 "--prepared-media", path("prepared-media.json"),
-                "--produced-segments", path("hls-production.json"),
+                "--produced-segments", produced,
                 "--report", path("hls-push-quality.csv")) + window + common, path("hls-push-quality.txt"))
             print("   hls_push_destination_quality_csv=%s" % path("hls-push-quality.csv"))
         return bool(passed)

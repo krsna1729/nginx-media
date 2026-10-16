@@ -116,12 +116,13 @@ def prepare_media(cfg, source, case_dir):
                      os.path.join(case_dir, "prepared-media.json")), timeout=120)
 
 
-def observe_offer(scope, cfg, playlist, case_dir):
-    """Record the segments the sender produces (hls-production.json)."""
+def observe_offer(scope, cfg, playlist, case_dir, ns=None, cookie=""):
+    """Record the segments the sender produces (hls-production.json); a served
+    playlist URL is polled from `ns`, a file path read directly."""
     return scope.spawn("HLS offer observer",
                        _python(cfg, "capacity_media_offer.py", "observe", playlist,
-                               os.path.join(case_dir, "hls-production.json")),
-                       monitor=True, log=os.path.join(case_dir, "hls-production.log"))
+                               os.path.join(case_dir, "hls-production.json"), "--cookie", cookie),
+                       ns=ns, monitor=True, log=os.path.join(case_dir, "hls-production.log"))
 
 
 class RtmpSinks:
@@ -381,7 +382,7 @@ class HlsReaders:
         self.log = os.path.join(case_dir, "hls-reader.log")
 
     @classmethod
-    def start(cls, scope, cfg, case_dir, url, readers, seconds, reference_bps):
+    def start(cls, scope, cfg, case_dir, url, readers, seconds, reference_bps, cookie=""):
         report, ready = os.path.join(case_dir, "hls-readers.csv"), os.path.join(case_dir, "hls.ready")
         _gone(report, ready)
         return cls(case_dir, scope.spawn(
@@ -389,7 +390,7 @@ class HlsReaders:
             _python(cfg, "hls_capacity_readers.py", "--url", url, "--readers", readers,
                     "--duration", "%g" % (seconds + 60), "--report", report, "--ready-file", ready,
                     "--reference-bps", reference_bps, "--clock-domain", CLOCK,
-                    "--min-delivery-ratio", cfg.min_delivery_ratio),
+                    "--min-delivery-ratio", cfg.min_delivery_ratio, "--cookie", cookie),
             monitor=True, ns=RECEIVER, cpus=cfg.receiver_cpus, log=os.path.join(case_dir, "hls-reader.log")))
 
     @property

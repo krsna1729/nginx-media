@@ -2213,6 +2213,48 @@ def test_hls_push_judge_rejects_non_finite_inputs(work):
           f"a NaN first-segment latency must fail: {result.stdout}")
 
 
+def test_restream_push_is_judged_by_sequence(work):
+    """restream names each output's segments `<token>-<seq>.ts`: complete
+    destinations pass by sequence, and one segment a destination missed fails it."""
+    p = hls_push_judge_rung(os.path.join(work, "push-restream"))
+    with open(p("sink.after.json"), encoding="utf-8") as source:
+        after = json.load(source)
+    template = after["destinations"]["d0000"]
+    for index, token in enumerate(("r00aa", "r00bb", "r00cc")):
+        renamed = {f"{token}-{name[3:]}": dict(entry, at=entry["at"] + 0.3 * index)
+                   for name, entry in template["segment_detail"].items()}
+        after["destinations"]["d%04d" % index] = dict(template, segment_detail=renamed)
+    write_json(p("sink.after.json"), after)
+
+    def judge(*extra):
+        produced = harness_rung._push_production(p("sink.after.json"), p("push-production.json"))
+        return run([sys.executable, HLS_PUSH_JUDGE, "report", "--stream", "live",
+                    "--destinations", "3", "--sink-before", p("sink.before.json"),
+                    "--sink-after", p("sink.after.json"), "--reference-bps", "800000",
+                    "--prepared-media", p("prepared-media.json"), "--produced-segments", produced,
+                    "--measurement-window", p("cpu.before"), p("cpu.after"),
+                    "--clock-domain", "controller-monotonic"] + list(extra))
+
+    result = judge("--segment-identity", "sequence")
+    check(judge_passed(result) and "quality_average_delivery_ratio_min=1.00000" in result.stdout
+          and "quality_dropped_units=n/a" in result.stdout,
+          f"complete restream push must pass by sequence, sender counters n/a: {result.stdout}")
+    del after["destinations"]["d0001"]["segment_detail"]["r00bb-2.ts"]
+    write_json(p("sink.after.json"), after)
+    result = judge("--segment-identity", "sequence")
+    check(not judge_passed(result) and "d0001: 1 window segments missing" in result.stdout,
+          f"a segment one destination missed must fail that destination: {result.stdout}")
+
+    readers = load_module(READERS, "hls_capacity_readers_fmp4")
+    box = lambda kind, payload=b"": (8 + len(payload)).to_bytes(4, "big") + kind + payload  # noqa: E731
+    fragment = box(b"styp") + box(b"moof", bytes(16)) + box(b"mdat", bytes(64))
+    check(readers.validate_segment("http://h/hls/p/seg3.m4s", fragment), "an fMP4 fragment is valid")
+    check(not readers.validate_segment("http://h/hls/p/seg3.m4s", fragment[:-1]),
+          "a truncated fMP4 fragment is not")
+    check(not readers.validate_segment("http://h/hls/p/seg3.m4s", box(b"moof", bytes(16))),
+          "an fMP4 fragment without media data is not")
+
+
 def harness_cfg(**overrides):
     """The harness configuration, with this checkout's helpers."""
     return dataclasses.replace(harness_config.load(), bench_dir=HERE, **overrides)
@@ -3087,6 +3129,7 @@ def main():
         test_cpu_window_prepares_every_capture_before_release(
             os.path.join(work, "prepared-captures"))
         test_hls_push_judge_rejects_non_finite_inputs(work)
+        test_restream_push_is_judged_by_sequence(work)
         test_calibration_is_stored_only_from_a_passing_positive_rung(work)
         test_harness_runs_the_mixes_of_the_one_list(work)
         test_bench_ci_manifest_is_the_harness_mix_list(work)

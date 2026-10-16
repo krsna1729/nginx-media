@@ -37,8 +37,9 @@ class Response:
 
 
 class HTTPClient:
-    def __init__(self, reader_id):
+    def __init__(self, reader_id, cookie=""):
         self.reader_id = reader_id
+        self.cookie = f"Cookie: {cookie}\r\n" if cookie else ""
         self.reader = None
         self.writer = None
 
@@ -68,7 +69,7 @@ class HTTPClient:
                 if parts.port and parts.port != 80:
                     host = f"{host}:{parts.port}"
                 self.writer.write((f"GET {target} HTTP/1.1\r\nHost: {host}\r\n"
-                                   "User-Agent: hls-capacity-reader/1\r\n"
+                                   "User-Agent: hls-capacity-reader/1\r\n" + self.cookie +
                                    "Accept: */*\r\nConnection: keep-alive\r\n\r\n").encode("ascii"))
                 await self.writer.drain()
                 status_line = await self.reader.readline()
@@ -183,6 +184,29 @@ def validate_ts(body):
         body[pos] == 0x47 for pos in range(0, len(body), 188))
 
 
+def validate_fmp4(body):
+    """Top-level ISO-BMFF boxes tile the body exactly, with a moof and an mdat."""
+    kinds, pos = set(), 0
+    while pos + 8 <= len(body):
+        size, kind = int.from_bytes(body[pos:pos + 4], "big"), body[pos + 4:pos + 8]
+        if size == 1 and pos + 16 <= len(body):
+            size = int.from_bytes(body[pos + 8:pos + 16], "big")
+        elif size == 0:
+            size = len(body) - pos
+        if size < 8 or pos + size > len(body):
+            return False
+        kinds.add(kind)
+        pos += size
+    return pos == len(body) and {b"moof", b"mdat"} <= kinds
+
+
+def validate_segment(url, body):
+    """The container check the segment's name implies: fMP4 or MPEG-TS."""
+    if urlsplit(url).path.endswith((".m4s", ".mp4")):
+        return validate_fmp4(body)
+    return validate_ts(body)
+
+
 def percentile(sorted_values, fraction):
     """Nearest-rank percentile over an ascending list: the smallest sample at
     or above `fraction` of the samples.  No interpolation, so every ratio
@@ -239,10 +263,10 @@ async def fetch_segment(client, url, stats, semaphore, concurrency, warmup=False
 async def _fetch_segment(client, url, stats, warmup):
     try:
         body = checked_body(await client.request(url), "segment")
-        if not validate_ts(body):
+        if not validate_segment(url, body):
             if not warmup and not stats.sealed:
                 stats.ts_sync_errors += 1
-            raise HTTPError("segment MPEG-TS sync or packet length error")
+            raise HTTPError("segment container framing error")
         if not warmup and not stats.sealed:
             stats.bytes_received += len(body)
             stats.segments += 1
@@ -330,7 +354,7 @@ async def async_main(args):
     fatal_event = asyncio.Event()
     fatal_messages = []
     stats = [ReaderStats(i) for i in range(args.readers)]
-    clients = [HTTPClient(i) for i in range(args.readers)]
+    clients = [HTTPClient(i, args.cookie) for i in range(args.readers)]
     segment_semaphore = asyncio.Semaphore(SEGMENT_CONCURRENCY_LIMIT)
     concurrency = [0, 0]
     tasks = [asyncio.create_task(run_reader(item, args.url, client, ready_event,
@@ -592,6 +616,8 @@ def parse_args(argv=None):
     parser.add_argument("--reference-bps", type=float, required=True)
     parser.add_argument("--min-delivery-ratio", type=float, default=0.95)
     parser.add_argument("--poll-interval", type=float, default=1.0)
+    parser.add_argument("--cookie", default="",
+                        help="Cookie header value; restream serves HLS only to a session")
     parser.add_argument("--clock-domain", required=True,
                         choices=("controller-monotonic", "receiver-monotonic"))
     args = parser.parse_args(argv)

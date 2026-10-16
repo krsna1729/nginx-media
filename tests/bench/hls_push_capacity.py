@@ -22,6 +22,32 @@ from urllib.parse import parse_qs, urlsplit
 from capacity_media_offer import prepared_rate, production
 from proc_cpu_sampler import read_threads
 
+SEQUENCE = re.compile(r"(\d+)\.\w+$")
+
+
+def by_sequence(sink):
+    """Key each destination's segments by their trailing sequence number.
+
+    restream names each output's segments `<per-output token>-<seq>.ts`, so
+    only the sequence identifies one segment across outputs. Two names with one
+    sequence (an output restarted under a new token) stay one entry with both
+    counts, which the duplicate check reports."""
+    for destination in sink["destinations"].values():
+        merged = {}
+        for name, entry in destination.get("segment_detail", {}).items():
+            match = SEQUENCE.search(name)
+            if match is None:
+                raise RuntimeError(f"HLS push segment {name!r} has no sequence number")
+            key = match.group(1)
+            if key in merged:
+                first = merged[key]
+                entry = dict(first, count=first["count"] + entry["count"],
+                             at=min(first["at"], entry["at"]))
+            merged[key] = entry
+        if merged:
+            destination["segment_detail"] = merged
+    return sink
+
 
 class HlsPushSink(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
@@ -407,19 +433,45 @@ def expected_destination_ids(programs, destinations, offset):
             for index in range(offset, offset + destinations)]
 
 
+def sender_counters(before, after, destination):
+    """(dropped, errors, final metrics) from nginx's per-destination egress
+    counters over the window."""
+    if destination not in after:
+        raise RuntimeError(f"no final HLS push egress metrics for {destination}")
+    final_metrics = after[destination]
+    if not {"dropped_units", "transport_errors"} <= final_metrics.keys():
+        raise RuntimeError(f"no final HLS push drop/error counters for {destination}")
+    initial_metrics = before.get(destination, {})
+    dropped = final_metrics["dropped_units"] - initial_metrics.get("dropped_units", 0)
+    errors = final_metrics["transport_errors"] - initial_metrics.get("transport_errors", 0)
+    if not all(math.isfinite(number) for number in (dropped, errors)) or min(dropped, errors) < 0:
+        raise RuntimeError(f"HLS push drop/error counters invalid or regressed for {destination}")
+    return dropped, errors, final_metrics
+
+
 def report(args):
-    before = metric_snapshot(args.before_prefix, args.stream, args.programs)
-    after = metric_snapshot(args.after_prefix, args.stream, args.programs)
+    # Without sender metrics (restream exports none) the verdict rests on the
+    # receiver evidence alone, and the sender counters read n/a, not zero.
+    sender = args.before_prefix is not None
+    if sender:
+        before = metric_snapshot(args.before_prefix, args.stream, args.programs)
+        after = metric_snapshot(args.after_prefix, args.stream, args.programs)
     with Path(args.sink_before).open(encoding="utf-8") as source:
         sink_before = json.load(source)
     with Path(args.sink_after).open(encoding="utf-8") as source:
         sink_after = json.load(source)
+    if args.segment_identity == "sequence":
+        sink_before, sink_after = by_sequence(sink_before), by_sequence(sink_after)
+    with Path(args.produced_segments).open(encoding="utf-8") as source:
+        production_provenance = json.load(source)["provenance"]
 
     duration = sink_after["monotonic"] - sink_before["monotonic"]
     if not math.isfinite(duration) or duration <= 0:
         raise RuntimeError("HLS push sink snapshots have a nonpositive interval")
-    before_active = active_worker_snapshot(args.before_prefix, "hls_upload_pool")
-    after_active = active_worker_snapshot(args.after_prefix, "hls_upload_pool")
+    before_active = after_active = "n/a"
+    if sender:
+        before_active = active_worker_snapshot(args.before_prefix, "hls_upload_pool")
+        after_active = active_worker_snapshot(args.after_prefix, "hls_upload_pool")
 
     records = []
     for destination in expected_destination_ids(args.programs, args.destinations,
@@ -431,19 +483,14 @@ def report(args):
 
         delta_bytes = final_sink["ts_bytes"] - initial_sink.get("ts_bytes", 0)
         segments = final_sink["segments"] - initial_sink.get("segments", 0)
-        if destination not in after:
-            raise RuntimeError(f"no final HLS push egress metrics for {destination}")
-        final_metrics = after[destination]
-        if not {"dropped_units", "transport_errors"} <= final_metrics.keys():
-            raise RuntimeError(f"no final HLS push drop/error counters for {destination}")
-        initial_metrics = before.get(destination, {})
-        dropped = final_metrics["dropped_units"] - initial_metrics.get("dropped_units", 0)
-        errors = final_metrics["transport_errors"] - initial_metrics.get("transport_errors", 0)
-        if not all(math.isfinite(number)
-                   for number in (delta_bytes, segments, dropped, errors)):
+        if not all(math.isfinite(number) for number in (delta_bytes, segments)):
             raise RuntimeError(f"non-finite HLS push counters for {destination}")
-        if min(delta_bytes, segments, dropped, errors) < 0:
+        if min(delta_bytes, segments) < 0:
             raise RuntimeError(f"HLS push counters regressed for {destination}")
+        dropped = errors = None
+        final_metrics = {"queue_bytes": None, "queue_lag_ms": None}
+        if sender:
+            dropped, errors, final_metrics = sender_counters(before, after, destination)
 
         # uploads completed inside the window only
         measured_durations = final_sink["upload_durations_ms"][
@@ -580,7 +627,7 @@ def report(args):
     print("quality_start_uncertainty_ns=0")
     print("quality_end_uncertainty_ns=0")
     print(f"quality_offered_payload_bps={offered_bps:.2f}")
-    print("quality_offered_rate_provenance=identified final segment sizes / local cut timestamp span")
+    print(f"quality_offered_rate_provenance={production_provenance}")
     print(f"quality_prepared_source_payload_bps={prepared_bps:.2f}")
     print(f"quality_prepared_rate_provenance={prepared_provenance}")
     print(f"quality_total_receiver_bytes={sum(record['bytes'] for record in records)}")
@@ -603,8 +650,9 @@ def report(args):
     print(f"quality_playlist_violations={sum(r['playlist_violations'] for r in records)}")
     print(f"quality_total_bytes={segment_summary['delivered_bytes']}")
     print(f"quality_total_segments={sum(r['segments'] for r in records)}")
-    print(f"quality_dropped_units={sum(r['dropped_units'] for r in records)}")
-    print(f"quality_transport_errors={sum(r['transport_errors'] for r in records)}")
+    total = lambda key: sum(r[key] for r in records) if sender else "n/a"  # noqa: E731
+    print(f"quality_dropped_units={total('dropped_units')}")
+    print(f"quality_transport_errors={total('transport_errors')}")
     print(f"quality_sink_http_errors={http_errors}")
     print(f"quality_active_uploaders_before={before_active}")
     print(f"quality_active_uploaders_after={after_active}")
@@ -616,10 +664,9 @@ def report(args):
     print(f"quality_upload_duration_p95_ms={percentile(upload_durations, 0.95):.3f}")
     print(f"quality_upload_duration_p99_ms={percentile(upload_durations, 0.99):.3f}")
     print(f"quality_upload_duration_max_ms={max(upload_durations, default=0):.3f}")
-    print(f"quality_queue_lag_p50_ms={percentile(queue_lags, 0.50)}")
-    print(f"quality_queue_lag_p95_ms={percentile(queue_lags, 0.95)}")
-    print(f"quality_queue_lag_p99_ms={percentile(queue_lags, 0.99)}")
-    print(f"quality_max_queue_lag_ms={max(queue_lags)}")
+    for label, fraction in (("p50", 0.50), ("p95", 0.95), ("p99", 0.99)):
+        print(f"quality_queue_lag_{label}_ms={percentile(queue_lags, fraction) if sender else 'n/a'}")
+    print(f"quality_max_queue_lag_ms={max(queue_lags) if sender else 'n/a'}")
     print(f"quality_failure_count={len(failures)}")
     for failure in failures[:12]:
         print(f"quality_failure={failure}")
@@ -735,8 +782,10 @@ def main():
     sink_parser.add_argument("--latency-ms", type=int, default=0)
 
     report_parser = subparsers.add_parser("report")
-    report_parser.add_argument("--before-prefix", required=True)
-    report_parser.add_argument("--after-prefix", required=True)
+    report_parser.add_argument("--before-prefix",
+                               help="sender metrics; omit both prefixes for an "
+                                    "engine that exports none")
+    report_parser.add_argument("--after-prefix")
     report_parser.add_argument("--stream", required=True)
     report_parser.add_argument("--destinations", type=int, required=True)
     report_parser.add_argument("--programs", type=int, default=1,
@@ -759,6 +808,10 @@ def main():
     report_parser.add_argument("--segment-lag-limit-s", type=nonnegative_float,
                                default=0,
                                help="0: twice the observed segment interval")
+    report_parser.add_argument("--segment-identity", choices=("name", "sequence"),
+                               default="name",
+                               help="sequence: outputs name one segment differently "
+                                    "(restream) and share only its sequence number")
     readiness_parser = subparsers.add_parser("readiness-report")
     readiness_parser.add_argument("--metrics-prefix", required=True)
     readiness_parser.add_argument("--stream", required=True)
@@ -770,6 +823,8 @@ def main():
 
 
     args = parser.parse_args()
+    if args.command == "report" and (args.before_prefix is None) != (args.after_prefix is None):
+        parser.error("--before-prefix and --after-prefix go together")
 
     if args.command == "serve":
         serve(args.port, args.bind, args.fail_every, args.close_after,

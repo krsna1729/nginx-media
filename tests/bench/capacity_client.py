@@ -323,6 +323,8 @@ def provision(engine, client, program, plan, receiver, path="",
                 sink.post(request_path, body)
 
         if engine == "restream":
+            # A fresh connection per POST: restream closes idle keep-alive
+            # connections, and a POST lost after the send cannot be resent.
             url = restream_output_url(kind, sink_id, receiver, port,
                                       program.stream, path)
             raw = client.post("/pipelines/%s/outputs" % pipeline_id, {
@@ -330,11 +332,11 @@ def provision(engine, client, program, plan, receiver, path="",
                 "url": url,
                 "config": {"video": {"mode": "source"},
                            "audio": {"mode": "all"}},
-            }, headers=headers)
+            }, headers=headers, fresh=True)
             output_id = _output_id(sink_id, raw)
             client.post(
                 "/pipelines/%s/outputs/%s/start" % (pipeline_id, output_id),
-                {}, headers=headers)
+                {}, headers=headers, fresh=True)
         else:
             client.post_owner(
                 "/streams/%s/destinations" % program.stream,
