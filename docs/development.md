@@ -483,10 +483,17 @@ The measuring side is kept from becoming the measured limit:
   fanout of segments, so it is not used.  Loopback mode sets
   `net.ipv4.tcp_tw_reuse` (the namespace mode sets it per namespace) because
   every destination of a rung shares one address, and it restores whatever the
-  host had, together with the mask, when it goes down.  The shared address is
-  also loopback's own ceiling: past roughly a thousand TCP destinations one
-  rung's sockets exhaust the 4-tuple space against `127.0.0.1`, which is a
-  limit of the mode and not of the engine.
+  together with the mask, when it goes down.  The shared address is
+  loopback's own ceiling, and the arithmetic is worth stating: one destination
+  pair offers `net.ipv4.ip_local_port_range` ports (28,232 here), so a single
+  rung of a thousand connections cannot exhaust it, and only accumulation
+  across successive rungs can.  Distinct addresses out of `127.0.0.0/8` would
+  give each destination pair its own port space, and the kernel already routes
+  that whole range to `lo`, so a sink can bind `127.0.0.7` with no
+  configuration at all.  That is the remedy to reach for if a loopback rung
+  ever fails on ports, and it is not applied yet: the diagnosis that put
+  earlier RTMP rungs at that ceiling is unverified, so the spread would be
+  complexity spent on an unmeasured limit.
 - **The preflight decides whether a rung can be measured at all.**  Before a
   rung at or above `CAPACITY_PREFLIGHT_MIN_DESTINATIONS` (128 by default,
   `CAPACITY_PREFLIGHT=auto|yes|no`), the harness fingerprints the sender and
