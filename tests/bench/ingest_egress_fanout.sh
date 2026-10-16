@@ -298,8 +298,18 @@ harness_run() {   # <argv...>
 # API, the HLS push sink's readiness and snapshot endpoints) is made from
 # inside the harness namespace, because that is the only place its address
 # resolves.  A caller must not have to know which topology it is running in.
+# Every request this harness makes goes through one of these wrappers, and
+# none of them had a deadline. A peer that accepts a connection and never
+# answers therefore parked the whole run: a readiness poll on the RTMP sink's
+# metrics endpoint waited six and a half hours on its *first* attempt, so the
+# two hundred attempts wrapped around it never mattered. Defaults go first so
+# a caller that legitimately needs longer can pass its own and win.
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-3}"
+CURL_MAX_TIME="${CURL_MAX_TIME:-20}"
+
 receiver_curl() {   # <curl args...>
-    harness_run curl "$@"
+    harness_run curl --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+        --max-time "$CURL_MAX_TIME" "$@"
 }
 
 # The shared publisher helper fetches the ingest key over the API, which
@@ -796,10 +806,12 @@ PY
     for (( k = 0; k < count; k++ )); do
         dir="$RTMP_SINK_RUN-$k"
         for i in $(seq 1 200); do
-            curl -fsS "$(rtmp_sink_api "$k")/metrics" >/dev/null 2>&1 && break
+            curl -fsS --connect-timeout 2 --max-time 5 \
+                "$(rtmp_sink_api "$k")/metrics" >/dev/null 2>&1 && break
             sleep 0.05
         done
-        if ! curl -fsS "$(rtmp_sink_api "$k")/metrics" >/dev/null 2>&1; then
+        if ! curl -fsS --connect-timeout 2 --max-time 5 \
+                "$(rtmp_sink_api "$k")/metrics" >/dev/null 2>&1; then
             echo "RTMP sink $k did not become ready" >&2
             stop_rtmp_sink_instance
             return 1
@@ -1103,12 +1115,14 @@ restream_api() { printf 'http://%s:%s' "$CAPACITY_MEDIA_ADDR" "$RESTREAM_HTTP_PO
 # code paths for the same evidence.
 api_curl() {   # <curl args...>
     if [ -z "$CAPACITY_SENDER_EXEC" ]; then
-        curl "$@"
+        curl --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+        --max-time "$CURL_MAX_TIME" "$@"
         return
     fi
     local -a prefix=()
     read -r -a prefix <<< "$CAPACITY_SENDER_EXEC"
-    "${prefix[@]}" curl "$@"
+    "${prefix[@]}" curl --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+        --max-time "$CURL_MAX_TIME" "$@"
 }
 
 rtmp_sink_api() {   # [sink index]
@@ -1818,7 +1832,12 @@ hls_storm() {
 
         [ -s "$list" ] || { sleep 0.2; continue; }
 
-        curl -fsS --parallel --parallel-max "$HLS_READERS" \
+        # A reader pull runs for as long as the segment list keeps it busy, so
+        # it gets a bound sized for a rung rather than the wrapper's short
+        # default - long enough never to truncate a real pull, short enough
+        # that a stalled segment server cannot park the run.
+        curl -fsS --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time 300 \
+            --parallel --parallel-max "$HLS_READERS" \
             --config "$list" >/dev/null 2>&1 || true
 
         sleep 0.02

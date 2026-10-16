@@ -165,6 +165,32 @@ def cell_id(engine, cpus):
 CHILD = None
 
 
+def stop_child_group(grace=60):
+    """Stop the harness and everything it started, escalating if it will not.
+
+    Returns true if the group had to be killed rather than asked.
+    """
+    if CHILD is None:
+        return False
+    try:
+        os.killpg(os.getpgid(CHILD.pid), signal.SIGTERM)
+    except OSError:
+        return False
+    try:
+        CHILD.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(CHILD.pid), signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            CHILD.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+        return True
+    return False
+
+
 def stop_children(signum, frame):
     """Pass a stop request on to the harness and everything it started.
 
@@ -173,14 +199,7 @@ def stop_children(signum, frame):
     them. That runaway has already poisoned one cell: a sender left pinned to
     a benchmark CPU changed the verdict of every rung after it.
     """
-    if CHILD is not None:
-        try:
-            os.killpg(os.getpgid(CHILD.pid), signal.SIGTERM)
-            CHILD.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            os.killpg(os.getpgid(CHILD.pid), signal.SIGKILL)
-        except OSError:
-            pass
+    stop_child_group()
     raise SystemExit(128 + signum)
 
 
@@ -256,7 +275,21 @@ def run_cell(engine, cpus, snapshot, helpers, scripts, args, out_dir):
                                  stdout=handle, stderr=subprocess.STDOUT,
                                  start_new_session=True)
         try:
-            status = CHILD.wait()
+            status = CHILD.wait(timeout=args.cell_budget)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            # Every request the harness makes is a curl with no deadline, so a
+            # peer that accepts a connection and never answers parks the whole
+            # sweep. That is how one night produced one mix of one cell: a
+            # readiness poll on the RTMP sink's metrics endpoint waited six and
+            # a half hours on its first attempt, so the two hundred attempts
+            # around it never mattered. The bound has to be on the clock, not
+            # on the number of attempts.
+            log("%-18s over its %ds budget - stopping it"
+                % (identifier, args.cell_budget))
+            killed = stop_child_group()
+            status = -signal.SIGKILL if killed else -signal.SIGTERM
+            timed_out = True
         finally:
             CHILD = None
     elapsed = time.time() - started
@@ -270,6 +303,8 @@ def run_cell(engine, cpus, snapshot, helpers, scripts, args, out_dir):
         "cores": len(cpus),
         "seconds_per_rung": args.seconds,
         "exit_status": status,
+        "timed_out": timed_out,
+        "budget_seconds": args.cell_budget,
         "wall_seconds": round(elapsed, 1),
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "matrix": None,
@@ -346,6 +381,9 @@ def main():
     parser.add_argument("--out", default=os.path.join(
         PROJECT_ROOT, "docs/capacity-evidence",
         "sweep-%s" % time.strftime("%Y%m%d")))
+    parser.add_argument("--cell-budget", type=int, default=10800,
+                        help="wall-clock seconds one cell may take before it is "
+                             "stopped and recorded as a timeout")
     parser.add_argument("--seconds", type=int, default=60,
                         help="measurement window per rung")
     parser.add_argument("--cell", action="append", default=[],
