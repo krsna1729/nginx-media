@@ -2255,6 +2255,30 @@ def test_restream_push_is_judged_by_sequence(work):
           "an fMP4 fragment without media data is not")
 
 
+def test_topology_cells_and_steering_masks(work):
+    """A wrong RPS mask silently steers receive work to the wrong CPUs, and a
+    cell that shares its name across topologies silently overwrites a result."""
+    topology = os.path.join(HERE, "capacity_topology.sh")
+    for cpus, expected in (("12-19", "ff000"), ("0,2,4,6,8,10", "555"),
+                           ("3-4", "18"), ("0", "1"), ("63", "8000000000000000")):
+        result = run(["bash", topology, "mask", cpus])
+        check(result.returncode == 0 and result.stdout.strip() == expected,
+              f"mask for {cpus} must be {expected}: {result.stdout}{result.stderr}")
+    result = run(["bash", topology, "mask", "64"])
+    check(result.returncode != 0 and "outside 0-63" in result.stderr,
+          f"a CPU past the bitmap must be refused: {result.stdout}{result.stderr}")
+
+    sweep = load_module(os.path.join(HERE, "capacity_sweep.py"), "capacity_sweep_under_test")
+    check(set(sweep.TOPOLOGIES) == {"namespace", "loopback"},
+          "both topologies are first class, so both appear in a default run")
+    engine = next(e for e in sweep.ENGINES if e["id"] == "nginx-haivision")
+    names = {sweep.cell_id(engine, [0, 2], topology_name) for topology_name in sweep.TOPOLOGIES}
+    check(len(names) == len(sweep.TOPOLOGIES),
+          f"a cell name must say which topology measured it: {names}")
+    check(sweep.cell_id(engine, [0, 2], "namespace") == "nginx-haivision-2c",
+          "the namespace cell keeps the name earlier evidence used")
+
+
 def harness_cfg(**overrides):
     """The harness configuration, with this checkout's helpers."""
     return dataclasses.replace(harness_config.load(), bench_dir=HERE, **overrides)
@@ -3130,6 +3154,7 @@ def main():
             os.path.join(work, "prepared-captures"))
         test_hls_push_judge_rejects_non_finite_inputs(work)
         test_restream_push_is_judged_by_sequence(work)
+        test_topology_cells_and_steering_masks(work)
         test_calibration_is_stored_only_from_a_passing_positive_rung(work)
         test_harness_runs_the_mixes_of_the_one_list(work)
         test_bench_ci_manifest_is_the_harness_mix_list(work)

@@ -15,7 +15,7 @@ comes from a rung's `diagnostics.json`; the method is in
 The two-host SSH receiver mode was removed when the harness moved to Python
 (`tests/bench/capacity_harness.py`); its earlier loopback-SSH runs below are
 orchestration evidence only. Every capacity result here is from one host, with
-the receivers on loopback or in the `capacity_veth.sh` namespaces.
+the receivers on loopback or in the `capacity_topology.sh` namespaces.
 
 
 ## What landed, and why
@@ -378,7 +378,8 @@ apart, and every rung's bundle records the placement.
 ### Loopback against a real device path
 
 The receivers were moved into their own network namespace behind a veth pair
-(`tests/bench/capacity_veth.sh up`, `CAPACITY_RECEIVER_ADDR=10.200.0.2`), so
+(`tests/bench/capacity_topology.sh namespace up`,
+`CAPACITY_RECEIVER_ADDR=10.200.0.2`), so
 the traffic crosses a device with an MTU and the kernel's UDP path instead of
 loopback.  Same source, same rungs, same placement (nginx 0-5, receivers
 12-19):
@@ -1094,7 +1095,7 @@ Rather than introducing external containers, virtual bridges or user-space proxi
 ```
 
 
-1. **Dual-Namespace Multi-Queue Veth (`tests/bench/capacity_veth.sh`)**:
+1. **Dual-Namespace Multi-Queue Veth (`tests/bench/capacity_topology.sh namespace`)**:
    * Creates an isolated `sut` namespace for NGINX and a `harness` namespace for publishers and sinks.
    * Connected via a peer-to-peer `veth` pair (`veth-sut <-> veth-harness`) configured with `numtxqueues 8 numrxqueues 8`.
    * Ingress (8 Mbit/s) and egress (8 Gbit/s) traverse independent full-duplex hardware queues, eliminating loopback softirq serialization.

@@ -451,10 +451,32 @@ The measuring side is kept from becoming the measured limit:
   every shared-runner tier uses.  The other wired topology is
   `ip netns exec <ns>` / `nsenter --net=/run/netns/<ns> --no-fork` with the
   namespace's own address, which puts the traffic over a veth pair. The namespace
-  topology is one command - `eval "$(tests/bench/capacity_veth.sh up)"` -
+  topology is one command - `eval "$(tests/bench/capacity_topology.sh namespace up)"` -
   and it is the topology to use when the question is whether the software
   depends on loopback; it is not a NIC, so a number from it is a number
-  about the software, not about a 25 Gbit/s link.
+  about the software, not about a 25 Gbit/s link.  `capacity_sweep.py` runs
+  both topologies (`--topology namespace|loopback|both`) as separate cells,
+  because the same engine at the same core count means different things on a
+  shared stack and between namespaces; the cell name carries the topology
+  (`nginx-haivision-4c`, `nginx-haivision-4c-loopback`).
+- **Both topologies are tuned, and every tunable is a measured need.**
+  `capacity_topology.sh` applies the settings and reads each one back, so a
+  setting that did not take effect fails the run instead of quietly changing
+  what the numbers mean.  Two settings exist for one reason: a packet arriving
+  on a software device is processed on the CPU that transmitted it unless
+  receive steering moves it.  On this machine, for one 1.7 Mpps flow into a
+  receiver pinned to an E-core, the sender's CPU spent 20.7% (namespace) and
+  33.5% (loopback, `lo`) of a core in softirq while the mask was zero, and the
+  sender managed 1.67 M and 1.39 M sends; with the mask set to the receiver
+  CPUs the softirq work moved to an E-core and the sender managed 2.71 M and
+  1.75 M sends.  Without the mask a capacity run reads as a sender limit that
+  is really the receivers' ingress.  Both modes also require 64 MiB socket
+  buffers (`net.core.rmem_max`/`wmem_max`, checked, never set here: the write
+  belongs to the host) and the namespace mode sets `tcp_tw_reuse` per
+  namespace.  In loopback mode one device carries both directions, so the
+  single mask is the receiver CPUs, which also moves the sender's own ingress
+  off its cores; that asymmetry is the reason the namespace mode is the
+  qualification topology and loopback is the single-host reference.
 - **The preflight decides whether a rung can be measured at all.**  Before a
   rung at or above `CAPACITY_PREFLIGHT_MIN_DESTINATIONS` (128 by default,
   `CAPACITY_PREFLIGHT=auto|yes|no`), the harness fingerprints the sender and

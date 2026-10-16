@@ -35,13 +35,13 @@ bench-reporting:
 	python3 tests/bench/test_transport_provenance.py
 	python3 tests/bench/test_publication.py
 
-# The receiver topology for capacity runs.
-# veth-up/veth-down need root (sudo -n is used for the ip commands only).
-bench-veth-up:
-	tests/bench/capacity_veth.sh up
+# The receiver topology for capacity runs, in either mode.  The script needs
+# root (sudo -n covers the ip and sysfs writes); the sweep sets up its own.
+bench-topology-up:
+	tests/bench/capacity_topology.sh namespace up
 
-bench-veth-down:
-	tests/bench/capacity_veth.sh down
+bench-topology-down:
+	tests/bench/capacity_topology.sh namespace down
 
 bench-preflight:
 	python3 tests/bench/capacity_preflight.py host --role sender \

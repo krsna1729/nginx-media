@@ -46,10 +46,8 @@ ENGINES = [
      "binary": ".build/nginx-robotweax/install/sbin/nginx"},
     {"id": "nginx-haivision",
      "binary": ".build/nginx-haivision/install/sbin/nginx"},
-    # restream has no HLS output path the harness can judge.
     {"id": "restream",
-     "binary": "../restream/target/release/restream",
-     "unsupported": ("hls",)},
+     "binary": "../restream/target/release/restream"},
 ]
 
 #: Receivers and publishers stay on the E-cores so they cannot steal from
@@ -59,6 +57,9 @@ E_CORES = [12, 13, 14, 15, 16, 17, 18, 19]
 PUBLISHER_CPUS = "12,13"
 
 STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+TOPOLOGIES = ("namespace", "loopback")
+# In namespace mode the harness needs both ends and the address between them;
+# loopback shares this host, so it needs no environment at all.
 VETH_KEYS = ("CAPACITY_SENDER_EXEC", "CAPACITY_RECEIVER_EXEC",
              "CAPACITY_RECEIVER_ADDR", "CAPACITY_SENDER_ADDR")
 
@@ -74,35 +75,23 @@ def workloads_in(matrix):
     return set((matrix.get("mixes") or {}).keys())
 
 
-def complete(record, args, engine):
-    """Whether a previous result measured every workload this engine runs
-    with this ladder and window; a smoke result never satisfies a full run."""
-    wanted = set(engine_mixes(engine, args)[0])
+def complete(record, args):
+    """Whether a previous result measured every requested workload with this
+    ladder and window; a smoke result never satisfies a full run."""
+    wanted = set(requested_mixes(args))
     return (bool(wanted)
             and record.get("seconds_per_rung") == args.seconds
             and record.get("steps", STEPS) == args.steps
             and workloads_in(record.get("matrix")) >= wanted)
 
 
-def mix_protocols():
-    """{mix: protocol field} from capacity-mixes.conf, in file order."""
-    table = {}
+def requested_mixes(args):
+    """The mix names to run; `all` is every mix in capacity-mixes.conf."""
+    if args.mixes != "all":
+        return args.mixes.split()
     with open(os.path.join(PROJECT_ROOT, "tests/bench/capacity-mixes.conf")) as source:
-        for line in source:
-            if line.strip() and not line.lstrip().startswith("#"):
-                name, protocol = line.split(":")[:2]
-                table[name] = protocol
-    return table
-
-
-def engine_mixes(engine, args):
-    """(mixes to run, mixes the engine cannot carry). Unsupported mixes are
-    recorded as such, never run, so they cannot read as setup failures."""
-    protocols = mix_protocols()
-    names = list(protocols) if args.mixes == "all" else args.mixes.split()
-    unsupported = [n for n in names
-                   if any(p in protocols.get(n, "") for p in engine.get("unsupported", ()))]
-    return [n for n in names if n not in unsupported], unsupported
+        return [line.split(":")[0] for line in source
+                if line.strip() and not line.lstrip().startswith("#")]
 
 
 def engine_binary(engine):
@@ -124,9 +113,52 @@ def snapshot_harness():
     return os.path.join(frozen, "capacity_harness.py"), frozen, scripts
 
 
-def cell_id(engine, cpus):
+def cell_id(engine, cpus, topology):
     """A name that is safe as a path, in a URL and in later tooling."""
-    return "%s-%dc" % (engine["id"], len(cpus))
+    suffix = "" if topology == "namespace" else "-" + topology
+    return "%s-%dc%s" % (engine["id"], len(cpus), suffix)
+
+
+def set_up_topology(topology, notes):
+    """Bring one topology up; returns (harness environment, error).  What it
+    steered goes into `notes`, because a cell's numbers mean something different
+    depending on whether the sender's cores paid for the receivers' ingress."""
+    done = subprocess.run(["tests/bench/capacity_topology.sh", topology, "up"],
+                          cwd=PROJECT_ROOT, text=True, capture_output=True, timeout=120)
+    if done.returncode != 0:
+        return {}, "%s up failed (exit %d): %s" % (topology, done.returncode,
+                                                   done.stderr.strip())
+    environment = {}
+    for line in done.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            environment[key.strip()] = value.strip().strip("'\"")
+    if topology == "namespace":
+        absent = [key for key in VETH_KEYS if not environment.get(key)]
+        if absent:
+            return {}, "namespace up missed %s" % ",".join(absent)
+        environment = {key: environment[key] for key in VETH_KEYS}
+    for line in done.stderr.splitlines():
+        if "steering" in line:  # what the sender's cores do and do not pay for
+            note = line.split("capacity_topology: ", 1)[-1]
+            notes.append(note)
+            log("%-10s %s" % (topology, note))
+    if topology == "namespace":
+        for line in done.stderr.splitlines():
+            if "already exist" in line:
+                log("%-10s %s" % (topology, line.split("capacity_topology: ", 1)[-1]))
+    return environment, None
+
+
+def tear_down_topology(topology):
+    """Undo what the topology set on this host: the loopback mode steers the
+    host's own `lo`, which must not outlive the run."""
+    done = subprocess.run(["tests/bench/capacity_topology.sh", topology, "down"],
+                          cwd=PROJECT_ROOT, text=True, capture_output=True, timeout=120)
+    if done.returncode != 0:
+        log("%s down failed: %s" % (topology, (done.stderr or done.stdout).strip()))
+    elif topology == "loopback":
+        log("%-10s %s" % (topology, done.stdout.strip()))
 
 
 def wait_for_harness(child, log_path, args):
@@ -291,9 +323,9 @@ def cleanup_cell(child, identifier, run_dir):
         signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)
 
 
-def run_cell(engine, cpus, snapshot, helpers, scripts, args):
+def run_cell(engine, cpus, topology, snapshot, helpers, scripts, args):
     """Run every workload's ladder for one engine at one CPU count."""
-    identifier = cell_id(engine, cpus)
+    identifier = cell_id(engine, cpus, topology)
     case_dir = os.path.join(args.out, identifier)
     run_dir = os.path.join(case_dir, "run")
     bench_log = os.path.join(case_dir, "bench.log")
@@ -319,7 +351,7 @@ def run_cell(engine, cpus, snapshot, helpers, scripts, args):
         "CAPACITY_RECEIVER_CPUS": RECEIVER_CPUS,
         "CAPACITY_PUBLISHER_CPUS": PUBLISHER_CPUS,
         "CAPACITY_QUALITY_SECONDS": str(args.seconds),
-        "CAPACITY_QUALITY_MIXES": " ".join(engine_mixes(engine, args)[0]),
+        "CAPACITY_QUALITY_MIXES": " ".join(requested_mixes(args)),
         "CAPACITY_QUALITY_STEPS": args.steps,
         "CAPACITY_BENCH_DIR": helpers,
         "CAPACITY_SCRIPTS_DIR": scripts,
@@ -327,7 +359,7 @@ def run_cell(engine, cpus, snapshot, helpers, scripts, args):
         "CAPACITY_SINK_MODE": "correctness",
         "PHASES": "capacity-quality-ladder",
         "CAPACITY_RUN": run_dir,
-    }, **args.veth_env)
+    }, **args.topology_env[topology])
 
     # Every CPU a role is placed on.  No `--isolate`: its cpuset makes the
     # receivers' taskset onto the E-cores fail with EINVAL.
@@ -356,6 +388,8 @@ def run_cell(engine, cpus, snapshot, helpers, scripts, args):
     record = {
         "cell": identifier,
         "engine": engine["id"],
+        "topology": topology,
+        "topology_steering": args.topology_notes[topology],
         "cpus": cpu_list,
         "cores": len(cpus),
         "seconds_per_rung": args.seconds,
@@ -367,8 +401,7 @@ def run_cell(engine, cpus, snapshot, helpers, scripts, args):
         "wall_seconds": round(elapsed, 1),
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "matrix": None,
-        "mixes": engine_mixes(engine, args)[0],
-        "unsupported_mixes": engine_mixes(engine, args)[1],
+        "mixes": requested_mixes(args),
     }
     try:
         with open(matrix_path) as handle:
@@ -414,7 +447,7 @@ def summarise(records):
     for record in records:
         matrix = record.get("matrix")
         if not matrix:
-            lines.append("%-18s %-9s %s" % (record["cell"], record["cores"],
+            lines.append("%-26s %-9s %s" % (record["cell"], record["cores"],
                                             "no matrix"))
             continue
         mixes = matrix.get("mixes") or {}
@@ -442,9 +475,6 @@ def summarise(records):
         if limited:
             lines.append("%-28s infrastructure limited: %s"
                          % ("", ",".join(limited)))
-        if record.get("unsupported_mixes"):
-            lines.append("%-28s not supported by this engine: %s"
-                         % ("", ",".join(record["unsupported_mixes"])))
     return "\n".join(lines)
 
 
@@ -462,92 +492,98 @@ def sweep(args):
         wanted = {name.strip() for name in args.engines.split(",")}
         engines = [e for e in ENGINES if e["id"] in wanted]
 
-    cells = [(engine, PCORES[:count])
-             for engine in engines
-             for count in range(1, len(PCORES) + 1)]
+    # The extremes for every engine first, so a cross-engine comparison exists
+    # hours before the middle core counts finish.  Each topology brings its own
+    # cells: the same engine and core count means different things on a shared
+    # loopback stack and between namespaces, so they are never one result.
+    counts = [1, len(PCORES)] + list(range(2, len(PCORES)))
+    topologies = TOPOLOGIES if args.topology == "both" else (args.topology,)
+    cells = [(engine, PCORES[:count], topology)
+             for topology in topologies
+             for count in counts
+             for engine in engines]
     if args.cell:
         wanted = set(args.cell)
         cells = [cell for cell in cells if cell_id(*cell) in wanted]
-    missing = [engine["id"] for engine, _ in cells
-               if not os.path.exists(engine_binary(engine))]
+    missing = {engine["id"] for engine, _, _ in cells
+               if not os.path.exists(engine_binary(engine))}
     if missing:
         log("skipping cells for engines with no binary: %s"
-            % ", ".join(sorted(set(missing))))
-        cells = [(e, c) for e, c in cells if os.path.exists(engine_binary(e))]
+            % ", ".join(sorted(missing)))
+        cells = [(e, c, t) for e, c, t in cells
+                 if os.path.exists(engine_binary(e))]
     if not cells:
         log("no cells to run")
         return 1
 
-    # Without the namespaces the harness would silently measure loopback.
-    veth = subprocess.run(["tests/bench/capacity_veth.sh", "up"],
-                          cwd=PROJECT_ROOT, text=True, capture_output=True,
-                          timeout=120)
-    args.veth_env = {}
-    for line in veth.stdout.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            args.veth_env[key.strip()] = value.strip().strip("'\"")
-    absent = [key for key in VETH_KEYS if not args.veth_env.get(key)]
-    if veth.returncode != 0 or absent:
-        log("capacity_veth.sh up failed (exit %d, missing %s): %s"
-            % (veth.returncode, ",".join(absent) or "nothing",
-               veth.stderr.strip()))
-        return 1
-    args.veth_env = {key: args.veth_env[key] for key in VETH_KEYS}
+    args.topology_env = {}
+    args.topology_notes = {}
+    for topology in topologies:
+        notes = []
+        environment, error = set_up_topology(topology, notes)
+        if error:
+            log(error)
+            return 1
+        args.topology_env[topology] = environment
+        args.topology_notes[topology] = notes
 
     snapshot, helpers, scripts = snapshot_harness()
     log("harness snapshot: %s" % os.path.relpath(snapshot, PROJECT_ROOT))
     log("%d cells, %ds per rung, %d workloads each"
-        % (len(cells), args.seconds, len(mix_protocols()) if args.mixes == "all" else len(args.mixes.split())))
+        % (len(cells), args.seconds, len(requested_mixes(args))))
 
     records = []
     started = time.time()
-    for engine, cpus in cells:
-        identifier = cell_id(engine, cpus)
-        result_path = os.path.join(args.out, identifier, "result.json")
-        if os.path.exists(result_path) and not args.force:
+    try:
+        for engine, cpus, topology in cells:
+            identifier = cell_id(engine, cpus, topology)
+            result_path = os.path.join(args.out, identifier, "result.json")
+            if os.path.exists(result_path) and not args.force:
+                try:
+                    with open(result_path) as handle:
+                        previous = json.load(handle)
+                except (OSError, ValueError):
+                    previous = {}
+                # A ladder stopping at its first quality failure exits non-zero
+                # and is complete; only the matrix decides.
+                if complete(previous, args):
+                    log("%-26s already measured, skipping" % identifier)
+                    records.append(previous)
+                    continue
+                log("%-26s previous attempt incomplete (%d of %d workloads, exit %s);"
+                    " re-running" % (identifier,
+                                     len(workloads_in(previous.get("matrix"))),
+                                     len(requested_mixes(args)),
+                                     previous.get("exit_status")))
+
+            log("%-26s %d core%s (%s) %s"
+                % (identifier, len(cpus), "" if len(cpus) == 1 else "s",
+                   ",".join(str(c) for c in cpus), topology))
             try:
-                with open(result_path) as handle:
-                    previous = json.load(handle)
-            except (OSError, ValueError):
-                previous = {}
-            # A ladder stopping at its first quality failure exits non-zero
-            # and is complete; only the matrix decides.
-            if complete(previous, args, engine):
-                log("%-18s already measured, skipping" % identifier)
-                records.append(previous)
-                continue
-            log("%-18s previous attempt incomplete (%d of %d workloads, exit %s);"
-                " re-running" % (identifier,
-                                 len(workloads_in(previous.get("matrix"))),
-                                 len(engine_mixes(engine, args)[0]),
-                                 previous.get("exit_status")))
+                record = run_cell(engine, cpus, topology, snapshot, helpers, scripts, args)
+            except SystemExit:
+                log("interrupted; %s is not recorded and will re-run" % identifier)
+                raise
+            write_json(result_path, record)
+            records.append(record)
+            log("%-26s done in %.0fs, exit %s"
+                % (identifier, record["wall_seconds"], record["exit_status"]))
 
-        log("%-18s %d core%s (%s)"
-            % (identifier, len(cpus), "" if len(cpus) == 1 else "s",
-               ",".join(str(c) for c in cpus)))
-        try:
-            record = run_cell(engine, cpus, snapshot, helpers, scripts, args)
-        except SystemExit:
-            log("interrupted; %s is not recorded and will re-run" % identifier)
-            raise
-        write_json(result_path, record)
-        records.append(record)
-        log("%-18s done in %.0fs, exit %s"
-            % (identifier, record["wall_seconds"], record["exit_status"]))
-
-        # No matrix and no rung ever started: the harness failed to start,
-        # and every remaining cell would record the same fault.
-        if record["matrix"] is None and not record["rung_started"]:
-            log("")
-            log("%s died after %.1fs before its first rung - this is a harness "
-                "fault, not a capacity result. Stopping rather than recording "
-                "the same fault %d more times."
-                % (identifier, record["wall_seconds"], len(cells) - 1))
-            log("the cell's own log is %s"
-                % os.path.relpath(os.path.join(args.out, identifier, "bench.log"),
-                                  PROJECT_ROOT))
-            return 1
+            # No matrix and no rung ever started: the harness failed to start,
+            # and every remaining cell would record the same fault.
+            if record["matrix"] is None and not record["rung_started"]:
+                log("")
+                log("%s died after %.1fs before its first rung - this is a harness "
+                    "fault, not a capacity result. Stopping rather than recording "
+                    "the same fault %d more times."
+                    % (identifier, record["wall_seconds"], len(cells) - 1))
+                log("the cell's own log is %s"
+                    % os.path.relpath(os.path.join(args.out, identifier, "bench.log"),
+                                      PROJECT_ROOT))
+                return 1
+    finally:
+        for topology in topologies:
+            tear_down_topology(topology)
 
     elapsed = time.time() - started
     write_json(os.path.join(args.out, "sweep.json"), {
@@ -555,7 +591,8 @@ def sweep(args):
                               .isoformat(timespec="seconds"),
         "seconds_per_rung": args.seconds,
         "steps": args.steps,
-        "mixes": list(mix_protocols()) if args.mixes == "all" else args.mixes.split(),
+        "mixes": requested_mixes(args),
+        "topologies": list(topologies),
         "elapsed_seconds": round(elapsed, 1),
         "cells": records,
     })
@@ -571,14 +608,20 @@ def main():
     parser.add_argument("--out", default=None,
                         help="result directory; default docs/capacity-evidence/"
                              "sweep-YYYYMMDD (with -smoke under --smoke)")
-    parser.add_argument("--cell-budget", type=int, default=10800,
+    parser.add_argument("--cell-budget", type=int, default=36000,
                         help="wall-clock seconds one cell may take before it is "
-                             "stopped and recorded as a timeout")
+                             "stopped and recorded as a timeout; hangs are caught "
+                             "sooner by the idle watchdog")
     parser.add_argument("--seconds", type=int, default=60,
                         help="measurement window per rung")
     parser.add_argument("--cell", action="append", default=[],
-                        help="cell id such as nginx-haivision-4c, repeatable; "
+                        help="cell id such as nginx-haivision-4c or "
+                             "nginx-haivision-4c-loopback, repeatable; "
                              "default is every cell")
+    parser.add_argument("--topology", choices=TOPOLOGIES + ("both",), default="both",
+                        help="receiver topology: namespace (one netns per side "
+                             "over a veth pair), loopback (one shared stack), or "
+                             "both")
     parser.add_argument("--force", action="store_true",
                         help="re-run cells that already have a result")
     parser.add_argument("--engines", default="",

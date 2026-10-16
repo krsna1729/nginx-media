@@ -240,7 +240,10 @@ HARNESS_FILES = (
     "capacity_diagnostics.py", "capacity_preflight.py", "capacity_media_offer.py",
     "hls_capacity_readers.py", "hls_push_capacity.py",
     "proc_cpu_sampler.py", "rtmp_capacity_quality.py",
-    "srt_capacity_quality.py", "srt_fanout_sink.c")
+    "srt_capacity_quality.py", "srt_fanout_sink.c",
+    # The topology decides which CPUs pay for receive processing, so a run
+    # taken with different steering is not the same measurement.
+    "capacity_topology.sh")
 
 # What the harness prints on its `quality_recipe` line, and how each value is
 # read back.  Everything on it describes how a rung was taken.
