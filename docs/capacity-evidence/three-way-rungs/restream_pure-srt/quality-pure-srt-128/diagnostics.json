@@ -1,0 +1,1032 @@
+{
+ "schema": "nginx-media.capacity-diagnostics/2",
+ "case": {
+  "outcome": "pass",
+  "mix": "pure-srt",
+  "sink_mode": "correctness",
+  "srt_senders": "adaptive",
+  "hls_push_uploaders": "adaptive",
+  "srt_backend": "",
+  "nginx_cpus": "0,2,4,6",
+  "receiver_cpus": "12,13,14,15,16,17,18,19",
+  "receiver_topology": "loopback",
+  "receiver_address": "127.0.0.1",
+  "destinations": 128,
+  "programs": 1,
+  "rate": "8M",
+  "protocol": "srt",
+  "srt": 128,
+  "rtmp": 0,
+  "hls_readers": 0,
+  "hls_push": 0,
+  "hls": "yes",
+  "workers": 4,
+  "measurement_s": 10.403868,
+  "measurement_provenance": "controller-stream-counter-collection-brackets",
+  "requested_s": 10
+ },
+ "outcome": "pass",
+ "intervals": {
+  "stream_counter_measurement": {
+   "value": 10.403868,
+   "unit": "s",
+   "status": "ok",
+   "provenance": "controller-stream-counter-collection-brackets",
+   "window": {
+    "clock_domain": "controller-monotonic",
+    "provenance": "controller stream-counter collection brackets",
+    "start_request_ns": 273051049553309,
+    "start_reply_ns": 273051063154589,
+    "start_ns": 273051056353949,
+    "start_uncertainty_ns": 6800640,
+    "end_request_ns": 273061455076884,
+    "end_reply_ns": 273061465367073,
+    "end_ns": 273061460221978,
+    "end_uncertainty_ns": 5145094
+   }
+  },
+  "extended_host": {
+   "value": 10.102595352,
+   "unit": "s",
+   "status": "ok",
+   "window": {
+    "clock_domain": "controller-monotonic",
+    "start_ns": 273051250790709,
+    "end_ns": 273061353386061,
+    "start_uncertainty_ns": 3948251.0,
+    "end_uncertainty_ns": 4331683.0
+   }
+  },
+  "cpu": {
+   "value": 10.02735389,
+   "unit": "s",
+   "status": "ok"
+  },
+  "requested": {
+   "value": 10,
+   "unit": "s",
+   "status": "ok"
+  }
+ },
+ "cpu": {
+  "unit_note": "percent of one core; 100 = one fully busy core",
+  "interval": {
+   "value": 10.02735389,
+   "unit": "s",
+   "status": "ok"
+  },
+  "window": {
+   "clock_domain": "controller-monotonic",
+   "start_ns": 273051315620621.0,
+   "end_ns": 273061342974511.0,
+   "start_uncertainty_ns": 956957.0,
+   "end_uncertainty_ns": 758286.0
+  },
+  "clk_tck": {
+   "value": 100,
+   "unit": "ticks/s",
+   "status": "ok"
+  },
+  "thread_accounting": {
+   "value": {
+    "threads_both": 175,
+    "threads_born": 0,
+    "threads_exited": 1,
+    "tid_reused": 0,
+    "negative_rejected": 0,
+    "clk_tck": 100,
+    "window_s": 10.02735389,
+    "window": {
+     "clock_domain": "controller-monotonic",
+     "start_ns": 273051315620621.0,
+     "end_ns": 273061342974511.0,
+     "start_uncertainty_ns": 956957.0,
+     "end_uncertainty_ns": 758286.0
+    },
+    "processes": {
+     "1745902": {
+      "total_pct": 37.797,
+      "attributed_pct": 37.797,
+      "unattributed_pct": 0.0
+     },
+     "1745925": {
+      "total_pct": 75.793,
+      "attributed_pct": 72.402,
+      "unattributed_pct": 3.391
+     },
+     "1746464": {
+      "total_pct": 0.499,
+      "attributed_pct": 0.499,
+      "unattributed_pct": 0.0
+     }
+    },
+    "process_totals": true
+   },
+   "unit": "threads",
+   "status": "ok"
+  },
+  "by_kind_pct_of_core": {
+   "value": {
+    "worker": 37.8,
+    "srt-receiver": 75.79,
+    "publisher": 0.5
+   },
+   "unit": "%core",
+   "status": "ok"
+  },
+  "sampled_total_pct_of_core": {
+   "value": 114.09,
+   "unit": "%core",
+   "status": "ok"
+  },
+  "sampled_total_pct_of_permitted": {
+   "value": 5.7,
+   "unit": "%of permitted CPUs",
+   "status": "ok",
+   "permitted_cpus": 20
+  },
+  "workers": {
+   "restream": {
+    "total": {
+     "value": 37.8,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "event_loop": {
+     "value": null,
+     "unit": "%core",
+     "status": "unavailable",
+     "reason": "event-loop thread not labelled (no gdb?)"
+    },
+    "srt_senders_individual": {
+     "value": null,
+     "unit": "%core",
+     "status": "unavailable",
+     "reason": "no srt-egress threads"
+    },
+    "srt_senders_combined": {
+     "value": 0,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "srt_senders_busy_ge_1pct": {
+     "value": 0,
+     "unit": "threads",
+     "status": "ok"
+    },
+    "libsrt_sndq": {
+     "value": null,
+     "unit": "%core",
+     "status": "unavailable",
+     "reason": "no SRT:SndQ threads"
+    },
+    "libsrt_rcvq": {
+     "value": null,
+     "unit": "%core",
+     "status": "unavailable",
+     "reason": "no SRT:RcvQ threads"
+    },
+    "libsrt_tsbpd": {
+     "value": null,
+     "unit": "%core",
+     "status": "unavailable",
+     "reason": "no SRT:TsbPd threads"
+    },
+    "hls_uploaders": {
+     "value": null,
+     "unit": "%core",
+     "status": "unavailable",
+     "reason": "no hls-push threads"
+    },
+    "other": {
+     "value": 37.8,
+     "unit": "%core",
+     "status": "ok"
+    }
+   }
+  },
+  "processes": {
+   "restream": {
+    "pid": 1745902,
+    "kind": "worker",
+    "total_pct_of_core": 37.8,
+    "roles": {
+     "restream": 0.1,
+     "restream-tokio": 0.5,
+     "sqlx-sqlite-wor": 0.0,
+     "tracing-appende": 0.0,
+     "restream-rtmp-c": 0.2,
+     "srt-in-16000": 0.0,
+     "restream-media": 0.0,
+     "egress-shard-0": 9.08,
+     "srt-dns-res": 0.0,
+     "egress-shard-1": 9.47,
+     "egress-shard-2": 9.27,
+     "egress-shard-3": 9.17
+    }
+   },
+   "srt-receiver": {
+    "pid": 1745925,
+    "kind": "srt-receiver",
+    "total_pct_of_core": 75.79,
+    "roles": {
+     "srt_fanout_sink": 11.17,
+     "SRT:GC": 0.0,
+     "SRT:SndQ": 0.0,
+     "SRT:RcvQ": 61.13,
+     "SRT:TsbPd": 0.1,
+     "(unattributed)": 3.39
+    }
+   },
+   "publisher:1746464": {
+    "pid": 1746464,
+    "kind": "publisher",
+    "total_pct_of_core": 0.5,
+    "roles": {
+     "ffmpeg": 0.0,
+     "mux0:flv": 0.2,
+     "dmx0:mpegts": 0.3
+    }
+   }
+  }
+ },
+ "cpu_environment": {
+  "online_cpus": {
+   "value": 20,
+   "unit": "cpus",
+   "status": "ok"
+  },
+  "permitted_cpus": {
+   "value": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19
+   ],
+   "unit": "cpu ids",
+   "status": "ok"
+  },
+  "loadavg": {
+   "value": "0.89 0.93 1.17 3/2116 1747074",
+   "unit": "text",
+   "status": "ok"
+  },
+  "cgroup_cpu_quota": {
+   "value": null,
+   "unit": "cpus",
+   "status": "ok",
+   "note": "unlimited (cpu.max=max)"
+  },
+  "cgroup_throttled_periods": {
+   "value": 0,
+   "unit": "periods",
+   "status": "ok"
+  },
+  "cgroup_throttled_time": {
+   "value": 0.0,
+   "unit": "s",
+   "status": "ok"
+  },
+  "cpu_frequency": {
+   "value": {
+    "cpu11": 1892309,
+    "cpu9": 5200000,
+    "cpu7": 5400000,
+    "cpu18": 2736588,
+    "cpu5": 5400000,
+    "cpu16": 2900861,
+    "cpu3": 5200000,
+    "cpu14": 2314855,
+    "cpu1": 5200000,
+    "cpu12": 2526674,
+    "cpu10": 2514652,
+    "cpu8": 3599963,
+    "cpu19": 2900440,
+    "cpu6": 3599963,
+    "cpu17": 2900557,
+    "cpu4": 2984808,
+    "cpu15": 2900416,
+    "cpu2": 1545387,
+    "cpu13": 1974523,
+    "cpu0": 3211416
+   },
+   "unit": "kHz",
+   "status": "ok"
+  },
+  "host_cpu_busy_fraction": {
+   "value": 0.0853,
+   "unit": "fraction of all online CPUs",
+   "status": "ok"
+  },
+  "host_cpu_steal_fraction": {
+   "value": 0.0,
+   "unit": "fraction",
+   "status": "ok"
+  },
+  "host_softirq_fraction": {
+   "value": 0.0099,
+   "unit": "fraction",
+   "status": "ok"
+  },
+  "thread_affinity": {
+   "value": {
+    "publisher/dmx0:mpegts": [
+     "12-13"
+    ],
+    "publisher/ffmpeg": [
+     "12-13"
+    ],
+    "publisher/mux0:flv": [
+     "12-13"
+    ],
+    "restream/egress-shard-0": [
+     "0,2,4,6"
+    ],
+    "restream/egress-shard-1": [
+     "0,2,4,6"
+    ],
+    "restream/egress-shard-2": [
+     "0,2,4,6"
+    ],
+    "restream/egress-shard-3": [
+     "0,2,4,6"
+    ],
+    "restream/restream": [
+     "0,2,4,6"
+    ],
+    "restream/restream-media": [
+     "0,2,4,6"
+    ],
+    "restream/restream-rtmp-c": [
+     "0,2,4,6"
+    ],
+    "restream/restream-tokio": [
+     "0,2,4,6"
+    ],
+    "restream/sqlx-sqlite-wor": [
+     "0,2,4,6"
+    ],
+    "restream/srt-dns-res": [
+     "0,2,4,6"
+    ],
+    "restream/srt-in-16000": [
+     "0,2,4,6"
+    ],
+    "restream/tracing-appende": [
+     "0,2,4,6"
+    ],
+    "srt-receiver/SRT:GC": [
+     "12-19"
+    ],
+    "srt-receiver/SRT:RcvQ": [
+     "12-19"
+    ],
+    "srt-receiver/SRT:SndQ": [
+     "12-19"
+    ],
+    "srt-receiver/SRT:TsbPd": [
+     "12-19"
+    ],
+    "srt-receiver/srt_fanout_sink": [
+     "12-19"
+    ]
+   },
+   "unit": "cpu list",
+   "status": "ok"
+  },
+  "threads_per_process": {
+   "value": {
+    "restream:1745902": 26,
+    "srt-receiver:1745925": 146,
+    "publisher:1746464": 3
+   },
+   "unit": "threads",
+   "status": "ok"
+  },
+  "nonvoluntary_ctxt_switches": {
+   "value": {
+    "restream:1745902": 13,
+    "srt-receiver:1745925": 27,
+    "publisher:1746464": 0
+   },
+   "unit": "switches",
+   "status": "ok"
+  },
+  "run_queue_pressure": {
+   "value": {
+    "some_stalled_pct": 1.1985,
+    "some_stalled_s": 0.121,
+    "full_stalled_pct": 0.0,
+    "procs_running_before": 1,
+    "procs_running_after": 3
+   },
+   "unit": "share of the window and queue depth",
+   "status": "ok"
+  },
+  "per_cpu_busy_pct": {
+   "value": {
+    "cpu0": 14.06,
+    "cpu1": 1.9,
+    "cpu2": 15.03,
+    "cpu3": 0.59,
+    "cpu4": 17.06,
+    "cpu5": 2.56,
+    "cpu6": 17.46,
+    "cpu7": 1.88,
+    "cpu8": 4.85,
+    "cpu9": 1.48,
+    "cpu10": 5.49,
+    "cpu11": 1.17,
+    "cpu12": 11.99,
+    "cpu13": 11.77,
+    "cpu14": 10.81,
+    "cpu15": 10.61,
+    "cpu16": 10.62,
+    "cpu17": 11.61,
+    "cpu18": 10.18,
+    "cpu19": 10.13
+   },
+   "unit": "% of one core over the window",
+   "status": "ok"
+  },
+  "sender_pinned_headroom": {
+   "value": {
+    "cpus": [
+     "cpu0",
+     "cpu2",
+     "cpu4",
+     "cpu6"
+    ],
+    "mean_busy_pct": 15.9,
+    "min_busy_pct": 14.06,
+    "max_busy_pct": 17.46,
+    "idle_cpus": 0,
+    "saturated_cpus": 0
+   },
+   "unit": "% of one core over the window",
+   "status": "ok",
+   "placement": "0,2,4,6"
+  },
+  "receiver_pinned_headroom": {
+   "value": {
+    "cpus": [
+     "cpu12",
+     "cpu13",
+     "cpu14",
+     "cpu15",
+     "cpu16",
+     "cpu17",
+     "cpu18",
+     "cpu19"
+    ],
+    "mean_busy_pct": 10.96,
+    "min_busy_pct": 10.13,
+    "max_busy_pct": 11.99,
+    "idle_cpus": 0,
+    "saturated_cpus": 0
+   },
+   "unit": "% of one core over the window",
+   "status": "ok",
+   "placement": "12,13,14,15,16,17,18,19"
+  }
+ },
+ "network": {
+  "udp_in_datagrams": {
+   "value": 1462537,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_out_datagrams": {
+   "value": 1439342,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_rcvbuf_errors": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_sndbuf_errors": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_in_errors": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "tcp_retrans_segs": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "ListenDrops": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "TCPBacklogDrop": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "softnet_dropped": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_socket_drops_by_process": {
+   "value": {
+    "restream:1745902": {
+     "kind": "worker",
+     "udp_sockets": 5,
+     "socket_drops_delta": 0,
+     "rx_queue_bytes": 0
+    },
+    "srt-receiver:1745925": {
+     "kind": "srt-receiver",
+     "udp_sockets": 8,
+     "socket_drops_delta": 0,
+     "rx_queue_bytes": 0
+    }
+   },
+   "unit": "datagrams",
+   "status": "ok",
+   "note": "/proc/net/udp drops column; sockets counted only if alive at both ends"
+  }
+ },
+ "event_loop_max_delay": {
+  "value": {
+   "restream": null
+  },
+  "unit": "ms",
+  "status": "ok"
+ },
+ "srt": {
+  "status": "unavailable",
+  "reason": "no SRT destinations"
+ },
+ "rtmp": {
+  "status": "unavailable",
+  "reason": "no RTMP scheduler metrics"
+ },
+ "hls_push": {
+  "status": "unavailable",
+  "reason": "no HLS push destinations"
+ },
+ "delivery": {
+  "srt": {
+   "value": {
+    "quality_measurement_valid": "yes",
+    "quality_pass": "yes",
+    "quality_reference_payload_bps": 9207404.45,
+    "quality_reference_payload_mbps": 9.2074,
+    "quality_prepared_source_payload_bps": 9001038.93,
+    "quality_reference_vs_prepared_ratio": 1.02293,
+    "quality_measurement_s": 10.04,
+    "quality_window_start_ns": 273051345870127,
+    "quality_window_end_ns": 273061385716359,
+    "quality_clock_domain": "controller-monotonic",
+    "quality_start_uncertainty_ns": 0,
+    "quality_end_uncertainty_ns": 0,
+    "quality_offered_payload_bps": 9001038.93,
+    "quality_offered_rate_provenance": "prepared MPEG-TS bytes / source preparation duration",
+    "quality_total_receiver_bytes": 1487535712,
+    "quality_average_delivery_ratio_min": 1.00535,
+    "quality_interval_delivery_ratio_min": 0.9129,
+    "quality_destination_fairness_jain": "1.00000 (supplementary)",
+    "quality_sender_feed_drops": 0,
+    "quality_strict_full_rate": "yes",
+    "quality_strict_ratio_min": 1.00535,
+    "quality_strict_ratio_tolerance": 0.999,
+    "quality_strict_interval_floor": 0.9,
+    "quality_strict_interval_min": 0.9129,
+    "quality_strict_ts_errors": 0,
+    "quality_sender_output_drops": 0,
+    "quality_stream_feed_overruns": 0,
+    "quality_stream_feed_retention_evictions": 0,
+    "quality_peak_feed_queue_utilization": 0,
+    "quality_peak_output_queue_utilization": 0,
+    "quality_complete_queue_samples": 0,
+    "failures_sample": [],
+    "failures_total": 0
+   },
+   "unit": "mixed",
+   "status": "ok"
+  },
+  "srt_short_interval_ratio": {
+   "value": {
+    "min": 0.93851,
+    "p01": 0.93851,
+    "p50": 1.012527,
+    "samples": 1152
+   },
+   "unit": "ratio of reference",
+   "status": "ok"
+  }
+ },
+ "resources": {
+  "worker_memory": {
+   "value": {
+    "1745902": {
+     "before": {
+      "rss_kb": 87832,
+      "pss_kb": 83493
+     },
+     "after": {
+      "rss_kb": 105104,
+      "pss_kb": 100585
+     }
+    }
+   },
+   "unit": "kB",
+   "status": "ok"
+  },
+  "sockstat": {
+   "value": {
+    "before": "sockets: used 1056\nTCP: inuse 17 orphan 0 tw 457 alloc 41 mem 1697\nUDP: inuse 27 mem 950\nRAW: inuse 0\nFRAG: inuse 0 memory 0",
+    "after": "sockets: used 1059\nTCP: inuse 15 orphan 0 tw 433 alloc 40 mem 1365\nUDP: inuse 27 mem 1576\nRAW: inuse 0\nFRAG: inuse 0 memory 0"
+   },
+   "unit": "text",
+   "status": "ok"
+  },
+  "cpu_sampling_overhead": {
+   "value": {
+    "before": 22.352175,
+    "after": 15.382047
+   },
+   "unit": "ms of sampler CPU per snapshot",
+   "status": "ok"
+  },
+  "extended_snapshot_capture": {
+   "value": 8.663366,
+   "unit": "ms",
+   "status": "ok"
+  }
+ },
+ "preflight": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no preflight for this rung"
+ },
+ "host_fingerprint": {
+  "role": "sender",
+  "hostname": "PARAM",
+  "architecture": "x86_64",
+  "boot_id": "020146be-a151-4fc8-869f-b8ad0783ac8a",
+  "binary": "/home/krsna1729/Projects/restream/target/release/restream",
+  "kernel": "7.2.5-3-omarchy",
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900H",
+  "nproc_online": 20,
+  "permitted_cpus": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15,
+   16,
+   17,
+   18,
+   19
+  ],
+  "cgroup": {
+   "cpu_max": "max 100000",
+   "cpu_stat": {
+    "usage_usec": 452724216489,
+    "user_usec": 392387765665,
+    "system_usec": 60336450824,
+    "nice_usec": 3355498,
+    "core_sched.force_idle_usec": 0,
+    "nr_periods": 0,
+    "nr_throttled": 0,
+    "throttled_usec": 0,
+    "nr_bursts": 0,
+    "burst_usec": 0
+   }
+  },
+  "cpu_freq_khz": {
+   "cpu11": 5200000,
+   "cpu9": 5200000,
+   "cpu7": 5400000,
+   "cpu18": 4100000,
+   "cpu5": 5383833,
+   "cpu16": 2316831,
+   "cpu3": 5200000,
+   "cpu14": 4100000,
+   "cpu1": 1942339,
+   "cpu12": 3321034,
+   "cpu10": 5200000,
+   "cpu8": 2004597,
+   "cpu19": 4100000,
+   "cpu6": 3401508,
+   "cpu17": 4100000,
+   "cpu4": 1977836,
+   "cpu15": 3520261,
+   "cpu2": 1433899,
+   "cpu13": 2597313,
+   "cpu0": 1130010
+  },
+  "governor": "performance",
+  "no_turbo": "0",
+  "energy_preference": "performance",
+  "numa": {
+   "node0": "0-19"
+  },
+  "loadavg": "0.89 0.93 1.17 3/1951 1747265",
+  "host_busy_fraction": 0.0219,
+  "memory": {
+   "MemTotal": "15982540 kB",
+   "MemFree": "6313024 kB",
+   "MemAvailable": "7257460 kB"
+  },
+  "interfaces": {
+   "docker0": {
+    "operstate": "down",
+    "mtu": "1500",
+    "speed_mbps": "-1",
+    "driver": null,
+    "virtual": true
+   },
+   "lo": {
+    "operstate": "unknown",
+    "mtu": "65536",
+    "speed_mbps": null,
+    "driver": null,
+    "virtual": true
+   },
+   "tailscale0": {
+    "operstate": "unknown",
+    "mtu": "1280",
+    "speed_mbps": "-1",
+    "driver": null,
+    "virtual": true
+   },
+   "wlo1": {
+    "operstate": "up",
+    "mtu": "1500",
+    "speed_mbps": null,
+    "driver": "iwlwifi",
+    "virtual": false
+   }
+  },
+  "kernel_udp_limits": {
+   "net.core.rmem_max": "67108864",
+   "net.core.wmem_max": "67108864",
+   "net.core.rmem_default": "212992",
+   "net.core.wmem_default": "212992",
+   "net.core.netdev_max_backlog": "1000",
+   "net.ipv4.udp_mem": "371172\t494899\t742344",
+   "net.core.somaxconn": "4096"
+  },
+  "softnet": {
+   "cpu0": {
+    "processed": 123414994,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu1": {
+    "processed": 24549930,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu2": {
+    "processed": 58964499,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu3": {
+    "processed": 23816899,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu4": {
+    "processed": 70015394,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu5": {
+    "processed": 26472203,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu6": {
+    "processed": 76012515,
+    "dropped": 0,
+    "time_squeeze": 12
+   },
+   "cpu7": {
+    "processed": 26763288,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu8": {
+    "processed": 29148483,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu9": {
+    "processed": 24237872,
+    "dropped": 0,
+    "time_squeeze": 7
+   },
+   "cpu10": {
+    "processed": 25038776,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu11": {
+    "processed": 26897261,
+    "dropped": 0,
+    "time_squeeze": 6
+   },
+   "cpu12": {
+    "processed": 29977015,
+    "dropped": 0,
+    "time_squeeze": 45
+   },
+   "cpu13": {
+    "processed": 21320131,
+    "dropped": 0,
+    "time_squeeze": 6
+   },
+   "cpu14": {
+    "processed": 22746511,
+    "dropped": 0,
+    "time_squeeze": 16
+   },
+   "cpu15": {
+    "processed": 15291476,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu16": {
+    "processed": 14942613,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu17": {
+    "processed": 15576929,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu18": {
+    "processed": 14773227,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu19": {
+    "processed": 14819669,
+    "dropped": 0,
+    "time_squeeze": 1
+   }
+  },
+  "transport": null,
+  "build": {
+   "sha256": "e542ce688940d9455ce21b0f30a111076601b5849c68f683b90cbc107b15317c"
+  },
+  "transport_provenance": {
+   "source_commit": null,
+   "source_commit_status": "unknown-no-resolved-srt-library",
+   "library_version": null,
+   "linkage": "unknown"
+  }
+ },
+ "receiver_host_fingerprint": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no native receiver host fingerprint"
+ },
+ "receiver_nginx_fingerprint": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no native receiver nginx fingerprint"
+ },
+ "counter_windows": {
+  "stream": {
+   "clock_domain": "controller-monotonic",
+   "provenance": "controller stream-counter collection brackets",
+   "start_request_ns": 273051049553309,
+   "start_reply_ns": 273051063154589,
+   "start_ns": 273051056353949,
+   "start_uncertainty_ns": 6800640,
+   "end_request_ns": 273061455076884,
+   "end_reply_ns": 273061465367073,
+   "end_ns": 273061460221978,
+   "end_uncertainty_ns": 5145094
+  },
+  "workers": {
+   "clock_domain": "controller-monotonic",
+   "provenance": "controller worker-metric collection brackets",
+   "start_request_ns": 273051156985308,
+   "start_reply_ns": 273051170296702,
+   "start_ns": 273051163641005,
+   "start_uncertainty_ns": 6655697,
+   "end_request_ns": 273061499499146,
+   "end_reply_ns": 273061513436447,
+   "end_ns": 273061506467796,
+   "end_uncertainty_ns": 6968650
+  }
+ },
+ "receiver_windows": {
+  "srt": {
+   "clock_domain": "controller-monotonic",
+   "start_request_ns": 273051323484697,
+   "start_reply_ns": 273051357237832,
+   "native_start_ns": 273051345870127,
+   "start_ns": 273051345870127,
+   "start_uncertainty_ns": 0,
+   "end_request_ns": 273061352931104,
+   "end_reply_ns": 273061395299135,
+   "native_end_ns": 273061385716359,
+   "end_ns": 273061385716359,
+   "end_uncertainty_ns": 0
+  }
+ },
+ "efficiency": {
+  "delivered": {
+   "value": 1.1853,
+   "unit": "Gbit/s",
+   "status": "ok",
+   "sources": [
+    "srt receiver-counted bytes over receiver window"
+   ]
+  },
+  "window_alignment": {
+   "srt": {
+    "status": "ok",
+    "value": {
+     "cpu": {
+      "clock_domain": "controller-monotonic",
+      "start_ns": 273051315620621.0,
+      "end_ns": 273061342974511.0,
+      "start_uncertainty_ns": 956957.0,
+      "end_uncertainty_ns": 758286.0
+     },
+     "receiver": {
+      "clock_domain": "controller-monotonic",
+      "start_request_ns": 273051323484697,
+      "start_reply_ns": 273051357237832,
+      "native_start_ns": 273051345870127,
+      "start_ns": 273051345870127,
+      "start_uncertainty_ns": 0,
+      "end_request_ns": 273061352931104,
+      "end_reply_ns": 273061395299135,
+      "native_end_ns": 273061385716359,
+      "end_ns": 273061385716359,
+      "end_uncertainty_ns": 0
+     },
+     "coverage": 0.9969833012445919,
+     "max_boundary_skew_s": 0.043500134,
+     "duration_error_s": 0.012492341999999823,
+     "bound_fraction": 0.02
+    },
+    "unit": "mixed"
+   }
+  },
+  "sender_cpu_per_gbps": {
+   "value": 31.89,
+   "unit": "%core per Gbit/s",
+   "status": "ok"
+  },
+  "receiver_cpu_per_gbps": {
+   "value": 63.94,
+   "unit": "%core per Gbit/s",
+   "status": "ok"
+  }
+ },
+ "saturation_notes": [
+  "host CPU busy 8.5% of all online CPUs",
+  "sender 38% vs receivers 76% of one core"
+ ]
+}

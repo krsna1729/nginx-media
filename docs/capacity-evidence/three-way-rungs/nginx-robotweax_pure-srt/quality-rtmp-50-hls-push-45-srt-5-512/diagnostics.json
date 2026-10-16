@@ -1,0 +1,2311 @@
+{
+ "schema": "nginx-media.capacity-diagnostics/2",
+ "case": {
+  "outcome": "pass",
+  "mix": "rtmp-50-hls-push-45-srt-5",
+  "sink_mode": "correctness",
+  "srt_senders": "adaptive",
+  "hls_push_uploaders": "adaptive",
+  "srt_backend": "robotweax-srt",
+  "nginx_cpus": "0,2,4,6",
+  "receiver_cpus": "12,13,14,15,16,17,18,19",
+  "receiver_topology": "loopback",
+  "receiver_address": "127.0.0.1",
+  "destinations": 512,
+  "programs": 1,
+  "rate": "8M",
+  "protocol": "rtmp-hls-push",
+  "srt": 26,
+  "rtmp": 256,
+  "hls_readers": 0,
+  "hls_push": 230,
+  "hls": "yes",
+  "workers": 1,
+  "measurement_s": 10.903728,
+  "measurement_provenance": "controller-stream-counter-collection-brackets",
+  "requested_s": 10
+ },
+ "outcome": "pass",
+ "intervals": {
+  "stream_counter_measurement": {
+   "value": 10.903728,
+   "unit": "s",
+   "status": "ok",
+   "provenance": "controller-stream-counter-collection-brackets",
+   "window": {
+    "clock_domain": "controller-monotonic",
+    "provenance": "controller stream-counter collection brackets",
+    "start_request_ns": 267197080307187,
+    "start_reply_ns": 267197196371006,
+    "start_ns": 267197138339096,
+    "start_uncertainty_ns": 58031909,
+    "end_request_ns": 267207991281373,
+    "end_reply_ns": 267208092852415,
+    "end_ns": 267208042066894,
+    "end_uncertainty_ns": 50785521
+   }
+  },
+  "extended_host": {
+   "value": 10.144396863,
+   "unit": "s",
+   "status": "ok",
+   "window": {
+    "clock_domain": "controller-monotonic",
+    "start_ns": 267197695547470,
+    "end_ns": 267207839944333,
+    "start_uncertainty_ns": 9764643.0,
+    "end_uncertainty_ns": 34167103.5
+   }
+  },
+  "cpu": {
+   "value": 10.021467204,
+   "unit": "s",
+   "status": "ok"
+  },
+  "requested": {
+   "value": 10,
+   "unit": "s",
+   "status": "ok"
+  }
+ },
+ "cpu": {
+  "unit_note": "percent of one core; 100 = one fully busy core",
+  "interval": {
+   "value": 10.021467204,
+   "unit": "s",
+   "status": "ok"
+  },
+  "window": {
+   "clock_domain": "controller-monotonic",
+   "start_ns": 267197761284373.0,
+   "end_ns": 267207782751577.0,
+   "start_uncertainty_ns": 1062899.0,
+   "end_uncertainty_ns": 1525709.0
+  },
+  "clk_tck": {
+   "value": 100,
+   "unit": "ticks/s",
+   "status": "ok"
+  },
+  "thread_accounting": {
+   "value": {
+    "threads_both": 194,
+    "threads_born": 0,
+    "threads_exited": 0,
+    "tid_reused": 0,
+    "negative_rejected": 0,
+    "clk_tck": 100,
+    "window_s": 10.021467204,
+    "window": {
+     "clock_domain": "controller-monotonic",
+     "start_ns": 267197761284373.0,
+     "end_ns": 267207782751577.0,
+     "start_uncertainty_ns": 1062899.0,
+     "end_uncertainty_ns": 1525709.0
+    },
+    "processes": {
+     "1288744": {
+      "total_pct": 20.257,
+      "attributed_pct": 20.456,
+      "unattributed_pct": -0.2
+     },
+     "1289137": {
+      "total_pct": 14.17,
+      "attributed_pct": 12.174,
+      "unattributed_pct": 1.996
+     },
+     "1289139": {
+      "total_pct": 13.77,
+      "attributed_pct": 1.996,
+      "unattributed_pct": 11.775
+     },
+     "1288886": {
+      "total_pct": 5.688,
+      "attributed_pct": 5.089,
+      "unattributed_pct": 0.599
+     },
+     "1288917": {
+      "total_pct": 5.887,
+      "attributed_pct": 5.089,
+      "unattributed_pct": 0.798
+     },
+     "1288948": {
+      "total_pct": 5.488,
+      "attributed_pct": 4.79,
+      "unattributed_pct": 0.699
+     },
+     "1288979": {
+      "total_pct": 5.788,
+      "attributed_pct": 5.388,
+      "unattributed_pct": 0.399
+     },
+     "1289010": {
+      "total_pct": 6.187,
+      "attributed_pct": 5.987,
+      "unattributed_pct": 0.2
+     },
+     "1289041": {
+      "total_pct": 5.588,
+      "attributed_pct": 5.089,
+      "unattributed_pct": 0.499
+     },
+     "1293169": {
+      "total_pct": 1.896,
+      "attributed_pct": 1.696,
+      "unattributed_pct": 0.2
+     }
+    },
+    "process_totals": true
+   },
+   "unit": "threads",
+   "status": "ok"
+  },
+  "by_kind_pct_of_core": {
+   "value": {
+    "worker": 20.46,
+    "srt-receiver": 14.17,
+    "hls-push-receiver": 13.77,
+    "rtmp-receiver": 34.63,
+    "publisher": 1.9
+   },
+   "unit": "%core",
+   "status": "ok"
+  },
+  "sampled_total_pct_of_core": {
+   "value": 84.92,
+   "unit": "%core",
+   "status": "ok"
+  },
+  "sampled_total_pct_of_permitted": {
+   "value": 4.25,
+   "unit": "%of permitted CPUs",
+   "status": "ok",
+   "permitted_cpus": 20
+  },
+  "workers": {
+   "w0": {
+    "total": {
+     "value": 20.46,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "event_loop": {
+     "value": 6.79,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "srt_senders_individual": {
+     "value": {
+      "srt-egress-00": 0.8,
+      "srt-egress-01": 0.7,
+      "srt-egress-02": 0.6,
+      "srt-egress-03": 0.6,
+      "srt-egress-04": 0.1,
+      "srt-egress-05": 0.1,
+      "srt-egress-06": 0.1,
+      "srt-egress-07": 0.0,
+      "srt-egress-08": 0.1,
+      "srt-egress-09": 0.1,
+      "srt-egress-10": 0.1,
+      "srt-egress-11": 0.1,
+      "srt-egress-12": 0.1,
+      "srt-egress-13": 0.1,
+      "srt-egress-14": 0.1,
+      "srt-egress-15": 0.1
+     },
+     "unit": "%core",
+     "status": "ok"
+    },
+    "srt_senders_combined": {
+     "value": 3.79,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "srt_senders_busy_ge_1pct": {
+     "value": 0,
+     "unit": "threads",
+     "status": "ok"
+    },
+    "libsrt_sndq": {
+     "value": null,
+     "unit": "%core",
+     "status": "unavailable",
+     "reason": "no SRT:SndQ threads"
+    },
+    "libsrt_rcvq": {
+     "value": null,
+     "unit": "%core",
+     "status": "unavailable",
+     "reason": "no SRT:RcvQ threads"
+    },
+    "libsrt_tsbpd": {
+     "value": null,
+     "unit": "%core",
+     "status": "unavailable",
+     "reason": "no SRT:TsbPd threads"
+    },
+    "hls_uploaders": {
+     "value": 1.9,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "other": {
+     "value": 7.98,
+     "unit": "%core",
+     "status": "ok"
+    }
+   }
+  },
+  "processes": {
+   "w0": {
+    "pid": 1288744,
+    "kind": "worker",
+    "total_pct_of_core": 20.46,
+    "roles": {
+     "worker": 6.79,
+     "hls-push": 1.9,
+     "srt-egress-00": 0.8,
+     "srt-egress-01": 0.7,
+     "srt-egress-02": 0.6,
+     "srt-egress-03": 0.6,
+     "srt-egress-04": 0.1,
+     "srt-egress-05": 0.1,
+     "srt-egress-06": 0.1,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.1,
+     "srt-egress-09": 0.1,
+     "srt-egress-10": 0.1,
+     "srt-egress-11": 0.1,
+     "srt-egress-12": 0.1,
+     "srt-egress-13": 0.1,
+     "srt-egress-14": 0.1,
+     "srt-egress-15": 0.1,
+     "ingest": 0.6,
+     "unlabelled": 7.38
+    }
+   },
+   "srt-receiver": {
+    "pid": 1289137,
+    "kind": "srt-receiver",
+    "total_pct_of_core": 14.17,
+    "roles": {
+     "srt_fanout_sink": 3.29,
+     "SRT:GC": 0.0,
+     "SRT:SndQ": 0.0,
+     "SRT:RcvQ": 8.88,
+     "SRT:TsbPd": 0.0,
+     "(unattributed)": 2.0
+    }
+   },
+   "hls-push-receiver": {
+    "pid": 1289139,
+    "kind": "hls-push-receiver",
+    "total_pct_of_core": 13.77,
+    "roles": {
+     "python3": 2.0,
+     "(unattributed)": 11.77
+    }
+   },
+   "wrtmp-sink-0": {
+    "pid": 1288886,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 5.69,
+    "roles": {
+     "worker": 4.49,
+     "nginx-thread": 0.0,
+     "srt-egress-00": 0.0,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.1,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.1,
+     "srt-egress-05": 0.1,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.0,
+     "srt-egress-10": 0.1,
+     "srt-egress-11": 0.0,
+     "srt-egress-12": 0.0,
+     "srt-egress-13": 0.1,
+     "srt-egress-14": 0.1,
+     "srt-egress-15": 0.0,
+     "(unattributed)": 0.6
+    }
+   },
+   "wrtmp-sink-1": {
+    "pid": 1288917,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 5.89,
+    "roles": {
+     "worker": 4.39,
+     "nginx-thread": 0.0,
+     "srt-egress-00": 0.2,
+     "srt-egress-01": 0.1,
+     "srt-egress-02": 0.0,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.1,
+     "srt-egress-05": 0.0,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.1,
+     "srt-egress-10": 0.0,
+     "srt-egress-11": 0.0,
+     "srt-egress-12": 0.1,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.1,
+     "(unattributed)": 0.8
+    }
+   },
+   "wrtmp-sink-2": {
+    "pid": 1288948,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 5.49,
+    "roles": {
+     "worker": 4.39,
+     "nginx-thread": 0.0,
+     "srt-egress-00": 0.1,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.0,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.0,
+     "srt-egress-05": 0.0,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.1,
+     "srt-egress-10": 0.1,
+     "srt-egress-11": 0.1,
+     "srt-egress-12": 0.0,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.0,
+     "(unattributed)": 0.7
+    }
+   },
+   "wrtmp-sink-3": {
+    "pid": 1288979,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 5.79,
+    "roles": {
+     "worker": 4.39,
+     "nginx-thread": 0.0,
+     "srt-egress-00": 0.1,
+     "srt-egress-01": 0.1,
+     "srt-egress-02": 0.1,
+     "srt-egress-03": 0.1,
+     "srt-egress-04": 0.1,
+     "srt-egress-05": 0.0,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.1,
+     "srt-egress-08": 0.1,
+     "srt-egress-09": 0.0,
+     "srt-egress-10": 0.1,
+     "srt-egress-11": 0.0,
+     "srt-egress-12": 0.0,
+     "srt-egress-13": 0.1,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.1,
+     "(unattributed)": 0.4
+    }
+   },
+   "wrtmp-sink-4": {
+    "pid": 1289010,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 6.19,
+    "roles": {
+     "worker": 4.29,
+     "nginx-thread": 0.0,
+     "srt-egress-00": 0.1,
+     "srt-egress-01": 0.2,
+     "srt-egress-02": 0.1,
+     "srt-egress-03": 0.1,
+     "srt-egress-04": 0.1,
+     "srt-egress-05": 0.2,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.1,
+     "srt-egress-08": 0.1,
+     "srt-egress-09": 0.1,
+     "srt-egress-10": 0.1,
+     "srt-egress-11": 0.1,
+     "srt-egress-12": 0.1,
+     "srt-egress-13": 0.1,
+     "srt-egress-14": 0.1,
+     "srt-egress-15": 0.1,
+     "(unattributed)": 0.2
+    }
+   },
+   "wrtmp-sink-5": {
+    "pid": 1289041,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 5.59,
+    "roles": {
+     "worker": 4.29,
+     "nginx-thread": 0.1,
+     "srt-egress-00": 0.0,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.1,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.1,
+     "srt-egress-05": 0.0,
+     "srt-egress-06": 0.1,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.0,
+     "srt-egress-10": 0.1,
+     "srt-egress-11": 0.0,
+     "srt-egress-12": 0.1,
+     "srt-egress-13": 0.1,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.1,
+     "(unattributed)": 0.5
+    }
+   },
+   "publisher:1293169": {
+    "pid": 1293169,
+    "kind": "publisher",
+    "total_pct_of_core": 1.9,
+    "roles": {
+     "ffmpeg": 0.0,
+     "SRT:GC": 0.0,
+     "SRT:SndQ": 0.4,
+     "SRT:RcvQ": 0.8,
+     "mux0:mpegts": 0.2,
+     "dmx0:mpegts": 0.3,
+     "(unattributed)": 0.2
+    }
+   }
+  }
+ },
+ "cpu_environment": {
+  "online_cpus": {
+   "value": 20,
+   "unit": "cpus",
+   "status": "ok"
+  },
+  "permitted_cpus": {
+   "value": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19
+   ],
+   "unit": "cpu ids",
+   "status": "ok"
+  },
+  "loadavg": {
+   "value": "1.03 1.01 1.20 12/2092 1296855",
+   "unit": "text",
+   "status": "ok"
+  },
+  "cgroup_cpu_quota": {
+   "value": null,
+   "unit": "cpus",
+   "status": "ok",
+   "note": "unlimited (cpu.max=max)"
+  },
+  "cgroup_throttled_periods": {
+   "value": 0,
+   "unit": "periods",
+   "status": "ok"
+  },
+  "cgroup_throttled_time": {
+   "value": 0.0,
+   "unit": "s",
+   "status": "ok"
+  },
+  "cpu_frequency": {
+   "value": {
+    "cpu11": 1200834,
+    "cpu9": 1000513,
+    "cpu7": 1200466,
+    "cpu18": 1099974,
+    "cpu5": 1200012,
+    "cpu16": 1099935,
+    "cpu3": 1199987,
+    "cpu14": 1100002,
+    "cpu1": 1199975,
+    "cpu12": 1099951,
+    "cpu10": 1200000,
+    "cpu8": 1200012,
+    "cpu19": 1099994,
+    "cpu6": 1200012,
+    "cpu17": 1100020,
+    "cpu4": 1200000,
+    "cpu15": 1099975,
+    "cpu2": 1200093,
+    "cpu13": 1099941,
+    "cpu0": 1200000
+   },
+   "unit": "kHz",
+   "status": "ok"
+  },
+  "host_cpu_busy_fraction": {
+   "value": 0.091,
+   "unit": "fraction of all online CPUs",
+   "status": "ok"
+  },
+  "host_cpu_steal_fraction": {
+   "value": 0.0,
+   "unit": "fraction",
+   "status": "ok"
+  },
+  "host_softirq_fraction": {
+   "value": 0.0077,
+   "unit": "fraction",
+   "status": "ok"
+  },
+  "thread_affinity": {
+   "value": {
+    "hls-push-receiver/python3": [
+     "12-19"
+    ],
+    "publisher/SRT:GC": [
+     "12-13"
+    ],
+    "publisher/SRT:RcvQ": [
+     "12-13"
+    ],
+    "publisher/SRT:SndQ": [
+     "12-13"
+    ],
+    "publisher/dmx0:mpegts": [
+     "12-13"
+    ],
+    "publisher/ffmpeg": [
+     "12-13"
+    ],
+    "publisher/mux0:mpegts": [
+     "12-13"
+    ],
+    "srt-receiver/SRT:GC": [
+     "12-19"
+    ],
+    "srt-receiver/SRT:RcvQ": [
+     "12-19"
+    ],
+    "srt-receiver/SRT:SndQ": [
+     "12-19"
+    ],
+    "srt-receiver/SRT:TsbPd": [
+     "12-19"
+    ],
+    "srt-receiver/srt_fanout_sink": [
+     "12-19"
+    ],
+    "w0/hls-push": [
+     "0,2,4,6"
+    ],
+    "w0/ingest": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-00": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-01": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-02": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-03": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-04": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-05": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-06": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-07": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-08": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-09": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-10": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-11": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-12": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-13": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-14": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-15": [
+     "0,2,4,6"
+    ],
+    "w0/unlabelled": [
+     "0,2,4,6"
+    ],
+    "w0/worker": [
+     "0,2,4,6"
+    ],
+    "wrtmp-sink-0/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/worker": [
+     "12-19"
+    ]
+   },
+   "unit": "cpu list",
+   "status": "ok"
+  },
+  "threads_per_process": {
+   "value": {
+    "w0:1288744": 29,
+    "srt-receiver:1289137": 32,
+    "hls-push-receiver:1289139": 2,
+    "wrtmp-sink-0:1288886": 21,
+    "wrtmp-sink-1:1288917": 21,
+    "wrtmp-sink-2:1288948": 21,
+    "wrtmp-sink-3:1288979": 21,
+    "wrtmp-sink-4:1289010": 21,
+    "wrtmp-sink-5:1289041": 21,
+    "publisher:1293169": 6
+   },
+   "unit": "threads",
+   "status": "ok"
+  },
+  "nonvoluntary_ctxt_switches": {
+   "value": {
+    "w0:1288744": 295,
+    "srt-receiver:1289137": 553,
+    "hls-push-receiver:1289139": 9,
+    "wrtmp-sink-0:1288886": 151,
+    "wrtmp-sink-1:1288917": 154,
+    "wrtmp-sink-2:1288948": 161,
+    "wrtmp-sink-3:1288979": 163,
+    "wrtmp-sink-4:1289010": 158,
+    "wrtmp-sink-5:1289041": 140,
+    "publisher:1293169": 0
+   },
+   "unit": "switches",
+   "status": "ok"
+  },
+  "run_queue_pressure": {
+   "value": {
+    "some_stalled_pct": 1.8017,
+    "some_stalled_s": 0.183,
+    "full_stalled_pct": 0.0,
+    "procs_running_before": 3,
+    "procs_running_after": 12
+   },
+   "unit": "share of the window and queue depth",
+   "status": "ok"
+  },
+  "per_cpu_busy_pct": {
+   "value": {
+    "cpu0": 10.54,
+    "cpu1": 4.07,
+    "cpu2": 9.4,
+    "cpu3": 3.26,
+    "cpu4": 14.4,
+    "cpu5": 4.91,
+    "cpu6": 15.98,
+    "cpu7": 5.01,
+    "cpu8": 7.14,
+    "cpu9": 2.24,
+    "cpu10": 5.84,
+    "cpu11": 3.71,
+    "cpu12": 13.48,
+    "cpu13": 12.71,
+    "cpu14": 11.37,
+    "cpu15": 10.98,
+    "cpu16": 12.07,
+    "cpu17": 11.58,
+    "cpu18": 11.77,
+    "cpu19": 11.88
+   },
+   "unit": "% of one core over the window",
+   "status": "ok"
+  },
+  "sender_pinned_headroom": {
+   "value": {
+    "cpus": [
+     "cpu0",
+     "cpu2",
+     "cpu4",
+     "cpu6"
+    ],
+    "mean_busy_pct": 12.58,
+    "min_busy_pct": 9.4,
+    "max_busy_pct": 15.98,
+    "idle_cpus": 1,
+    "saturated_cpus": 0
+   },
+   "unit": "% of one core over the window",
+   "status": "ok",
+   "placement": "0,2,4,6"
+  },
+  "receiver_pinned_headroom": {
+   "value": {
+    "cpus": [
+     "cpu12",
+     "cpu13",
+     "cpu14",
+     "cpu15",
+     "cpu16",
+     "cpu17",
+     "cpu18",
+     "cpu19"
+    ],
+    "mean_busy_pct": 11.98,
+    "min_busy_pct": 10.98,
+    "max_busy_pct": 13.48,
+    "idle_cpus": 0,
+    "saturated_cpus": 0
+   },
+   "unit": "% of one core over the window",
+   "status": "ok",
+   "placement": "12,13,14,15,16,17,18,19"
+  }
+ },
+ "network": {
+  "udp_in_datagrams": {
+   "value": 256203,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_out_datagrams": {
+   "value": 255641,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_rcvbuf_errors": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_sndbuf_errors": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_in_errors": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "tcp_retrans_segs": {
+   "value": 1,
+   "unit": "count",
+   "status": "ok"
+  },
+  "ListenDrops": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "TCPBacklogDrop": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "softnet_dropped": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_socket_drops_by_process": {
+   "value": {
+    "w0:1288744": {
+     "kind": "worker",
+     "udp_sockets": 6,
+     "socket_drops_delta": 0,
+     "rx_queue_bytes": 0
+    },
+    "publisher:1293169": {
+     "kind": "publisher",
+     "udp_sockets": 1,
+     "socket_drops_delta": 0,
+     "rx_queue_bytes": 0
+    },
+    "srt-receiver:1289137": {
+     "kind": "srt-receiver",
+     "udp_sockets": 2,
+     "socket_drops_delta": 0,
+     "rx_queue_bytes": 0
+    }
+   },
+   "unit": "datagrams",
+   "status": "ok",
+   "note": "/proc/net/udp drops column; sockets counted only if alive at both ends"
+  }
+ },
+ "event_loop_max_delay": {
+  "value": {
+   "w0": 105.0
+  },
+  "unit": "ms",
+  "status": "ok"
+ },
+ "srt": {
+  "sent_bytes": {
+   "value": 317138328,
+   "unit": "count",
+   "status": "ok"
+  },
+  "blocked_sends": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "retransmitted_packets": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "feed_drops": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "destination_drops": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "transport_errors": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "active_senders_end": {
+   "value": 4.0,
+   "unit": "threads",
+   "status": "ok"
+  },
+  "enqueue_to_send_lag_end": {
+   "value": {
+    "max": 1.0,
+    "median": 0.0
+   },
+   "unit": "ms",
+   "status": "ok"
+  },
+  "queue_timeline": {
+   "value": [
+    {
+     "t_s": 0.0,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 1.063,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 2.101,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 3.15,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 4.237,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 5.318,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 6.386,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 7.448,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 8.518,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 9.573,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    }
+   ],
+   "unit": "units",
+   "status": "ok"
+  },
+  "per_lane_service_rate": {
+   "value": {
+    "w0:s0": 18374420,
+    "w0:s1": 18374420,
+    "w0:s10": 9187210,
+    "w0:s11": 9187210,
+    "w0:s12": 9187210,
+    "w0:s13": 9187210,
+    "w0:s14": 9187210,
+    "w0:s15": 9187210,
+    "w0:s2": 18374420,
+    "w0:s3": 18374420,
+    "w0:s4": 18374420,
+    "w0:s5": 18374420,
+    "w0:s6": 18374420,
+    "w0:s7": 18374420,
+    "w0:s8": 18374420,
+    "w0:s9": 18374420
+   },
+   "unit": "bit/s",
+   "status": "ok"
+  },
+  "queue_sampling_interval": {
+   "value": 1.064,
+   "unit": "s",
+   "status": "ok"
+  }
+ },
+ "rtmp": {
+  "destinations_visited": {
+   "value": 68096.0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "units_pumped": {
+   "value": 68096.0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "bytes_queued": {
+   "value": 3025548800.0,
+   "unit": "bytes",
+   "status": "ok"
+  },
+  "service_time": {
+   "value": 811081.0,
+   "unit": "us",
+   "status": "ok"
+  },
+  "reposts": {
+   "value": 816.0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "last_visit_service_us": {
+   "value": 627.0,
+   "unit": "",
+   "status": "ok"
+  },
+  "last_visit_destinations": {
+   "value": 64.0,
+   "unit": "",
+   "status": "ok"
+  },
+  "last_visit_units": {
+   "value": 64.0,
+   "unit": "",
+   "status": "ok"
+  },
+  "last_visit_bytes": {
+   "value": 2717056.0,
+   "unit": "",
+   "status": "ok"
+  }
+ },
+ "hls_push": {
+  "quality_measurement_valid": {
+   "value": "yes",
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_pass": {
+   "value": "yes",
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_destinations": {
+   "value": 230,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_measurement_s": {
+   "value": 10.012,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_window_start_ns": {
+   "value": 267197807184487,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_window_end_ns": {
+   "value": 267207819498962,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_clock_domain": {
+   "value": "controller-monotonic",
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_start_uncertainty_ns": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_end_uncertainty_ns": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_offered_payload_bps": {
+   "value": 9027469.84,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_offered_rate_provenance": {
+   "value": "identified final segment sizes / local cut timestamp span",
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_prepared_source_payload_bps": {
+   "value": 8759786.67,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_prepared_rate_provenance": {
+   "value": "ffprobe elementary packet sizes / packet presentation span",
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_total_receiver_bytes": {
+   "value": 2844370440,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_absolute_delivery_ratio_min": {
+   "value": 1.030558,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_identified_window_start_ns": {
+   "value": 267197761284373,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_identified_window_end_ns": {
+   "value": 267203778706178,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_identified_measurement_s": {
+   "value": 6.017422,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_reference_payload_bps": {
+   "value": 9112563.16,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_average_delivery_ratio_min": {
+   "value": 1,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_ratio_basis": {
+   "value": "identified-segments",
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_window_byte_ratio_min": {
+   "value": 1.08436,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_window_segments": {
+   "value": 3,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_window_segment_bytes": {
+   "value": 7963680,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_segment_interval_s": {
+   "value": 2.002,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_segment_lag_limit_s": {
+   "value": 4.004,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_segment_lag_p95_s": {
+   "value": 0.285,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_segment_lag_max_s": {
+   "value": 0.343,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_missing_segments": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_duplicate_segments": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_playlist_violations": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_total_bytes": {
+   "value": 1831646400,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_total_segments": {
+   "value": 1150,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_dropped_units": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_transport_errors": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_sink_http_errors": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_active_uploaders_before": {
+   "value": 1,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_active_uploaders_after": {
+   "value": 1,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_first_segment_latency_p50_ms": {
+   "value": 1206.752,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_first_segment_latency_p95_ms": {
+   "value": 1315.287,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_first_segment_latency_p99_ms": {
+   "value": 1324.761,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_all_destinations_ready_s": {
+   "value": 1.327,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_upload_duration_p50_ms": {
+   "value": 0.646,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_upload_duration_p95_ms": {
+   "value": 1.115,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_upload_duration_p99_ms": {
+   "value": 1.695,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_upload_duration_max_ms": {
+   "value": 2.311,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_queue_lag_p50_ms": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_queue_lag_p95_ms": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_queue_lag_p99_ms": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_max_queue_lag_ms": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "quality_failure_count": {
+   "value": 0,
+   "unit": "",
+   "status": "ok"
+  },
+  "active_uploaders_end": {
+   "value": 1.0,
+   "unit": "threads",
+   "status": "ok"
+  },
+  "first_segment_latency_all": {
+   "value": 1.4525020039873198,
+   "unit": "s",
+   "status": "ok"
+  }
+ },
+ "delivery": {
+  "srt": {
+   "value": {
+    "quality_measurement_valid": "yes",
+    "quality_pass": "yes",
+    "quality_reference_payload_bps": 9330303.83,
+    "quality_reference_payload_mbps": 9.3303,
+    "quality_prepared_source_payload_bps": 9001038.93,
+    "quality_reference_vs_prepared_ratio": 1.03658,
+    "quality_measurement_s": 10.01,
+    "quality_window_start_ns": 267197808478370,
+    "quality_window_end_ns": 267207817996123,
+    "quality_clock_domain": "controller-monotonic",
+    "quality_start_uncertainty_ns": 0,
+    "quality_end_uncertainty_ns": 0,
+    "quality_offered_payload_bps": 9001038.93,
+    "quality_offered_rate_provenance": "prepared MPEG-TS bytes / source preparation duration",
+    "quality_total_receiver_bytes": 298216128,
+    "quality_average_delivery_ratio_min": 0.97913,
+    "quality_interval_delivery_ratio_min": 0.8965,
+    "quality_destination_fairness_jain": "1.00000 (supplementary)",
+    "quality_sender_feed_drops": 0,
+    "quality_strict_full_rate": "no",
+    "quality_strict_ratio_min": 0.97913,
+    "quality_strict_ratio_tolerance": 0.999,
+    "quality_strict_interval_floor": 0.9,
+    "quality_strict_interval_min": 0.8965,
+    "quality_strict_ts_errors": 0,
+    "quality_sender_output_drops": 0,
+    "quality_stream_feed_overruns": 0,
+    "quality_stream_feed_retention_evictions": 72,
+    "quality_peak_feed_queue_utilization": 0,
+    "quality_peak_output_queue_utilization": 0,
+    "quality_complete_queue_samples": 10,
+    "failures_sample": [],
+    "failures_total": 0
+   },
+   "unit": "mixed",
+   "status": "ok"
+  },
+  "rtmp": {
+   "value": {
+    "rtmp_queue_bytes_start_destinations": "256/256",
+    "rtmp_queue_bytes_start_total": 0,
+    "rtmp_queue_bytes_start_p50": 0,
+    "rtmp_queue_bytes_start_p95": 0,
+    "rtmp_queue_bytes_start_max": 0,
+    "rtmp_queue_bytes_end_destinations": "256/256",
+    "rtmp_queue_bytes_end_total": 0,
+    "rtmp_queue_bytes_end_p50": 0,
+    "rtmp_queue_bytes_end_p95": 0,
+    "rtmp_queue_bytes_end_max": 0,
+    "quality_measurement_valid": "yes",
+    "quality_pass": "yes",
+    "quality_reference_payload_bps": 9023627.7,
+    "quality_min_delivery_ratio": 0.97797,
+    "quality_measurement_s": 10.015539,
+    "quality_shell_window_s": 10.903728,
+    "quality_timing": "receiver-scrape-monotonic",
+    "quality_window_start_ns": 267197888124471,
+    "quality_window_end_ns": 267207903663403,
+    "quality_clock_domain": "controller-monotonic",
+    "quality_start_uncertainty_ns": 14909472,
+    "quality_end_uncertainty_ns": 26742811,
+    "quality_offered_payload_bps": 8759786.67,
+    "quality_offered_rate_provenance": "ffprobe elementary packet sizes / packet presentation span",
+    "quality_absolute_delivery_ratio_min": 1.007429,
+    "quality_interval_delivery_ratio_min": 0.92558,
+    "quality_longest_stall_s": 0,
+    "quality_receiver_count": 256,
+    "quality_aggregate_bytes": 2837728205,
+    "quality_aggregate_bps": 2266660415.79,
+    "failures_sample": [],
+    "failures_total": 0
+   },
+   "unit": "mixed",
+   "status": "ok"
+  },
+  "hls_push": {
+   "value": {
+    "quality_measurement_valid": "yes",
+    "quality_pass": "yes",
+    "quality_destinations": 230,
+    "quality_measurement_s": 10.012,
+    "quality_window_start_ns": 267197807184487,
+    "quality_window_end_ns": 267207819498962,
+    "quality_clock_domain": "controller-monotonic",
+    "quality_start_uncertainty_ns": 0,
+    "quality_end_uncertainty_ns": 0,
+    "quality_offered_payload_bps": 9027469.84,
+    "quality_offered_rate_provenance": "identified final segment sizes / local cut timestamp span",
+    "quality_prepared_source_payload_bps": 8759786.67,
+    "quality_prepared_rate_provenance": "ffprobe elementary packet sizes / packet presentation span",
+    "quality_total_receiver_bytes": 2844370440,
+    "quality_absolute_delivery_ratio_min": 1.030558,
+    "quality_identified_window_start_ns": 267197761284373,
+    "quality_identified_window_end_ns": 267203778706178,
+    "quality_identified_measurement_s": 6.017422,
+    "quality_reference_payload_bps": 9112563.16,
+    "quality_average_delivery_ratio_min": 1,
+    "quality_ratio_basis": "identified-segments",
+    "quality_window_byte_ratio_min": 1.08436,
+    "quality_window_segments": 3,
+    "quality_window_segment_bytes": 7963680,
+    "quality_segment_interval_s": 2.002,
+    "quality_segment_lag_limit_s": 4.004,
+    "quality_segment_lag_p95_s": 0.285,
+    "quality_segment_lag_max_s": 0.343,
+    "quality_missing_segments": 0,
+    "quality_duplicate_segments": 0,
+    "quality_playlist_violations": 0,
+    "quality_total_bytes": 1831646400,
+    "quality_total_segments": 1150,
+    "quality_dropped_units": 0,
+    "quality_transport_errors": 0,
+    "quality_sink_http_errors": 0,
+    "quality_active_uploaders_before": 1,
+    "quality_active_uploaders_after": 1,
+    "quality_first_segment_latency_p50_ms": 1206.752,
+    "quality_first_segment_latency_p95_ms": 1315.287,
+    "quality_first_segment_latency_p99_ms": 1324.761,
+    "quality_all_destinations_ready_s": 1.327,
+    "quality_upload_duration_p50_ms": 0.646,
+    "quality_upload_duration_p95_ms": 1.115,
+    "quality_upload_duration_p99_ms": 1.695,
+    "quality_upload_duration_max_ms": 2.311,
+    "quality_queue_lag_p50_ms": 0,
+    "quality_queue_lag_p95_ms": 0,
+    "quality_queue_lag_p99_ms": 0,
+    "quality_max_queue_lag_ms": 0,
+    "failures_sample": [],
+    "failures_total": 0
+   },
+   "unit": "mixed",
+   "status": "ok"
+  },
+  "srt_short_interval_ratio": {
+   "value": {
+    "min": 0.896497,
+    "p01": 0.896497,
+    "p50": 0.991703,
+    "samples": 234
+   },
+   "unit": "ratio of reference",
+   "status": "ok"
+  }
+ },
+ "resources": {
+  "worker_memory": {
+   "value": {
+    "1288744": {
+     "before": {
+      "rss_kb": 117456,
+      "pss_kb": 110807
+     },
+     "after": {
+      "rss_kb": 142952,
+      "pss_kb": 136391
+     }
+    },
+    "1288886": {
+     "before": {
+      "rss_kb": 159964,
+      "pss_kb": 155305
+     },
+     "after": {
+      "rss_kb": 549700,
+      "pss_kb": 545057
+     }
+    }
+   },
+   "unit": "kB",
+   "status": "ok"
+  },
+  "sockstat": {
+   "value": {
+    "before": "sockets: used 1571\nTCP: inuse 537 orphan 0 tw 4956 alloc 565 mem 1680\nUDP: inuse 21 mem 1133\nRAW: inuse 0\nFRAG: inuse 0 memory 0",
+    "after": "sockets: used 1566\nTCP: inuse 537 orphan 0 tw 6592 alloc 563 mem 1585\nUDP: inuse 20 mem 1473\nRAW: inuse 0\nFRAG: inuse 0 memory 0"
+   },
+   "unit": "text",
+   "status": "ok"
+  },
+  "cpu_sampling_overhead": {
+   "value": {
+    "before": 35.851408,
+    "after": 89.396731
+   },
+   "unit": "ms of sampler CPU per snapshot",
+   "status": "ok"
+  },
+  "extended_snapshot_capture": {
+   "value": 68.334207,
+   "unit": "ms",
+   "status": "ok"
+  }
+ },
+ "preflight": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no preflight for this rung"
+ },
+ "host_fingerprint": {
+  "role": "sender",
+  "hostname": "PARAM",
+  "architecture": "x86_64",
+  "boot_id": "020146be-a151-4fc8-869f-b8ad0783ac8a",
+  "binary": "/home/krsna1729/Projects/nginx-media/.build/nginx-robotweax/install/sbin/nginx",
+  "kernel": "7.2.5-3-omarchy",
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900H",
+  "nproc_online": 20,
+  "permitted_cpus": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15,
+   16,
+   17,
+   18,
+   19
+  ],
+  "cgroup": {
+   "cpu_max": "max 100000",
+   "cpu_stat": {
+    "usage_usec": 448978124733,
+    "user_usec": 390416567056,
+    "system_usec": 58561557676,
+    "nice_usec": 3355498,
+    "core_sched.force_idle_usec": 0,
+    "nr_periods": 0,
+    "nr_throttled": 0,
+    "throttled_usec": 0,
+    "nr_bursts": 0,
+    "burst_usec": 0
+   }
+  },
+  "cpu_freq_khz": {
+   "cpu11": 1705004,
+   "cpu9": 5200000,
+   "cpu7": 5400000,
+   "cpu18": 399914,
+   "cpu5": 727642,
+   "cpu16": 399949,
+   "cpu3": 2270897,
+   "cpu14": 1962393,
+   "cpu1": 543955,
+   "cpu12": 1542090,
+   "cpu10": 5200000,
+   "cpu8": 1322326,
+   "cpu19": 3900373,
+   "cpu6": 4631422,
+   "cpu17": 1732759,
+   "cpu4": 5232218,
+   "cpu15": 1437125,
+   "cpu2": 400997,
+   "cpu13": 1465303,
+   "cpu0": 754631
+  },
+  "governor": "performance",
+  "no_turbo": "0",
+  "energy_preference": "performance",
+  "numa": {
+   "node0": "0-19"
+  },
+  "loadavg": "1.03 1.01 1.20 2/2033 1298040",
+  "host_busy_fraction": 0.0279,
+  "memory": {
+   "MemTotal": "15982540 kB",
+   "MemFree": "572484 kB",
+   "MemAvailable": "3614944 kB"
+  },
+  "interfaces": {
+   "docker0": {
+    "operstate": "down",
+    "mtu": "1500",
+    "speed_mbps": "-1",
+    "driver": null,
+    "virtual": true
+   },
+   "lo": {
+    "operstate": "unknown",
+    "mtu": "65536",
+    "speed_mbps": null,
+    "driver": null,
+    "virtual": true
+   },
+   "tailscale0": {
+    "operstate": "unknown",
+    "mtu": "1280",
+    "speed_mbps": "-1",
+    "driver": null,
+    "virtual": true
+   },
+   "wlo1": {
+    "operstate": "up",
+    "mtu": "1500",
+    "speed_mbps": null,
+    "driver": "iwlwifi",
+    "virtual": false
+   }
+  },
+  "kernel_udp_limits": {
+   "net.core.rmem_max": "67108864",
+   "net.core.wmem_max": "67108864",
+   "net.core.rmem_default": "212992",
+   "net.core.wmem_default": "212992",
+   "net.core.netdev_max_backlog": "1000",
+   "net.ipv4.udp_mem": "371172\t494899\t742344",
+   "net.core.somaxconn": "4096"
+  },
+  "softnet": {
+   "cpu0": {
+    "processed": 111931223,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu1": {
+    "processed": 24528248,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu2": {
+    "processed": 47052993,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu3": {
+    "processed": 23810911,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu4": {
+    "processed": 58361020,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu5": {
+    "processed": 26452165,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu6": {
+    "processed": 64315602,
+    "dropped": 0,
+    "time_squeeze": 10
+   },
+   "cpu7": {
+    "processed": 26744241,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu8": {
+    "processed": 29126003,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu9": {
+    "processed": 24214887,
+    "dropped": 0,
+    "time_squeeze": 7
+   },
+   "cpu10": {
+    "processed": 25017574,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu11": {
+    "processed": 26582049,
+    "dropped": 0,
+    "time_squeeze": 4
+   },
+   "cpu12": {
+    "processed": 27990473,
+    "dropped": 0,
+    "time_squeeze": 45
+   },
+   "cpu13": {
+    "processed": 19550361,
+    "dropped": 0,
+    "time_squeeze": 6
+   },
+   "cpu14": {
+    "processed": 21378570,
+    "dropped": 0,
+    "time_squeeze": 16
+   },
+   "cpu15": {
+    "processed": 13946671,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu16": {
+    "processed": 13580330,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu17": {
+    "processed": 13693731,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu18": {
+    "processed": 13433307,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu19": {
+    "processed": 13191954,
+    "dropped": 0,
+    "time_squeeze": 1
+   }
+  },
+  "transport": "robotweax-srt 1.5.7 (/home/krsna1729/Projects/nginx-media/.build/srt-robotweax/lib/librobotweax-srt.so.0.2)",
+  "build": {
+   "compiler": "gcc 16.2.1 20260810 (GCC)",
+   "configure_arguments": "--prefix=/home/krsna1729/Projects/nginx-media/.build/nginx-robotweax/install --add-module=/home/krsna1729/Projects/nginx-media --with-threads --with-http_ssl_module --without-http_rewrite_module --without-http_gzip_module --with-cc=/home/krsna1729/Projects/nginx-media/scripts/record-compiler.py --with-cc-opt='-std=gnu2x -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong' --with-ld-opt='-Wl,-rpath,/home/krsna1729/Projects/nginx-media/.build/srt-robotweax/lib -Wl,-z,relro,-z,now,-z,noexecstack'",
+   "sha256": "e3e9c2ee64ffe2713d2dd5226866fa034fc2c6394f75d71105da9afb37b7632f"
+  },
+  "transport_provenance": {
+   "source_commit": "a87779d9c3d831583d32b2f61cae5b81edb05537",
+   "source_commit_status": "verified-artifact-metadata",
+   "library_version": "1.5.7",
+   "linkage": "shared",
+   "library_path": "/home/krsna1729/Projects/nginx-media/.build/srt-robotweax/lib/librobotweax-srt.so.0.2.9",
+   "library_sha256": "38816bdffe727afd4485942cc211c2a2236a63cfe0a5abe4cd3ce34a4f016fa4",
+   "library_version_method": "srt_getversion",
+   "build": {
+    "schema": "nginx-media.transport-build/1",
+    "source": {
+     "repository": "https://github.com/robotweax/srt",
+     "commit": "a87779d9c3d831583d32b2f61cae5b81edb05537"
+    },
+    "artifact": {
+     "path": "/home/krsna1729/Projects/nginx-media/.build/srt-robotweax/lib/librobotweax-srt.so.0.2.9",
+     "sha256": "38816bdffe727afd4485942cc211c2a2236a63cfe0a5abe4cd3ce34a4f016fa4"
+    },
+    "package": "robotweax-srt-pinned",
+    "compiler": {
+     "path": "/usr/bin/c++",
+     "version": "c++ (GCC) 16.2.1 20260810\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+    },
+    "cmake": {
+     "BUILD_SHARED_LIBS": "ON",
+     "CMAKE_BUILD_TYPE": "Release",
+     "CMAKE_CXX_FLAGS": "",
+     "CMAKE_CXX_FLAGS_DEBUG": "-g",
+     "CMAKE_CXX_FLAGS_MINSIZEREL": "-Os -DNDEBUG",
+     "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG",
+     "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG",
+     "CMAKE_C_FLAGS": "",
+     "CMAKE_C_FLAGS_DEBUG": "-g",
+     "CMAKE_C_FLAGS_MINSIZEREL": "-Os -DNDEBUG",
+     "CMAKE_C_FLAGS_RELEASE": "-O3 -DNDEBUG",
+     "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG",
+     "CMAKE_SHARED_LINKER_FLAGS": "",
+     "CMAKE_SHARED_LINKER_FLAGS_DEBUG": "",
+     "CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL": "",
+     "CMAKE_SHARED_LINKER_FLAGS_RELEASE": "",
+     "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO": "",
+     "CMAKE_STATIC_LINKER_FLAGS": "",
+     "CMAKE_STATIC_LINKER_FLAGS_DEBUG": "",
+     "CMAKE_STATIC_LINKER_FLAGS_MINSIZEREL": "",
+     "CMAKE_STATIC_LINKER_FLAGS_RELEASE": "",
+     "CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO": "",
+     "CMAKE_CXX_FLAGS-ADVANCED": "1",
+     "CMAKE_CXX_FLAGS_DEBUG-ADVANCED": "1",
+     "CMAKE_CXX_FLAGS_MINSIZEREL-ADVANCED": "1",
+     "CMAKE_CXX_FLAGS_RELEASE-ADVANCED": "1",
+     "CMAKE_CXX_FLAGS_RELWITHDEBINFO-ADVANCED": "1",
+     "CMAKE_C_FLAGS-ADVANCED": "1",
+     "CMAKE_C_FLAGS_DEBUG-ADVANCED": "1",
+     "CMAKE_C_FLAGS_MINSIZEREL-ADVANCED": "1",
+     "CMAKE_C_FLAGS_RELEASE-ADVANCED": "1",
+     "CMAKE_C_FLAGS_RELWITHDEBINFO-ADVANCED": "1",
+     "CMAKE_SHARED_LINKER_FLAGS-ADVANCED": "1",
+     "CMAKE_SHARED_LINKER_FLAGS_DEBUG-ADVANCED": "1",
+     "CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL-ADVANCED": "1",
+     "CMAKE_SHARED_LINKER_FLAGS_RELEASE-ADVANCED": "1",
+     "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO-ADVANCED": "1",
+     "CMAKE_STATIC_LINKER_FLAGS-ADVANCED": "1",
+     "CMAKE_STATIC_LINKER_FLAGS_DEBUG-ADVANCED": "1",
+     "CMAKE_STATIC_LINKER_FLAGS_MINSIZEREL-ADVANCED": "1",
+     "CMAKE_STATIC_LINKER_FLAGS_RELEASE-ADVANCED": "1",
+     "CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO-ADVANCED": "1"
+    },
+    "linkage": "shared"
+   }
+  }
+ },
+ "receiver_host_fingerprint": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no native receiver host fingerprint"
+ },
+ "receiver_nginx_fingerprint": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no native receiver nginx fingerprint"
+ },
+ "counter_windows": {
+  "stream": {
+   "clock_domain": "controller-monotonic",
+   "provenance": "controller stream-counter collection brackets",
+   "start_request_ns": 267197080307187,
+   "start_reply_ns": 267197196371006,
+   "start_ns": 267197138339096,
+   "start_uncertainty_ns": 58031909,
+   "end_request_ns": 267207991281373,
+   "end_reply_ns": 267208092852415,
+   "end_ns": 267208042066894,
+   "end_uncertainty_ns": 50785521
+  },
+  "workers": {
+   "clock_domain": "controller-monotonic",
+   "provenance": "controller worker-metric collection brackets",
+   "start_request_ns": 267197390695913,
+   "start_reply_ns": 267197541271906,
+   "start_ns": 267197465983909,
+   "start_uncertainty_ns": 75287996,
+   "end_request_ns": 267208130806346,
+   "end_reply_ns": 267208289310204,
+   "end_ns": 267208210058275,
+   "end_uncertainty_ns": 79251929
+  }
+ },
+ "receiver_windows": {
+  "srt": {
+   "clock_domain": "controller-monotonic",
+   "start_request_ns": 267197782217272,
+   "start_reply_ns": 267197829333288,
+   "native_start_ns": 267197808478370,
+   "start_ns": 267197808478370,
+   "start_uncertainty_ns": 0,
+   "end_request_ns": 267207807151787,
+   "end_reply_ns": 267207838290090,
+   "native_end_ns": 267207817996123,
+   "end_ns": 267207817996123,
+   "end_uncertainty_ns": 0
+  },
+  "hls_push": {
+   "clock_domain": "controller-monotonic",
+   "start_ns": 267197807184487,
+   "start_uncertainty_ns": 0,
+   "native_start_ns": 267197807184487,
+   "start_request_ns": 267197782260665,
+   "start_reply_ns": 267197829041732,
+   "end_ns": 267207819498962,
+   "end_uncertainty_ns": 0,
+   "native_end_ns": 267207819498962,
+   "end_request_ns": 267207803437828,
+   "end_reply_ns": 267207845548034
+  }
+ },
+ "efficiency": {
+  "delivered": {
+   "value": 4.7778,
+   "unit": "Gbit/s",
+   "status": "ok",
+   "sources": [
+    "srt receiver-counted bytes over receiver window",
+    "rtmp receiver-counted bytes over receiver window",
+    "hls_push receiver-counted bytes over receiver window"
+   ]
+  },
+  "window_alignment": {
+   "srt": {
+    "status": "ok",
+    "value": {
+     "cpu": {
+      "clock_domain": "controller-monotonic",
+      "start_ns": 267197761284373.0,
+      "end_ns": 267207782751577.0,
+      "start_uncertainty_ns": 1062899.0,
+      "end_uncertainty_ns": 1525709.0
+     },
+     "receiver": {
+      "clock_domain": "controller-monotonic",
+      "start_request_ns": 267197782217272,
+      "start_reply_ns": 267197829333288,
+      "native_start_ns": 267197808478370,
+      "start_ns": 267197808478370,
+      "start_uncertainty_ns": 0,
+      "end_request_ns": 267207807151787,
+      "end_reply_ns": 267207838290090,
+      "native_end_ns": 267207817996123,
+      "end_ns": 267207817996123,
+      "end_uncertainty_ns": 0
+     },
+     "coverage": 0.995290709829279,
+     "max_boundary_skew_s": 0.048256896,
+     "duration_error_s": 0.011949450999999556,
+     "bound_fraction": 0.02
+    },
+    "unit": "mixed"
+   },
+   "rtmp": {
+    "status": "ok",
+    "value": {
+     "cpu": {
+      "clock_domain": "controller-monotonic",
+      "start_ns": 267197761284373.0,
+      "end_ns": 267207782751577.0,
+      "start_uncertainty_ns": 1062899.0,
+      "end_uncertainty_ns": 1525709.0
+     },
+     "receiver": {
+      "start_ns": 267197888124471,
+      "end_ns": 267207903663403,
+      "clock_domain": "controller-monotonic",
+      "start_uncertainty_ns": 14909472,
+      "end_uncertainty_ns": 26742811
+     },
+     "coverage": 0.9873431608947069,
+     "max_boundary_skew_s": 0.149180346,
+     "duration_error_s": 0.005928272000000234,
+     "bound_fraction": 0.02
+    },
+    "unit": "mixed"
+   },
+   "hls_push": {
+    "status": "ok",
+    "value": {
+     "cpu": {
+      "clock_domain": "controller-monotonic",
+      "start_ns": 267197761284373.0,
+      "end_ns": 267207782751577.0,
+      "start_uncertainty_ns": 1062899.0,
+      "end_uncertainty_ns": 1525709.0
+     },
+     "receiver": {
+      "clock_domain": "controller-monotonic",
+      "start_ns": 267197807184487,
+      "start_uncertainty_ns": 0,
+      "native_start_ns": 267197807184487,
+      "start_request_ns": 267197782260665,
+      "start_reply_ns": 267197829041732,
+      "end_ns": 267207819498962,
+      "end_uncertainty_ns": 0,
+      "native_end_ns": 267207819498962,
+      "end_request_ns": 267207803437828,
+      "end_reply_ns": 267207845548034
+     },
+     "coverage": 0.9954198209637727,
+     "max_boundary_skew_s": 0.046963013,
+     "duration_error_s": 0.009152729000000193,
+     "bound_fraction": 0.02
+    },
+    "unit": "mixed"
+   }
+  },
+  "sender_cpu_per_gbps": {
+   "value": 4.28,
+   "unit": "%core per Gbit/s",
+   "status": "ok"
+  },
+  "receiver_cpu_per_gbps": {
+   "value": 13.1,
+   "unit": "%core per Gbit/s",
+   "status": "ok"
+  }
+ },
+ "saturation_notes": [
+  "host CPU busy 9.1% of all online CPUs",
+  "sender 20% vs receivers 63% of one core"
+ ]
+}

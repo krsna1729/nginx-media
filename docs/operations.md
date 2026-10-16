@@ -698,9 +698,9 @@ their single sender-thread figures are not current shard-pool measurements.
   450 MiB/s because the bench's own reader pool is the limit there, not the
   server.
 - **Historical pre-sharding result:** eight live destinations cost the old
-  sender less than a tenth of a core.  The current 16-shard pool and 1000-output
-  limit are measured by `bench-capacity-curve`; do not use this row as a
-  current per-destination CPU estimate.
+  sender less than a tenth of a core.  Current per-destination cost is
+  measured by `bench-capacity-quality`; do not use this row as a current
+  per-destination CPU estimate.
 
 **The price of misplacement.**  Twelve publishers, two workers, identical
 publisher commands and identical offered rate, one program per publisher,

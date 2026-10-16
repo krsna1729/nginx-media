@@ -20,7 +20,7 @@
  * nonblocking transport sends.
  */
 
-#define NGX_MEDIA_SRT_MAX_OUTPUTS 1000
+#define NGX_MEDIA_SRT_MAX_OUTPUTS 2048
 #define NGX_MEDIA_SRT_EGRESS_SHARDS 16
 #define NGX_MEDIA_SRT_OUT_MAX_EVENTS 2048
 
@@ -79,7 +79,7 @@ typedef struct ngx_media_srt_outputs_s ngx_media_srt_outputs_t;
 
 ngx_int_t ngx_media_srt_outputs_start(ngx_media_srt_outputs_t **out,
     const ngx_media_srt_output_conf_t *confs, ngx_uint_t count,
-    ngx_uint_t max_events, ngx_log_t *log);
+    ngx_uint_t max_events, ngx_uint_t mux_groups, ngx_log_t *log);
 void ngx_media_srt_outputs_stop(ngx_media_srt_outputs_t *outs);
 
 /* Reschedules stable logical shards over the bounded physical sender pool. */

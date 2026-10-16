@@ -1,0 +1,3094 @@
+{
+ "schema": "nginx-media.capacity-diagnostics/2",
+ "case": {
+  "outcome": "setup-failure",
+  "mix": "rtmp-95-srt-5",
+  "sink_mode": "correctness",
+  "srt_senders": "adaptive",
+  "hls_push_uploaders": "adaptive",
+  "srt_backend": "libsrt.so.1.5",
+  "nginx_cpus": "0,2,4,6",
+  "receiver_cpus": "12,13,14,15,16,17,18,19",
+  "receiver_topology": "loopback",
+  "receiver_address": "127.0.0.1",
+  "destinations": 1024,
+  "srt": 51,
+  "rtmp": 973,
+  "hls_readers": 0,
+  "hls_push": 0,
+  "status": 1
+ },
+ "outcome": "setup-failure",
+ "intervals": {
+  "stream_counter_measurement": {
+   "value": null,
+   "unit": "s",
+   "status": "ok",
+   "provenance": null,
+   "window": {
+    "clock_domain": "controller-monotonic",
+    "provenance": "controller stream-counter collection brackets",
+    "start_request_ns": 271306130960822,
+    "start_reply_ns": 271306270105811,
+    "start_ns": 271306200533316,
+    "start_uncertainty_ns": 69572494,
+    "end_request_ns": 271320737211054,
+    "end_reply_ns": 271320929956402,
+    "end_ns": 271320833583728,
+    "end_uncertainty_ns": 96372674
+   }
+  },
+  "extended_host": {
+   "value": 12.94732722,
+   "unit": "s",
+   "status": "ok",
+   "window": {
+    "clock_domain": "controller-monotonic",
+    "start_ns": 271306960839442,
+    "end_ns": 271319908166662,
+    "start_uncertainty_ns": 18373148.5,
+    "end_uncertainty_ns": 140155580.5
+   }
+  },
+  "cpu": {
+   "value": 12.6421670645,
+   "unit": "s",
+   "status": "ok"
+  },
+  "requested": {
+   "value": null,
+   "unit": "s",
+   "status": "ok"
+  }
+ },
+ "cpu": {
+  "unit_note": "percent of one core; 100 = one fully busy core",
+  "interval": {
+   "value": 12.6421670645,
+   "unit": "s",
+   "status": "ok"
+  },
+  "window": {
+   "clock_domain": "controller-monotonic",
+   "start_ns": 271307052565669.0,
+   "end_ns": 271319694732733.5,
+   "start_uncertainty_ns": 4162517.0,
+   "end_uncertainty_ns": 8755849.5
+  },
+  "clk_tck": {
+   "value": 100,
+   "unit": "ticks/s",
+   "status": "ok"
+  },
+  "thread_accounting": {
+   "value": {
+    "threads_both": 542,
+    "threads_born": 0,
+    "threads_exited": 0,
+    "tid_reused": 0,
+    "negative_rejected": 0,
+    "clk_tck": 100,
+    "window_s": 12.6421670645,
+    "window": {
+     "clock_domain": "controller-monotonic",
+     "start_ns": 271307052565669.0,
+     "end_ns": 271319694732733.5,
+     "start_uncertainty_ns": 4162517.0,
+     "end_uncertainty_ns": 8755849.5
+    },
+    "processes": {
+     "1584949": {
+      "total_pct": 110.424,
+      "attributed_pct": 110.582,
+      "unattributed_pct": -0.158
+     },
+     "1587651": {
+      "total_pct": 33.301,
+      "attributed_pct": 30.375,
+      "unattributed_pct": 2.927
+     },
+     "1585391": {
+      "total_pct": 22.465,
+      "attributed_pct": 22.465,
+      "unattributed_pct": 0.0
+     },
+     "1585442": {
+      "total_pct": 26.894,
+      "attributed_pct": 26.815,
+      "unattributed_pct": 0.079
+     },
+     "1585485": {
+      "total_pct": 23.572,
+      "attributed_pct": 23.73,
+      "unattributed_pct": -0.158
+     },
+     "1585558": {
+      "total_pct": 24.996,
+      "attributed_pct": 24.917,
+      "unattributed_pct": 0.079
+     },
+     "1585628": {
+      "total_pct": 29.742,
+      "attributed_pct": 29.821,
+      "unattributed_pct": -0.079
+     },
+     "1585705": {
+      "total_pct": 26.42,
+      "attributed_pct": 26.261,
+      "unattributed_pct": 0.158
+     },
+     "1585746": {
+      "total_pct": 25.549,
+      "attributed_pct": 25.075,
+      "unattributed_pct": 0.475
+     },
+     "1585820": {
+      "total_pct": 28.239,
+      "attributed_pct": 28.081,
+      "unattributed_pct": 0.158
+     },
+     "1585884": {
+      "total_pct": 28.16,
+      "attributed_pct": 27.922,
+      "unattributed_pct": 0.237
+     },
+     "1585922": {
+      "total_pct": 26.42,
+      "attributed_pct": 26.182,
+      "unattributed_pct": 0.237
+     },
+     "1585963": {
+      "total_pct": 25.391,
+      "attributed_pct": 24.996,
+      "unattributed_pct": 0.396
+     },
+     "1586013": {
+      "total_pct": 24.521,
+      "attributed_pct": 24.679,
+      "unattributed_pct": -0.158
+     },
+     "1586037": {
+      "total_pct": 26.34,
+      "attributed_pct": 26.42,
+      "unattributed_pct": -0.079
+     },
+     "1586118": {
+      "total_pct": 22.86,
+      "attributed_pct": 22.702,
+      "unattributed_pct": 0.158
+     },
+     "1586186": {
+      "total_pct": 24.284,
+      "attributed_pct": 24.6,
+      "unattributed_pct": -0.316
+     },
+     "1586238": {
+      "total_pct": 23.651,
+      "attributed_pct": 23.572,
+      "unattributed_pct": 0.079
+     },
+     "1586271": {
+      "total_pct": 26.499,
+      "attributed_pct": 26.499,
+      "unattributed_pct": 0.0
+     },
+     "1586311": {
+      "total_pct": 24.284,
+      "attributed_pct": 24.6,
+      "unattributed_pct": -0.316
+     },
+     "1586354": {
+      "total_pct": 22.86,
+      "attributed_pct": 22.781,
+      "unattributed_pct": 0.079
+     },
+     "1586420": {
+      "total_pct": 22.385,
+      "attributed_pct": 22.385,
+      "unattributed_pct": 0.0
+     },
+     "1586456": {
+      "total_pct": 22.781,
+      "attributed_pct": 22.939,
+      "unattributed_pct": -0.158
+     },
+     "1599116": {
+      "total_pct": 2.927,
+      "attributed_pct": 2.848,
+      "unattributed_pct": 0.079
+     }
+    },
+    "process_totals": true
+   },
+   "unit": "threads",
+   "status": "ok"
+  },
+  "by_kind_pct_of_core": {
+   "value": {
+    "worker": 110.58,
+    "srt-receiver": 33.3,
+    "rtmp-receiver": 529.5,
+    "publisher": 2.93
+   },
+   "unit": "%core",
+   "status": "ok"
+  },
+  "sampled_total_pct_of_core": {
+   "value": 676.31,
+   "unit": "%core",
+   "status": "ok"
+  },
+  "sampled_total_pct_of_permitted": {
+   "value": 33.82,
+   "unit": "%of permitted CPUs",
+   "status": "ok",
+   "permitted_cpus": 20
+  },
+  "workers": {
+   "w0": {
+    "total": {
+     "value": 110.58,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "event_loop": {
+     "value": 79.34,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "srt_senders_individual": {
+     "value": {
+      "srt-egress-00": 1.03,
+      "srt-egress-01": 1.03,
+      "srt-egress-02": 1.03,
+      "srt-egress-03": 0.87,
+      "srt-egress-04": 0.08,
+      "srt-egress-05": 0.08,
+      "srt-egress-06": 0.0,
+      "srt-egress-07": 0.08,
+      "srt-egress-08": 0.08,
+      "srt-egress-09": 0.08,
+      "srt-egress-10": 0.08,
+      "srt-egress-11": 0.0,
+      "srt-egress-12": 0.08,
+      "srt-egress-13": 0.08,
+      "srt-egress-14": 0.16,
+      "srt-egress-15": 0.08
+     },
+     "unit": "%core",
+     "status": "ok"
+    },
+    "srt_senders_combined": {
+     "value": 4.83,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "srt_senders_busy_ge_1pct": {
+     "value": 3,
+     "unit": "threads",
+     "status": "ok"
+    },
+    "libsrt_sndq": {
+     "value": 18.35,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "libsrt_rcvq": {
+     "value": 5.85,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "libsrt_tsbpd": {
+     "value": 0.0,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "hls_uploaders": {
+     "value": 0.08,
+     "unit": "%core",
+     "status": "ok"
+    },
+    "other": {
+     "value": 2.14,
+     "unit": "%core",
+     "status": "ok"
+    }
+   }
+  },
+  "processes": {
+   "w0": {
+    "pid": 1584949,
+    "kind": "worker",
+    "total_pct_of_core": 110.58,
+    "roles": {
+     "worker": 79.34,
+     "hls-push": 0.08,
+     "srt-egress-00": 1.03,
+     "srt-egress-01": 1.03,
+     "srt-egress-02": 1.03,
+     "srt-egress-03": 0.87,
+     "srt-egress-04": 0.08,
+     "srt-egress-05": 0.08,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.08,
+     "srt-egress-08": 0.08,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.08,
+     "srt-egress-11": 0.0,
+     "srt-egress-12": 0.08,
+     "srt-egress-13": 0.08,
+     "srt-egress-14": 0.16,
+     "srt-egress-15": 0.08,
+     "ingest": 2.14,
+     "SRT:GC": 0.0,
+     "SRT:SndQ": 18.35,
+     "SRT:RcvQ": 5.85,
+     "SRT:TsbPd": 0.0
+    }
+   },
+   "srt-receiver": {
+    "pid": 1587651,
+    "kind": "srt-receiver",
+    "total_pct_of_core": 33.3,
+    "roles": {
+     "srt_fanout_sink": 7.75,
+     "SRT:GC": 0.0,
+     "SRT:SndQ": 0.0,
+     "SRT:RcvQ": 22.54,
+     "SRT:TsbPd": 0.08,
+     "(unattributed)": 2.93
+    }
+   },
+   "wrtmp-sink-0": {
+    "pid": 1585391,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 22.46,
+    "roles": {
+     "worker": 21.2,
+     "nginx-thread": 0.16,
+     "srt-egress-00": 0.0,
+     "srt-egress-01": 0.08,
+     "srt-egress-02": 0.08,
+     "srt-egress-03": 0.08,
+     "srt-egress-04": 0.16,
+     "srt-egress-05": 0.08,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.08,
+     "srt-egress-08": 0.08,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.0,
+     "srt-egress-11": 0.08,
+     "srt-egress-12": 0.0,
+     "srt-egress-13": 0.08,
+     "srt-egress-14": 0.16,
+     "srt-egress-15": 0.08
+    }
+   },
+   "wrtmp-sink-1": {
+    "pid": 1585442,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 26.89,
+    "roles": {
+     "worker": 25.63,
+     "nginx-thread": 0.08,
+     "srt-egress-00": 0.08,
+     "srt-egress-01": 0.08,
+     "srt-egress-02": 0.08,
+     "srt-egress-03": 0.08,
+     "srt-egress-04": 0.08,
+     "srt-egress-05": 0.0,
+     "srt-egress-06": 0.08,
+     "srt-egress-07": 0.16,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.08,
+     "srt-egress-11": 0.16,
+     "srt-egress-12": 0.08,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.08,
+     "(unattributed)": 0.08
+    }
+   },
+   "wrtmp-sink-2": {
+    "pid": 1585485,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 23.73,
+    "roles": {
+     "worker": 22.39,
+     "nginx-thread": 0.16,
+     "srt-egress-00": 0.16,
+     "srt-egress-01": 0.16,
+     "srt-egress-02": 0.08,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.08,
+     "srt-egress-05": 0.08,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.08,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.16,
+     "srt-egress-11": 0.16,
+     "srt-egress-12": 0.0,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.08,
+     "srt-egress-15": 0.08
+    }
+   },
+   "wrtmp-sink-3": {
+    "pid": 1585558,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 24.92,
+    "roles": {
+     "worker": 23.81,
+     "nginx-thread": 0.16,
+     "srt-egress-00": 0.08,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.08,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.0,
+     "srt-egress-05": 0.08,
+     "srt-egress-06": 0.08,
+     "srt-egress-07": 0.16,
+     "srt-egress-08": 0.08,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.08,
+     "srt-egress-11": 0.08,
+     "srt-egress-12": 0.0,
+     "srt-egress-13": 0.08,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.08
+    }
+   },
+   "wrtmp-sink-4": {
+    "pid": 1585628,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 29.82,
+    "roles": {
+     "worker": 28.48,
+     "nginx-thread": 0.16,
+     "srt-egress-00": 0.08,
+     "srt-egress-01": 0.08,
+     "srt-egress-02": 0.16,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.0,
+     "srt-egress-05": 0.08,
+     "srt-egress-06": 0.08,
+     "srt-egress-07": 0.16,
+     "srt-egress-08": 0.08,
+     "srt-egress-09": 0.16,
+     "srt-egress-10": 0.0,
+     "srt-egress-11": 0.16,
+     "srt-egress-12": 0.08,
+     "srt-egress-13": 0.08,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.0
+    }
+   },
+   "wrtmp-sink-5": {
+    "pid": 1585705,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 26.42,
+    "roles": {
+     "worker": 25.07,
+     "nginx-thread": 0.08,
+     "srt-egress-00": 0.08,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.08,
+     "srt-egress-03": 0.16,
+     "srt-egress-04": 0.08,
+     "srt-egress-05": 0.16,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.0,
+     "srt-egress-10": 0.16,
+     "srt-egress-11": 0.0,
+     "srt-egress-12": 0.16,
+     "srt-egress-13": 0.08,
+     "srt-egress-14": 0.08,
+     "srt-egress-15": 0.08,
+     "(unattributed)": 0.16
+    }
+   },
+   "wrtmp-sink-6": {
+    "pid": 1585746,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 25.55,
+    "roles": {
+     "worker": 24.28,
+     "nginx-thread": 0.08,
+     "srt-egress-00": 0.08,
+     "srt-egress-01": 0.08,
+     "srt-egress-02": 0.0,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.08,
+     "srt-egress-05": 0.0,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.08,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.08,
+     "srt-egress-11": 0.08,
+     "srt-egress-12": 0.0,
+     "srt-egress-13": 0.08,
+     "srt-egress-14": 0.08,
+     "srt-egress-15": 0.0,
+     "(unattributed)": 0.47
+    }
+   },
+   "wrtmp-sink-7": {
+    "pid": 1585820,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 28.24,
+    "roles": {
+     "worker": 26.97,
+     "nginx-thread": 0.24,
+     "srt-egress-00": 0.0,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.0,
+     "srt-egress-03": 0.08,
+     "srt-egress-04": 0.16,
+     "srt-egress-05": 0.0,
+     "srt-egress-06": 0.16,
+     "srt-egress-07": 0.08,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.16,
+     "srt-egress-10": 0.0,
+     "srt-egress-11": 0.0,
+     "srt-egress-12": 0.16,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.08,
+     "srt-egress-15": 0.0,
+     "(unattributed)": 0.16
+    }
+   },
+   "wrtmp-sink-8": {
+    "pid": 1585884,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 28.16,
+    "roles": {
+     "worker": 26.97,
+     "nginx-thread": 0.08,
+     "srt-egress-00": 0.08,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.16,
+     "srt-egress-03": 0.08,
+     "srt-egress-04": 0.08,
+     "srt-egress-05": 0.08,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.08,
+     "srt-egress-08": 0.08,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.08,
+     "srt-egress-11": 0.0,
+     "srt-egress-12": 0.0,
+     "srt-egress-13": 0.08,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.0,
+     "(unattributed)": 0.24
+    }
+   },
+   "wrtmp-sink-9": {
+    "pid": 1585922,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 26.42,
+    "roles": {
+     "worker": 25.23,
+     "nginx-thread": 0.08,
+     "srt-egress-00": 0.16,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.16,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.08,
+     "srt-egress-05": 0.0,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.16,
+     "srt-egress-10": 0.16,
+     "srt-egress-11": 0.08,
+     "srt-egress-12": 0.08,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.0,
+     "(unattributed)": 0.24
+    }
+   },
+   "wrtmp-sink-10": {
+    "pid": 1585963,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 25.39,
+    "roles": {
+     "worker": 24.05,
+     "nginx-thread": 0.08,
+     "srt-egress-00": 0.08,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.0,
+     "srt-egress-03": 0.08,
+     "srt-egress-04": 0.08,
+     "srt-egress-05": 0.16,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.08,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.0,
+     "srt-egress-11": 0.08,
+     "srt-egress-12": 0.08,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.16,
+     "(unattributed)": 0.4
+    }
+   },
+   "wrtmp-sink-11": {
+    "pid": 1586013,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 24.68,
+    "roles": {
+     "worker": 23.41,
+     "nginx-thread": 0.08,
+     "srt-egress-00": 0.16,
+     "srt-egress-01": 0.16,
+     "srt-egress-02": 0.16,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.0,
+     "srt-egress-05": 0.0,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.08,
+     "srt-egress-08": 0.08,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.08,
+     "srt-egress-11": 0.08,
+     "srt-egress-12": 0.16,
+     "srt-egress-13": 0.08,
+     "srt-egress-14": 0.08,
+     "srt-egress-15": 0.0
+    }
+   },
+   "wrtmp-sink-12": {
+    "pid": 1586037,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 26.42,
+    "roles": {
+     "worker": 25.15,
+     "nginx-thread": 0.08,
+     "srt-egress-00": 0.16,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.16,
+     "srt-egress-03": 0.08,
+     "srt-egress-04": 0.16,
+     "srt-egress-05": 0.16,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.08,
+     "srt-egress-09": 0.0,
+     "srt-egress-10": 0.08,
+     "srt-egress-11": 0.16,
+     "srt-egress-12": 0.0,
+     "srt-egress-13": 0.08,
+     "srt-egress-14": 0.08,
+     "srt-egress-15": 0.0
+    }
+   },
+   "wrtmp-sink-13": {
+    "pid": 1586118,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 22.86,
+    "roles": {
+     "worker": 21.59,
+     "nginx-thread": 0.0,
+     "srt-egress-00": 0.16,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.08,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.08,
+     "srt-egress-05": 0.0,
+     "srt-egress-06": 0.16,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.08,
+     "srt-egress-09": 0.16,
+     "srt-egress-10": 0.08,
+     "srt-egress-11": 0.08,
+     "srt-egress-12": 0.08,
+     "srt-egress-13": 0.08,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.08,
+     "(unattributed)": 0.16
+    }
+   },
+   "wrtmp-sink-14": {
+    "pid": 1586186,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 24.6,
+    "roles": {
+     "worker": 23.02,
+     "nginx-thread": 0.08,
+     "srt-egress-00": 0.08,
+     "srt-egress-01": 0.16,
+     "srt-egress-02": 0.16,
+     "srt-egress-03": 0.16,
+     "srt-egress-04": 0.08,
+     "srt-egress-05": 0.08,
+     "srt-egress-06": 0.08,
+     "srt-egress-07": 0.16,
+     "srt-egress-08": 0.16,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.16,
+     "srt-egress-11": 0.08,
+     "srt-egress-12": 0.08,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.0
+    }
+   },
+   "wrtmp-sink-15": {
+    "pid": 1586238,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 23.65,
+    "roles": {
+     "worker": 22.31,
+     "nginx-thread": 0.0,
+     "srt-egress-00": 0.0,
+     "srt-egress-01": 0.08,
+     "srt-egress-02": 0.08,
+     "srt-egress-03": 0.08,
+     "srt-egress-04": 0.0,
+     "srt-egress-05": 0.08,
+     "srt-egress-06": 0.08,
+     "srt-egress-07": 0.16,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.16,
+     "srt-egress-10": 0.08,
+     "srt-egress-11": 0.16,
+     "srt-egress-12": 0.16,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.16,
+     "srt-egress-15": 0.0,
+     "(unattributed)": 0.08
+    }
+   },
+   "wrtmp-sink-16": {
+    "pid": 1586271,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 26.5,
+    "roles": {
+     "worker": 25.23,
+     "nginx-thread": 0.08,
+     "srt-egress-00": 0.16,
+     "srt-egress-01": 0.16,
+     "srt-egress-02": 0.0,
+     "srt-egress-03": 0.08,
+     "srt-egress-04": 0.0,
+     "srt-egress-05": 0.08,
+     "srt-egress-06": 0.08,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.08,
+     "srt-egress-09": 0.0,
+     "srt-egress-10": 0.16,
+     "srt-egress-11": 0.08,
+     "srt-egress-12": 0.16,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.08,
+     "srt-egress-15": 0.08
+    }
+   },
+   "wrtmp-sink-17": {
+    "pid": 1586311,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 24.6,
+    "roles": {
+     "worker": 23.1,
+     "nginx-thread": 0.16,
+     "srt-egress-00": 0.16,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.08,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.0,
+     "srt-egress-05": 0.08,
+     "srt-egress-06": 0.16,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.16,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.16,
+     "srt-egress-11": 0.16,
+     "srt-egress-12": 0.16,
+     "srt-egress-13": 0.08,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.08
+    }
+   },
+   "wrtmp-sink-18": {
+    "pid": 1586354,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 22.86,
+    "roles": {
+     "worker": 21.59,
+     "nginx-thread": 0.0,
+     "srt-egress-00": 0.08,
+     "srt-egress-01": 0.16,
+     "srt-egress-02": 0.0,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.16,
+     "srt-egress-05": 0.16,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.0,
+     "srt-egress-09": 0.16,
+     "srt-egress-10": 0.0,
+     "srt-egress-11": 0.16,
+     "srt-egress-12": 0.16,
+     "srt-egress-13": 0.16,
+     "srt-egress-14": 0.0,
+     "srt-egress-15": 0.0,
+     "(unattributed)": 0.08
+    }
+   },
+   "wrtmp-sink-19": {
+    "pid": 1586420,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 22.39,
+    "roles": {
+     "worker": 21.2,
+     "nginx-thread": 0.16,
+     "srt-egress-00": 0.0,
+     "srt-egress-01": 0.0,
+     "srt-egress-02": 0.16,
+     "srt-egress-03": 0.08,
+     "srt-egress-04": 0.08,
+     "srt-egress-05": 0.0,
+     "srt-egress-06": 0.08,
+     "srt-egress-07": 0.08,
+     "srt-egress-08": 0.16,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.0,
+     "srt-egress-11": 0.08,
+     "srt-egress-12": 0.08,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.08,
+     "srt-egress-15": 0.08
+    }
+   },
+   "wrtmp-sink-20": {
+    "pid": 1586456,
+    "kind": "rtmp-receiver",
+    "total_pct_of_core": 22.94,
+    "roles": {
+     "worker": 21.52,
+     "nginx-thread": 0.16,
+     "srt-egress-00": 0.08,
+     "srt-egress-01": 0.16,
+     "srt-egress-02": 0.08,
+     "srt-egress-03": 0.0,
+     "srt-egress-04": 0.16,
+     "srt-egress-05": 0.16,
+     "srt-egress-06": 0.0,
+     "srt-egress-07": 0.0,
+     "srt-egress-08": 0.08,
+     "srt-egress-09": 0.08,
+     "srt-egress-10": 0.0,
+     "srt-egress-11": 0.08,
+     "srt-egress-12": 0.16,
+     "srt-egress-13": 0.0,
+     "srt-egress-14": 0.16,
+     "srt-egress-15": 0.08
+    }
+   },
+   "publisher:1599116": {
+    "pid": 1599116,
+    "kind": "publisher",
+    "total_pct_of_core": 2.93,
+    "roles": {
+     "ffmpeg": 0.0,
+     "SRT:GC": 0.0,
+     "SRT:SndQ": 0.63,
+     "SRT:RcvQ": 0.55,
+     "mux0:mpegts": 0.24,
+     "dmx0:mpegts": 1.42,
+     "(unattributed)": 0.08
+    }
+   }
+  }
+ },
+ "cpu_environment": {
+  "online_cpus": {
+   "value": 20,
+   "unit": "cpus",
+   "status": "ok"
+  },
+  "permitted_cpus": {
+   "value": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19
+   ],
+   "unit": "cpu ids",
+   "status": "ok"
+  },
+  "loadavg": {
+   "value": "8.14 3.02 2.39 60/2593 1601012",
+   "unit": "text",
+   "status": "ok"
+  },
+  "cgroup_cpu_quota": {
+   "value": null,
+   "unit": "cpus",
+   "status": "ok",
+   "note": "unlimited (cpu.max=max)"
+  },
+  "cgroup_throttled_periods": {
+   "value": 0,
+   "unit": "periods",
+   "status": "ok"
+  },
+  "cgroup_throttled_time": {
+   "value": 0.0,
+   "unit": "s",
+   "status": "ok"
+  },
+  "cpu_frequency": {
+   "value": {
+    "cpu11": 2757178,
+    "cpu9": 2848042,
+    "cpu7": 2888193,
+    "cpu18": 2385149,
+    "cpu5": 2883511,
+    "cpu16": 2385206,
+    "cpu3": 2878940,
+    "cpu14": 2385154,
+    "cpu1": 2888218,
+    "cpu12": 2376522,
+    "cpu10": 2757251,
+    "cpu8": 2847327,
+    "cpu19": 2384940,
+    "cpu6": 2888193,
+    "cpu17": 2385030,
+    "cpu4": 2883580,
+    "cpu15": 2385102,
+    "cpu2": 2887969,
+    "cpu13": 2385164,
+    "cpu0": 2888087
+   },
+   "unit": "kHz",
+   "status": "ok"
+  },
+  "host_cpu_busy_fraction": {
+   "value": 0.6295,
+   "unit": "fraction of all online CPUs",
+   "status": "ok"
+  },
+  "host_cpu_steal_fraction": {
+   "value": 0.0,
+   "unit": "fraction",
+   "status": "ok"
+  },
+  "host_softirq_fraction": {
+   "value": 0.0095,
+   "unit": "fraction",
+   "status": "ok"
+  },
+  "thread_affinity": {
+   "value": {
+    "publisher/SRT:GC": [
+     "12-13"
+    ],
+    "publisher/SRT:RcvQ": [
+     "12-13"
+    ],
+    "publisher/SRT:SndQ": [
+     "12-13"
+    ],
+    "publisher/dmx0:mpegts": [
+     "12-13"
+    ],
+    "publisher/ffmpeg": [
+     "12-13"
+    ],
+    "publisher/mux0:mpegts": [
+     "12-13"
+    ],
+    "srt-receiver/SRT:GC": [
+     "12-19"
+    ],
+    "srt-receiver/SRT:RcvQ": [
+     "12-19"
+    ],
+    "srt-receiver/SRT:SndQ": [
+     "12-19"
+    ],
+    "srt-receiver/SRT:TsbPd": [
+     "12-19"
+    ],
+    "srt-receiver/srt_fanout_sink": [
+     "12-19"
+    ],
+    "w0/SRT:GC": [
+     "0,2,4,6"
+    ],
+    "w0/SRT:RcvQ": [
+     "0,2,4,6"
+    ],
+    "w0/SRT:SndQ": [
+     "0,2,4,6"
+    ],
+    "w0/SRT:TsbPd": [
+     "0,2,4,6"
+    ],
+    "w0/hls-push": [
+     "0,2,4,6"
+    ],
+    "w0/ingest": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-00": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-01": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-02": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-03": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-04": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-05": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-06": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-07": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-08": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-09": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-10": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-11": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-12": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-13": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-14": [
+     "0,2,4,6"
+    ],
+    "w0/srt-egress-15": [
+     "0,2,4,6"
+    ],
+    "w0/worker": [
+     "0,2,4,6"
+    ],
+    "wrtmp-sink-0/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-0/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-1/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-10/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-11/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-12/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-13/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-14/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-15/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-16/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-17/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-18/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-19/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-2/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-20/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-3/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-4/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-5/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-6/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-7/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-8/worker": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/nginx-thread": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-00": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-01": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-02": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-03": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-04": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-05": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-06": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-07": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-08": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-09": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-10": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-11": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-12": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-13": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-14": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/srt-egress-15": [
+     "12-19"
+    ],
+    "wrtmp-sink-9/worker": [
+     "12-19"
+    ]
+   },
+   "unit": "cpu list",
+   "status": "ok"
+  },
+  "threads_per_process": {
+   "value": {
+    "w0:1584949": 34,
+    "srt-receiver:1587651": 61,
+    "wrtmp-sink-0:1585391": 21,
+    "wrtmp-sink-1:1585442": 21,
+    "wrtmp-sink-2:1585485": 21,
+    "wrtmp-sink-3:1585558": 21,
+    "wrtmp-sink-4:1585628": 21,
+    "wrtmp-sink-5:1585705": 21,
+    "wrtmp-sink-6:1585746": 21,
+    "wrtmp-sink-7:1585820": 21,
+    "wrtmp-sink-8:1585884": 21,
+    "wrtmp-sink-9:1585922": 21,
+    "wrtmp-sink-10:1585963": 21,
+    "wrtmp-sink-11:1586013": 21,
+    "wrtmp-sink-12:1586037": 21,
+    "wrtmp-sink-13:1586118": 21,
+    "wrtmp-sink-14:1586186": 21,
+    "wrtmp-sink-15:1586238": 21,
+    "wrtmp-sink-16:1586271": 21,
+    "wrtmp-sink-17:1586311": 21,
+    "wrtmp-sink-18:1586354": 21,
+    "wrtmp-sink-19:1586420": 21,
+    "wrtmp-sink-20:1586456": 21,
+    "publisher:1599116": 6
+   },
+   "unit": "threads",
+   "status": "ok"
+  },
+  "nonvoluntary_ctxt_switches": {
+   "value": {
+    "w0:1584949": 1793,
+    "srt-receiver:1587651": 15095,
+    "wrtmp-sink-0:1585391": 5101,
+    "wrtmp-sink-1:1585442": 5933,
+    "wrtmp-sink-2:1585485": 7131,
+    "wrtmp-sink-3:1585558": 7081,
+    "wrtmp-sink-4:1585628": 7243,
+    "wrtmp-sink-5:1585705": 6985,
+    "wrtmp-sink-6:1585746": 6902,
+    "wrtmp-sink-7:1585820": 7571,
+    "wrtmp-sink-8:1585884": 6644,
+    "wrtmp-sink-9:1585922": 6333,
+    "wrtmp-sink-10:1585963": 6659,
+    "wrtmp-sink-11:1586013": 5506,
+    "wrtmp-sink-12:1586037": 7028,
+    "wrtmp-sink-13:1586118": 5657,
+    "wrtmp-sink-14:1586186": 5881,
+    "wrtmp-sink-15:1586238": 6436,
+    "wrtmp-sink-16:1586271": 7451,
+    "wrtmp-sink-17:1586311": 5935,
+    "wrtmp-sink-18:1586354": 6658,
+    "wrtmp-sink-19:1586420": 5375,
+    "wrtmp-sink-20:1586456": 5629,
+    "publisher:1599116": 0
+   },
+   "unit": "switches",
+   "status": "ok"
+  },
+  "run_queue_pressure": {
+   "value": {
+    "some_stalled_pct": 29.5573,
+    "some_stalled_s": 3.827,
+    "full_stalled_pct": 0.0,
+    "procs_running_before": 1,
+    "procs_running_after": 61
+   },
+   "unit": "share of the window and queue depth",
+   "status": "ok"
+  },
+  "per_cpu_busy_pct": {
+   "value": {
+    "cpu0": 51.83,
+    "cpu1": 46.96,
+    "cpu2": 52.22,
+    "cpu3": 43.36,
+    "cpu4": 68.04,
+    "cpu5": 48.22,
+    "cpu6": 44.11,
+    "cpu7": 73.21,
+    "cpu8": 45.57,
+    "cpu9": 42.31,
+    "cpu10": 43.46,
+    "cpu11": 44.53,
+    "cpu12": 82.12,
+    "cpu13": 82.29,
+    "cpu14": 81.44,
+    "cpu15": 81.22,
+    "cpu16": 82.31,
+    "cpu17": 82.22,
+    "cpu18": 81.92,
+    "cpu19": 82.45
+   },
+   "unit": "% of one core over the window",
+   "status": "ok"
+  },
+  "sender_pinned_headroom": {
+   "value": {
+    "cpus": [
+     "cpu0",
+     "cpu2",
+     "cpu4",
+     "cpu6"
+    ],
+    "mean_busy_pct": 54.05,
+    "min_busy_pct": 44.11,
+    "max_busy_pct": 68.04,
+    "idle_cpus": 0,
+    "saturated_cpus": 0
+   },
+   "unit": "% of one core over the window",
+   "status": "ok",
+   "placement": "0,2,4,6"
+  },
+  "receiver_pinned_headroom": {
+   "value": {
+    "cpus": [
+     "cpu12",
+     "cpu13",
+     "cpu14",
+     "cpu15",
+     "cpu16",
+     "cpu17",
+     "cpu18",
+     "cpu19"
+    ],
+    "mean_busy_pct": 82.0,
+    "min_busy_pct": 81.22,
+    "max_busy_pct": 82.45,
+    "idle_cpus": 0,
+    "saturated_cpus": 0
+   },
+   "unit": "% of one core over the window",
+   "status": "ok",
+   "placement": "12,13,14,15,16,17,18,19"
+  }
+ },
+ "network": {
+  "udp_in_datagrams": {
+   "value": 624844,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_out_datagrams": {
+   "value": 624216,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_rcvbuf_errors": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_sndbuf_errors": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_in_errors": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "tcp_retrans_segs": {
+   "value": 1817,
+   "unit": "count",
+   "status": "ok"
+  },
+  "ListenDrops": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "TCPBacklogDrop": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "softnet_dropped": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "udp_socket_drops_by_process": {
+   "value": {
+    "w0:1584949": {
+     "kind": "worker",
+     "udp_sockets": 5,
+     "socket_drops_delta": 0,
+     "rx_queue_bytes": 0
+    },
+    "publisher:1599116": {
+     "kind": "publisher",
+     "udp_sockets": 1,
+     "socket_drops_delta": 0,
+     "rx_queue_bytes": 0
+    },
+    "srt-receiver:1587651": {
+     "kind": "srt-receiver",
+     "udp_sockets": 4,
+     "socket_drops_delta": 0,
+     "rx_queue_bytes": 415424
+    }
+   },
+   "unit": "datagrams",
+   "status": "ok",
+   "note": "/proc/net/udp drops column; sockets counted only if alive at both ends"
+  }
+ },
+ "event_loop_max_delay": {
+  "value": {
+   "w0": 309.0
+  },
+  "unit": "ms",
+  "status": "ok"
+ },
+ "srt": {
+  "sent_bytes": {
+   "value": 826293840,
+   "unit": "count",
+   "status": "ok"
+  },
+  "blocked_sends": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "retransmitted_packets": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "feed_drops": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "destination_drops": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "transport_errors": {
+   "value": 0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "active_senders_end": {
+   "value": 4.0,
+   "unit": "threads",
+   "status": "ok"
+  },
+  "enqueue_to_send_lag_end": {
+   "value": {
+    "max": 0.0,
+    "median": 0.0
+   },
+   "unit": "ms",
+   "status": "ok"
+  },
+  "queue_timeline": {
+   "value": [
+    {
+     "t_s": 0.0,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 1.091,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 2.169,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 3.285,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 4.391,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 5.602,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 6.905,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 8.279,
+     "feed_units": 0.0,
+     "output_units": 102.0
+    },
+    {
+     "t_s": 9.504,
+     "feed_units": 0.0,
+     "output_units": 32.0
+    },
+    {
+     "t_s": 10.685,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 11.806,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    },
+    {
+     "t_s": 12.987,
+     "feed_units": 0.0,
+     "output_units": 0.0
+    }
+   ],
+   "unit": "units",
+   "status": "ok"
+  },
+  "per_lane_service_rate": {
+   "value": {
+    "w0:s0": 36569102,
+    "w0:s1": 36569102,
+    "w0:s10": 27426826,
+    "w0:s11": 27426826,
+    "w0:s12": 27426826,
+    "w0:s13": 27426826,
+    "w0:s14": 27426826,
+    "w0:s15": 27426826,
+    "w0:s2": 36569102,
+    "w0:s3": 27426826,
+    "w0:s4": 27426826,
+    "w0:s5": 27426826,
+    "w0:s6": 27426826,
+    "w0:s7": 27426826,
+    "w0:s8": 27426826,
+    "w0:s9": 27426826
+   },
+   "unit": "bit/s",
+   "status": "ok"
+  },
+  "queue_sampling_interval": {
+   "value": 1.181,
+   "unit": "s",
+   "status": "ok"
+  }
+ },
+ "rtmp": {
+  "destinations_visited": {
+   "value": 115916.0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "units_pumped": {
+   "value": 288830.0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "bytes_queued": {
+   "value": 12849236181.0,
+   "unit": "bytes",
+   "status": "ok"
+  },
+  "service_time": {
+   "value": 11878836.0,
+   "unit": "us",
+   "status": "ok"
+  },
+  "reposts": {
+   "value": 3589.0,
+   "unit": "count",
+   "status": "ok"
+  },
+  "last_visit_service_us": {
+   "value": 2034.0,
+   "unit": "",
+   "status": "ok"
+  },
+  "last_visit_destinations": {
+   "value": 36.0,
+   "unit": "",
+   "status": "ok"
+  },
+  "last_visit_units": {
+   "value": 181.0,
+   "unit": "",
+   "status": "ok"
+  },
+  "last_visit_bytes": {
+   "value": 7693881.0,
+   "unit": "",
+   "status": "ok"
+  }
+ },
+ "hls_push": {
+  "status": "unavailable",
+  "reason": "no HLS push destinations"
+ },
+ "delivery": {
+  "srt": {
+   "value": {
+    "quality_measurement_valid": "no",
+    "quality_pass": "no",
+    "quality_strict_full_rate": "no",
+    "quality_setup_failure": "d0000: final sample gap 2.55s exceeds limit",
+    "failures_sample": [],
+    "failures_total": 0
+   },
+   "unit": "mixed",
+   "status": "ok"
+  },
+  "srt_short_interval_ratio": {
+   "value": {
+    "min": 0.891336,
+    "p01": 0.891336,
+    "p50": 0.973389,
+    "samples": 10
+   },
+   "unit": "ratio of reference",
+   "status": "ok"
+  }
+ },
+ "resources": {
+  "worker_memory": {
+   "value": {
+    "1584949": {
+     "before": {
+      "rss_kb": 164716,
+      "pss_kb": 157736
+     },
+     "after": {
+      "rss_kb": 157176,
+      "pss_kb": 151323
+     }
+    },
+    "1585391": {
+     "before": {
+      "rss_kb": 134732,
+      "pss_kb": 129867
+     },
+     "after": {
+      "rss_kb": 260960,
+      "pss_kb": 257110
+     }
+    }
+   },
+   "unit": "kB",
+   "status": "ok"
+  },
+  "sockstat": {
+   "value": {
+    "before": "sockets: used 3106\nTCP: inuse 2003 orphan 0 tw 5143 alloc 2028 mem 468\nUDP: inuse 24 mem 1524\nRAW: inuse 0\nFRAG: inuse 0 memory 0",
+    "after": "sockets: used 3116\nTCP: inuse 2003 orphan 0 tw 3813 alloc 2030 mem 11678\nUDP: inuse 23 mem 1249\nRAW: inuse 0\nFRAG: inuse 0 memory 0"
+   },
+   "unit": "text",
+   "status": "ok"
+  },
+  "cpu_sampling_overhead": {
+   "value": {
+    "before": 78.598806,
+    "after": 273.188146
+   },
+   "unit": "ms of sampler CPU per snapshot",
+   "status": "ok"
+  },
+  "extended_snapshot_capture": {
+   "value": 280.311161,
+   "unit": "ms",
+   "status": "ok"
+  }
+ },
+ "preflight": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no preflight for this rung"
+ },
+ "host_fingerprint": {
+  "role": "sender",
+  "hostname": "PARAM",
+  "architecture": "x86_64",
+  "boot_id": "020146be-a151-4fc8-869f-b8ad0783ac8a",
+  "binary": "/home/krsna1729/Projects/nginx-media/.build/nginx-haivision/install/sbin/nginx",
+  "kernel": "7.2.5-3-omarchy",
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900H",
+  "nproc_online": 20,
+  "permitted_cpus": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10,
+   11,
+   12,
+   13,
+   14,
+   15,
+   16,
+   17,
+   18,
+   19
+  ],
+  "cgroup": {
+   "cpu_max": "max 100000",
+   "cpu_stat": {
+    "usage_usec": 452049424545,
+    "user_usec": 391998383323,
+    "system_usec": 60051041222,
+    "nice_usec": 3355498,
+    "core_sched.force_idle_usec": 0,
+    "nr_periods": 0,
+    "nr_throttled": 0,
+    "throttled_usec": 0,
+    "nr_bursts": 0,
+    "burst_usec": 0
+   }
+  },
+  "cpu_freq_khz": {
+   "cpu11": 400000,
+   "cpu9": 1173713,
+   "cpu7": 1071215,
+   "cpu18": 1317643,
+   "cpu5": 2200000,
+   "cpu16": 982992,
+   "cpu3": 5200000,
+   "cpu14": 1252172,
+   "cpu1": 927672,
+   "cpu12": 1289152,
+   "cpu10": 2200000,
+   "cpu8": 961415,
+   "cpu19": 1026628,
+   "cpu6": 1855609,
+   "cpu17": 1260364,
+   "cpu4": 2200034,
+   "cpu15": 1122368,
+   "cpu2": 545698,
+   "cpu13": 1313491,
+   "cpu0": 726929
+  },
+  "governor": "performance",
+  "no_turbo": "0",
+  "energy_preference": "performance",
+  "numa": {
+   "node0": "0-19"
+  },
+  "loadavg": "10.52 3.72 2.63 2/2490 1601331",
+  "host_busy_fraction": 0.0778,
+  "memory": {
+   "MemTotal": "15982540 kB",
+   "MemFree": "459140 kB",
+   "MemAvailable": "239200 kB"
+  },
+  "interfaces": {
+   "docker0": {
+    "operstate": "down",
+    "mtu": "1500",
+    "speed_mbps": "-1",
+    "driver": null,
+    "virtual": true
+   },
+   "lo": {
+    "operstate": "unknown",
+    "mtu": "65536",
+    "speed_mbps": null,
+    "driver": null,
+    "virtual": true
+   },
+   "tailscale0": {
+    "operstate": "unknown",
+    "mtu": "1280",
+    "speed_mbps": "-1",
+    "driver": null,
+    "virtual": true
+   },
+   "wlo1": {
+    "operstate": "up",
+    "mtu": "1500",
+    "speed_mbps": null,
+    "driver": "iwlwifi",
+    "virtual": false
+   }
+  },
+  "kernel_udp_limits": {
+   "net.core.rmem_max": "67108864",
+   "net.core.wmem_max": "67108864",
+   "net.core.rmem_default": "212992",
+   "net.core.wmem_default": "212992",
+   "net.core.netdev_max_backlog": "1000",
+   "net.ipv4.udp_mem": "371172\t494899\t742344",
+   "net.core.somaxconn": "4096"
+  },
+  "softnet": {
+   "cpu0": {
+    "processed": 122001980,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu1": {
+    "processed": 24544406,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu2": {
+    "processed": 57601903,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu3": {
+    "processed": 23815916,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu4": {
+    "processed": 68669122,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu5": {
+    "processed": 26467983,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu6": {
+    "processed": 74641203,
+    "dropped": 0,
+    "time_squeeze": 12
+   },
+   "cpu7": {
+    "processed": 26758836,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu8": {
+    "processed": 29143402,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu9": {
+    "processed": 24232408,
+    "dropped": 0,
+    "time_squeeze": 7
+   },
+   "cpu10": {
+    "processed": 25032821,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu11": {
+    "processed": 26893666,
+    "dropped": 0,
+    "time_squeeze": 6
+   },
+   "cpu12": {
+    "processed": 29512672,
+    "dropped": 0,
+    "time_squeeze": 45
+   },
+   "cpu13": {
+    "processed": 20863797,
+    "dropped": 0,
+    "time_squeeze": 6
+   },
+   "cpu14": {
+    "processed": 22448401,
+    "dropped": 0,
+    "time_squeeze": 16
+   },
+   "cpu15": {
+    "processed": 14992703,
+    "dropped": 0,
+    "time_squeeze": 1
+   },
+   "cpu16": {
+    "processed": 14642340,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu17": {
+    "processed": 15096760,
+    "dropped": 0,
+    "time_squeeze": 2
+   },
+   "cpu18": {
+    "processed": 14443311,
+    "dropped": 0,
+    "time_squeeze": 0
+   },
+   "cpu19": {
+    "processed": 14522885,
+    "dropped": 0,
+    "time_squeeze": 1
+   }
+  },
+  "transport": "libsrt.so.1.5 1.5.7 (/home/krsna1729/Projects/nginx-media/.build/srt-haivision/lib/libsrt.so.1.5)",
+  "build": {
+   "compiler": "gcc 16.2.1 20260810 (GCC)",
+   "configure_arguments": "--prefix=/home/krsna1729/Projects/nginx-media/.build/nginx-haivision/install --add-module=/home/krsna1729/Projects/nginx-media --with-threads --with-http_ssl_module --without-http_rewrite_module --without-http_gzip_module --with-cc=/home/krsna1729/Projects/nginx-media/scripts/record-compiler.py --with-cc-opt='-std=gnu2x -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong' --with-ld-opt='-Wl,-rpath,/home/krsna1729/Projects/nginx-media/.build/srt-haivision/lib -Wl,-z,relro,-z,now,-z,noexecstack'",
+   "sha256": "997c16c4de1226a933bdeefd037642f1ae1cd3eb6791ef5dc45c2837302ee9fc"
+  },
+  "transport_provenance": {
+   "source_commit": "899348d8318eb9a3c5a5b6ec43c4a1114288773a",
+   "source_commit_status": "verified-artifact-metadata",
+   "library_version": "1.5.7",
+   "linkage": "shared",
+   "library_path": "/home/krsna1729/Projects/nginx-media/.build/srt-haivision/lib/libsrt.so.1.5.7",
+   "library_sha256": "fdfe10e06616e4d4a91f3b78530c32974261ff65f6c430234526e85e884df9a0",
+   "library_version_method": "srt_getversion",
+   "build": {
+    "schema": "nginx-media.transport-build/1",
+    "source": {
+     "repository": "https://github.com/Haivision/srt",
+     "commit": "899348d8318eb9a3c5a5b6ec43c4a1114288773a"
+    },
+    "artifact": {
+     "path": "/home/krsna1729/Projects/nginx-media/.build/srt-haivision/lib/libsrt.so.1.5.7",
+     "sha256": "fdfe10e06616e4d4a91f3b78530c32974261ff65f6c430234526e85e884df9a0"
+    },
+    "package": "srt-pinned",
+    "compiler": {
+     "path": "/usr/bin/c++",
+     "version": "c++ (GCC) 16.2.1 20260810\nCopyright (C) 2026 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+    },
+    "cmake": {
+     "BUILD_SHARED_LIBS": "ON",
+     "CMAKE_BUILD_TYPE": "Release",
+     "CMAKE_CXX_FLAGS": "",
+     "CMAKE_CXX_FLAGS_DEBUG": "-g",
+     "CMAKE_CXX_FLAGS_MINSIZEREL": "-Os -DNDEBUG",
+     "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG",
+     "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG",
+     "CMAKE_C_FLAGS": "",
+     "CMAKE_C_FLAGS_DEBUG": "-g",
+     "CMAKE_C_FLAGS_MINSIZEREL": "-Os -DNDEBUG",
+     "CMAKE_C_FLAGS_RELEASE": "-O3 -DNDEBUG",
+     "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG",
+     "CMAKE_SHARED_LINKER_FLAGS": "",
+     "CMAKE_SHARED_LINKER_FLAGS_DEBUG": "",
+     "CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL": "",
+     "CMAKE_SHARED_LINKER_FLAGS_RELEASE": "",
+     "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO": "",
+     "CMAKE_STATIC_LINKER_FLAGS": "",
+     "CMAKE_STATIC_LINKER_FLAGS_DEBUG": "",
+     "CMAKE_STATIC_LINKER_FLAGS_MINSIZEREL": "",
+     "CMAKE_STATIC_LINKER_FLAGS_RELEASE": "",
+     "CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO": "",
+     "CMAKE_CXX_FLAGS-ADVANCED": "1",
+     "CMAKE_CXX_FLAGS_DEBUG-ADVANCED": "1",
+     "CMAKE_CXX_FLAGS_MINSIZEREL-ADVANCED": "1",
+     "CMAKE_CXX_FLAGS_RELEASE-ADVANCED": "1",
+     "CMAKE_CXX_FLAGS_RELWITHDEBINFO-ADVANCED": "1",
+     "CMAKE_C_FLAGS-ADVANCED": "1",
+     "CMAKE_C_FLAGS_DEBUG-ADVANCED": "1",
+     "CMAKE_C_FLAGS_MINSIZEREL-ADVANCED": "1",
+     "CMAKE_C_FLAGS_RELEASE-ADVANCED": "1",
+     "CMAKE_C_FLAGS_RELWITHDEBINFO-ADVANCED": "1",
+     "CMAKE_SHARED_LINKER_FLAGS-ADVANCED": "1",
+     "CMAKE_SHARED_LINKER_FLAGS_DEBUG-ADVANCED": "1",
+     "CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL-ADVANCED": "1",
+     "CMAKE_SHARED_LINKER_FLAGS_RELEASE-ADVANCED": "1",
+     "CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO-ADVANCED": "1",
+     "CMAKE_STATIC_LINKER_FLAGS-ADVANCED": "1",
+     "CMAKE_STATIC_LINKER_FLAGS_DEBUG-ADVANCED": "1",
+     "CMAKE_STATIC_LINKER_FLAGS_MINSIZEREL-ADVANCED": "1",
+     "CMAKE_STATIC_LINKER_FLAGS_RELEASE-ADVANCED": "1",
+     "CMAKE_STATIC_LINKER_FLAGS_RELWITHDEBINFO-ADVANCED": "1"
+    },
+    "linkage": "shared"
+   }
+  }
+ },
+ "receiver_host_fingerprint": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no native receiver host fingerprint"
+ },
+ "receiver_nginx_fingerprint": {
+  "value": null,
+  "unit": "mixed",
+  "status": "unavailable",
+  "reason": "no native receiver nginx fingerprint"
+ },
+ "counter_windows": {
+  "stream": {
+   "clock_domain": "controller-monotonic",
+   "provenance": "controller stream-counter collection brackets",
+   "start_request_ns": 271306130960822,
+   "start_reply_ns": 271306270105811,
+   "start_ns": 271306200533316,
+   "start_uncertainty_ns": 69572494,
+   "end_request_ns": 271320737211054,
+   "end_reply_ns": 271320929956402,
+   "end_ns": 271320833583728,
+   "end_uncertainty_ns": 96372674
+  },
+  "workers": {
+   "clock_domain": "controller-monotonic",
+   "provenance": "controller worker-metric collection brackets",
+   "start_request_ns": 271306496166006,
+   "start_reply_ns": 271306746425152,
+   "start_ns": 271306621295579,
+   "start_uncertainty_ns": 125129573,
+   "end_request_ns": 271320973923832,
+   "end_reply_ns": 271321883147663,
+   "end_ns": 271321428535747,
+   "end_uncertainty_ns": 454611915
+  }
+ },
+ "receiver_windows": {
+  "srt": {
+   "clock_domain": "controller-monotonic",
+   "start_request_ns": 271307071509052,
+   "start_reply_ns": 271307124590202,
+   "native_start_ns": 271307081252205,
+   "start_ns": 271307081252205,
+   "start_uncertainty_ns": 0,
+   "end_request_ns": 271319730932350,
+   "end_reply_ns": 271319929179793,
+   "native_end_ns": 271319791672099,
+   "end_ns": 271319791672099,
+   "end_uncertainty_ns": 0
+  }
+ },
+ "efficiency": {
+  "status": "unavailable",
+  "reason": "no receiver-counted byte total or measurement interval"
+ },
+ "saturation_notes": [
+  "host CPU busy 62.9% of all online CPUs",
+  "sender 111% vs receivers 563% of one core"
+ ]
+}

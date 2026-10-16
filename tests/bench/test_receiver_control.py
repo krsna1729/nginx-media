@@ -85,7 +85,7 @@ class Attribution(unittest.TestCase):
                 while True:
                     try:
                         state = Path(f"/proc/{child}/stat").read_text().rsplit(")", 1)[1].split()[0]
-                    except FileNotFoundError:
+                    except (FileNotFoundError, ProcessLookupError):  # reaped mid-read
                         break
                     if state == "Z":
                         break

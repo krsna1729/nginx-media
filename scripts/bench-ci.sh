@@ -90,7 +90,7 @@ PYEOF
     echo "== bench-ci $TIER/$name"
     env "${harness_env[@]}" CAPACITY_RUN="$RUN" PHASES=capacity-quality-ladder \
         CAPACITY_QUALITY_STOP_AFTER_FAILURES="${BENCH_STOP_AFTER_FAILURES:-2}" \
-        "$ROOT/tests/bench/ingest_egress_fanout.sh" > "$OUT/$name.log" 2>&1
+        python3 "$ROOT/tests/bench/capacity_harness.py" > "$OUT/$name.log" 2>&1
     status=$?
     # Record termination before collecting evidence, including failed runs.
     echo "$status" > "$OUT/$name.status"

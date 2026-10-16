@@ -36,7 +36,7 @@
 #define NGX_MEDIA_SRT_EVENT_OPEN   3
 #define NGX_MEDIA_SRT_EVENT_CLOSE  4
 
-#define NGX_MEDIA_SRT_MAX_SESSIONS 16
+#define NGX_MEDIA_SRT_MAX_SESSIONS 256
 
 typedef struct {
     ngx_uint_t  type;          /* NGX_MEDIA_SRT_EVENT_* */
