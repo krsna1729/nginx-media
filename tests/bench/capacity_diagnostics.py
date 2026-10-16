@@ -123,23 +123,7 @@ def as_number(value):
     return int(number) if number.is_integer() else number
 
 
-def parse_cpu_list(text):
-    cpus = set()
-    if not text:
-        return cpus
-    for part in text.split(","):
-        part = part.strip()
-        if "-" in part:
-            low, high = part.split("-", 1)
-            cpus.update(range(int(low), int(high) + 1))
-        elif part:
-            cpus.add(int(part))
-    return cpus
-
-
 def read_processes(case_dir, prefix=""):
-    rows = load_csv(os.path.join(case_dir, "processes.tsv").replace(
-        ".tsv", ".tsv"))
     processes = {}
     path = os.path.join(case_dir, prefix + "processes.tsv")
     try:
@@ -149,7 +133,6 @@ def read_processes(case_dir, prefix=""):
                 processes[row["pid"]] = (row["kind"], row["label"])
     except OSError:
         pass
-    del rows
     return processes
 
 
@@ -332,11 +315,12 @@ def _ctx_delta(before, after, processes):
     result = {}
     for pid, p in (after or {}).get("processes", {}).items():
         b = (before or {}).get("processes", {}).get(pid, {})
-        if p.get("nonvoluntary_ctxt_switches") is None:
+        # a process absent from the opening snapshot has no delta, not a zero base
+        if (p.get("nonvoluntary_ctxt_switches") is None
+                or b.get("nonvoluntary_ctxt_switches") is None):
             continue
         label = processes.get(pid, ("?", f"pid{pid}"))[1] + f":{pid}"
-        result[label] = (p["nonvoluntary_ctxt_switches"]
-                         - (b.get("nonvoluntary_ctxt_switches") or 0))
+        result[label] = p["nonvoluntary_ctxt_switches"] - b["nonvoluntary_ctxt_switches"]
     return result
 
 
@@ -435,11 +419,7 @@ def srt_section(case_dir, workers_before, workers_after):
                 "ns": int(row["sample_ns"]), "feed": 0.0, "out": 0.0})
             rnd["feed"] += float(row["feed_queue_units"] or 0)
             rnd["out"] += float(row["output_queue_units"] or 0)
-            # A lane is a shard *of one worker*: every worker numbers its
-            # shards from zero, so keying by shard alone merges different
-            # lanes' counters into one series and the rate it reports is
-            # whichever worker's last sample happened to be read last - a
-            # lane serving 156 Mbit/s showed as 0 that way.
+            # a lane is one worker's shard: shard numbers restart per worker
             lane = per_lane.setdefault(
                 f"w{row['worker']}:s{row['shard']}", [])
             lane.append((int(row["sample_ns"]), float(row["sent_bytes"] or 0)))
@@ -525,11 +505,8 @@ def hls_push_section(case_dir, workers_before, workers_after):
 
 
 def hls_reader_stats(case_dir):
-    """Observed HLS-origin delivery, straight from the per-reader CSV.
-
-    hls-reader.log reports the configured threshold in `min_delivery_ratio`;
-    the measurement is the readers' own `reference_ratio`, which is why the
-    CSV is the source of the observed numbers and not the log."""
+    """Observed HLS-origin delivery from the per-reader CSV (the log's
+    min_delivery_ratio is the configured gate, not a measurement)."""
     rows = load_csv(os.path.join(case_dir, "hls-readers.csv"))
     if not rows:
         return None
@@ -566,11 +543,7 @@ def percentile_index(values, fraction):
 
 
 def merge_hls_reader_csv(section, case_dir):
-    """Fold the per-reader observations into the reader entry.
-
-    The log is the primary record and the CSV must agree with it; the observed
-    fields are added only where the log does not already carry them, so a log
-    written by the fixed benchmark is never overwritten by the CSV."""
+    """Add per-reader observations the reader log does not already carry."""
     stats = hls_reader_stats(case_dir)
     if stats is None:
         return
@@ -601,7 +574,7 @@ def delivery_section(case_dir):
             continue
         keep = {}
         for key, value in values.items():
-            if key.startswith("quality_failure") or key == "quality_failure":
+            if key.startswith("quality_failure"):
                 continue
             number = as_number(value)
             keep[key] = number if number is not None else value
@@ -615,9 +588,7 @@ def delivery_section(case_dir):
         keep["failures_sample"] = failures[:20]
         keep["failures_total"] = len(failures)
         if name == "hls_readers" and "min_delivery_ratio" in keep:
-            # The reader log's min_delivery_ratio is the configured gate, not
-            # a measurement; say so in the field name as well as keeping the
-            # original one, so nothing downstream has to guess.
+            # the log's min_delivery_ratio is the gate; also name it as such
             keep.setdefault("delivery_ratio_threshold",
                             keep["min_delivery_ratio"])
         section[name] = ok(keep, "mixed")
@@ -638,7 +609,7 @@ def delivery_section(case_dir):
     return section
 
 
-def resources_section(case_dir, cpu_total, host_after):
+def resources_section(case_dir, host_after):
     section = {}
     memory = {}
     for which in ("before", "after"):
@@ -672,12 +643,7 @@ def resources_section(case_dir, cpu_total, host_after):
 
 
 def per_cpu_busy(host_before, host_after):
-    """Per-CPU busy fraction over the window, from the sampler's per-CPU
-    counters.
-
-    A short delivery on idle pinned cores is a different finding from a short
-    delivery on saturated ones, and the aggregate line cannot tell them
-    apart."""
+    """Per-CPU busy % over the window: idle vs saturated pinned cores."""
     before = ((host_before or {}).get("host") or {}).get("cpu_per_cpu") or {}
     after = ((host_after or {}).get("host") or {}).get("cpu_per_cpu") or {}
     keys = ("user", "nice", "system", "idle", "iowait", "irq", "softirq",
@@ -700,10 +666,7 @@ def per_cpu_busy(host_before, host_after):
 
 
 def parse_cpu_list(text):
-    """[0, 2, 4, 5] from "0,2,4-5"; the harness's placement format.
-
-    `--meta nginx_cpus=0` arrives as the integer 0 - a one-CPU placement, not
-    an absent one - so a bare integer is a list of one."""
+    """[0, 2, 4, 5] from "0,2,4-5"; a bare int (--meta nginx_cpus=0) is one CPU."""
     if isinstance(text, int):
         return [text]
     if not isinstance(text, str) or not text.strip():
@@ -728,13 +691,7 @@ def parse_cpu_list(text):
 
 
 def run_queue_pressure(host_before, host_after):
-    """What the run queue did over the window.
-
-    The CPU counters say how busy the CPUs were; the PSI "some" total says how
-    long tasks waited for one, and procs_running says how deep the queue was
-    at the edges.  A rung that is short on delivery with idle CPUs and high
-    pressure is waiting on something else, which is the distinction the brief
-    asks for."""
+    """PSI CPU stall share over the window and procs_running at its edges."""
     before = ((host_before or {}).get("host") or {})
     after = ((host_after or {}).get("host") or {})
     result = {}
@@ -889,7 +846,8 @@ def efficiency_section(bundle):
         result["receiver_cpu_alignment"] = remote_alignment
         receiver_comparable = receiver_comparable and remote_alignment["status"] == "ok"
         native_duration = (remote_cpu.get("interval") or {}).get("value")
-        if not native_duration or abs(native_duration - cpu_seconds) > cpu_seconds * 0.02:
+        if (not native_duration or not cpu_seconds
+                or abs(native_duration - cpu_seconds) > cpu_seconds * 0.02):
             receiver_comparable = False
             result["receiver_cpu_alignment"] = missing(
                 "mixed", "controller CPU mapping disagrees with native receiver CPU duration")
@@ -919,7 +877,7 @@ def build(args):
                       for p in glob.glob(os.path.join(case_dir, "workers.before.*"))}
     workers_after = {os.path.basename(p).split(".")[-1]: parse_metrics(p)
                      for p in glob.glob(os.path.join(case_dir, "workers.after.*"))}
-    cpu, cpu_total = cpu_section(case_dir, processes, host_after)
+    cpu, _ = cpu_section(case_dir, processes, host_after)
     env = environment_section(host_before, host_after, processes)
     net = network_section(host_before, host_after, processes)
     event_loop = {}
@@ -950,7 +908,7 @@ def build(args):
         "rtmp": rtmp_section(case_dir, workers_before, workers_after),
         "hls_push": hls_push_section(case_dir, workers_before, workers_after),
         "delivery": delivery_section(case_dir),
-        "resources": resources_section(case_dir, cpu_total, host_after),
+        "resources": resources_section(case_dir, host_after),
         "preflight": (load_json(os.path.join(case_dir, "preflight.json"))
                       or missing("mixed", "no preflight for this rung")),
         # the host this rung was taken on: CPU, cgroup, affinity, frequency,
@@ -1085,10 +1043,8 @@ def matrix(args):
               f"{','.join(map(str, entry.get('infrastructure_limited') or [])) or 'none'}")
 
 
-# Which field carries the observed ratio, per protocol.  A configured
-# threshold is never one of them: min_delivery_ratio in the HLS reader log is
-# the gate the run was asked to accept, and reading it as a measurement is
-# what made a passing rung look like a 95% delivery rate.
+# Fields carrying the observed ratio per protocol; a configured threshold
+# (the HLS reader log's min_delivery_ratio) is never one of them.
 OBSERVED_RATIO_KEYS = {
     "srt": ("quality_average_delivery_ratio_min",),
     "rtmp": ("quality_min_delivery_ratio", "quality_absolute_delivery_ratio_min"),

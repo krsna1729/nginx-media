@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """Discarding HLS PUT sink and per-destination capacity-quality report.
 
-Throughput is judged on identified segments, not on bytes that happened to
-complete inside a window: with multi-second segments a window edge moves a
-whole segment in or out, which reads as a 10-20% rate change that is not one.
-The report takes the exact set of segments first delivered (to any
-destination) inside the window and asks, per destination, whether each of them
-arrived, exactly once, with the same size, and how long after the first
-destination had it.  A playlist PUT that references a segment the destination
-has not completely received yet is counted as an ordering violation.
+Delivery is judged on the identified segments produced inside the window (a
+window edge would otherwise move a whole multi-second segment in or out): per
+destination, did each arrive exactly once, at the same size, and how late.  A
+playlist PUT naming a segment not yet fully received is an ordering violation.
 """
 
 import argparse
@@ -127,9 +123,7 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
         upload_started = time.monotonic()
         parsed = urlsplit(self.path)
         server = self.server
-        # Fault injection, for the isolation test: a sink that refuses every
-        # Nth upload, closes the connection after N of them, or answers
-        # slowly.  All zero by default, so capacity runs are unaffected.
+        # Fault injection (hls_push_faults_nginx.sh); all zero in capacity runs.
         if server.fault_close_after or server.fault_fail_every:
             with server.fault_lock:
                 server.fault_puts += 1
@@ -242,7 +236,6 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
 def serve(port, bind="127.0.0.1", fail_every=0, close_after=0,
           latency_ms=0):
     server = http.server.ThreadingHTTPServer((bind, port), HlsPushSink)
-    # fault injection, off unless asked for: see the isolation test
     server.fault_lock = threading.Lock()
     server.fault_fail_every = fail_every
     server.fault_close_after = close_after
@@ -275,7 +268,7 @@ METRIC_NAMES = {
 LABEL = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:\\.|[^"\\])*)"')
 
 
-def metric_snapshot(prefix, stream):
+def metric_snapshot(prefix, stream, programs):
     prefix = Path(prefix)
     paths = sorted(prefix.parent.glob(prefix.name + ".*"))
     if not paths:
@@ -292,7 +285,10 @@ def metric_snapshot(prefix, stream):
                 if not separator:
                     continue
                 labels = dict(LABEL.findall(labels_text))
-                if labels.get("protocol") != "hls_push" or labels.get("name") != stream:
+                # --stream names program 0 only; with several programs the
+                # pNNNN- destination IDs are already unique per program
+                if (labels.get("protocol") != "hls_push"
+                        or (programs <= 1 and labels.get("name") != stream)):
                     continue
                 try:
                     value = int(float(value_text.strip()))
@@ -336,7 +332,7 @@ def percentile(values, fraction):
 
 
 def readiness_report(args):
-    metrics = metric_snapshot(args.metrics_prefix, args.stream)
+    metrics = metric_snapshot(args.metrics_prefix, args.stream, args.programs)
     active = active_worker_snapshot(args.metrics_prefix, "hls_upload_pool")
     with Path(args.sink_snapshot).open(encoding="utf-8") as source:
         sink = json.load(source)
@@ -378,7 +374,7 @@ def readiness_report(args):
         for destination in expected
     )
 
-    print(f"readiness_received_destinations={len(received)}/{args.destinations}")
+    print(f"readiness_received_destinations={len(received)}/{len(expected)}")
     print(f"readiness_elapsed_s={progress['elapsed_s']}")
     print(f"readiness_missing_ids={','.join(missing)}")
     print(f"readiness_active_uploaders={active}")
@@ -412,8 +408,8 @@ def expected_destination_ids(programs, destinations, offset):
 
 
 def report(args):
-    before = metric_snapshot(args.before_prefix, args.stream)
-    after = metric_snapshot(args.after_prefix, args.stream)
+    before = metric_snapshot(args.before_prefix, args.stream, args.programs)
+    after = metric_snapshot(args.after_prefix, args.stream, args.programs)
     with Path(args.sink_before).open(encoding="utf-8") as source:
         sink_before = json.load(source)
     with Path(args.sink_after).open(encoding="utf-8") as source:
@@ -426,8 +422,8 @@ def report(args):
     after_active = active_worker_snapshot(args.after_prefix, "hls_upload_pool")
 
     records = []
-    for index in range(args.destinations):
-        destination = f"d{index + args.destination_offset:04d}"
+    for destination in expected_destination_ids(args.programs, args.destinations,
+                                                args.destination_offset):
         final_sink = sink_after["destinations"].get(destination)
         initial_sink = sink_before["destinations"].get(destination, {})
         if final_sink is None:
@@ -438,25 +434,20 @@ def report(args):
         if destination not in after:
             raise RuntimeError(f"no final HLS push egress metrics for {destination}")
         final_metrics = after[destination]
+        if not {"dropped_units", "transport_errors"} <= final_metrics.keys():
+            raise RuntimeError(f"no final HLS push drop/error counters for {destination}")
         initial_metrics = before.get(destination, {})
-        dropped = final_metrics.get("dropped_units", 0) - initial_metrics.get(
-            "dropped_units", 0
-        )
-        errors = final_metrics.get("transport_errors", 0) - initial_metrics.get(
-            "transport_errors", 0
-        )
+        dropped = final_metrics["dropped_units"] - initial_metrics.get("dropped_units", 0)
+        errors = final_metrics["transport_errors"] - initial_metrics.get("transport_errors", 0)
         if not all(math.isfinite(number)
                    for number in (delta_bytes, segments, dropped, errors)):
             raise RuntimeError(f"non-finite HLS push counters for {destination}")
         if min(delta_bytes, segments, dropped, errors) < 0:
             raise RuntimeError(f"HLS push counters regressed for {destination}")
 
-        durations = final_sink["upload_durations_ms"]
-        measured_durations = durations[len(initial_sink.get(
-            "upload_durations_ms", []
-        )):]
-        if not measured_durations:
-            measured_durations = durations
+        # uploads completed inside the window only
+        measured_durations = final_sink["upload_durations_ms"][
+            len(initial_sink.get("upload_durations_ms", [])):]
         first_latency = final_sink["first_segment_latency_ms"]
         if first_latency is None:
             raise RuntimeError("HLS push sink has no first-segment start mark")
@@ -485,11 +476,6 @@ def report(args):
     if not math.isfinite(reference) or reference <= 0:
         raise RuntimeError("HLS push reference rate "
                            f"{reference!r} is not a finite positive rate")
-    for record in records:
-        if not math.isfinite(record["segment_ratio"]):
-            raise RuntimeError("non-finite segment delivery ratio for "
-                               f"{record['destination']}")
-
     failures = []
     prepared_bps, prepared_provenance = prepared_rate(args.prepared_media)
     offered_bps = segment_summary["offered_bps"]
@@ -665,6 +651,9 @@ def segment_accounting(args, sink_before, sink_after, records):
     lag_limit = args.segment_lag_limit_s or max(2 * interval, 2.0)
     window = sorted(name for name, entry in cuts.items()
                     if start <= entry["at"] <= end - lag_limit)
+    if not window:
+        raise RuntimeError("no identified segment was produced inside the "
+                           "window; lengthen the measurement")
     canonical = {name: entry["bytes"] for name, entry in cuts.items()}
     window_bytes = sum(canonical[name] for name in window)
     lags = []
@@ -692,7 +681,7 @@ def segment_accounting(args, sink_before, sink_after, records):
                 late += 1
             got += entry["bytes"]
         delivered += got
-        record["segment_ratio"] = got / window_bytes if window_bytes else 0.0
+        record["segment_ratio"] = got / window_bytes
         record["missing_segments"] = missing
         record["duplicate_segments"] = duplicates
         record["size_mismatches"] = mismatches
@@ -701,9 +690,6 @@ def segment_accounting(args, sink_before, sink_after, records):
         record["playlist_violations"] = (
             final.get("playlist_violations", 0)
             - initial.get("playlist_violations", 0))
-    if not window:
-        raise RuntimeError("no identified segment was produced inside the "
-                           "window; lengthen the measurement")
     lags.sort()
     return {
         "start": start,
@@ -743,9 +729,7 @@ def main():
     # loopback unless the sink is asked to listen where the sender can
     # reach it: a receiver in its own namespace, or on another host
     sink_parser.add_argument("--bind", default="127.0.0.1")
-    # fault injection for the isolation test: refuse every Nth upload, close
-    # the connection after N uploads, or answer after a delay.  Zero means
-    # none, which is what every capacity run uses.
+    # fault injection (hls_push_faults_nginx.sh): 0 = off
     sink_parser.add_argument("--fail-every", type=int, default=0)
     sink_parser.add_argument("--close-after", type=int, default=0)
     sink_parser.add_argument("--latency-ms", type=int, default=0)

@@ -47,7 +47,8 @@ def production(path, start, end):
 def prepare(source, output):
     result = subprocess.run(["ffprobe", "-v", "error", "-show_packets",
                              "-show_entries", "packet=size,pts_time,duration_time",
-                             "-of", "json", source], check=True, capture_output=True, text=True)
+                             "-of", "json", source], check=True, capture_output=True,
+                            text=True, timeout=300)
     packets = json.loads(result.stdout)["packets"]
     begin = min(float(packet["pts_time"]) for packet in packets)
     finish = max(float(packet["pts_time"]) + float(packet.get("duration_time", 0))
@@ -62,6 +63,7 @@ def prepare(source, output):
 
 def observe(playlist, output):
     stopped = False
+    parent = os.getppid()
     def stop(*_):
         nonlocal stopped
         stopped = True
@@ -90,7 +92,8 @@ def observe(playlist, output):
             "provenance": "playlist-identified final segment sizes / local last-write cut timestamps",
             "clock_domain": "controller-monotonic"}), encoding="utf-8")
         os.replace(temporary, output)
-        if stopped:
+        # Also stop if the harness died without signalling us.
+        if stopped or os.getppid() != parent:
             return
         time.sleep(0.05)
 

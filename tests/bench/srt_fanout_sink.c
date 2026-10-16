@@ -134,202 +134,88 @@ extract_destination(const char *streamid, char *destination, size_t cap)
 static int
 publish_ready(const char *path)
 {
-    char *temporary;
-    size_t length = strlen(path) + sizeof(".tmp.XXXXXX");
-    int fd, saved_errno;
+    /* An empty file: there is no partial content a poller could observe. */
+    FILE *file = fopen(path, "w");
 
-    temporary = malloc(length);
-    if (temporary == NULL) {
-        fprintf(stderr, "cannot allocate ready-file path\n");
-        return -1;
-    }
-    (void) snprintf(temporary, length, "%s.tmp.XXXXXX", path);
-
-    fd = mkstemp(temporary);
-    if (fd == -1) {
-        fprintf(stderr, "cannot create ready file %s: %s\n", path,
-                strerror(errno));
-        free(temporary);
-        return -1;
-    }
-    if (close(fd) == -1 || rename(temporary, path) == -1) {
-        saved_errno = errno;
-        (void) unlink(temporary);
+    if (file == NULL || fclose(file) != 0) {
         fprintf(stderr, "cannot publish ready file %s: %s\n", path,
-                strerror(saved_errno));
-        free(temporary);
-        return -1;
-    }
-
-    free(temporary);
-    return 0;
-}
-
-static int
-write_results(const char *path, const peer_t *peers, size_t count)
-{
-    FILE *file;
-    const struct timespec *first = NULL;
-    size_t i;
-    double first_ms;
-
-    for (i = 0; i < count; i++) {
-        if (!peers[i].has_first_byte) {
-            continue;
-        }
-        if (first == NULL
-            || peers[i].first_byte_at.tv_sec < first->tv_sec
-            || (peers[i].first_byte_at.tv_sec == first->tv_sec
-                && peers[i].first_byte_at.tv_nsec < first->tv_nsec))
-        {
-            first = &peers[i].first_byte_at;
-        }
-    }
-
-    file = fopen(path, "w");
-    if (file == NULL) {
-        fprintf(stderr, "cannot create result CSV %s: %s\n", path,
                 strerror(errno));
         return -1;
     }
-    if (fprintf(file,
-                "destination_id,bytes_received,first_ms,stalled,transport_error,"
-                "ts_packets,ts_sync_errors,ts_continuity_errors,ts_tei_errors\n") < 0)
-    {
-        fprintf(stderr, "cannot write result CSV %s\n", path);
-        (void) fclose(file);
-        return -1;
-    }
-    for (i = 0; i < count; i++) {
-        if (fprintf(file, "%s,%llu,", peers[i].destination,
-                    (unsigned long long) peers[i].bytes_received) < 0)
-        {
-            fprintf(stderr, "cannot write result CSV %s\n", path);
-            (void) fclose(file);
-            return -1;
-        }
-        if (peers[i].has_first_byte && first != NULL) {
-            first_ms = (peers[i].first_byte_at.tv_sec - first->tv_sec) * 1000.0
-                       + (peers[i].first_byte_at.tv_nsec - first->tv_nsec)
-                             / 1000000.0;
-            if (fprintf(file, "%.3f", first_ms) < 0) {
-                fprintf(stderr, "cannot write result CSV %s\n", path);
-                (void) fclose(file);
-                return -1;
-            }
-        }
-        if (fprintf(file, ",%d,%d,%llu,%llu,%llu,%llu\n",
-                    peers[i].stalled, peers[i].transport_error,
-                    (unsigned long long) peers[i].ts_packets,
-                    (unsigned long long) peers[i].ts_sync_errors,
-                    (unsigned long long) peers[i].ts_continuity_errors,
-                    (unsigned long long) peers[i].ts_tei_errors) < 0)
-        {
-            fprintf(stderr, "cannot write result CSV %s\n", path);
-            (void) fclose(file);
-            return -1;
-        }
-    }
-    if (fclose(file) != 0) {
-        fprintf(stderr, "cannot finish result CSV %s: %s\n", path,
-                strerror(errno));
-        return -1;
-    }
-
     return 0;
 }
 
+/* Result (snapshot_time NULL) or snapshot CSV, replaced atomically. */
 static int
-write_snapshot(const char *path, const peer_t *peers, size_t count,
+write_csv(const char *path, const peer_t *peers, size_t count,
     const struct timespec *snapshot_time)
 {
-    char *temporary;
-    size_t length = strlen(path) + sizeof(".tmp.XXXXXX");
-    size_t i;
-    int fd, saved_errno;
-    FILE *file;
-    uint64_t snapshot_ns;
-    snapshot_ns = (uint64_t) snapshot_time->tv_sec * 1000000000ULL
-                  + (uint64_t) snapshot_time->tv_nsec;
+    const struct timespec *first = NULL;
+    size_t length = strlen(path) + sizeof(".tmp.XXXXXX"), i;
+    char *temporary = malloc(length);
+    FILE *file = NULL;
+    int fd, ok, saved_errno;
 
-    temporary = malloc(length);
     if (temporary == NULL) {
-        fprintf(stderr, "cannot allocate receiver snapshot path\n");
+        fprintf(stderr, "cannot allocate a temporary path for %s\n", path);
         return -1;
     }
     (void) snprintf(temporary, length, "%s.tmp.XXXXXX", path);
     fd = mkstemp(temporary);
     if (fd == -1) {
-        fprintf(stderr, "cannot create receiver snapshot %s: %s\n", path,
-                strerror(errno));
-        free(temporary);
-        return -1;
+        goto failed;
     }
     file = fdopen(fd, "w");
     if (file == NULL) {
         saved_errno = errno;
         (void) close(fd);
-        (void) unlink(temporary);
-        fprintf(stderr, "cannot open receiver snapshot %s: %s\n", path,
-                strerror(saved_errno));
-        free(temporary);
-        return -1;
+        errno = saved_errno;
+        goto failed;
     }
-    /* The snapshot carries the same accounting as the final result, so a
-     * measurement taken during a run can say whether the media was continuous
-     * and whether the peer stalled, not only how many bytes had arrived. */
-    {
-        const struct timespec *first = NULL;
 
-        for (i = 0; i < count; i++) {
-            if (peers[i].has_first_byte
-                && (first == NULL
-                    || peers[i].first_byte_at.tv_sec < first->tv_sec
-                    || (peers[i].first_byte_at.tv_sec == first->tv_sec
-                        && peers[i].first_byte_at.tv_nsec < first->tv_nsec)))
-            {
-                first = &peers[i].first_byte_at;
-            }
-        }
-
-        if (fprintf(file,
-                    "destination_id,bytes_received,first_ms,stalled,"
-                    "transport_error,ts_packets,ts_sync_errors,"
-                    "ts_continuity_errors,ts_tei_errors,snapshot_ns\n") < 0)
+    for (i = 0; i < count; i++) {
+        if (peers[i].has_first_byte
+            && (first == NULL
+                || peers[i].first_byte_at.tv_sec < first->tv_sec
+                || (peers[i].first_byte_at.tv_sec == first->tv_sec
+                    && peers[i].first_byte_at.tv_nsec < first->tv_nsec)))
         {
-            goto failed;
-        }
-
-        for (i = 0; i < count; i++) {
-            if (fprintf(file, "%s,%llu,", peers[i].destination,
-                        (unsigned long long) peers[i].bytes_received) < 0)
-            {
-                goto failed;
-            }
-            if (peers[i].has_first_byte && first != NULL) {
-                double  first_ms = (peers[i].first_byte_at.tv_sec
-                                    - first->tv_sec) * 1000.0
-                                   + (peers[i].first_byte_at.tv_nsec
-                                      - first->tv_nsec) / 1000000.0;
-
-                if (fprintf(file, "%.3f", first_ms) < 0) {
-                    goto failed;
-                }
-            }
-            if (fprintf(file, ",%d,%d,%llu,%llu,%llu,%llu,%llu\n",
-                        peers[i].stalled, peers[i].transport_error,
-                        (unsigned long long) peers[i].ts_packets,
-                        (unsigned long long) peers[i].ts_sync_errors,
-                        (unsigned long long) peers[i].ts_continuity_errors,
-                        (unsigned long long) peers[i].ts_tei_errors,
-                        (unsigned long long) snapshot_ns) < 0)
-            {
-                goto failed;
-            }
+            first = &peers[i].first_byte_at;
         }
     }
 
-    if (fclose(file) != 0) {
+    (void) fprintf(file,
+                   "destination_id,bytes_received,first_ms,stalled,"
+                   "transport_error,ts_packets,ts_sync_errors,"
+                   "ts_continuity_errors,ts_tei_errors%s\n",
+                   snapshot_time != NULL ? ",snapshot_ns" : "");
+    for (i = 0; i < count; i++) {
+        (void) fprintf(file, "%s,%llu,", peers[i].destination,
+                       (unsigned long long) peers[i].bytes_received);
+        if (peers[i].has_first_byte && first != NULL) {
+            (void) fprintf(file, "%.3f",
+                           (peers[i].first_byte_at.tv_sec - first->tv_sec)
+                               * 1000.0
+                           + (peers[i].first_byte_at.tv_nsec - first->tv_nsec)
+                               / 1000000.0);
+        }
+        (void) fprintf(file, ",%d,%d,%llu,%llu,%llu,%llu",
+                       peers[i].stalled, peers[i].transport_error,
+                       (unsigned long long) peers[i].ts_packets,
+                       (unsigned long long) peers[i].ts_sync_errors,
+                       (unsigned long long) peers[i].ts_continuity_errors,
+                       (unsigned long long) peers[i].ts_tei_errors);
+        if (snapshot_time != NULL) {
+            (void) fprintf(file, ",%llu",
+                           (unsigned long long) snapshot_time->tv_sec
+                               * 1000000000ULL
+                           + (unsigned long long) snapshot_time->tv_nsec);
+        }
+        (void) fputc('\n', file);
+    }
+
+    ok = !ferror(file);
+    if (fclose(file) != 0 || !ok) {
         file = NULL;
         goto failed;
     }
@@ -337,7 +223,6 @@ write_snapshot(const char *path, const peer_t *peers, size_t count,
     if (rename(temporary, path) == -1) {
         goto failed;
     }
-
     free(temporary);
     return 0;
 
@@ -347,8 +232,7 @@ failed:
         (void) fclose(file);
     }
     (void) unlink(temporary);
-    fprintf(stderr, "cannot write receiver snapshot %s: %s\n", path,
-            strerror(saved_errno));
+    fprintf(stderr, "cannot write %s: %s\n", path, strerror(saved_errno));
     free(temporary);
     return -1;
 }
@@ -498,11 +382,7 @@ ts_inspect(peer_t *peer, const unsigned char *data, size_t length)
     }
 }
 
-/*
- * Socket-to-peer lookup.  Every read event names a socket; a linear scan of
- * the peer table per event is quadratic in the fanout, which made the
- * receiver's own CPU part of what a large ladder rung measured.
- */
+/* Socket-to-peer lookup; a linear scan per event is quadratic in the fanout. */
 typedef struct {
     SRTSOCKET *keys;
     size_t *values;
@@ -604,9 +484,7 @@ main(int argc, char **argv)
     for (l = 0; l < LISTENER_CAP; l++) {
         listeners[l] = SRT_INVALID_SOCK;
     }
-    /* Where to listen.  Loopback by default; the capacity harness sets
-     * SRT_SINK_BIND so the measuring receiver can live in its own network
-     * namespace - or on another host - while the sender dials that address. */
+    /* Loopback by default; the harness binds the receiver namespace address. */
     bind_text = getenv("SRT_SINK_BIND");
     if (bind_text == NULL || bind_text[0] == '\0') {
         bind_text = "127.0.0.1";
@@ -618,18 +496,8 @@ main(int argc, char **argv)
         fprintf(stderr, "SRT_SINK_BIND is not an IPv4 address: %s\n", bind_text);
         return EXIT_FAILURE;
     }
-    {
-        const char *mode_env = getenv("SRT_SINK_MODE");
-        if (mode_env != NULL) {
-            if (strcmp(mode_env, "fast") == 0) {
-                fast_mode = 1;
-            } else if (strcmp(mode_env, "correctness") == 0) {
-                fast_mode = 0;
-            }
-        } else if (getenv("SRT_SINK_FAST") != NULL && strcmp(getenv("SRT_SINK_FAST"), "0") != 0) {
-            fast_mode = 1;
-        }
-    }
+    fast_mode = getenv("SRT_SINK_MODE") != NULL
+                && strcmp(getenv("SRT_SINK_MODE"), "fast") == 0;
 
     if (argc > 1 && strlen(argv[1]) < sizeof(port_text)) {
         strcpy(port_text, argv[1]);
@@ -721,11 +589,7 @@ main(int argc, char **argv)
         goto done;
     }
     initialized = 1;
-    /*
-     * Per-packet receive loss, empty accepts, and redundant epoll-removal
-     * warnings flood the measured path. Receiver byte, TS, and transport
-     * counters preserve the quality evidence without those log categories.
-     */
+    /* Per-packet loss/accept/epoll logging floods the measured path. */
     srt_dellogfa(SRT_LOGFA_BUF_RECV);
     srt_dellogfa(SRT_LOGFA_QUE_RECV);
     srt_dellogfa(SRT_LOGFA_TSBPD);
@@ -788,7 +652,8 @@ main(int argc, char **argv)
         }
     }
 
-    while (!stop_requested) {
+    /* A failure ends the run rather than idling, events ignored, until signalled. */
+    while (!stop_requested && !failure) {
         int count = srt_epoll_uwait(epoll_id, events,
                                     (int) (expected + listener_count), 1000);
         if (count == SRT_ERROR) {
@@ -1005,14 +870,6 @@ main(int argc, char **argv)
                         }
                         break;
                     }
-                    if (UINT64_MAX - peers[peer_index].bytes_received
-                        < (uint64_t) received)
-                    {
-                        fprintf(stderr, "byte counter overflow for %s\n",
-                                peers[peer_index].destination);
-                        failure = 1;
-                        break;
-                    }
                     peers[peer_index].bytes_received += (uint64_t) received;
                     if (measurement_active) {
                         if (!fast_mode) {
@@ -1043,12 +900,13 @@ main(int argc, char **argv)
                 }
             }
         }
-        if (measurement_toggle_requested) {
+        if (measurement_toggle_requested || snapshot_requested) {
             size_t peer_index;
-            int start_measurement = !measurement_active;
+            int toggle = measurement_toggle_requested;
 
             measurement_toggle_requested = 0;
-            if (start_measurement) {
+            snapshot_requested = 0;
+            if (toggle && !measurement_active) {
                 for (peer_index = 0; peer_index < connected; peer_index++) {
                     peers[peer_index].ts_packets = 0;
                     peers[peer_index].ts_sync_errors = 0;
@@ -1058,23 +916,11 @@ main(int argc, char **argv)
                     peers[peer_index].ts_partial_len = 0;
                     memset(peers[peer_index].ts_seen, 0, TS_SEEN_BYTES);
                 }
-                measurement_active = 1;
-            } else {
-                measurement_active = 0;
             }
+            measurement_active ^= toggle;
             if (clock_gettime(CLOCK_MONOTONIC, &snapshot_time) == -1
-                || write_snapshot(snapshot_path, peers, connected,
-                                  &snapshot_time) != 0)
-            {
-                failure = 1;
-                break;
-            }
-        }
-        if (snapshot_requested) {
-            snapshot_requested = 0;
-            if (clock_gettime(CLOCK_MONOTONIC, &snapshot_time) == -1
-                || write_snapshot(snapshot_path, peers, connected,
-                                  &snapshot_time) != 0)
+                || write_csv(snapshot_path, peers, connected,
+                             &snapshot_time) != 0)
             {
                 failure = 1;
                 break;
@@ -1087,7 +933,7 @@ main(int argc, char **argv)
                 connected, expected);
         failure = 1;
     }
-    if (write_results(argv[4], peers, connected) != 0) {
+    if (write_csv(argv[4], peers, connected, NULL) != 0) {
         failure = 1;
     }
 
@@ -1109,9 +955,7 @@ done:
     }
     free(peer_map.keys);
     free(peer_map.values);
-    if (buffer != NULL) {
-        free(buffer);
-    }
+    free(buffer);
     if (peers != NULL) {
         for (i = 0; i < (int) expected; i++) {
             free(peers[i].ts_last_cc);

@@ -308,8 +308,8 @@ CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-3}"
 CURL_MAX_TIME="${CURL_MAX_TIME:-20}"
 
 receiver_curl() {   # <curl args...>
-    harness_run curl --connect-timeout "$CURL_CONNECT_TIMEOUT" \
-        --max-time "$CURL_MAX_TIME" "$@"
+    harness_run curl --connect-timeout "${CURL_CONNECT_TIMEOUT:-3}" \
+        --max-time "${CURL_MAX_TIME:-20}" "$@"
 }
 
 # The shared publisher helper fetches the ingest key over the API, which
@@ -805,13 +805,24 @@ PY
 
     for (( k = 0; k < count; k++ )); do
         dir="$RTMP_SINK_RUN-$k"
-        for i in $(seq 1 200); do
-            curl -fsS --connect-timeout 2 --max-time 5 \
-                "$(rtmp_sink_api "$k")/metrics" >/dev/null 2>&1 && break
+        # Bounded by the clock, not by a count of attempts, and made through
+        # `receiver_curl`. Both matter and for the same reason: the sink's
+        # address resolves only inside the harness namespace. A bare curl
+        # leaves through the host's default route to the gateway, which drops
+        # the SYNs, so each attempt costs the full six-retry budget of about
+        # 127s - and two hundred of those is seven hours, which is what this
+        # wait actually spent before anyone noticed it had stopped.
+        sink_ready=0
+        local sink_deadline=$(( SECONDS + 30 ))
+        while [ "$SECONDS" -lt "$sink_deadline" ]; do
+            if receiver_curl -fsS "$(rtmp_sink_api "$k")/metrics" \
+                >/dev/null 2>&1; then
+                sink_ready=1
+                break
+            fi
             sleep 0.05
         done
-        if ! curl -fsS --connect-timeout 2 --max-time 5 \
-                "$(rtmp_sink_api "$k")/metrics" >/dev/null 2>&1; then
+        if [ "$sink_ready" -ne 1 ]; then
             echo "RTMP sink $k did not become ready" >&2
             stop_rtmp_sink_instance
             return 1
@@ -1115,14 +1126,14 @@ restream_api() { printf 'http://%s:%s' "$CAPACITY_MEDIA_ADDR" "$RESTREAM_HTTP_PO
 # code paths for the same evidence.
 api_curl() {   # <curl args...>
     if [ -z "$CAPACITY_SENDER_EXEC" ]; then
-        curl --connect-timeout "$CURL_CONNECT_TIMEOUT" \
-        --max-time "$CURL_MAX_TIME" "$@"
+        curl --connect-timeout "${CURL_CONNECT_TIMEOUT:-3}" \
+        --max-time "${CURL_MAX_TIME:-20}" "$@"
         return
     fi
     local -a prefix=()
     read -r -a prefix <<< "$CAPACITY_SENDER_EXEC"
-    "${prefix[@]}" curl --connect-timeout "$CURL_CONNECT_TIMEOUT" \
-        --max-time "$CURL_MAX_TIME" "$@"
+    "${prefix[@]}" curl --connect-timeout "${CURL_CONNECT_TIMEOUT:-3}" \
+        --max-time "${CURL_MAX_TIME:-20}" "$@"
 }
 
 rtmp_sink_api() {   # [sink index]
@@ -2520,17 +2531,14 @@ capacity_worker_metrics() {   # <file prefix>; one response from every worker
 }
 
 capacity_rtmp_sink_metrics() {   # <file prefix>
-    local prefix="$1"
-
-    local k pid status=0
+    local prefix="$1" k pid status=0
     local -a requests=()
 
     [ -n "$RTMP_SINK_WORKER_PID" ] || return 0
-    # stamped with the monotonic clock around each request, so the rate
-    # divides by the interval that brackets these counters; one file per
-    # sink, summed by the analyzer
+    # one file per sink, summed by the analyzer; the sink resolves only in
+    # the harness namespace
     for (( k = 0; k < RTMP_SINK_COUNT; k++ )); do
-        python3 "$BENCH_DIR/rtmp_capacity_quality.py" scrape \
+        harness_run python3 "$BENCH_DIR/rtmp_capacity_quality.py" scrape \
             "$(rtmp_sink_api "$k")/metrics" \
             "$prefix.${RTMP_SINK_PIDS[$k]}" &
         requests+=( "$!" )
@@ -2925,7 +2933,9 @@ capacity_hls_push_snapshot() {   # <port> <output> <start|end> <sink PID>
     local port="$1" output="$2" phase="$3" pid="$4" request_ns=0 reply_ns=0
     if [ -n "$CAPACITY_RECEIVER_CONFIG" ]; then
         receiver_capture command-capture "${RECEIVER_IDENTITIES[$pid]}" "$output" \
-            curl -fsS -o "$output" "http://$CAPACITY_RECEIVER_ADDR:$port/__snapshot" || return 1
+            curl --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+            --max-time "$CURL_MAX_TIME" -fsS -o "$output" \
+            "http://$CAPACITY_RECEIVER_ADDR:$port/__snapshot" || return 1
     else
         capacity_capture_gate || return 1
         request_ns="$(python3 -c 'import time; print(time.monotonic_ns())')"
@@ -3778,7 +3788,7 @@ PY
         for attempt in $(seq 1 "$connect_attempts"); do
             : > "$case_dir/rtmp-warmup.metrics"
             for (( sink = 0; sink < RTMP_SINK_COUNT; sink++ )); do
-                curl -fsS "$(rtmp_sink_api "$sink")/metrics" \
+                receiver_curl -fsS "$(rtmp_sink_api "$sink")/metrics" \
                     >> "$case_dir/rtmp-warmup.metrics" \
                     || { echo "could not scrape RTMP receiver metrics" >&2; return 1; }
             done

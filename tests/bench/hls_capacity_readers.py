@@ -16,6 +16,9 @@ from capacity_media_offer import prepared_rate, production
 
 REQUEST_TIMEOUT = 8.0
 SEGMENT_CONCURRENCY_LIMIT = 32
+# A dead controller never signals: bound each wait (above the harness's longest
+# readiness wait, 30 s + 0.1 s/destination) so an orphan exits.
+SIGNAL_WAIT_LIMIT_S = 1800
 
 
 class MeasurementError(Exception):
@@ -191,45 +194,35 @@ def percentile(sorted_values, fraction):
 
 
 def delivery_ratios(stats, reference):
-    """What the readers counted, per reader: delivered rate over the reader's
-    own measurement interval, divided by the reference rate.  The configured
-    acceptance threshold is not part of any of these numbers."""
-    if reference <= 0:
-        ratios = sorted(item.rate_bps * 0.0 for item in stats)
-    else:
-        ratios = sorted(item.rate_bps / reference for item in stats)
-    lowest = min(stats, key=lambda item: item.rate_bps) if stats else None
+    """Per reader: delivered rate over its own window / reference rate."""
+    ratios = sorted(item.rate_bps / reference for item in stats)
     return {
-        "min": ratios[0] if ratios else 0.0,
-        "min_reader_id": lowest.reader_id if lowest else -1,
+        "min": ratios[0],
+        "min_reader_id": min(stats, key=lambda item: item.rate_bps).reader_id,
         "p5": percentile(ratios, 0.05),
         "p50": percentile(ratios, 0.50),
         "p95": percentile(ratios, 0.95),
     }
 
 
-async def read_playlist(client, playlist_url, stats):
-    try:
-        response = await client.request(playlist_url)
-    except HTTPError:
-        stats.playlist_errors += 1
-        raise
+def checked_body(response, what):
     if response.status != 200:
-        stats.playlist_errors += 1
-        raise HTTPError(f"playlist returned HTTP {response.status}")
+        raise HTTPError(f"{what} returned HTTP {response.status}")
     declared = response.headers.get("content-length")
-    if declared is not None:
-        try:
-            matches_length = int(declared) == len(response.body)
-        except ValueError:
-            matches_length = False
-        if not matches_length:
-            stats.playlist_errors += 1
-            raise HTTPError("invalid playlist Content-Length")
     try:
-        return parse_playlist(response.body)
+        matches_length = declared is None or int(declared) == len(response.body)
+    except ValueError:
+        matches_length = False
+    if not matches_length:
+        raise HTTPError(f"invalid {what} Content-Length")
+    return response.body
+
+
+async def read_playlist(client, playlist_url):
+    body = checked_body(await client.request(playlist_url), "playlist")
+    try:
+        return parse_playlist(body)
     except ValueError as exc:
-        stats.playlist_errors += 1
         raise HTTPError(str(exc)) from exc
 
 
@@ -245,27 +238,19 @@ async def fetch_segment(client, url, stats, semaphore, concurrency, warmup=False
 
 async def _fetch_segment(client, url, stats, warmup):
     try:
-        response = await client.request(url)
-        declared = response.headers.get("content-length")
-        if response.status != 200:
-            raise HTTPError(f"segment returned HTTP {response.status}")
-        if declared is not None:
-            try:
-                matches_length = int(declared) == len(response.body)
-            except ValueError:
-                matches_length = False
-            if not matches_length:
-                raise HTTPError("invalid segment Content-Length")
-        if not validate_ts(response.body):
-            stats.ts_sync_errors += 1
+        body = checked_body(await client.request(url), "segment")
+        if not validate_ts(body):
+            if not warmup and not stats.sealed:
+                stats.ts_sync_errors += 1
             raise HTTPError("segment MPEG-TS sync or packet length error")
         if not warmup and not stats.sealed:
-            stats.bytes_received += len(response.body)
+            stats.bytes_received += len(body)
             stats.segments += 1
-            stats.delivered_segments[urlsplit(url).path.rsplit("/", 1)[-1]] = len(response.body)
+            stats.delivered_segments[urlsplit(url).path.rsplit("/", 1)[-1]] = len(body)
         return True
     except (HTTPError, ValueError):
-        if not warmup:
+        # errors count only inside the measurement window, like the bytes
+        if not warmup and not stats.sealed:
             stats.segment_errors += 1
         return False
 
@@ -274,9 +259,8 @@ async def run_reader(stats, playlist_url, client, ready_event, measurement_event
                      stop_event, fatal_event, fatal_messages, poll_interval,
                      segment_semaphore, concurrency):
     try:
-        sequence, uris = await read_playlist(client, playlist_url, stats)
+        sequence, uris = await read_playlist(client, playlist_url)
         if not uris:
-            stats.playlist_errors += 1
             raise MeasurementError(f"reader {stats.reader_id}: playlist has no segments")
         tail_sequence = sequence + len(uris) - 1
         tail_url = urljoin(playlist_url, uris[-1])
@@ -292,12 +276,13 @@ async def run_reader(stats, playlist_url, client, ready_event, measurement_event
                 await asyncio.wait_for(measurement_event.wait(), timeout=poll_interval)
             except asyncio.TimeoutError:
                 try:
-                    current_sequence, current_uris = await read_playlist(client, playlist_url, stats)
+                    current_sequence, current_uris = await read_playlist(client, playlist_url)
                 except HTTPError:
+                    # only a refresh that straddled the start is in the window
+                    stats.playlist_errors += measurement_event.is_set()
                     continue
-                # A playlist completed across start may already contain
-                # in-window segments. Only a wholly pre-start refresh can
-                # advance the warmup anchor without skipping delivery.
+                # A refresh completed across start may hold in-window segments;
+                # only a wholly pre-start one may advance the warmup anchor.
                 if measurement_event.is_set():
                     pending_playlist = current_sequence, current_uris
                     break
@@ -306,7 +291,7 @@ async def run_reader(stats, playlist_url, client, ready_event, measurement_event
         while not stop_event.is_set():
             try:
                 if pending_playlist is None:
-                    current_sequence, current_uris = await read_playlist(client, playlist_url, stats)
+                    current_sequence, current_uris = await read_playlist(client, playlist_url)
                 else:
                     current_sequence, current_uris = pending_playlist
                     pending_playlist = None
@@ -320,7 +305,7 @@ async def run_reader(stats, playlist_url, client, ready_event, measurement_event
                                             segment_semaphore, concurrency)
                     last_sequence = max(last_sequence, current_end)
             except HTTPError:
-                pass
+                stats.playlist_errors += not stats.sealed
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=poll_interval)
             except asyncio.TimeoutError:
@@ -398,15 +383,14 @@ async def async_main(args):
             ready.write("ready\n")
         start_wait = asyncio.create_task(measurement_event.wait())
         stop_wait = asyncio.create_task(stop_event.wait())
-        _, pending = await asyncio.wait({start_wait, stop_wait},
+        _, pending = await asyncio.wait({start_wait, stop_wait}, timeout=SIGNAL_WAIT_LIMIT_S,
                                         return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
-        if stop_event.is_set() and not measurement_event.is_set():
-            raise MeasurementError("received SIGTERM before measurement started")
-        if start_ns is None:
-            raise MeasurementError("measurement start has no timestamp")
+        if not measurement_event.is_set():
+            raise MeasurementError("no measurement start (SIGTERM first, or no SIGUSR1 "
+                                   f"within {SIGNAL_WAIT_LIMIT_S}s)")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=args.duration)
         except asyncio.TimeoutError:
@@ -416,9 +400,12 @@ async def async_main(args):
             for item in stats:
                 item.sealed = True
         elapsed = (end_ns - start_ns) / 1e9
-        # Closing counters must still find this process alive. SIGUSR2 seals
-        # receipts; SIGTERM releases reporting/exit after CPU accounting closes.
-        await finish_event.wait()
+        # Closing counters must still find this process alive: SIGUSR2 seals
+        # receipts, SIGTERM releases reporting once CPU accounting closes.
+        try:
+            await asyncio.wait_for(finish_event.wait(), timeout=SIGNAL_WAIT_LIMIT_S)
+        except asyncio.TimeoutError as exc:
+            raise MeasurementError(f"no SIGTERM within {SIGNAL_WAIT_LIMIT_S}s of the window end") from exc
         for item in stats:
             item.rate_bps = item.bytes_received * 8 / elapsed if elapsed > 0 else 0.0
         try:
@@ -448,11 +435,7 @@ async def async_main(args):
         print(f"readers={args.readers}")
         print(f"duration_s={elapsed:.6f}")
         print(f"reader_window_reference_bps={reference:.2f}")
-        # The gate and the measurement are different numbers: the threshold is
-        # what the run was asked to accept, the observed values are what the
-        # readers counted.  min_delivery_ratio keeps its original meaning - the
-        # configured threshold - so published history that read it is not
-        # reinterpreted; anything that wants a measurement reads observed_*.
+        # min_delivery_ratio is the configured gate, kept for history; observed_* are measurements.
         print(f"delivery_ratio_threshold={args.min_delivery_ratio:.6f}")
         print(f"min_delivery_ratio={args.min_delivery_ratio:.6f}")
         print(f"observed_min_delivery_ratio={observed['min']:.6f}")
@@ -499,7 +482,7 @@ def write_report(path, stats, duration, reference, ratio, segment_limit, concurr
                          "segment_concurrency_limit", "segment_concurrency_max",
                          "window_start_ns", "window_end_ns", "delivered_segments"))
         for item in stats:
-            comparison = item.rate_bps / reference if reference > 0 else 0.0
+            comparison = item.rate_bps / reference
             writer.writerow((item.reader_id, item.bytes_received, item.segments,
                              item.playlist_errors, item.segment_errors,
                              item.sequence_gaps, item.ts_sync_errors,

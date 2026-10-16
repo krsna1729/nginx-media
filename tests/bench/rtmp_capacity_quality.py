@@ -1,25 +1,15 @@
 #!/usr/bin/env python3
 """Assess per-destination RTMP payload delivery from worker metric snapshots.
 
-Three uses:
-
-  scrape URL OUT          one receiver scrape, stamped with the monotonic
-                          clock immediately before and after the request, so
-                          the delivery rate divides by the interval that
-                          actually brackets the byte counters rather than by
-                          a duration the shell measured somewhere else.
-  sample URL[,URL] BASE OUT
-                          scrapes every --interval seconds until SIGTERM and
-                          writes per-destination interval deltas, for the
-                          short-interval and stall checks.
-  (no subcommand)         the quality report.
+  scrape URL OUT              one receiver scrape bracketed by monotonic stamps
+  sample URL[,URL] BASE OUT   per-destination interval deltas until SIGTERM
+  (no subcommand)             the quality report
 """
 
 import argparse
 import csv
 import glob
 import math
-import os
 import re
 import signal
 import sys
@@ -41,10 +31,6 @@ SAMPLE_RE = re.compile(
 LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:\\.|[^"\\])*)"')
 
 
-def decode_label(value):
-    return re.sub(r"\\([\\n\"])", lambda match: {"\\": "\\", "n": "\n", '"': '"'}[match.group(1)], value)
-
-
 def read_snapshot(prefix):
     paths = sorted(glob.glob(prefix + ".*"))
     if not paths:
@@ -52,43 +38,8 @@ def read_snapshot(prefix):
     totals = {}
     for path in paths:
         with open(path, encoding="utf-8") as source:
-            for line_number, line in enumerate(source, 1):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                match = SAMPLE_RE.match(line)
-                if match is None:
-                    # Other exposition lines are irrelevant; malformed target samples are not.
-                    if line.startswith(METRIC):
-                        raise ValueError(f"malformed {METRIC} sample in {path}:{line_number}")
-                    continue
-                name, raw_labels, raw_value = match.groups()
-                if name != METRIC:
-                    continue
-                labels = {}
-                if raw_labels:
-                    for item in LABEL_RE.finditer(raw_labels):
-                        key, value = item.groups()
-                        if key in labels:
-                            raise ValueError(f"duplicate label {key} in {path}:{line_number}")
-                        labels[key] = decode_label(value)
-                    # Ensure the complete label set was parsed, not a partial regex match.
-                    if ",".join(f'{key}="{value}"' for key, value in labels.items()) != raw_labels:
-                        # Compare after tokenization while allowing whitespace around commas.
-                        remainder = LABEL_RE.sub("", raw_labels)
-                        if remainder.strip(" ,\t"):
-                            raise ValueError(f"malformed labels in {path}:{line_number}")
-                try:
-                    value = float(raw_value)
-                except ValueError as error:
-                    raise ValueError(f"invalid {METRIC} value in {path}:{line_number}") from error
-                if not math.isfinite(value) or value < 0 or not value.is_integer():
-                    raise ValueError(f"invalid {METRIC} counter in {path}:{line_number}")
-                if (labels.get("application") == "live"
-                        and labels.get("name") is not None
-                        and labels.get("source") == labels.get("name")):
-                    identifier = labels["name"]
-                    totals[identifier] = totals.get(identifier, 0) + int(value)
+            for identifier, value in parse_totals(source.read()).items():
+                totals[identifier] = totals.get(identifier, 0) + value
     return totals
 
 
@@ -242,8 +193,6 @@ def interval_check(args, expected, reference, before, after, before_ns,
                  int(row["bytes_received"]), int(row["total_bytes"])))
     summary = {}
     for identifier in expected:
-        if identifier not in before or identifier not in after:
-            continue
         intervals = rows.get(identifier, [])
         if not intervals:
             raise ValueError(f"{identifier}: no short-interval samples")
@@ -270,10 +219,8 @@ def interval_check(args, expected, reference, before, after, before_ns,
         if after_ns > previous_end:
             raw.append((previous_end, after_ns, residual, after[identifier]))
         previous_end, previous_total = before_ns, before[identifier]
-        # A scrape that ran late is followed by one that comes early; the
-        # short interval between them holds whatever TCP delivered in a
-        # fraction of a second and says nothing about the rate.  Intervals
-        # shorter than half the sampling period are merged into the next.
+        # A late scrape followed by an early one leaves a sub-second interval
+        # that says nothing about rate: merge spans shorter than half a period.
         spans = []
         pending = None
         for start_ns, end_ns, count, cumulative in raw:
@@ -393,18 +340,14 @@ def quality_report(args):
     if after_ns <= before_ns:
         raise ValueError("receiver scrape timestamps did not advance")
     measurement_s = (after_ns - before_ns) / 1e9
-    timing = "receiver-scrape-monotonic"
     failures = []
     rows = []
     rates = []
     total_bytes = 0
     for identifier in expected:
-        if identifier not in before or identifier not in after:
-            missing = []
-            if identifier not in before:
-                missing.append("before")
-            if identifier not in after:
-                missing.append("after")
+        missing = [name for name, snapshot in (("before", before), ("after", after))
+                   if identifier not in snapshot]
+        if missing:
             raise ValueError(f"{identifier}: missing metric sample in {','.join(missing)} snapshot")
         start, end = before[identifier], after[identifier]
         if end < start:
@@ -413,14 +356,14 @@ def quality_report(args):
         rate = delta * 8.0 / measurement_s
         total_bytes += delta
         rates.append(rate)
-        rows.append((identifier, start, end, delta, f"{rate:.2f}", ""))
+        rows.append((identifier, start, end, delta, rate))
         if delta <= 0:
             failures.append(f"{identifier}: no positive payload delivery")
 
     if args.reference_bps == 0:
         if len(expected) != 1:
             raise ValueError("reference-bps 0 requires exactly one expected destination")
-        reference = rates[0] if rates else 0.0
+        reference = rates[0]
         if reference <= 0:
             raise ValueError("cannot calibrate reference from a nonpositive delivery rate")
     else:
@@ -434,14 +377,9 @@ def quality_report(args):
             failures.append(f"{identifier}: delivery below prepared elementary payload rate")
 
     result_rows = []
-    for row in rows:
-        identifier, start, end, delta, raw_rate, _ = row
-        if raw_rate == "":
-            result_rows.append((identifier, start, end, delta, raw_rate, ""))
-            continue
-        rate = float(raw_rate)
-        ratio = rate / reference if reference > 0 else 0.0
-        result_rows.append((identifier, start, end, delta, raw_rate, f"{ratio:.5f}"))
+    for identifier, start, end, delta, rate in rows:
+        ratio = rate / reference
+        result_rows.append((identifier, start, end, delta, f"{rate:.2f}", f"{ratio:.5f}"))
         if rate <= 0 or ratio < args.min_delivery_ratio:
             failures.append(f"{identifier}: delivery ratio {ratio:.5f} below {args.min_delivery_ratio:.5f}")
 
@@ -454,10 +392,7 @@ def quality_report(args):
     interval_summary = interval_check(args, expected, max(reference, offered_bps), before,
                                       after, before_ns, after_ns, failures)
 
-    ratios = [float(row[5]) for row in result_rows if row[5] != ""]
-    min_ratio = min(ratios, default=0.0)
-    if len(ratios) != len(expected):
-        min_ratio = 0.0
+    min_ratio = min(rates) / reference
     aggregate_bps = total_bytes * 8.0 / measurement_s
     if args.queue_before_prefix or args.queue_after_prefix:
         if not args.queue_before_prefix or not args.queue_after_prefix:
@@ -472,7 +407,7 @@ def quality_report(args):
     print(f"quality_min_delivery_ratio={min_ratio:.5f}")
     print(f"quality_measurement_s={measurement_s:.6f}")
     print(f"quality_shell_window_s={args.measurement_s:.6f}")
-    print(f"quality_timing={timing}")
+    print("quality_timing=receiver-scrape-monotonic")
     print(f"quality_window_start_ns={before_ns:.0f}")
     print(f"quality_window_end_ns={after_ns:.0f}")
     print("quality_clock_domain=controller-monotonic")
@@ -480,12 +415,9 @@ def quality_report(args):
     print(f"quality_end_uncertainty_ns={stamp_uncertainty(args.after_prefix, after_ns)}")
     print(f"quality_offered_payload_bps={offered_bps:.2f}")
     print(f"quality_offered_rate_provenance={offered_provenance}")
-    print(f"quality_absolute_delivery_ratio_min={min(rates, default=0) / offered_bps:.6f}")
-    if interval_summary:
-        print("quality_interval_delivery_ratio_min="
-              f"{min(v[0] for v in interval_summary.values()):.5f}")
-        print("quality_longest_stall_s="
-              f"{max(v[1] for v in interval_summary.values()):.3f}")
+    print(f"quality_absolute_delivery_ratio_min={min(rates) / offered_bps:.6f}")
+    print(f"quality_interval_delivery_ratio_min={min(v[0] for v in interval_summary.values()):.5f}")
+    print(f"quality_longest_stall_s={max(v[1] for v in interval_summary.values()):.3f}")
     print(f"quality_receiver_count={len(rates)}")
     print(f"quality_aggregate_bytes={total_bytes}")
     print(f"quality_aggregate_bps={aggregate_bps:.2f}")

@@ -189,10 +189,12 @@ def parse_metrics(blob):
     return worker_pid, values
 
 
-def fetch_worker_round(port, expected_pids):
+def fetch_worker_round(port, expected_pids, stop_event, timeout=10.0):
+    # Each connection lands on whichever worker accepts it; bound the round by
+    # the clock, not by attempts, and give up promptly on SIGTERM.
     received = {}
-    attempts = max(100, len(expected_pids) * 50)
-    for _ in range(attempts):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not stop_event.is_set():
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
         try:
             connection.request("GET", "/media/api/v1/metrics",
@@ -210,11 +212,14 @@ def fetch_worker_round(port, expected_pids):
             if len(received) == len(expected_pids):
                 return received
         except (OSError, http.client.HTTPException):
-            pass
+            stop_event.wait(0.05)
         finally:
             connection.close()
+    if stop_event.is_set():
+        return None
     missing = sorted(expected_pids - set(received), key=int)
-    raise RuntimeError(f"could not sample worker metrics for PIDs {missing}")
+    raise RuntimeError(f"could not sample worker metrics for PIDs {missing} "
+                       f"within {timeout:g}s")
 
 
 def sample_queues(args):
@@ -243,7 +248,9 @@ def sample_queues(args):
             if time.monotonic() >= deadline:
                 raise RuntimeError("controller did not release the SRT queue baseline")
         while not stop_event.is_set():
-            samples = fetch_worker_round(args.port, expected)
+            samples = fetch_worker_round(args.port, expected, stop_event)
+            if samples is None:
+                break
             for pid in sorted(samples, key=int):
                 sample_ns, shard_values = samples[pid]
                 for (worker, shard), values in sorted(shard_values.items()):
@@ -383,21 +390,11 @@ def process_queue_samples(args, keys, expected, queue_start_ns, queue_end_ns, fa
             if data["destinations"] <= 0:
                 continue
             old = prior_values.get(shard)
-            consecutive = False
             if old is not None:
                 old_round, old_ns, old_data = old
                 gap_s = (sample_ns - old_ns) / 1e9
                 if round_id != old_round + 1 or gap_s <= 0 or gap_s > args.max_interval_s:
                     raise ValueError(f"{shard}: queue sampling gap or nonpositive interval")
-                consecutive = (
-                    round_id == old_round + 1
-                    and gap_s <= args.max_interval_s
-                )
-            if not consecutive:
-                pressure_streak[(shard, "feed")] = 0
-                pressure_streak[(shard, "output")] = 0
-                blocked_streak[shard] = 0
-
             feed_util = max(data["feed_queue_units"] / 64,
                             data["feed_queue_bytes"] / (8 * 1024 * 1024))
             output_capacity = data["destinations"] * 256
@@ -414,7 +411,7 @@ def process_queue_samples(args, keys, expected, queue_start_ns, queue_end_ns, fa
                                         f"{utilization:.3f} for {pressure_streak[(shard, kind)]} samples")
                 else:
                     pressure_streak[(shard, kind)] = 0
-            if consecutive:
+            if old is not None:
                 if data["blocked_sends"] > old_data["blocked_sends"]:
                     blocked_streak[shard] += 1
                 else:
@@ -436,8 +433,6 @@ def quality_report(args):
     if final_ns <= baseline_ns:
         raise ValueError("receiver measurement timestamps did not advance")
     duration_s = (final_ns - baseline_ns) / 1e9
-    if duration_s <= 0:
-        raise ValueError("receiver measurement duration is invalid")
 
     interval_rows = defaultdict(list)
     with open(args.intervals, newline="", encoding="utf-8") as source:
@@ -697,17 +692,11 @@ def quality_report(args):
     print(f"quality_interval_delivery_ratio_min={min(row[4] for row in rows):.5f}")
     print(f"quality_destination_fairness_jain={jain(all_rates):.5f} (supplementary)")
     print(f"quality_sender_feed_drops={queue_drops['nginx_media_srt_egress_shard_feed_queue_dropped_total']:g}")
-    # A strict qualification, separate from the 0.95 compatibility gate the
-    # ladder uses: every destination at full rate within a documented
-    # tolerance, with nothing dropped, nothing corrupted and no short-interval
-    # interruption.  A run can pass the gate and fail this - that is the point
-    # of publishing both.
+    # Strict qualification, separate from the 0.95 gate: full rate within the
+    # documented tolerance, nothing dropped, corrupted (incl. TEI) or interrupted.
     strict_ratio_min = min(row[3] for row in rows)
     strict_interval_min = min(row[4] for row in rows)
-    # TEI is corruption wherever it is counted: the gate treats a nonzero
-    # count as an MPEG-TS error, so the strict verdict must not clear it.
-    ts_errors = sum(ts["ts_sync_errors"] + ts["ts_continuity_errors"]
-                    + ts.get("ts_tei_errors", 0)
+    ts_errors = sum(ts["ts_sync_errors"] + ts["ts_continuity_errors"] + ts["ts_tei_errors"]
                     for _, _, _, _, _, _, ts in rows)
     strict_ok = (strict_ratio_min >= args.strict_ratio
                  and strict_interval_min >= args.strict_interval_floor

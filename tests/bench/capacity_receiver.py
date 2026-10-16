@@ -14,6 +14,10 @@ import sys
 import threading
 import time
 
+# Each side waits longer than the work the other may legitimately do first.
+READY_TIMEOUT, RELEASE_TIMEOUT, CAPTURE_FRAME_TIMEOUT = 30.0, 10.0, 30.0
+COMMAND_TIMEOUT, REPLY_TIMEOUT, CALL_TIMEOUT = 60.0, 90.0, 300.0
+
 # Match the native receiver control's Linux binding, including SIGKILL.
 LIBC = ctypes.CDLL(None, use_errno=True)
 LIBC.prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong,
@@ -88,10 +92,9 @@ def read_frame(stream, timeout=10.0):
 def release_capture(request):
     if request.get("prepared"):
         print(json.dumps({"ready": True}), flush=True)
-        if read_frame(sys.stdin) != {"capture": True}:
+        if read_frame(sys.stdin, CAPTURE_FRAME_TIMEOUT) != {"capture": True}:
             raise ValueError("invalid receiver capture release")
-    # Preparation may park for a controller barrier. The actual target must
-    # still belong to this run when the capture is released.
+    # A controller barrier may have parked us; recheck ownership at release.
     owned(request["path"], request["token"])
 
 
@@ -127,19 +130,11 @@ def server(request):
         try:
             return child.wait()
         finally:
-            # The owner waits for the group leader; a killed SSH client must not
-            # leave the receiver alive. Signals below validate this identity.
-            try:
-                owned(path, request["token"])
-                os.killpg(child.pid, signal.SIGKILL)
-            except (OSError, ValueError):
-                pass
+            # A killed SSH client must not leave the receiver alive.
+            disconnect(None, None)
     elif action == "signal":
         signal_owned(path, request["token"], request["signal"])
     elif action == "snapshot":
-        # One receiver RPC owns remove/signal/ack/copy. A closing SRT sampler
-        # finishes its in-flight interval before the measurement signal, not
-        # after a controller-side stop/join round trip.
         owned(path, request["token"])
         quiesce = request.get("quiesce")
         if quiesce:
@@ -176,7 +171,7 @@ def server(request):
         output = request["output"]
         release_capture(request)
         Path(output).unlink(missing_ok=True)
-        result = subprocess.run(argv, stdout=subprocess.DEVNULL,
+        result = subprocess.run(argv, stdout=subprocess.DEVNULL, timeout=COMMAND_TIMEOUT,
                                 preexec_fn=owner_binding(), check=False)
         if result.returncode:
             raise ValueError(f"receiver capture command failed: {result.returncode}")
@@ -195,7 +190,7 @@ def server(request):
         Path(path).write_bytes(base64.b64decode(request["data"]))
     elif action == "children":
         identity = owned(path, request["token"])
-        children = subprocess.run(["pgrep", "-P", str(identity["pid"])],
+        children = subprocess.run(["pgrep", "-P", str(identity["pid"])], timeout=10,
                                   capture_output=True, text=True, check=False)
         if children.returncode != 0 or not children.stdout.strip():
             raise ValueError("receiver nginx has no worker")
@@ -211,9 +206,8 @@ class Transport:
         self.ssh = ["ssh", *config["ssh_options"], config["host"]]
 
     def mapped(self, value):
-        # A receiver root may be nested below the sender root in loopback
-        # validation. Never translate native paths again, or translate a run
-        # path twice through its source-root parent.
+        # Loopback validation nests the receiver root below the sender root:
+        # never translate a path that is already remote.
         for remote in (self.config["remote_workspace"], self.config["remote_run"],
                        self.config["remote_root"]):
             if value == remote or value.startswith(remote + "/"):
@@ -231,7 +225,7 @@ class Transport:
         return [*self.ssh, shlex.join(command)]
 
     def call(self, request, capture=False):
-        return subprocess.run(self.command(request),
+        return subprocess.run(self.command(request), timeout=CALL_TIMEOUT,
                               stdout=subprocess.PIPE if capture else None, check=False)
 
     def request(self, action, path, **kwargs):
@@ -254,23 +248,22 @@ class Transport:
         process = subprocess.Popen(self.command(request), stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, preexec_fn=owner_binding())
         try:
-            if read_frame(process.stdout) != {"ready": True}:
+            if read_frame(process.stdout, READY_TIMEOUT) != {"ready": True}:
                 raise ValueError("invalid receiver capture readiness")
             if ready_file:
                 publish(ready_file, {"ready": True})
-                deadline = time.monotonic() + 10.0
+                deadline = time.monotonic() + RELEASE_TIMEOUT
                 while not Path(release_file).is_file():
                     if process.poll() is not None:
                         raise ValueError("receiver capture peer exited before release")
                     if time.monotonic() >= deadline:
                         raise ValueError("receiver capture release timed out")
                     time.sleep(0.001)
-            # SSH startup/authentication and native preparation are outside
-            # the bracket; only token dispatch through native reply is inside.
+            # The bracket covers only token dispatch through the native reply.
             begin = time.monotonic_ns()
             process.stdin.write(b'{"capture":true}\n')
             process.stdin.flush()
-            reply = read_frame(process.stdout)
+            reply = read_frame(process.stdout, REPLY_TIMEOUT)
             end = time.monotonic_ns()
             process.stdin.close()
             status = process.wait(timeout=10)
@@ -287,21 +280,24 @@ class Transport:
             if not process.stdin.closed:
                 process.stdin.close()
             process.stdout.close()
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+            stop(process)
+
+
+def stop(process):
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
 
 def client(args):
     transport = Transport(json.loads(Path(args.config).read_text()))
     action, rest = args.action, args.args
     if action in ("start", "tunnel"):
-        # The harness passes its PID so death before prctl cannot bind us to
-        # an already-reparented process. Capture SSH children bind to their client.
+        # Bind to the harness PID, not our parent: the harness may already be gone.
         if args.owner_pid is None or args.owner_pid <= 0:
             raise ValueError(f"{action} requires a positive --owner-pid")
         owner_binding(args.owner_pid)()
@@ -310,20 +306,15 @@ def client(args):
             [transport.mapped(value) for value in rest])])
     if action == "start":
         path, *argv = rest
-        payload = base64.b64encode(json.dumps(dict(
+        owner = subprocess.Popen(transport.command(dict(
             action="start", path=transport.mapped(path), token=path,
-            argv=[transport.mapped(value) for value in argv])).encode()).decode()
-        command = shlex.join(["python3", transport.config["remote_root"] +
-                             "/tests/bench/capacity_receiver.py", "--serve", payload])
-        owner = subprocess.Popen([*transport.ssh, command], stdin=subprocess.PIPE,
-                                 preexec_fn=owner_binding())
+            argv=[transport.mapped(value) for value in argv])),
+            stdin=subprocess.PIPE, preexec_fn=owner_binding())
         try:
             return owner.wait()
         finally:
             owner.stdin.close()
-            if owner.poll() is None:
-                owner.terminate()
-                owner.wait()
+            stop(owner)
     if action == "signal":
         path, signo = rest
         return transport.request("signal", path, token=path, signal=signo).returncode
@@ -364,8 +355,7 @@ def client(args):
                                  args.capture_release_file)
     if action == "collect":
         path = rest[0]
-        # Receiver artifacts never overwrite local diagnostics, sender logs or
-        # ownership tokens. Fetch the named receiver outputs only.
+        # Named receiver outputs only: never overwrite local logs or tokens.
         for name in ("srt.csv", "receiver-intervals.csv", "hls-readers.csv",
                      "receiver.cpu.before", "receiver.cpu.after",
                      "receiver.host.before.json", "receiver.host.after.json"):

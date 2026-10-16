@@ -36,19 +36,19 @@ def main():
     if not compiler:
         parser.error("--compiler must name a compiler")
     compiler[0] = shutil.which(compiler[0]) or compiler[0]
-    compiler_version = subprocess.run(compiler + ["--version"], check=True,
+    compiler_version = subprocess.run(compiler + ["--version"], check=True, timeout=60,
                                       capture_output=True, text=True).stdout.strip()
     package = {}
     for flag, key in (("--cflags", "cflags"), ("--libs", "libs"),
                       ("--modversion", "version"), ("--variable=pcfiledir", "pcfiledir")):
-        package[key] = subprocess.run(["pkg-config", flag, args.pkg], check=True,
+        package[key] = subprocess.run(["pkg-config", flag, args.pkg], check=True, timeout=60,
                                       capture_output=True, text=True).stdout.strip()
     cflags = shlex.split(args.cflags) + shlex.split(package["cflags"])
     ldflags = shlex.split(package["libs"])
     command = compiler + cflags + [str(source), "-o", str(binary)] + ldflags
     source_sha256 = digest(source)
     print(shlex.join(command), flush=True)
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, timeout=600)
     if digest(source) != source_sha256:
         raise SystemExit("receiver source changed during compilation")
     evidence = {
