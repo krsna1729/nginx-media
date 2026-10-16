@@ -281,25 +281,37 @@ class Program:
         return destination_id(self.program_index, offset, self.program_count)
 
     def plan(self, srt_base_port, srt_listeners, rtmp_base, rtmp_sinks,
-             hls_push_port, receiver, hls_path):
-        """Resolve each destination to (kind, id, port, receiver_api)."""
+             hls_push_port, receiver, hls_path, receiver_addresses=(),
+             address_block=256):
+        """Resolve each destination to (kind, id, port, receiver_api, address).
+
+        The address is the one this destination dials.  One destination
+        address offers one source-port budget for its port (RFC-less kernel
+        arithmetic: see `receiver_addresses` in harness/config.py), so a large
+        HLS push rung spreads its destinations over several of them; every
+        other protocol already shards over ports.
+        """
         srt_count = sum(1 for kind, _ in self.entries if kind == SRT)
         rtmp_count = sum(1 for kind, _ in self.entries if kind == RTMP)
+        hls_addresses = list(receiver_addresses) or [receiver]
         out = []
         for kind, offset in self.entries:
             sink_id = self.id_for(offset)
             if kind == SRT:
                 port = sink_port(srt_base_port, self.program_index, offset,
                                  srt_count, srt_listeners)
-                out.append((kind, sink_id, port, None))
+                out.append((kind, sink_id, port, None, receiver))
             elif kind == RTMP:
                 index = ((self.program_index * rtmp_count
                           + offset - srt_count) % rtmp_sinks)
                 api = "http://%s:%d/media/api/v1" % (
                     receiver, rtmp_sink_http_port(rtmp_base, index))
-                out.append((kind, sink_id, rtmp_sink_port(rtmp_base, index), api))
+                out.append((kind, sink_id, rtmp_sink_port(rtmp_base, index), api,
+                            receiver))
             else:
-                out.append((kind, sink_id, hls_push_port, None))
+                place = (offset - srt_count - rtmp_count) // max(1, address_block)
+                out.append((kind, sink_id, hls_push_port, None,
+                            hls_addresses[min(place, len(hls_addresses) - 1)]))
         return out
 
 
@@ -311,7 +323,7 @@ def provision(engine, client, program, plan, receiver, path="",
     added = 0
     stall_seen = False
 
-    for kind, sink_id, port, receiver_api in plan:
+    for kind, sink_id, port, receiver_api, address in plan:
         if sink_id == stall_id:
             stall_seen = True
 
@@ -325,7 +337,7 @@ def provision(engine, client, program, plan, receiver, path="",
         if engine == "restream":
             # A fresh connection per POST: restream closes idle keep-alive
             # connections, and a POST lost after the send cannot be resent.
-            url = restream_output_url(kind, sink_id, receiver, port,
+            url = restream_output_url(kind, sink_id, address, port,
                                       program.stream, path)
             raw = client.post("/pipelines/%s/outputs" % pipeline_id, {
                 "name": sink_id,
@@ -340,7 +352,7 @@ def provision(engine, client, program, plan, receiver, path="",
         else:
             client.post_owner(
                 "/streams/%s/destinations" % program.stream,
-                nginx_destination_body(kind, sink_id, receiver, port,
+                nginx_destination_body(kind, sink_id, address, port,
                                        program.stream, path))
         added += 1
 
@@ -386,6 +398,8 @@ def _cmd_provision(args):
         hls_push_port=args.hls_push_port,
         receiver=args.receiver_addr,
         hls_path=args.path,
+        receiver_addresses=[a for a in args.receiver_addresses.split(",") if a],
+        address_block=args.receiver_address_block,
     )
 
     cookie = read_cookie_jar(args.cookie_file) if args.cookie_file else ""
@@ -434,6 +448,10 @@ def build_parser():
     p.add_argument("--program-index", type=int, default=0)
     p.add_argument("--programs", type=int, default=1)
     p.add_argument("--receiver-addr", required=True)
+    p.add_argument("--receiver-addresses", default="",
+                   help="comma-separated destination addresses for one rung; "
+                        "the HLS push destinations spread over them")
+    p.add_argument("--receiver-address-block", type=int, default=256)
     p.add_argument("--srt-base-port", type=int, default=0)
     p.add_argument("--srt-listeners", type=int, default=16)
     p.add_argument("--rtmp-base", type=int, default=0)

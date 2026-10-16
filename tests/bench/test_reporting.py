@@ -27,12 +27,15 @@ import io
 import json
 import os
 import shutil
+import socket
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import types
+import urllib.error
+import urllib.request
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1685,6 +1688,7 @@ MIXES_CONF = os.path.join(HERE, "capacity-mixes.conf")
 SRT_JUDGE = os.path.join(HERE, "srt_capacity_quality.py")
 RTMP_JUDGE = os.path.join(HERE, "rtmp_capacity_quality.py")
 HLS_PUSH_JUDGE = os.path.join(HERE, "hls_push_capacity.py")
+CLIENT = os.path.join(HERE, "capacity_client.py")
 
 # the seven workloads bench-ci.sh used to promise, and the two contention
 # ladders the harness ran on top of them without the manifest saying so
@@ -2305,6 +2309,147 @@ def test_topology_cells_and_steering_masks(work):
           "a namespace cell still runs in the namespaces")
     check(loopback["CAPACITY_NGINX_CPUS"] == "0" and "PHASES" in loopback,
           "a loopback cell still carries its own settings")
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_destinations_spread_over_addresses(work):
+    """One destination address is one source-port budget, so a large rung must
+    spread; the listeners and the dialled URLs come from one list."""
+    from harness import config as harness_config  # noqa: F401 (loaded above)
+    addresses = harness_config.receiver_addresses("127.0.0.1", 16, 600)
+    check(addresses == ["127.0.0.1", "127.0.0.2", "127.0.0.3"],
+          f"600 destinations at 256 per address need three addresses: {addresses}")
+    check(harness_config.receiver_addresses("127.0.0.1", 16, 10) == ["127.0.0.1"],
+          "a small rung keeps one address")
+    check(harness_config.receiver_addresses("10.200.0.2", 16, 2048)
+          == ["10.200.0.%d" % n for n in range(2, 10)],
+          "2048 destinations span eight addresses from the base")
+    for bad in ("127.0.0.1/24", "127.0.0.999"):
+        try:
+            harness_config.receiver_addresses(bad, 16, 600)
+            check(False, f"{bad} must be refused")
+        except ValueError:
+            check(True, f"{bad} is refused")
+    try:
+        harness_config.receiver_addresses("10.200.0.250", 16, 2048)
+        check(False, "an address that would leave the subnet must be refused")
+    except ValueError:
+        check(True, "an address that would leave the subnet is refused")
+
+    client = load_module(CLIENT, "capacity_client_spread")
+    program = client.Program(0, 1, "live/a")
+    program.add(client.HLS_PUSH, 600, first=0)
+    plan = program.plan(9000, 4, 20000, 1, 24800, "127.0.0.1", "/hls",
+                        receiver_addresses=addresses)
+    check([entry[4] for entry in plan[:2]] == ["127.0.0.1", "127.0.0.1"],
+          "the first block of destinations dials the first address")
+    check(plan[256][4] == "127.0.0.2" and plan[512][4] == "127.0.0.3",
+          "each block of destinations dials its own address")
+    check(all(entry[2] == 24800 for entry in plan),
+          "the port is unchanged: the addresses are what spread the budget")
+
+    # One sink process serves every address and totals them in one snapshot,
+    # which is what makes the spread cost nothing at judging time.
+    port = free_port()
+    def push(address, name, body=b"\x47" + bytes(187)):
+        request = urllib.request.Request("http://%s:%d/%s" % (address, port, name),
+                                         data=body, method="PUT")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            return error.code
+        except urllib.error.URLError:
+            return 0  # not listening yet, which the caller retries
+    def snapshot():
+        with urllib.request.urlopen("http://%s:%d/__snapshot" % (addresses[0], port),
+                                    timeout=10) as response:
+            return json.loads(response.read())
+    sink = subprocess.Popen([sys.executable, HLS_PUSH_JUDGE, "serve", "--port", str(port),
+                             "--bind", "127.0.0.1", "--bind", "127.0.0.2"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for address, destination in (("127.0.0.1", "d0001"), ("127.0.0.2", "d0002")):
+            for _ in range(50):
+                code = push(address, "%s/seg0.ts" % destination)
+                if 200 <= code < 300:
+                    break
+                time.sleep(0.1)
+            check(200 <= code < 300, f"{address} must accept an upload: {code}")
+        seen = sorted(snapshot()["destinations"])
+        check(seen == ["d0001", "d0002"],
+              f"one snapshot must carry both addresses' destinations: {seen}")
+    finally:
+        sink.terminate()
+        sink.wait(timeout=10)
+
+
+def test_push_sink_keeps_the_senders_connection(work):
+    """nginx-media keeps one connection per destination (src/core/ngx_media_http.h),
+    so a sink that answers HTTP/1.0 makes every segment a new connection: a cost
+    the engine never asked for, and the source-port budget that large rungs ran
+    out of."""
+    port = free_port()
+    sink = subprocess.Popen([sys.executable, HLS_PUSH_JUDGE, "serve", "--port", str(port)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    try:
+        for _ in range(100):
+            try:
+                urllib.request.urlopen("http://127.0.0.1:%d/__health" % port, timeout=1).read()
+                break
+            except Exception:
+                time.sleep(0.05)
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+            stream = connection.makefile("rwb")
+            body = b"\x47" + bytes(187)
+            for index in range(3):
+                stream.write(b"PUT /d0000/seg%d.ts HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                             b"Connection: keep-alive\r\nContent-Length: %d\r\n\r\n"
+                             % (index, len(body)) + body)
+                stream.flush()
+                status = stream.readline()
+                check(status.startswith(b"HTTP/1.1 201"),
+                      f"upload {index} must be accepted on the kept connection: {status!r}")
+                while True:
+                    header = stream.readline()
+                    if header in (b"\r\n", b"\n", b""):
+                        break
+            # the same connection carried every segment: the sink did not close
+            stream.write(b"GET /__snapshot HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            stream.flush()
+            check(stream.readline().startswith(b"HTTP/1.1 200"),
+                  "the kept connection must still answer after three uploads")
+            length = 0
+            while True:
+                header = stream.readline()
+                if header.startswith(b"Content-Length:"):
+                    length = int(header.split(b":")[1])
+                if header in (b"\r\n", b"\n", b""):
+                    break
+            snapshot = json.loads(stream.read(length))
+            check(sorted(snapshot["destinations"]) == ["d0000"],
+                  f"all three uploads are one destination: {sorted(snapshot['destinations'])}")
+            check(snapshot["destinations"]["d0000"]["segments"] == 3,
+                  f"the sink counted three segments: {snapshot['destinations']['d0000']['segments']}")
+
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+            stream = connection.makefile("rwb")
+            stream.write(b"PUT /d0001/seg0.ts HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                         b"Connection: close\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+            stream.flush()
+            check(stream.readline().startswith(b"HTTP/1.1 201"), "a closing upload is accepted too")
+            while True:
+                if stream.readline() in (b"\r\n", b"\n", b""):
+                    break
+            check(stream.read(1) == b"", "Connection: close is honoured")
+    finally:
+        sink.terminate()
+        sink.wait(timeout=10)
 
 
 def harness_cfg(**overrides):
@@ -3183,6 +3328,8 @@ def main():
         test_hls_push_judge_rejects_non_finite_inputs(work)
         test_restream_push_is_judged_by_sequence(work)
         test_topology_cells_and_steering_masks(work)
+        test_destinations_spread_over_addresses(work)
+        test_push_sink_keeps_the_senders_connection(work)
         test_calibration_is_stored_only_from_a_passing_positive_rung(work)
         test_harness_runs_the_mixes_of_the_one_list(work)
         test_bench_ci_manifest_is_the_harness_mix_list(work)

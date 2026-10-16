@@ -17,7 +17,7 @@ import shutil
 import signal
 import time
 
-from . import proc
+from . import config, proc
 from .proc import HARNESS, RECEIVER, Failed
 
 CLOCK = "controller-monotonic"
@@ -434,11 +434,17 @@ class HlsPushSink:
         self.proc = None
 
     @classmethod
-    def start(cls, scope, cfg, case_dir):
+    def start(cls, scope, cfg, case_dir, destinations):
         sink = cls(cfg, case_dir)
+        # Every destination of one rung shares one sink port, so the addresses
+        # are what give each destination its own source-port budget.
+        addresses = config.receiver_addresses(cfg.receiver_addr, cfg.receiver_addr_count,
+                                              destinations)
+        binds = [flag for address in addresses for flag in ("--bind", address)]
+        sink.addresses = addresses
         sink.proc = scope.spawn(
             "HLS push sink",
-            _python(cfg, "hls_push_capacity.py", "serve", "--port", sink.port, "--bind", cfg.receiver_addr),
+            _python(cfg, "hls_push_capacity.py", "serve", "--port", sink.port, *binds),
             ns=RECEIVER, cpus=cfg.receiver_cpus, log=sink.log)
         try:
             proc.wait_until("HLS push sink health", lambda: sink._get("__health", 2, False)[0] == 200,

@@ -404,7 +404,7 @@ class Rung:
         if n["srt"]:
             self.srt = receivers.SrtSink.start(scope, cfg, self.dir, total["srt"], spec.sink_mode)
         if n["hls_push"]:
-            self.push = receivers.HlsPushSink.start(scope, cfg, self.dir)
+            self.push = receivers.HlsPushSink.start(scope, cfg, self.dir, n["hls_push"])
         restream = cfg.engine == "restream"
         if not restream:
             proc.curl(inst.api + "/streams", proc.SENDER, method="POST",
@@ -423,6 +423,10 @@ class Rung:
                 "--rtmp-sinks", self.rtmp.count if self.rtmp else 1,
                 "--hls-push-port", self.push.port if self.push else 0,
                 "--path", cfg.path("hls", "live", name)]
+        if self.push:
+            # The same list the sink listens on, so a destination's URL and its
+            # listener are decided by one function.
+            argv += ["--receiver-addresses", ",".join(self.push.addresses)]
         if restream:
             argv += ["--pipeline", inst.pipeline_id, "--cookie-file", inst.cookie]
         done = proc.run(argv, ns=proc.SENDER, timeout=60 + all_dest // 2, check=False)

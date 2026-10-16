@@ -50,7 +50,13 @@ def by_sequence(sink):
 
 
 class HlsPushSink(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.0"
+    # HTTP/1.1 so the sender's keep-alive is honoured: nginx-media keeps one
+    # connection per destination (src/core/ngx_media_http.h), and answering as
+    # HTTP/1.0 made every segment a new TCP connection - a cost and a source
+    # port the engine never asked for, and the reason large rungs ran out of
+    # 4-tuples.  Every response carries a Content-Length, so framing is
+    # unambiguous either way.
+    protocol_version = "HTTP/1.1"
 
     def do_GET(self):
         parsed = urlsplit(self.path)
@@ -59,10 +65,10 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/__mark":
-            with self.server.destinations_lock:
-                if self.server.mark_monotonic is None:
-                    self.server.mark_monotonic = time.monotonic()
-                marked = self.server.mark_monotonic
+            with self.server.state.destinations_lock:
+                if self.server.state.mark_monotonic is None:
+                    self.server.state.mark_monotonic = time.monotonic()
+                marked = self.server.state.mark_monotonic
             self._reply(200, json.dumps({"mark_monotonic": marked}).encode(),
                         "application/json")
             return
@@ -79,23 +85,23 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
                 return
             expected_ids = set(expected_destination_ids(
                 int(query.get("programs", ["1"])[0]), expected, offset))
-            with self.server.destinations_lock:
+            with self.server.state.destinations_lock:
                 now = time.monotonic()
-                received = self.server.ts_destinations & expected_ids
+                received = self.server.state.ts_destinations & expected_ids
                 progress = {
                     "monotonic": now,
                     "elapsed_s": (
-                        now - self.server.mark_monotonic
-                        if self.server.mark_monotonic is not None else None
+                        now - self.server.state.mark_monotonic
+                        if self.server.state.mark_monotonic is not None else None
                     ),
                     "expected": expected,
                     "received": len(received),
                     "missing_ids": sorted(expected_ids - received),
                     "first_segment_latencies_ms": sorted(
-                        (self.server.ts_first_at[destination]
-                         - self.server.mark_monotonic) * 1000
+                        (self.server.state.ts_first_at[destination]
+                         - self.server.state.mark_monotonic) * 1000
                         for destination in received
-                        if self.server.mark_monotonic is not None
+                        if self.server.state.mark_monotonic is not None
                     ),
                 }
             body = json.dumps(progress).encode()
@@ -107,37 +113,37 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/__snapshot":
-            with self.server.destinations_lock:
+            with self.server.state.destinations_lock:
                 snapshot = {
                     "monotonic": time.monotonic(),
-                    "mark_monotonic": self.server.mark_monotonic,
-                    "http_errors": self.server.http_errors,
-                    "fault_puts": self.server.fault_puts,
-                    "fault_failures": self.server.fault_failures,
-                    "fault_closed": self.server.fault_closed,
+                    "mark_monotonic": self.server.state.mark_monotonic,
+                    "http_errors": self.server.state.http_errors,
+                    "fault_puts": self.server.state.fault_puts,
+                    "fault_failures": self.server.state.fault_failures,
+                    "fault_closed": self.server.state.fault_closed,
                     "destinations": {
                         destination: {
-                            "ts_bytes": self.server.ts_bytes[destination],
-                            "segments": self.server.ts_segments[destination],
+                            "ts_bytes": self.server.state.ts_bytes[destination],
+                            "segments": self.server.state.ts_segments[destination],
                             "first_segment_monotonic":
-                                self.server.ts_first_at[destination],
+                                self.server.state.ts_first_at[destination],
                             "first_segment_latency_ms": (
-                                (self.server.ts_first_at[destination]
-                                 - self.server.mark_monotonic) * 1000
-                                if self.server.mark_monotonic is not None else None
+                                (self.server.state.ts_first_at[destination]
+                                 - self.server.state.mark_monotonic) * 1000
+                                if self.server.state.mark_monotonic is not None else None
                             ),
                             "upload_durations_ms":
-                                list(self.server.ts_upload_durations_ms[destination]),
+                                list(self.server.state.ts_upload_durations_ms[destination]),
                             "segment_detail":
-                                dict(self.server.ts_detail.get(destination, {})),
+                                dict(self.server.state.ts_detail.get(destination, {})),
                             "playlist_puts":
-                                self.server.playlist_puts.get(destination, 0),
+                                self.server.state.playlist_puts.get(destination, 0),
                             "playlist_entries":
-                                self.server.playlist_entries.get(destination, 0),
+                                self.server.state.playlist_entries.get(destination, 0),
                             "playlist_violations":
-                                self.server.playlist_violations.get(destination, 0),
+                                self.server.state.playlist_violations.get(destination, 0),
                         }
-                        for destination in self.server.ts_destinations
+                        for destination in self.server.state.ts_destinations
                     },
                 }
             body = json.dumps(snapshot).encode()
@@ -148,7 +154,7 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
     def do_PUT(self):
         upload_started = time.monotonic()
         parsed = urlsplit(self.path)
-        server = self.server
+        server = self.server.state
         # Fault injection (hls_push_faults_nginx.sh); all zero in capacity runs.
         if server.fault_close_after or server.fault_fail_every:
             with server.fault_lock:
@@ -199,9 +205,9 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
 
         name = parts[1] if len(parts) > 1 else ""
         if parsed.path.lower().endswith(".ts"):
-            with self.server.destinations_lock:
+            with self.server.state.destinations_lock:
                 destination = parts[0]
-                detail = self.server.ts_detail.setdefault(destination, {})
+                detail = self.server.state.ts_detail.setdefault(destination, {})
                 record = detail.get(name)
                 if record is None:
                     detail[name] = {"bytes": received, "at": time.monotonic(),
@@ -209,15 +215,15 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
                 else:
                     record["count"] += 1
                     record["bytes"] = received
-                self.server.ts_destinations.add(destination)
-                self.server.ts_bytes[destination] = (
-                    self.server.ts_bytes.get(destination, 0) + received
+                self.server.state.ts_destinations.add(destination)
+                self.server.state.ts_bytes[destination] = (
+                    self.server.state.ts_bytes.get(destination, 0) + received
                 )
-                self.server.ts_segments[destination] = (
-                    self.server.ts_segments.get(destination, 0) + 1
+                self.server.state.ts_segments[destination] = (
+                    self.server.state.ts_segments.get(destination, 0) + 1
                 )
-                self.server.ts_first_at.setdefault(destination, time.monotonic())
-                self.server.ts_upload_durations_ms.setdefault(destination, []).append(
+                self.server.state.ts_first_at.setdefault(destination, time.monotonic())
+                self.server.state.ts_upload_durations_ms.setdefault(destination, []).append(
                     (time.monotonic() - upload_started) * 1000
                 )
         self._reply(201)
@@ -229,23 +235,23 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
             for line in body.decode("utf-8", "replace").splitlines()
             if line.strip() and not line.startswith("#")
         ]
-        with self.server.destinations_lock:
-            detail = self.server.ts_detail.get(destination, {})
+        with self.server.state.destinations_lock:
+            detail = self.server.state.ts_detail.get(destination, {})
             missing = [uri for uri in referenced if uri not in detail]
-            self.server.playlist_puts[destination] = (
-                self.server.playlist_puts.get(destination, 0) + 1)
+            self.server.state.playlist_puts[destination] = (
+                self.server.state.playlist_puts.get(destination, 0) + 1)
             # how many segments the playlist names: the destination's own
             # window, which a per-destination profile is supposed to set
-            self.server.playlist_entries[destination] = len(referenced)
+            self.server.state.playlist_entries[destination] = len(referenced)
             if missing:
-                self.server.playlist_violations[destination] = (
-                    self.server.playlist_violations.get(destination, 0)
+                self.server.state.playlist_violations[destination] = (
+                    self.server.state.playlist_violations.get(destination, 0)
                     + len(missing))
 
     def _reply(self, status, body=b"", content_type=None, count_error=True):
         if count_error and status >= 400:
-            with self.server.destinations_lock:
-                self.server.http_errors += 1
+            with self.server.state.destinations_lock:
+                self.server.state.http_errors += 1
         self.send_response(status)
         if content_type:
             self.send_header("Content-Type", content_type)
@@ -259,30 +265,50 @@ class HlsPushSink(http.server.BaseHTTPRequestHandler):
 
 
 
-def serve(port, bind="127.0.0.1", fail_every=0, close_after=0,
-          latency_ms=0):
-    server = http.server.ThreadingHTTPServer((bind, port), HlsPushSink)
-    server.fault_lock = threading.Lock()
-    server.fault_fail_every = fail_every
-    server.fault_close_after = close_after
-    server.fault_latency_ms = latency_ms
-    server.fault_puts = 0
-    server.fault_failures = 0
-    server.fault_closed = 0
-    server.daemon_threads = True
-    server.destinations_lock = threading.Lock()
-    server.ts_destinations = set()
-    server.ts_bytes = {}
-    server.ts_segments = {}
-    server.ts_first_at = {}
-    server.ts_upload_durations_ms = {}
-    server.ts_detail = {}
-    server.playlist_puts = {}
-    server.playlist_entries = {}
-    server.playlist_violations = {}
-    server.mark_monotonic = None
-    server.http_errors = 0
-    server.serve_forever(poll_interval=0.25)
+class SinkState:
+    """Everything the destinations of one rung share.
+
+    One rung's destinations may arrive on several addresses (a single
+    destination address offers one source-port budget, see
+    `docs/development.md`), and the snapshot's job is to total them, so the
+    state belongs to the sink and not to a listening socket.
+    """
+
+    def __init__(self, fail_every=0, close_after=0, latency_ms=0):
+        self.fault_lock = threading.Lock()
+        self.fault_fail_every = fail_every
+        self.fault_close_after = close_after
+        self.fault_latency_ms = latency_ms
+        self.fault_puts = 0
+        self.fault_failures = 0
+        self.fault_closed = 0
+        self.destinations_lock = threading.Lock()
+        self.ts_destinations = set()
+        self.ts_bytes = {}
+        self.ts_segments = {}
+        self.ts_first_at = {}
+        self.ts_upload_durations_ms = {}
+        self.ts_detail = {}
+        self.playlist_puts = {}
+        self.playlist_entries = {}
+        self.playlist_violations = {}
+        self.mark_monotonic = None
+        self.http_errors = 0
+
+
+def serve(port, binds=("127.0.0.1",), fail_every=0, close_after=0, latency_ms=0):
+    """Listen on every address of one rung, with one shared state."""
+    state = SinkState(fail_every, close_after, latency_ms)
+    servers = []
+    for bind in binds:
+        server = http.server.ThreadingHTTPServer((bind, port), HlsPushSink)
+        server.state = state
+        server.daemon_threads = True
+        servers.append(server)
+    for server in servers[1:]:
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.25},
+                         daemon=True).start()
+    servers[0].serve_forever(poll_interval=0.25)
 
 
 METRIC_NAMES = {
@@ -775,7 +801,10 @@ def main():
     sink_parser.add_argument("--port", type=int, required=True)
     # loopback unless the sink is asked to listen where the sender can
     # reach it: a receiver in its own namespace, or on another host
-    sink_parser.add_argument("--bind", default="127.0.0.1")
+    # One entry per address this rung's destinations may arrive on: a single
+    # destination address offers one source-port budget, so a large rung
+    # spreads over several (docs/development.md).
+    sink_parser.add_argument("--bind", action="append", default=None)
     # fault injection (hls_push_faults_nginx.sh): 0 = off
     sink_parser.add_argument("--fail-every", type=int, default=0)
     sink_parser.add_argument("--close-after", type=int, default=0)
@@ -827,8 +856,8 @@ def main():
         parser.error("--before-prefix and --after-prefix go together")
 
     if args.command == "serve":
-        serve(args.port, args.bind, args.fail_every, args.close_after,
-              args.latency_ms)
+        serve(args.port, args.bind or ["127.0.0.1"], args.fail_every,
+              args.close_after, args.latency_ms)
     else:
         try:
             if args.command == "readiness-report":

@@ -137,6 +137,17 @@ make_helper() {
     mv -f "$HELPER.tmp" "$HELPER" || fail "cannot install $HELPER"
 }
 
+# The extra destination addresses the receiving side owns, so a destination URL
+# the sender is given always has a listener on this end.
+spread_addresses() {
+    local base="${RECV_ADDR%%/*}" count="${CAPACITY_RECEIVER_ADDR_COUNT:-16}" index
+    [ "$count" -ge 1 ] || count=1
+    for ((index = 1; index < count; index++)); do
+        ip -n "$NS_RECV" addr replace "${base%.*}.$(( ${base##*.} + index ))/24" \
+            dev "$RECV_IF" >/dev/null || return 1
+    done
+}
+
 create_net() {
     ip netns add "$NS_SUT" || return 1
     ip netns add "$NS_RECV" || return 1
@@ -149,6 +160,10 @@ create_net() {
     ip -n "$NS_SUT" link set "$SUT_IF" mtu "$MTU" up || return 1
     ip -n "$NS_SUT" link set lo up || return 1
     ip -n "$NS_RECV" addr add "$RECV_ADDR" dev "$RECV_IF" || return 1
+    # A rung's HLS push destinations may spread over several addresses, one
+    # source-port budget each (docs/development.md); they are all this side of
+    # the pair, so the sender reaches them over the same link.
+    spread_addresses || return 1
     ip -n "$NS_RECV" link set "$RECV_IF" mtu "$MTU" up || return 1
     ip -n "$NS_RECV" link set lo up
 }
@@ -249,6 +264,8 @@ case "$MODE:$ACTION" in
         echo "steering: $SUT_IF rx=$(in_ns "$NS_SUT" cat /sys/class/net/$SUT_IF/queues/rx-0/rps_cpus) \
 $RECV_IF rx=$(in_ns "$NS_RECV" cat /sys/class/net/$RECV_IF/queues/rx-0/rps_cpus)"
         echo "limits: $(status_common "$NS_SUT")"
+        echo "destination addresses: $(ip -n "$NS_RECV" -4 -br addr show "$RECV_IF" \
+            | tr ' ' '\n' | grep -c '^10\.') on $RECV_IF"
         echo "helper: $([ -x "$HELPER" ] && echo present || echo absent)"
         echo "host filter rules for $SUT_IF/$RECV_IF: $(iptables -S 2>/dev/null \
             | grep -c "$SUT_IF\|$RECV_IF")"

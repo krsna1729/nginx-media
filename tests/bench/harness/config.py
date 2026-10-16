@@ -29,6 +29,33 @@ def _words(name, default):
     return _env(name, default).split()
 
 
+def receiver_addresses(base, count, destinations):
+    """The destination addresses one rung spreads over.
+
+    A TCP connection is one (source address, source port, destination address,
+    destination port) tuple, and the source ports come from one budget per
+    destination address, so a rung whose destinations all share one address
+    also shares one budget.  Loopback carries 127.0.0.0/8 whole, and a veth
+    carries whatever its namespace is given, so a second address costs nothing
+    to use.  Returns the addresses for `destinations` destinations, at most
+    `count` of them, in the order their destinations are numbered.
+    """
+    if not 1 <= count <= 254:
+        raise ValueError("receiver address count %r is outside 1-254" % count)
+    parts = base.split(".")
+    if len(parts) != 4:
+        raise ValueError("receiver address %r is not an IPv4 address" % base)
+    last = int(parts[3])
+    if last + count - 1 > 254:
+        raise ValueError("receiver addresses from %s would leave the subnet" % base)
+    wanted = max(1, -(-destinations // RECEIVER_ADDRESS_BLOCK))
+    return [".".join(parts[:3] + [str(last + index)])
+            for index in range(min(count, wanted))]
+
+
+RECEIVER_ADDRESS_BLOCK = 256
+
+
 @dataclasses.dataclass(frozen=True)
 class Config:
     root: str
@@ -48,6 +75,7 @@ class Config:
     publisher_cpus: str
     sender_addr: str
     receiver_addr: str
+    receiver_addr_count: int
     media_addr: str
     # quality ladder
     quality_rate: str
@@ -115,6 +143,7 @@ class Config:
 def load():
     sender_addr = _env("CAPACITY_SENDER_ADDR", "127.0.0.1")
     receiver_addr = _env("CAPACITY_RECEIVER_ADDR", "127.0.0.1")
+    receiver_addr_count = int(_env("CAPACITY_RECEIVER_ADDR_COUNT", "16"))
     return Config(
         root=ROOT,
         bench_dir=_env("CAPACITY_BENCH_DIR", os.path.join(ROOT, "tests/bench")),
@@ -133,6 +162,7 @@ def load():
         publisher_cpus=_env("CAPACITY_PUBLISHER_CPUS"),
         sender_addr=sender_addr,
         receiver_addr=receiver_addr,
+        receiver_addr_count=receiver_addr_count,
         # A namespaced sender binds its own namespace address for media, the
         # only one its peers can reach; a host sender binds loopback.
         media_addr=_env("CAPACITY_MEDIA_ADDR",
