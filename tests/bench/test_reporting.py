@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -2277,6 +2278,33 @@ def test_topology_cells_and_steering_masks(work):
           f"a cell name must say which topology measured it: {names}")
     check(sweep.cell_id(engine, [0, 2], "namespace") == "nginx-haivision-2c",
           "the namespace cell keeps the name earlier evidence used")
+
+    # A shell that has run `eval "$(capacity_topology.sh namespace up)"` exports
+    # the namespace environment.  A loopback cell must not inherit it, or it
+    # would measure through the namespaces while its name and record say
+    # loopback, and the two cells would be one measurement under two names.
+    preset = {"CAPACITY_SENDER_EXEC": "nsenter --net=/run/netns/nmsut",
+              "CAPACITY_RECEIVER_EXEC": "nsenter --net=/run/netns/nmrecv",
+              "CAPACITY_SENDER_ADDR": "10.200.0.1",
+              "CAPACITY_RECEIVER_ADDR": "10.200.0.2",
+              "CAPACITY_MEDIA_ADDR": "10.200.0.1"}
+    arguments = types.SimpleNamespace(
+        topology_env={"namespace": dict(preset), "loopback": {}},
+        seconds=60, steps="1 2", mixes="pure-srt", out=os.path.join(work, "cells"))
+    os.environ.update(preset)
+    try:
+        loopback = sweep.cell_environment(engine, [0], "loopback", HERE, HERE, "/run", arguments)
+        namespaced = sweep.cell_environment(engine, [0], "namespace", HERE, HERE, "/run", arguments)
+    finally:
+        for name in preset:
+            os.environ.pop(name, None)
+    inherited = sorted(name for name in preset if name in loopback)
+    check(not inherited, f"a loopback cell must not inherit {inherited}")
+    check(namespaced["CAPACITY_RECEIVER_ADDR"] == "10.200.0.2"
+          and "nsenter" in namespaced["CAPACITY_SENDER_EXEC"],
+          "a namespace cell still runs in the namespaces")
+    check(loopback["CAPACITY_NGINX_CPUS"] == "0" and "PHASES" in loopback,
+          "a loopback cell still carries its own settings")
 
 
 def harness_cfg(**overrides):

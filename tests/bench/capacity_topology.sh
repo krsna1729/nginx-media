@@ -51,6 +51,9 @@ RPS_SUT_CPUS="${RPS_SENDER_CPUS:-0,2,4,6,8,10}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HELPER_DIR="$ROOT/.build/capacity-veth"
 HELPER="$HELPER_DIR/nsenter-net"
+# The loopback mask is a host setting, so what it was before the run is kept
+# here and restored by `down`, including after an interrupted sweep.
+LO_STATE="$HELPER_DIR/loopback-rps.before"
 
 fail() { echo "capacity_topology: $*" >&2; exit 1; }
 
@@ -192,17 +195,32 @@ namespace_down() {
 # has to serve them: the fanout direction is the volume that matters.
 loopback_up() {
     tune_limits "-"
+    # Whatever this host had before the run is what it gets back: the mask is a
+    # host-global setting and outlives the sweep.
+    local before
+    before="$(cat /sys/class/net/$LO_IF/queues/rx-0/rps_cpus 2>/dev/null)" \
+        || fail "cannot read $LO_IF steering"
+    if [ ! -e "$LO_STATE" ]; then
+        mkdir -p "$(dirname "$LO_STATE")" || fail "cannot write $LO_STATE"
+        echo "${before:-0}" > "$LO_STATE" || fail "cannot record $LO_STATE"
+    fi
     set_rps "-" "$LO_IF" "$(mask_of "$RPS_RECV_CPUS")" "shared ingress"
 }
 
 loopback_down() {
-    set_rps "-" "$LO_IF" "0" "shared ingress"
+    local before="0"
+    [ ! -e "$LO_STATE" ] || before="$(cat "$LO_STATE")"
+    set_rps "-" "$LO_IF" "${before:-0}" "shared ingress"
+    rm -f "$LO_STATE"
 }
 
 status_common() {
-    in_ns "$1" sysctl -n net.core.rmem_max net.core.wmem_max \
-        net.core.netdev_max_backlog 2>/dev/null | tr '\n' ' '
-    echo
+    # net.core.rmem_max and wmem_max exist per namespace; netdev_max_backlog
+    # does not (it is host-global), so it is read from the host either way.
+    local ns="$1"
+    printf 'rmem_max/wmem_max: %s; netdev_max_backlog (host): %s\n' \
+        "$(in_ns "$ns" sysctl -n net.core.rmem_max net.core.wmem_max 2>/dev/null | tr '\n' ' ')" \
+        "$(cat /proc/sys/net/core/netdev_max_backlog 2>/dev/null)"
 }
 
 case "$MODE:$ACTION" in
@@ -219,9 +237,9 @@ case "$MODE:$ACTION" in
         ip -n "$NS_RECV" -br addr show "$RECV_IF"
         echo "queues: $(ip -n "$NS_SUT" -d link show "$SUT_IF" 2>/dev/null \
             | grep -o 'numtxqueues [0-9]*\|numrxqueues [0-9]*' | tr '\n' ' ')"
-        echo "steering: $SUT_IF rx=$(ip -n "$NS_SUT" cat /sys/class/net/$SUT_IF/queues/rx-0/rps_cpus) \
-$RECV_IF rx=$(ip -n "$NS_RECV" cat /sys/class/net/$RECV_IF/queues/rx-0/rps_cpus)"
-        echo "limits (rmem_max wmem_max netdev_max_backlog): $(status_common "$NS_SUT")"
+        echo "steering: $SUT_IF rx=$(in_ns "$NS_SUT" cat /sys/class/net/$SUT_IF/queues/rx-0/rps_cpus) \
+$RECV_IF rx=$(in_ns "$NS_RECV" cat /sys/class/net/$RECV_IF/queues/rx-0/rps_cpus)"
+        echo "limits: $(status_common "$NS_SUT")"
         echo "helper: $([ -x "$HELPER" ] && echo present || echo absent)"
         echo "host filter rules for $SUT_IF/$RECV_IF: $(iptables -S 2>/dev/null \
             | grep -c "$SUT_IF\|$RECV_IF")"
@@ -234,7 +252,7 @@ $RECV_IF rx=$(ip -n "$NS_RECV" cat /sys/class/net/$RECV_IF/queues/rx-0/rps_cpus)
     loopback:status)
         need_root "$@"
         echo "steering: $LO_IF rx=$(cat /sys/class/net/$LO_IF/queues/rx-0/rps_cpus)"
-        echo "limits (rmem_max wmem_max netdev_max_backlog): $(status_common -)"
+        echo "limits: $(status_common -)"
         ;;
     mask:*)
         case "$ACTION" in

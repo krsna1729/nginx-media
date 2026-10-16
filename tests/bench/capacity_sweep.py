@@ -323,6 +323,44 @@ def cleanup_cell(child, identifier, run_dir):
         signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP_SIGNALS)
 
 
+def cell_environment(engine, cpus, topology, helpers, scripts, run_dir, args):
+    """The environment one cell's harness runs in.
+
+    A loopback cell must not inherit a namespace environment from the shell
+    that started the sweep (`eval "$(capacity_topology.sh namespace up)"`): it
+    would then measure through the namespaces while its own name and record
+    say loopback.  CAPACITY_MEDIA_ADDR goes with them, because the harness
+    derives the media address from the sender's when a sender prefix is set.
+    """
+    environment = dict(os.environ, **{
+        # `auto` records a rung the receiver side cannot carry as
+        # infrastructure-limited instead of as the engine losing capacity.
+        "CAPACITY_PREFLIGHT": "auto",
+        "CAPACITY_ENGINE": "restream" if engine["id"] == "restream" else "nginx",
+        "CAPACITY_NGINX": engine_binary(engine),
+        "RESTREAM_BIN": engine_binary(engine),
+        "CAPACITY_RTMP_SINK_NGINX": os.path.join(
+            PROJECT_ROOT, ".build/nginx-haivision/install/sbin/nginx"),
+        "CAPACITY_WORKERS": str(len(cpus)),
+        "CAPACITY_NGINX_CPUS": ",".join(str(cpu) for cpu in cpus),
+        "CAPACITY_RECEIVER_CPUS": RECEIVER_CPUS,
+        "CAPACITY_PUBLISHER_CPUS": PUBLISHER_CPUS,
+        "CAPACITY_QUALITY_SECONDS": str(args.seconds),
+        "CAPACITY_QUALITY_MIXES": " ".join(requested_mixes(args)),
+        "CAPACITY_QUALITY_STEPS": args.steps,
+        "CAPACITY_BENCH_DIR": helpers,
+        "CAPACITY_SCRIPTS_DIR": scripts,
+        "CAPACITY_QUALITY_STOP_AFTER_FAILURES": "1",
+        "CAPACITY_SINK_MODE": "correctness",
+        "PHASES": "capacity-quality-ladder",
+        "CAPACITY_RUN": run_dir,
+    }, **args.topology_env[topology])
+    if topology == "loopback":
+        for key in (*VETH_KEYS, "CAPACITY_MEDIA_ADDR"):
+            environment.pop(key, None)
+    return environment
+
+
 def run_cell(engine, cpus, topology, snapshot, helpers, scripts, args):
     """Run every workload's ladder for one engine at one CPU count."""
     identifier = cell_id(engine, cpus, topology)
@@ -336,30 +374,7 @@ def run_cell(engine, cpus, topology, snapshot, helpers, scripts, args):
         os.remove(matrix_path)
 
     cpu_list = ",".join(str(cpu) for cpu in cpus)
-    binary = engine_binary(engine)
-    environment = dict(os.environ, **{
-        # `auto` records a rung the receiver side cannot carry as
-        # infrastructure-limited instead of as the engine losing capacity.
-        "CAPACITY_PREFLIGHT": "auto",
-        "CAPACITY_ENGINE": "restream" if engine["id"] == "restream" else "nginx",
-        "CAPACITY_NGINX": binary,
-        "RESTREAM_BIN": binary,
-        "CAPACITY_RTMP_SINK_NGINX": os.path.join(
-            PROJECT_ROOT, ".build/nginx-haivision/install/sbin/nginx"),
-        "CAPACITY_WORKERS": str(len(cpus)),
-        "CAPACITY_NGINX_CPUS": cpu_list,
-        "CAPACITY_RECEIVER_CPUS": RECEIVER_CPUS,
-        "CAPACITY_PUBLISHER_CPUS": PUBLISHER_CPUS,
-        "CAPACITY_QUALITY_SECONDS": str(args.seconds),
-        "CAPACITY_QUALITY_MIXES": " ".join(requested_mixes(args)),
-        "CAPACITY_QUALITY_STEPS": args.steps,
-        "CAPACITY_BENCH_DIR": helpers,
-        "CAPACITY_SCRIPTS_DIR": scripts,
-        "CAPACITY_QUALITY_STOP_AFTER_FAILURES": "1",
-        "CAPACITY_SINK_MODE": "correctness",
-        "PHASES": "capacity-quality-ladder",
-        "CAPACITY_RUN": run_dir,
-    }, **args.topology_env[topology])
+    environment = cell_environment(engine, cpus, topology, helpers, scripts, run_dir, args)
 
     # Every CPU a role is placed on.  No `--isolate`: its cpuset makes the
     # receivers' taskset onto the E-cores fail with EINVAL.
