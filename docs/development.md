@@ -481,10 +481,10 @@ The measuring side is kept from becoming the measured limit:
   host-global knobs (`rps_sock_flow_entries`, one `rps_flow_cnt` per queue)
   for a reverse direction that is acknowledgements and requests against a
   fanout of segments, so it is not used.  Loopback mode sets
-  `net.ipv4.tcp_tw_reuse` (the namespace mode sets it per namespace) because
-  every destination of a rung shares one address, and it restores whatever the
-  together with the mask, when it goes down.  The shared address is
-  loopback's own ceiling, and the arithmetic is worth stating: one destination
+  `net.ipv4.tcp_tw_reuse` (the namespace mode sets it per namespace, since the
+  flag itself is per namespace) and restores whatever the host had, together
+  with the mask, when it goes down.  The shared address is loopback's own
+  ceiling, and the arithmetic is worth stating: one destination
   pair offers `net.ipv4.ip_local_port_range` ports (28,232 here), so a single
   rung of a thousand connections cannot exhaust it, and only accumulation
   across successive rungs can.  Distinct addresses out of `127.0.0.0/8` would
