@@ -11,9 +11,6 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
-import os
-import re
-import subprocess
 import sys
 import time
 import urllib.parse
@@ -54,7 +51,7 @@ class ApiError(RuntimeError):
 
 def destination_id(program_index: int, destination_index: int,
                    program_count: int) -> str:
-    """Must agree with the shell's `capacity_destination_id` (see self-test)."""
+    """Must agree with the ids the harness's receivers expect (harness/receivers.py)."""
     if program_count == 1:
         return "d%04d" % destination_index
     return "p%04d-d%04d" % (program_index, destination_index)
@@ -110,22 +107,32 @@ class Client:
                 payload = body.encode() if isinstance(body, str) else body
 
         url = self._parsed.path.rstrip("/") + path
-        try:
-            conn = self._connection()
-            if timeout is not None:
-                conn.timeout = timeout
-            if payload is not None:
-                head["Content-Length"] = str(len(payload))
-            conn.request(method, url, body=payload, headers=head)
-            response = conn.getresponse()
-            data = response.read()
-            status = response.status
-            if response.will_close:
+        for attempt in (0, 1):
+            reused = self._conn is not None
+            try:
+                conn = self._connection()
+                if timeout is not None:
+                    conn.timeout = timeout
+                if payload is not None:
+                    head["Content-Length"] = str(len(payload))
+                try:
+                    conn.request(method, url, body=payload, headers=head)
+                except (BrokenPipeError, ConnectionResetError):
+                    # The server closed an idle keep-alive connection; the
+                    # request was never delivered, so one resend is safe.
+                    if reused and attempt == 0:
+                        self._drop()
+                        continue
+                    raise
+                response = conn.getresponse()
+                data = response.read()
+                status = response.status
+                if response.will_close:
+                    self._drop()
+            except Exception as exc:
                 self._drop()
-        except Exception as exc:
-            self._drop()
-            raise ApiError("%s %s: %s" % (method, path, exc)) from exc
-        return status, data
+                raise ApiError("%s %s: %s" % (method, path, exc)) from exc
+            return status, data
 
     def get(self, path, fresh=False):
         status, data = self.request("GET", path, fresh=fresh)
@@ -212,10 +219,9 @@ def rtmp_sink_port(base, index):
     return base + 128 + index
 
 
-def rtmp_sink_http_port(base, index, receiver_config=False):
-    """The API port of RTMP sink `index`; remote sinks are tunnelled to a
-    separate local range."""
-    return base + (256 if receiver_config else 192) + index
+def rtmp_sink_http_port(base, index):
+    """The API port of RTMP sink `index`."""
+    return base + 192 + index
 
 
 def nginx_destination_body(kind, sink_id, receiver, port, stream, path=""):
@@ -275,7 +281,7 @@ class Program:
         return destination_id(self.program_index, offset, self.program_count)
 
     def plan(self, srt_base_port, srt_listeners, rtmp_base, rtmp_sinks,
-             hls_push_port, receiver, receiver_config, hls_path):
+             hls_push_port, receiver, hls_path):
         """Resolve each destination to (kind, id, port, receiver_api)."""
         srt_count = sum(1 for kind, _ in self.entries if kind == SRT)
         rtmp_count = sum(1 for kind, _ in self.entries if kind == RTMP)
@@ -289,10 +295,8 @@ class Program:
             elif kind == RTMP:
                 index = ((self.program_index * rtmp_count
                           + offset - srt_count) % rtmp_sinks)
-                address = "127.0.0.1" if receiver_config else receiver
                 api = "http://%s:%d/media/api/v1" % (
-                    address, rtmp_sink_http_port(rtmp_base, index,
-                                                 receiver_config))
+                    receiver, rtmp_sink_http_port(rtmp_base, index))
                 out.append((kind, sink_id, rtmp_sink_port(rtmp_base, index), api))
             else:
                 out.append((kind, sink_id, hls_push_port, None))
@@ -379,7 +383,6 @@ def _cmd_provision(args):
         rtmp_sinks=args.rtmp_sinks or 1,
         hls_push_port=args.hls_push_port,
         receiver=args.receiver_addr,
-        receiver_config=args.receiver_config,
         hls_path=args.path,
     )
 
@@ -408,61 +411,6 @@ def _cmd_post_owner(args):
     return 0
 
 
-def _shell_destination_ids(cases):
-    """Answers from the harness's own `capacity_destination_id`, via bash."""
-    harness = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                           "ingest_egress_fanout.sh")
-    with open(harness, errors="ignore") as handle:
-        source = handle.read()
-    match = re.search(
-        r"^capacity_destination_id\(\)\s*\{.*?^\}", source,
-        re.MULTILINE | re.DOTALL)
-    if not match:
-        raise ApiError("capacity_destination_id is gone from %s" % harness)
-
-    # The shell function's printf carries no newline, so each answer is wrapped.
-    calls = "\n".join(
-        'printf "%%s\\n" "$(capacity_destination_id %d %d %d)"'
-        % (program_index, destination_index, programs)
-        for programs, program_index, destination_index in cases)
-    try:
-        result = subprocess.run(["bash", "-c", "%s\n%s\n" % (match.group(0), calls)],
-                                text=True, capture_output=True, timeout=60)
-    except subprocess.TimeoutExpired as exc:
-        raise ApiError("the shell function timed out") from exc
-    if result.returncode != 0:
-        raise ApiError("the shell function failed: %s" % result.stderr.strip())
-    return result.stdout.split()
-
-
-def _cmd_self_test(_args):
-    """Check this module's id scheme against the harness's shell function."""
-    cases = [(programs, program_index, destination_index)
-             for programs in (1, 4)
-             for program_index in range(programs)
-             for destination_index in (0, 1, 17, 1023, 2047)]
-    theirs = _shell_destination_ids(cases)
-
-    mismatches = [
-        "programs=%d p=%d d=%d: python %r shell %r"
-        % (programs, program_index, destination_index,
-           destination_id(program_index, destination_index, programs), shell)
-        for (programs, program_index, destination_index), shell
-        in zip(cases, theirs)
-        if destination_id(program_index, destination_index, programs) != shell
-    ]
-    if len(theirs) != len(cases):
-        mismatches.append("shell returned %d answers for %d cases"
-                          % (len(theirs), len(cases)))
-    if mismatches:
-        for line in mismatches:
-            print(line, file=sys.stderr)
-        return 1
-    print("destination id scheme agrees with the shell across %d cases"
-          % len(cases))
-    return 0
-
-
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--api", default="http://127.0.0.1:19999/media/api/v1")
@@ -488,8 +436,6 @@ def build_parser():
     p.add_argument("--srt-listeners", type=int, default=16)
     p.add_argument("--rtmp-base", type=int, default=0)
     p.add_argument("--rtmp-sinks", type=int, default=0)
-    p.add_argument("--receiver-config", action="store_true",
-                   help="the receiver sinks are separate instances")
     p.add_argument("--hls-push-port", type=int, default=0)
     p.add_argument("--path", default="")
     p.add_argument("--pipeline", default="")
@@ -502,10 +448,6 @@ def build_parser():
     p.add_argument("path")
     p.add_argument("--body", default="")
     p.set_defaults(run=_cmd_post_owner)
-
-    p = sub.add_parser("self-test",
-                       help="check the id scheme against the shell's")
-    p.set_defaults(run=_cmd_self_test)
 
     return parser
 

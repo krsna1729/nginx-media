@@ -397,8 +397,8 @@ def readiness_report(args):
 
 def expected_destination_ids(programs, destinations, offset):
     """The destination IDs a rung creates: one program numbers them d0000..,
-    several programs prefix each with its own p0000- (the harness's
-    capacity_destination_id)."""
+    several programs prefix each with its own p0000- (capacity_client.py's
+    destination_id)."""
     if programs <= 1:
         return [f"d{index:04d}"
                 for index in range(offset, offset + destinations)]

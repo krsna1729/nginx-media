@@ -233,7 +233,10 @@ def peak_pressure(bundle):
 # whatever the nginx binary under test was.  (Not the binary: every code
 # revision under comparison is a different binary by definition.)
 HARNESS_FILES = (
-    "ingest_egress_fanout.sh", "capacity-mixes.conf",
+    "capacity_harness.py", "harness/api.py", "harness/config.py", "harness/cpu.py",
+    "harness/ladder.py", "harness/media.py", "harness/phases.py", "harness/proc.py",
+    "harness/receivers.py", "harness/rung.py", "harness/sender.py",
+    "capacity-mixes.conf",
     "capacity_diagnostics.py", "capacity_preflight.py", "capacity_media_offer.py",
     "hls_capacity_readers.py", "hls_push_capacity.py",
     "proc_cpu_sampler.py", "rtmp_capacity_quality.py",

@@ -33,7 +33,6 @@ from datetime import datetime, timezone
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
 
-HARNESS = os.path.join(PROJECT_ROOT, "tests/bench/ingest_egress_fanout.sh")
 MIXES = "pure-srt pure-rtmp pure-hls pure-hls-push rtmp-95-srt-5 hls-push-95-srt-5 rtmp-50-hls-push-45-srt-5"
 
 #: The harness default stops at 1024; the qualification target is 2048.
@@ -47,8 +46,10 @@ ENGINES = [
      "binary": ".build/nginx-robotweax/install/sbin/nginx"},
     {"id": "nginx-haivision",
      "binary": ".build/nginx-haivision/install/sbin/nginx"},
+    # restream has no HLS output path the harness can judge.
     {"id": "restream",
-     "binary": "../restream/target/release/restream"},
+     "binary": "../restream/target/release/restream",
+     "unsupported": ("hls",)},
 ]
 
 #: Receivers and publishers stay on the E-cores so they cannot steal from
@@ -73,14 +74,35 @@ def workloads_in(matrix):
     return set((matrix.get("mixes") or {}).keys())
 
 
-def complete(record, args):
-    """Whether a previous result measured every requested workload with this
-    ladder and window; a smoke result never satisfies a full run."""
-    wanted = set(args.mixes.split())
+def complete(record, args, engine):
+    """Whether a previous result measured every workload this engine runs
+    with this ladder and window; a smoke result never satisfies a full run."""
+    wanted = set(engine_mixes(engine, args)[0])
     return (bool(wanted)
             and record.get("seconds_per_rung") == args.seconds
             and record.get("steps", STEPS) == args.steps
             and workloads_in(record.get("matrix")) >= wanted)
+
+
+def mix_protocols():
+    """{mix: protocol field} from capacity-mixes.conf, in file order."""
+    table = {}
+    with open(os.path.join(PROJECT_ROOT, "tests/bench/capacity-mixes.conf")) as source:
+        for line in source:
+            if line.strip() and not line.lstrip().startswith("#"):
+                name, protocol = line.split(":")[:2]
+                table[name] = protocol
+    return table
+
+
+def engine_mixes(engine, args):
+    """(mixes to run, mixes the engine cannot carry). Unsupported mixes are
+    recorded as such, never run, so they cannot read as setup failures."""
+    protocols = mix_protocols()
+    names = list(protocols) if args.mixes == "all" else args.mixes.split()
+    unsupported = [n for n in names
+                   if any(p in protocols.get(n, "") for p in engine.get("unsupported", ()))]
+    return [n for n in names if n not in unsupported], unsupported
 
 
 def engine_binary(engine):
@@ -88,50 +110,18 @@ def engine_binary(engine):
 
 
 def snapshot_harness():
-    """One immutable copy of the harness and every helper it names.
-
-    The copy sits beside the original because the harness resolves its root
-    two levels up; helpers are found by the `$BENCH_DIR/`, `$SCRIPTS_DIR/`
-    and `$ROOT/scripts/` references, and CAPACITY_BENCH_DIR/SCRIPTS_DIR point
-    the harness at the copies.
-    """
+    """One immutable copy of tests/bench (harness package and every helper)
+    plus the sink builder, so an edit during a sweep cannot change a cell."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     bench = os.path.join(PROJECT_ROOT, "tests/bench")
-    helpers = os.path.join(bench, ".sweep-%s-helpers" % stamp)
-    scripts = os.path.join(bench, ".sweep-%s-scripts" % stamp)
-    os.makedirs(helpers, exist_ok=True)
-    os.makedirs(scripts, exist_ok=True)
-
-    needed = {"bench": set(), "scripts": set()}
-    with open(HARNESS, errors="ignore") as handle:
-        text = handle.read()
-    for match in re.finditer(
-            r"\$(BENCH_DIR|SCRIPTS_DIR|ROOT/scripts)/([A-Za-z0-9_.-]+)", text):
-        needed["bench" if match.group(1) == "BENCH_DIR" else "scripts"].add(
-            match.group(2))
-
-    missing = []
-    for kind, target in (("bench", helpers), ("scripts", scripts)):
-        if not needed[kind]:
-            raise SystemExit("no %s helpers found in the harness; the freeze "
-                             "would be incomplete" % kind)
-        source_dir = bench if kind == "bench" else os.path.join(PROJECT_ROOT, "scripts")
-        for name in sorted(needed[kind]):
-            source = os.path.join(source_dir, name)
-            if not os.path.exists(source):
-                missing.append(name)
-                continue
-            shutil.copy(source, os.path.join(target, name))
-    if missing:
-        raise SystemExit("the harness reads files that do not exist: %s"
-                         % ", ".join(missing))
-
-    path = os.path.join(bench, ".sweep-%s.sh" % stamp)
-    shutil.copy(HARNESS, path)
-    os.chmod(path, 0o755)
-    log("froze the harness, %d benchmark helpers and %d script helpers"
-        % (len(needed["bench"]), len(needed["scripts"])))
-    return path, helpers, scripts
+    frozen = os.path.join(bench, ".sweep-%s" % stamp)
+    shutil.copytree(bench, frozen, ignore=shutil.ignore_patterns(
+        ".*", "__pycache__", "history", "test_*.py"))
+    scripts = os.path.join(frozen, "scripts")
+    os.makedirs(scripts)
+    shutil.copy(os.path.join(PROJECT_ROOT, "scripts/build-capacity-receiver.py"), scripts)
+    log("froze tests/bench into %s" % os.path.relpath(frozen, PROJECT_ROOT))
+    return os.path.join(frozen, "capacity_harness.py"), frozen, scripts
 
 
 def cell_id(engine, cpus):
@@ -329,7 +319,7 @@ def run_cell(engine, cpus, snapshot, helpers, scripts, args):
         "CAPACITY_RECEIVER_CPUS": RECEIVER_CPUS,
         "CAPACITY_PUBLISHER_CPUS": PUBLISHER_CPUS,
         "CAPACITY_QUALITY_SECONDS": str(args.seconds),
-        "CAPACITY_QUALITY_MIXES": args.mixes,
+        "CAPACITY_QUALITY_MIXES": " ".join(engine_mixes(engine, args)[0]),
         "CAPACITY_QUALITY_STEPS": args.steps,
         "CAPACITY_BENCH_DIR": helpers,
         "CAPACITY_SCRIPTS_DIR": scripts,
@@ -343,7 +333,7 @@ def run_cell(engine, cpus, snapshot, helpers, scripts, args):
     # receivers' taskset onto the E-cores fail with EINVAL.
     helper_cpus = ",".join(str(cpu) for cpu in cpus + E_CORES)
     command = ["omarchy-benchmark", "--cpu", helper_cpus, "--turbo", "on",
-               "--", "bash", snapshot]
+               "--", "python3", snapshot]
     started = time.time()
     status, timed_out, stall_note, killed = None, False, None, False
     child = None
@@ -377,6 +367,8 @@ def run_cell(engine, cpus, snapshot, helpers, scripts, args):
         "wall_seconds": round(elapsed, 1),
         "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "matrix": None,
+        "mixes": engine_mixes(engine, args)[0],
+        "unsupported_mixes": engine_mixes(engine, args)[1],
     }
     try:
         with open(matrix_path) as handle:
@@ -450,6 +442,9 @@ def summarise(records):
         if limited:
             lines.append("%-28s infrastructure limited: %s"
                          % ("", ",".join(limited)))
+        if record.get("unsupported_mixes"):
+            lines.append("%-28s not supported by this engine: %s"
+                         % ("", ",".join(record["unsupported_mixes"])))
     return "\n".join(lines)
 
 
@@ -503,7 +498,7 @@ def sweep(args):
     snapshot, helpers, scripts = snapshot_harness()
     log("harness snapshot: %s" % os.path.relpath(snapshot, PROJECT_ROOT))
     log("%d cells, %ds per rung, %d workloads each"
-        % (len(cells), args.seconds, len(args.mixes.split())))
+        % (len(cells), args.seconds, len(mix_protocols()) if args.mixes == "all" else len(args.mixes.split())))
 
     records = []
     started = time.time()
@@ -518,14 +513,14 @@ def sweep(args):
                 previous = {}
             # A ladder stopping at its first quality failure exits non-zero
             # and is complete; only the matrix decides.
-            if complete(previous, args):
+            if complete(previous, args, engine):
                 log("%-18s already measured, skipping" % identifier)
                 records.append(previous)
                 continue
             log("%-18s previous attempt incomplete (%d of %d workloads, exit %s);"
                 " re-running" % (identifier,
                                  len(workloads_in(previous.get("matrix"))),
-                                 len(args.mixes.split()),
+                                 len(engine_mixes(engine, args)[0]),
                                  previous.get("exit_status")))
 
         log("%-18s %d core%s (%s)"
@@ -560,7 +555,7 @@ def sweep(args):
                               .isoformat(timespec="seconds"),
         "seconds_per_rung": args.seconds,
         "steps": args.steps,
-        "mixes": args.mixes.split(),
+        "mixes": list(mix_protocols()) if args.mixes == "all" else args.mixes.split(),
         "elapsed_seconds": round(elapsed, 1),
         "cells": records,
     })
@@ -589,19 +584,17 @@ def main():
     parser.add_argument("--engines", default="",
                         help="comma-separated engine ids to restrict to")
     parser.add_argument("--smoke", action="store_true",
-                        help="one reference rung and a ten-destination rung per "
-                             "workload, ten seconds each, to show the harness "
-                             "works end to end before a night is spent on it")
+                        help="every workload at ten destinations for ten "
+                             "seconds, to show the harness works end to end "
+                             "before a night is spent on it")
     parser.add_argument("--mixes", default=MIXES,
                         help="workloads to run per cell; default is all seven")
     parser.add_argument("--steps", default=STEPS,
                         help="destination ladder per workload")
     args = parser.parse_args()
     if args.smoke:
-        args.mixes = MIXES
-        # The 1-destination rung is the reference the ladder calibrates from.
-        args.steps = "1 10"
-        args.seconds = 10
+        # The ladder calibrates its own 1-destination references.
+        args.mixes, args.steps, args.seconds = "all", "10", 10
         args.cell_budget = min(args.cell_budget, 1800)
     # Absolute: the harness runs with cwd=PROJECT_ROOT, and leftover processes
     # are matched by this path.

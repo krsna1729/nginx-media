@@ -595,7 +595,7 @@ def per_cpu_busy(window_s=0.5):
 
 def foreign_cpu_consumers(window_s=0.5, limit=5):
     """Processes outside the benchmark that used CPU in the window, biggest first."""
-    own = ("ingest_egress_fanout", "capacity_preflight", "srt_fanout_sink",
+    own = ("capacity_harness", "capacity_preflight", "srt_fanout_sink",
            "hls_push_capacity", "hls_capacity_readers", "proc_cpu_sampler",
            "nginx", "omarchy-benchmark", "taskset")
     first = {}

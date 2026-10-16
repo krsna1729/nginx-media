@@ -6,7 +6,8 @@
 # attribution because both sides share the machine.
 #
 #   tests/bench/capacity_veth.sh up|down|status [ns-sut] [ns-recv]
-#   eval "$(tests/bench/capacity_veth.sh up)"   # exports the harness env
+#   eval "$(tests/bench/capacity_veth.sh up)"   # exports the harness env, then
+#   PHASES=capacity-quality-ladder python3 tests/bench/capacity_harness.py
 #
 # `up` creates two namespaces, one veth pair and a capability-bearing nsenter
 # copy (so the harness enters a namespace as the invoking user); `down` removes
@@ -48,15 +49,17 @@ remove_net() {
     return 0
 }
 
-# Socket-buffer maxima and tw_reuse are per namespace; netdev_max_backlog is
-# host-global and not visible inside one, so it is not set here.
+# net.core socket-buffer limits are host-global on this kernel (writes from a
+# namespace are refused), so they are checked, not set; tw_reuse is per netns.
 tune_ns() {   # <namespace>
-    ip netns exec "$1" sysctl -qw \
-        net.core.rmem_max="$SOCKMEM" \
-        net.core.wmem_max="$SOCKMEM" \
-        net.core.rmem_default=212992 \
-        net.core.wmem_default=212992 \
-        net.ipv4.tcp_tw_reuse=1 >/dev/null || fail "cannot tune namespace $1"
+    local key value
+    ip netns exec "$1" sysctl -qw net.ipv4.tcp_tw_reuse=1 >/dev/null \
+        || fail "cannot set tcp_tw_reuse in $1"
+    for key in net.core.rmem_max net.core.wmem_max; do
+        value="$(ip netns exec "$1" sysctl -n "$key")" || fail "cannot read $key in $1"
+        [ "$value" -ge "$SOCKMEM" ] \
+            || fail "$key is $value in $1; the SRT sink needs $SOCKMEM (sudo sysctl -w $key=$SOCKMEM)"
+    done
 }
 
 # Copy then rename: a running helper cannot be overwritten in place (ETXTBSY).

@@ -6,7 +6,8 @@ builds request bodies and talks HTTP.  The behaviours pinned here are the ones
 that fail *silently* rather than loudly:
 
   * the destination id scheme, which the receiver slot mapping, the stall
-    contract and every report all key off, and which exists in two languages
+    contract and every report all key off, and which the harness's receivers
+    repeat
   * the request body of each of the three destination kinds, for each of the
     two engines -- a wrong field is a misroute, not an error
   * owner routing: a miss must be retried on a *new connection*, because a
@@ -25,7 +26,6 @@ import http.server
 import importlib.util
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -37,6 +37,9 @@ _client = importlib.util.spec_from_file_location(
     "capacity_client", os.path.join(HERE, "capacity_client.py"))
 cc = importlib.util.module_from_spec(_client)
 _client.loader.exec_module(cc)
+
+sys.path.insert(0, HERE)
+from harness import receivers  # noqa: E402
 
 FAILURES = []
 
@@ -136,32 +139,17 @@ def test_exports_exist():
     check("provision" in cc.__all__, "the unified provisioner is exported")
 
 
-def test_destination_id_matches_shell():
+def test_destination_id_scheme():
     """The scheme is defined twice; a divergence corrupts results silently."""
-    print("\ndestination id parity with the harness")
-    result = subprocess.run(
-        [sys.executable, os.path.join(HERE, "capacity_client.py"), "self-test"],
-        text=True, capture_output=True)
-    check(result.returncode == 0, "python agrees with the shell function",
-          result.stderr.strip()[:200])
-
-    # And the parity check is not vacuous: a one-character change must fail.
-    source = open(os.path.join(HERE, "capacity_client.py")).read()
-    mutated = source.replace('return "d%04d" % destination_index',
-                             'return "d%05d" % destination_index')
-    check(mutated != source, "the mutation applies")
-    patched = os.path.join(HERE, ".capacity_client.mutant.py")
-    try:
-        with open(patched, "w") as handle:
-            handle.write(mutated)
-        mutant = subprocess.run(
-            [sys.executable, patched, "self-test"],
-            text=True, capture_output=True)
-        check(mutant.returncode != 0,
-              "a mutated scheme is rejected by the same check")
-    finally:
-        if os.path.exists(patched):
-            os.remove(patched)
+    print("\ndestination id scheme")
+    check(cc.destination_id(0, 17, 1) == "d0017", "one program: d%04d")
+    check(cc.destination_id(3, 2047, 4) == "p0003-d2047",
+          "several programs: p%04d-d%04d")
+    for programs in (1, 4):
+        ours = {cc.destination_id(p, d, programs)
+                for p in range(programs) for d in range(2048)}
+        check(ours == receivers._ids(programs, 2048),
+              "the harness's receivers expect the same ids (programs=%d)" % programs)
 
 
 def test_sink_port():
@@ -181,8 +169,7 @@ def test_rtmp_ports():
     print("\nrtmp sink port ranges")
     check(cc.rtmp_sink_port(20000, 0) == 20128, "media port base")
     check(cc.rtmp_sink_http_port(20000, 0) == 20192, "api port base")
-    check(cc.rtmp_sink_http_port(20000, 3, True) == 20259,
-          "an external receiver config uses the other api range")
+    check(cc.rtmp_sink_http_port(20000, 3) == 20195, "api port of a later sink")
 
 
 # -- the request bodies ----------------------------------------------------
@@ -238,7 +225,7 @@ def test_program_numbering():
     program.add(cc.HLS_PUSH, 1, first=5)
     plan = program.plan(srt_base_port=9000, srt_listeners=4, rtmp_base=20000,
                         rtmp_sinks=2, hls_push_port=8080,
-                        receiver="10.0.0.9", receiver_config=False, hls_path="")
+                        receiver="10.0.0.9", hls_path="")
     check([entry[0] for entry in plan] ==
           [cc.SRT] * 3 + [cc.RTMP] * 2 + [cc.HLS_PUSH],
           "kinds appear in the harness's order")
@@ -255,7 +242,7 @@ def test_program_numbering():
 
     multi = cc.Program(1, 2, "live/b")
     multi.add(cc.SRT, 2, first=0)
-    plan = multi.plan(9000, 4, 20000, 1, 8080, "10.0.0.9", False, "")
+    plan = multi.plan(9000, 4, 20000, 1, 8080, "10.0.0.9", "")
     check([e[1] for e in plan] == ["p0001-d0000", "p0001-d0001"],
           "with more than one program the ids carry the program index")
 
@@ -407,7 +394,7 @@ def test_cookie_jar():
 def main():
     print("capacity_client: data plane, bodies and retries")
     test_exports_exist()
-    test_destination_id_matches_shell()
+    test_destination_id_scheme()
     test_sink_port()
     test_rtmp_ports()
     test_bodies()

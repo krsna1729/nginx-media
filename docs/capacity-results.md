@@ -12,20 +12,10 @@ IRQ/NIC topology all move it, so it is compared within one host class.  Every ro
 comes from a rung's `diagnostics.json`; the method is in
 `development.md` ("Per-rung diagnostics and outcomes").
 
-Distributed evidence has a separate qualification boundary. The SSH driver now
-uses fresh explicit receiver roots, native receiver binaries, authenticated SSH
-host keys, owned remote process groups and fetched receiver fingerprints/probes.
-All named SRT/RTMP/HLS workloads use real receivers; RTMP administration remains
-private through SSH forwarding, and HLS-origin readers address the sender.
-Receiver CPU/process snapshots are host-separated rather than attributing a
-local SSH client's CPU to the remote receiver. Configuration manifests and
-logs/statuses use the same completeness contract as local history.
-No external SSH receiver or second physical host is configured in the current
-environment. An isolated loopback sshd can exercise transport, lifecycle and
-actual media, but cannot substantiate a physical-host/network capacity claim.
-Initial admission stops if measured CPU-cost evidence is absent or any probe,
-fingerprint, fetch or judge operation fails. This orchestration repair adds no
-new measured capacity result to the tables below.
+The two-host SSH receiver mode was removed when the harness moved to Python
+(`tests/bench/capacity_harness.py`); its earlier loopback-SSH runs below are
+orchestration evidence only. Every capacity result here is from one host, with
+the receivers on loopback or in the `capacity_veth.sh` namespaces.
 
 
 ## What landed, and why
@@ -780,8 +770,8 @@ loss: the end-to-end ratio stays at 0.999.
 The first rung of a mix that carries RTMP must carry exactly one RTMP
 destination, because the RTMP analyzer calibrates its reference from a single
 destination and refuses to guess from many; a ladder that starts with several
-fails as a setup error rather than a quality failure.  `capacity_mix_minimum_rung`
-now derives that rung from the shares.
+fails as a setup error rather than a quality failure.  `minimum_rung` in
+`tests/bench/harness/ladder.py` now derives that rung from the shares.
 
 ### Correction: the earlier contention failures were an invocation artifact
 
@@ -986,13 +976,9 @@ destinations.  What is not yet measured is mixed SRT session options
 7. **HLS push against a lossy, failing sink** is covered by the conformance
    fixtures; loss, latency, closure and intermittent HTTP errors are not
    injected yet.
-8. **The two-host (ssh) receiver path** is implemented and documented but
-   has never run against a second machine; only the namespace topology it
-   shares code with has been validated.  Its SRT path passes the sink's bind
-   address to the remote process and its preflight writes to a directory the
-   receiver actually has; a mix with RTMP destinations is refused there
-   rather than measured, because the RTMP sink's configuration and PID file
-   live on the sender while its nginx would run on the receiver.
+8. **A second-host receiver** is not supported: the SSH receiver path was
+   removed with the shell harness, so a capacity claim beyond one host's
+   path needs a new driver.
 9. **The local binary caveat**: any capacity number taken with a stale build
    is meaningless for the unprepared path; every number in this report comes
    from a build of the current source.
