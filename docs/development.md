@@ -278,7 +278,6 @@ make bench-hls            # serving HLS: disk vs tmpfs, sendfile, kTLS
 make bench-hls-fanout     # many concurrent readers over a sliding window
 make bench-push-fanout    # the uploader's copy path, 8 destinations
 make bench-burst-sizing   # sweep TS backing capacity against real media
-make bench-capacity-curve     # fixed-worker offered-load sweep and fairness
 make bench-capacity-quality  # per-destination delivery checks across egress mixes
 ```
 
@@ -290,37 +289,16 @@ one function changed, so it takes the two nginx binaries as its arguments
 (defaulting to `/tmp/nginx-sendfile` and `/tmp/nginx-buffered`); the target
 runs it with those defaults, which is only meaningful if you put them there.
 
-`bench-capacity-curve` holds worker count constant (four by default).  It steps
-program counts `1 2 4 8`, source bitrates `2M 6M 12M 20M`, then the exact
-single-program SRT and RTMP destination ladder `1 8 32 64 128 256 512 1000`.
-The remaining SRT cases isolate one stalled reader, saturate four programs with
-250 destinations each, and run a sustained four-program / four-destination
-fairness window.
-
-Each case starts a fresh NGINX instance with HLS's shared transport mux active;
-HLS segmentation and file I/O are part of the measured configuration.  The
-receivers and destination objects are installed first.  SRT publishers then
-start while nonblocking output handshakes settle, and the harness waits for all
-expected peers and for program-frame/output-feed progress before taking the
-measurement baseline.  The SRT receiver snapshots delivered payload bytes;
-the RTMP receiver reports delivered payload-byte counter deltas.
-Reports include overall `destination_fairness_jain` and
-`healthy_destination_fairness_jain` (excludes the deliberately stalled reader),
-per-program Jain fairness, first-byte spread, shard send/retransmission/queue
-counters, sender-thread CPU, worker RSS/PSS, event-loop delay, per-worker
-`ss -m` socket memory, and host-global `/proc/net/sockstat` values.
-
-`CAPACITY_WORKERS` chooses the fixed worker count.  `CAPACITY_WINDOW`,
-`CAPACITY_PROGRAM_STEPS`, `CAPACITY_BITRATE_STEPS`, and `CAPACITY_DEST_STEPS`
-bound the shorter sweeps; `CAPACITY_SLOW_SECONDS`,
-`CAPACITY_SATURATED_SECONDS`, and `CAPACITY_SUSTAINED_SECONDS` control the
-scenario windows.  RTMP ladder cases use one worker.  Per case the harness
-caps a source at 60 Mbit/s, nominal egress at 8000 Mbit/s, total destinations
-at 1000, outputs per owner at 1000, and each measurement window at 600 seconds.
-The focused `PHASES=capacity-srt-ladder` run executes only the single-program
-SRT destination ladder. `capacity-slow-reader`, `capacity-saturated`, and
-`capacity-sustained` each run one scenario without repeating the ladder.
-This is an offered-load curve, not a worker-count sweep.
+Every capacity and developer benchmark runs from one entry,
+`python3 tests/bench/capacity_harness.py` (package `tests/bench/harness/`).
+`PHASES` selects `capacity-quality-ladder` (`make bench-capacity-quality`) or
+the developer phases `floor ingest egress misplace topology`; the default is
+`floor ingest egress misplace` (`make bench-ingest-egress-fanout`), and
+`make bench-worker-topology` runs `topology`.  Every knob is an environment
+variable, read in `tests/bench/harness/config.py`; `CAPACITY_RUN` is the run
+directory (default `.build/ingest-egress-fanout`).  Exit status 0 means every
+ladder passed, 1 that a ladder recorded failures, 3 a configuration or setup
+error.
 
 `bench-capacity-quality` runs the delivery-quality ladders listed in
 `tests/bench/capacity-mixes.conf` (the one list the harness and
@@ -470,14 +448,52 @@ The measuring side is kept from becoming the measured limit:
   `CAPACITY_RECEIVER_EXEC` is the command prefix that starts a receiver
   program where it belongs and `CAPACITY_RECEIVER_ADDR` is the address the
   sender dials; unset, both keep the receivers on `127.0.0.1`, which is what
-  every shared-runner tier uses.  Two other topologies are wired:
+  every shared-runner tier uses.  The other wired topology is
   `ip netns exec <ns>` / `nsenter --net=/run/netns/<ns> --no-fork` with the
-  namespace's own address puts the traffic over a veth pair, and
-  the distributed driver below puts the receivers on another machine. The namespace
-  topology is one command - `eval "$(tests/bench/capacity_veth.sh up)"` -
+  namespace's own address, which puts the traffic over a veth pair. The namespace
+  topology is one command - `eval "$(tests/bench/capacity_topology.sh namespace up)"` -
   and it is the topology to use when the question is whether the software
   depends on loopback; it is not a NIC, so a number from it is a number
-  about the software, not about a 25 Gbit/s link.
+  about the software, not about a 25 Gbit/s link.  `capacity_sweep.py` runs
+  both topologies (`--topology namespace|loopback|both`) as separate cells,
+  because the same engine at the same core count means different things on a
+  shared stack and between namespaces; the cell name carries the topology
+  (`nginx-haivision-4c`, `nginx-haivision-4c-loopback`).
+- **Both topologies are tuned, and every tunable is a measured need.**
+  `capacity_topology.sh` applies the settings and reads each one back, so a
+  setting that did not take effect fails the run instead of quietly changing
+  what the numbers mean.  Two settings exist for one reason: a packet arriving
+  on a software device is processed on the CPU that transmitted it unless
+  receive steering moves it.  On this machine, for one 1.7 Mpps flow into a
+  receiver pinned to an E-core, the sender's CPU spent 20.7% (namespace) and
+  33.5% (loopback, `lo`) of a core in softirq while the mask was zero, and the
+  sender managed 1.67 M and 1.39 M sends; with the mask set to the receiver
+  CPUs the softirq work moved to an E-core and the sender managed 2.71 M and
+  1.75 M sends.  Without the mask a capacity run reads as a sender limit that
+  is really the receivers' ingress.  Both modes also require 64 MiB socket
+  buffers (`net.core.rmem_max`/`wmem_max`, checked, never set here: the write
+  belongs to the host) and the namespace mode sets `tcp_tw_reuse` per
+  namespace.  In loopback mode one device carries both directions, so the
+  single mask is the receiver CPUs, which also moves the sender's own ingress
+  off its cores; that asymmetry is the reason the namespace mode is the
+  qualification topology and loopback is the single-host reference.  RFS would
+  attribute per flow instead and remove the asymmetry, at the cost of two more
+  host-global knobs (`rps_sock_flow_entries`, one `rps_flow_cnt` per queue)
+  for a reverse direction that is acknowledgements and requests against a
+  fanout of segments, so it is not used.  Loopback mode sets
+  `net.ipv4.tcp_tw_reuse` (the namespace mode sets it per namespace, since the
+  flag itself is per namespace) and restores whatever the host had, together
+  with the mask, when it goes down.  The shared address is loopback's own
+  ceiling, and the arithmetic is worth stating: one destination
+  pair offers `net.ipv4.ip_local_port_range` ports (28,232 here), so a single
+  rung of a thousand connections cannot exhaust it, and only accumulation
+  across successive rungs can.  Distinct addresses out of `127.0.0.0/8` would
+  give each destination pair its own port space, and the kernel already routes
+  that whole range to `lo`, so a sink can bind `127.0.0.7` with no
+  configuration at all.  That is the remedy to reach for if a loopback rung
+  ever fails on ports, and it is not applied yet: the diagnosis that put
+  earlier RTMP rungs at that ceiling is unverified, so the spread would be
+  complexity spent on an unmeasured limit.
 - **The preflight decides whether a rung can be measured at all.**  Before a
   rung at or above `CAPACITY_PREFLIGHT_MIN_DESTINATIONS` (128 by default,
   `CAPACITY_PREFLIGHT=auto|yes|no`), the harness fingerprints the sender and
@@ -493,69 +509,6 @@ The measuring side is kept from becoming the measured limit:
   that workload's ladder; it is never a quality failure and never a
   statement about nginx.  The bundle keeps the whole preflight under
   `preflight`, and the matrix and history list the rung separately.
-- **Two hosts.** `tests/bench/capacity_distributed.sh --receiver user@host
-  --addr 10.10.0.2 --sender-addr 10.10.0.1 --mixes all` supports every named
-  SRT, sharded RTMP, HLS-origin and HLS-push workload. Each workload gets its
-  own configuration manifest, log, status and diagnostic directories; contention
-  calibration begins at four outputs when the requested first rung is one.
-  `--receiver-root /absolute/isolated/root` explicitly maps sender run paths
-  onto a **new** receiver root (default: a scoped fresh `/tmp` directory).
-  Only source is mirrored: `.build` and `.git` are excluded, no `--delete`
-  is used, and receiver SRT/nginx binaries are compiled natively. Fingerprints
-  record architecture, boot ID, actual binary hash and linked SRT identity.
-  Both host fingerprints and both probe results must arrive before judging;
-  exit 0 admits the ladder, 2 stops as infrastructure-limited, and every other
-  status is fatal. Initial admission requires measured
-  `CAPACITY_PREFLIGHT_SENDER_CPU_PER_GBPS` and
-  `CAPACITY_PREFLIGHT_RECEIVER_CPU_PER_GBPS`, not guessed core-count capacity.
-  `--out` must name a new directory; readiness, probe and snapshot artifacts
-  cannot be inherited from an earlier run.
-  `CAPACITY_RECEIVER_CONFIG` carries serialized SSH argv and path mappings.
-  Receivers publish their own PID, process group, start time and ownership token;
-  liveness and signals verify them on the receiver. Local SSH client CPU is
-  never sampled as receiver CPU. Remote CPU and host snapshots stay in separate
-  `receiver.cpu.*`, `receiver.host.*` and `receiver.processes.tsv` artifacts
-  because numeric PIDs and monotonic clocks can collide across hosts.
-  `remote_workspace` identifies the complete owned receiver root, including
-  sibling calibration/run paths, so native paths are never translated twice.
-  Closing the SSH owner's stdin reaps its owned receiver group. Long-lived
-  clients/tunnels bind to the true harness PID, including SIGKILL and startup
-  races. Cleanup also closes/reaps local owners when a new signal RPC fails.
-  Tunnel owners are the actual SSH process, not a wrapper. The availability
-  probe uses SSH's socket-reuse semantics so TIME_WAIT is not a false listener.
-  RTMP administration binds remote loopback and uses a private SSH forward.
-  HLS-origin readers use `--sender-addr`: the sender exposes only `/hls/` on
-  a separate listener, never its unauthenticated administration API.
-  Existing authenticated host keys are required; `--ssh-port`, `--ssh-key`
-  and `--known-hosts` support an isolated loopback sshd without permanent SSH
-  configuration. For example, after independently authenticating its host key:
-
-  ```sh
-  tests/bench/capacity_distributed.sh --receiver \"$USER@127.0.0.1\" \
-    --addr 127.0.0.1 --sender-addr 127.0.0.1 --ssh-port 22222 \
-    --ssh-key \"$PWD/.build/ssh-smoke/client\" \
-    --known-hosts \"$PWD/.build/ssh-smoke/known_hosts\" \
-    --receiver-root \"$PWD/.build/ssh-smoke/receiver-new\" \
-    --out \"$PWD/.build/ssh-smoke/result-new\" \
-    --mixes 'pure-srt pure-rtmp pure-hls pure-hls-push' --steps '1' \
-    --seconds 15 --preflight-only
-  python3 tests/bench/test_capacity_receiver.py \
-    --ssh-config .build/ssh-smoke/result-new/receiver-config.json
-  ```
-
-  Without measured CPU costs, the first command stops with insufficient
-  evidence after native preparation and the actual probe. Its transport config
-  remains usable for the second command's real process/file/signal/teardown
-  smoke. For an actual media smoke (not admission or capacity qualification),
-  use that config with `CAPACITY_RUN` set to its `local_run`,
-  `CAPACITY_RECEIVER_CONFIG` to its path, `CAPACITY_PREFLIGHT=no`,
-  `CAPACITY_RECEIVER_ADDR=127.0.0.1`, `CAPACITY_SENDER_ADDR=127.0.0.1`,
-  `CAPACITY_QUALITY_MIXES='pure-srt pure-rtmp pure-hls pure-hls-push'`,
-  `CAPACITY_QUALITY_STEPS=1`, `CAPACITY_QUALITY_SECONDS=15`, and
-  `PHASES=capacity-quality-ladder` when launching `ingest_egress_fanout.sh`.
-  Loopback SSH proves orchestration only, not a second physical host or NIC
-  capacity. A 1000 × 8 Mbit/s rung needs about 9.6 Gbit/s including overhead;
-  insufficient or invalid evidence must never become a capacity claim.
 - The SRT receiver listens on several ports (`PORT:N`) so no single receiver
   UDP socket and libsrt receive thread carries more than
   `CAPACITY_SRT_RECEIVER_PEERS` destinations (16 by default).
@@ -604,16 +557,15 @@ References are reset for every mix and persisted only after their own checks
 pass. Offered/prepared rates and provenance travel into diagnostics and history.
 
 HLS-reader acceptance excludes cuts before the reader's acknowledged actual
-start, not just before the CPU snapshot. Remote native start/end values must
-agree with their controller-clock acknowledgments; an unmapped clock is a
-setup failure. Missing in-window segments still fail delivery.
+start, not just before the CPU snapshot. Missing in-window segments still fail
+delivery.
 
 CPU accounting opens only after sampler/receiver readiness and closes before
 sampler joins or artifact fetches. Every capture first validates ownership and
 prepares its native operation, including sampler quiescence, then acknowledges
 READY while parked. The controller releases CPU accounting and all capture
-tokens together. SSH authentication and process startup are outside request/reply
-brackets; token dispatch through native reply is inside. Receiver replies retain
+tokens together. Process startup is outside request/reply brackets; signal
+dispatch through native reply is inside. Receiver replies retain
 native capture times separately from controller brackets. Failed preparation
 aborts the boundary and reaps parked captures instead of opening accounting.
 Extended host snapshots run outside CPU accounting and retain their own interval.
@@ -770,6 +722,52 @@ for branch (`10 commits × 3 workloads × 3 rungs × 10 s`), 28 for nightly
 derived from the current recipe, not observed wall-clock costs; they exclude
 per-revision builds, mixed-workload calibration, startup and retries. The
 trend job has a 180-minute ceiling, separate from the full qualification job.
+
+
+#### The data plane is Python: `tests/bench/capacity_client.py`
+
+The harness (`tests/bench/capacity_harness.py`) owns process lifecycle,
+ordering, cleanup, CPU pinning, namespace entry and signal delivery. HTTP
+provisioning, JSON, retries and the destination numbering live in
+`capacity_client.py`, because every defect found in the former shell harness
+was in that half:
+
+* a request body assembled by shell concatenation and then handed to Python
+  through a `'''$res'''` literal, which a body containing a quote ends early
+* a `sleep 0.2` on a retry path that runs about three times per destination,
+  which put 93% of a rung's wall time into setup nothing measured
+* a retry loop bounded by attempt count, which would report a slow owner as a
+  setup error within half a second
+
+The harness calls it once per program, never once per destination. This is not a
+style preference: measured on the same sender, one process per destination
+costs **64.86 ms** against **6.13 ms** for a `curl` invocation, because
+interpreter start-up dominates. Batched, the same work costs **0.40 ms** per
+destination at one worker, **27.64 ms** at four and **35.62 ms** at six - the
+same shape as the old loop, which cost 8.80, 635.27 and 972.58 ms at those
+worker counts because it slept on every owner miss.
+
+`tests/bench/provision_cost.py` re-measures that comparison:
+
+```sh
+tests/bench/provision_cost.py --destinations 256 --workers 1,4,6
+```
+
+Two behaviours in the client are load-bearing and tested in
+`tests/bench/test_capacity_client.py`:
+
+* **Owner-routed calls open a new connection per attempt.** A stream is served
+  by one worker, chosen by hashing its name, and a `reuseport` listener hashes
+  each new connection to choose the acceptor. A reused connection is pinned to
+  the worker that already refused it, so retrying on one could never succeed.
+  Ordinary calls reuse a connection deliberately.
+* **Retries end at a deadline, not an attempt count.** A 404 means "the owner
+  cannot see this stream yet" as often as "wrong worker".
+
+The harness's receivers (`harness/receivers.py`) expect the destination ids
+the client provisions, because a report, the receiver slot mapping and the
+stall contract all key off them. `tests/bench/test_capacity_client.py`
+compares the two schemes over every id, as part of `make bench-reporting`.
 
 
 ### ffmpeg interoperability

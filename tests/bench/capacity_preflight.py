@@ -1,45 +1,14 @@
 #!/usr/bin/env python3
 """Decide whether a host pair can carry an offered load, before measuring it.
 
-A capacity number is only a statement about the software if the host, the
-network and the receivers were able to carry the load in the first place.
-This is the preflight that says so: it fingerprints the sender, the receiver
-and the path between them, and compares the measured headroom with what the
-requested rung needs.  When something is short it returns
-`infrastructure-limited` with the number that was short - never a capacity
-claim about nginx.
+  host   fingerprint one host (CPU, cgroup, NUMA, NICs, UDP limits, SRT library)
+  probe  --listen: count arriving UDP and echo pings; --peer: ping, then flood
+  judge  compare the measurements with the request: "ok",
+         "infrastructure-limited" or "insufficient-evidence"
 
-Subcommands:
-
-  host   [--role sender|receiver] [--json out]
-         one host's resources: CPU model and count, the permitted set, the
-         cgroup quota, frequency and throttling, NUMA placement, kernel,
-         memory, every interface's speed/driver/offloads/MTU, the kernel's
-         UDP buffer limits, and the transport library a binary links.
-
-  probe --listen --port N --seconds S --json out
-         receive side of the path probe: counts what arrives, echoes pings.
-
-  probe --peer HOST --port N --seconds S --json out
-         send side: measures round-trip time and loss on a ping sample, then
-         offers as much UDP payload as the path will take and reports what it
-         sent.  The receiver's own count is the one that matters; the judge
-         compares them.
-
-  judge --destinations N --bitrate-bps B --sender a.json --network b.json
-        [--receiver c.json] [--sender-cpu-per-gbps X] [--json out]
-         compares the measurements with the request and returns a verdict:
-         "ok" or "infrastructure-limited", with every limit that was hit and
-         the evidence for it.
-
-The overhead model is explicit and conservative: SRT carries a 1316-byte
-payload in a 44-byte IPv4/UDP/SRT data header (3.3%), and the default
-retransmission allowance is 15% on top, so the network requirement is the
-offered payload times 1.20.  `--overhead-factor` overrides it.  CPU has no
-model here on purpose: a core count cannot say how many cores per delivered
-Gbit/s the software needs, so that number is either supplied from a measured
-rung (`--sender-cpu-per-gbps`, `--receiver-cpu-per-gbps`) or reported as
-unknown - and an unknown is never a pass.
+The network requirement is payload x 1.20 (SRT header 3.3% plus a 15%
+retransmission allowance; `--overhead-factor`).  CPU needs a measured cost per
+Gbit/s (`--sender-cpu-per-gbps`); without one it is unknown, never a pass.
 """
 
 import argparse
@@ -60,26 +29,17 @@ import shutil
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import proc_cpu_sampler  # noqa: E402
+from proc_cpu_sampler import read_first_line  # noqa: E402
 
 MAGIC = b"NMPREFL1"  # exactly the 8 bytes the header carries
 PING = 0x01
 FLOOD = 0x02
 PING_REPLY = 0x03
 HEADER = struct.Struct("!8sB3xQ")  # magic, kind, padding, sequence
-SRT_PAYLOAD_BYTES = 1316
-SRT_HEADER_BYTES = 44  # 20 IPv4 + 8 UDP + 16 SRT data header
 DEFAULT_OVERHEAD_FACTOR = 1.20
 DEFAULT_PACKET_BYTES = 1400
 PING_COUNT = 20
 PING_TIMEOUT = 0.5
-
-
-def read_first_line(path):
-    try:
-        with open(path, encoding="utf-8") as source:
-            return source.readline().strip()
-    except OSError:
-        return None
 
 
 def cpu_model():
@@ -94,19 +54,12 @@ def cpu_model():
 
 
 def numa_nodes():
-    nodes = sorted(glob.glob("/sys/devices/system/node/node[0-9]*"))
-    result = {}
-    for node in nodes:
-        name = os.path.basename(node)
-        cpus = read_first_line(os.path.join(node, "cpulist"))
-        result[name] = cpus
-    return result
+    return {os.path.basename(node): read_first_line(os.path.join(node, "cpulist"))
+            for node in sorted(glob.glob("/sys/devices/system/node/node[0-9]*"))}
 
 
 def interface_facts():
-    """Speed, driver, MTU and offload state per interface, as the kernel
-    reports them.  A virtual interface (lo, veth, docker0) has no speed, and
-    saying so is better than assuming one."""
+    """Speed, driver, MTU and offloads per interface; virtual ones have no speed."""
     interfaces = {}
     for name in sorted(os.listdir("/sys/class/net")):
         base = os.path.join("/sys/class/net", name)
@@ -127,8 +80,7 @@ def interface_facts():
 
 
 def ethtool_facts(name):
-    """`ethtool -k`/`-i` when the tool is present: the offload state the NIC
-    actually applies, which /sys/class/net/features does not always match."""
+    """`ethtool` view of a NIC; /sys features do not always match what it applies."""
     facts = {}
     for args, key in ((["-k", name], "offloads"),
                       (["-i", name], "driver"),
@@ -299,14 +251,8 @@ def receiver_tool_versions():
 
 
 def transport_version(binary):
-    """Which libsrt a binary carries, and which build of it.
-
-    The soname alone cannot say whether a run used the distribution's library
-    or the pinned one built from source - both are libsrt.so.1.5 - so the
-    resolved path and the library's own version are reported with it.  A
-    statically linked robotweax build has no resolved path and reports its
-    version string instead.
-    """
+    """libsrt label, library version and resolved path: the soname alone cannot
+    tell the distribution's libsrt.so.1.5 from the pinned build."""
     if not binary or not os.path.exists(binary):
         return None
     version = None
@@ -325,13 +271,11 @@ def transport_version(binary):
         out = subprocess.run(["ldd", binary], capture_output=True, text=True,
                              timeout=10)
         for line in out.stdout.splitlines():
-            # both names end in srt: the reference library is libsrt.so, the
-            # clean-slate one librobotweax-srt.so
+            # libsrt.so and librobotweax-srt.so both contain "srt"
             if "srt" not in line or "=>" not in line:
                 continue
             soname = line.split()[0].strip()
-            resolved = line.split("=>")[-1].strip().split(" ")[0] \
-                if "=>" in line else ""
+            resolved = line.split("=>")[-1].strip().split(" ")[0]
             library_version = shared_library_version(resolved) \
                 if resolved and os.path.exists(resolved) else None
             label = version or soname
@@ -345,10 +289,7 @@ def transport_version(binary):
 
 
 def nginx_build(binary):
-    """Provenance of the binary under test: its compiler, the configure
-    arguments (which carry the compiler flags) and its content hash.  The
-    hash identifies a binary; it is never something history compares on,
-    because every code revision under comparison is a different binary."""
+    """Compiler, configure arguments/flags and content hash of the binary."""
     if not binary or not os.path.exists(binary):
         return None
     build = {}
@@ -375,7 +316,7 @@ def nginx_build(binary):
     return build or None
 
 
-def host_report(role, binary=None, pid=None):
+def host_report(role, binary=None):
     busy_start = proc_cpu_sampler.proc_stat_cpu()
     time.sleep(0.5)
     busy_end = proc_cpu_sampler.proc_stat_cpu()
@@ -410,8 +351,6 @@ def host_report(role, binary=None, pid=None):
     }
     if role == "receiver":
         report["tools"] = receiver_tool_versions()
-    if pid:
-        report["process"] = proc_cpu_sampler.process_info(pid)
     for name in ("eth0", "enp0s31f6", "wlo1"):
         if name in report["interfaces"]:
             report["interfaces"][name].update(ethtool_facts(name))
@@ -448,11 +387,8 @@ def busy_fraction(before, after):
 
 
 def udp_socket_drops(port):
-    """Per-socket UDP drops for the probe's own port, from /proc/net/udp.
-
-    A receiver that cannot drain its socket is a receiver limit, and it must
-    not be read as a slow path.  With SO_REUSEPORT there is one socket per
-    thread, so the drops of every socket bound to the port are summed."""
+    """UDP drops summed over every socket bound to the probe's port (one per
+    SO_REUSEPORT thread): a receiver that cannot drain is not a slow path."""
     total = None
     try:
         with open("/proc/net/udp", encoding="utf-8") as source:
@@ -475,10 +411,8 @@ def udp_socket_drops(port):
 
 
 def probe_listen(port, seconds, packet_bytes, bind, threads=1):
-    """Receive side.  One socket per thread with SO_REUSEPORT: a single
-    Python socket cannot drain more than a few Gbit/s, and a probe that
-    reports its own drain rate as the path's capacity is worse than no
-    probe."""
+    """Receive side; one SO_REUSEPORT socket per thread, since one Python
+    socket cannot drain more than a few Gbit/s."""
     sockets = []
     for _ in range(max(1, threads)):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -558,25 +492,31 @@ def probe_listen(port, seconds, packet_bytes, bind, threads=1):
 
 
 def probe_send(peer, port, seconds, packet_bytes, threads=1):
-    """Send side: one ping sample for the path's latency and loss, then as
-    much UDP payload as the threads can push.  The receiver's count is the
-    measurement; this side's count says whether the load was ever offered."""
+    """Send side: a ping sample for latency and loss, then a UDP flood.  The
+    receiver's count is the measurement; this one says what was offered."""
     address = (peer, port)
-    ping_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    ping_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1 << 20)
-    ping_sock.settimeout(PING_TIMEOUT)
     rtts = []
-    for sequence in range(PING_COUNT):
-        packet = HEADER.pack(MAGIC, PING, sequence) + bytes(64)
-        start = time.monotonic_ns()
-        try:
-            ping_sock.sendto(packet, address)
-            data, _ = ping_sock.recvfrom(2048)
-        except (socket.timeout, OSError):
-            continue
-        if data.startswith(MAGIC) and HEADER.unpack_from(data)[1] == PING_REPLY:
-            rtts.append((time.monotonic_ns() - start) / 1e6)
-    ping_sock.close()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as ping_sock:
+        for sequence in range(PING_COUNT):
+            start = time.monotonic_ns()
+            deadline = time.monotonic() + PING_TIMEOUT
+            try:
+                ping_sock.sendto(HEADER.pack(MAGIC, PING, sequence) + bytes(64), address)
+                # Skip late replies to earlier pings: they would read as short RTTs.
+                while (remaining := deadline - time.monotonic()) > 0:
+                    ping_sock.settimeout(remaining)
+                    data, _ = ping_sock.recvfrom(2048)
+                    if (len(data) >= HEADER.size and HEADER.unpack_from(data)
+                            == (MAGIC, PING_REPLY, sequence)):
+                        rtts.append((time.monotonic_ns() - start) / 1e6)
+                        break
+            except OSError:
+                continue
+    if not rtts:
+        # Our own listener never answered: wrong namespace, gatewayed/black-holed
+        # route or no receiver.  Never flood a path we cannot see the far end of.
+        raise SystemExit(f"refusing to probe: no ping reply from {peer}:{port} "
+                         f"in {PING_COUNT} attempts")
 
     payload = bytes(packet_bytes)
     counters = [{"bytes": 0, "packets": 0} for _ in range(max(1, threads))]
@@ -645,34 +585,17 @@ def parse_cpu_list(spec):
 
 
 def per_cpu_busy(window_s=0.5):
-    """Busy fraction per CPU over a short window, from /proc/stat.
-
-    The aggregate line cannot say which CPU was busy, and that is the whole
-    question when a run is pinned: work on a CPU the run does not use costs
-    the measurement nothing, work on one it does use contaminates it."""
-    before = proc_cpu_sampler.proc_stat_per_cpu() or {}
+    """Busy fraction per CPU over a short window, from /proc/stat."""
+    before = proc_cpu_sampler.proc_stat_per_cpu()
     time.sleep(window_s)
-    after = proc_cpu_sampler.proc_stat_per_cpu() or {}
-    busy = {}
-    for name, first in before.items():
-        second = after.get(name)
-        if not second:
-            continue
-        total = sum(second.values()) - sum(first.values())
-        idle = (second["idle"] + second.get("iowait", 0)
-                - first["idle"] - first.get("iowait", 0))
-        if total > 0:
-            busy[name] = round(1.0 - idle / total, 4)
-    return busy
+    after = proc_cpu_sampler.proc_stat_per_cpu()
+    return {name: value for name, first in before.items()
+            if (value := busy_fraction(first, after.get(name) or {})) is not None}
 
 
 def foreign_cpu_consumers(window_s=0.5, limit=5):
-    """Processes that used CPU during the window, by pid, biggest first.
-
-    The benchmark's own programs are named by their command lines; anything
-    else that is running is foreign to the measurement and is worth naming
-    before an hour of rungs is read as a capacity result."""
-    own = ("ingest_egress_fanout", "capacity_preflight", "srt_fanout_sink",
+    """Processes outside the benchmark that used CPU in the window, biggest first."""
+    own = ("capacity_harness", "capacity_preflight", "srt_fanout_sink",
            "hls_push_capacity", "hls_capacity_readers", "proc_cpu_sampler",
            "nginx", "omarchy-benchmark", "taskset")
     first = {}
@@ -709,8 +632,7 @@ def foreign_cpu_consumers(window_s=0.5, limit=5):
 
 
 def judge(args):
-    # Invalid measurements outrank hardware limits: a broken instrument cannot
-    # identify an infrastructure boundary, even when another resource is short.
+    # Invalid measurements outrank hardware limits.
     errors = []
     for label, path in (("sender", args.sender), ("network", args.network),
                         ("probe-sender", args.probe_sender),
@@ -749,8 +671,7 @@ def judge(args):
     sender = load(args.sender)
     network = load(args.network)
     if args.probe_sender:
-        # The path is measured from both ends: the receiver's count is the
-        # measurement, the sender's count says whether the load was offered.
+        # The receiver's count is the measurement; the sender's says what was offered.
         probe = load(args.probe_sender)
         for key in ("sent_bytes", "sent_packets", "send_window_s",
                     "rtt_ms_p50", "rtt_ms_p95", "ping_loss"):
@@ -789,13 +710,8 @@ def judge(args):
         details["probe_receiver_socket_drops"] = drops
         if measured_bps < required_bps:
             if drops:
-                # The probe's own receiver dropped datagrams, so the probe
-                # stopped being a valid instrument at that rate: it cannot say
-                # whether the path could carry more.  The benchmark's own
-                # receivers are sharded C programs and may still carry it, so
-                # this is evidence about the probe - reported, never turned
-                # into a limit.  The receiver's *CPU* is the number that
-                # decides the receiver side (see the CPU check below).
+                # The probe's own receiver dropped: evidence about the probe,
+                # not the path; the receiver side is decided by its CPU check.
                 unknown.append({
                     "side": "probe", "resource": "receiver-socket-drops",
                     "reason": f"the probe's own receiver counted "
@@ -809,8 +725,7 @@ def judge(args):
                               f"path carries more (more probe threads, or the "
                               f"CPU check)"})
             elif offered_bps is not None and offered_bps < required_bps:
-                # Nothing was lost, but the load was never offered: that is a
-                # limit of the probe, not a statement about the path.
+                # Never offered: a limit of the probe, not of the path.
                 unknown.append({
                     "side": "network", "resource": "throughput",
                     "reason": f"the probe offered {offered_bps / 1e9:.2f} Gbit/s "
@@ -834,18 +749,22 @@ def judge(args):
         details["probe_loss"] = round(loss, 5)
         offered_bps = details.get("offered_network_gbps")
         offered_bps = offered_bps * 1e9 if offered_bps else None
-        # Loss measured while the path was driven far harder than the request
-        # needs says nothing about the request, so it is only a limit when
-        # the probe was run near the operating point.
+        # A loss limit needs both: the probe offered at least the requirement,
+        # and what arrived fell short of it (overshoot loss is not a limit).
+        delivered_bps = offered_bps * (1.0 - loss) if offered_bps else None
+        if delivered_bps is not None:
+            details["probe_delivered_gbps"] = round(delivered_bps / 1e9, 4)
         if (loss > args.max_probe_loss and offered_bps
-                and required_bps <= offered_bps <= 4 * required_bps):
+                and offered_bps >= required_bps
+                and delivered_bps < required_bps):
             limits.append({
                 "side": "network", "resource": "loss",
                 "measured": round(loss, 5), "required": args.max_probe_loss,
                 "unit": "fraction",
-                "reason": f"{loss:.2%} of the probe's datagrams never arrived "
-                          f"at {offered_bps / 1e9:.2f} Gbit/s offered, which is "
-                          f"the rate the request needs"})
+                "reason": f"{loss:.2%} of the probe's datagrams never arrived, "
+                          f"leaving {delivered_bps / 1e9:.2f} Gbit/s against "
+                          f"the {required_bps / 1e9:.2f} Gbit/s this request "
+                          f"needs (offered {offered_bps / 1e9:.2f} Gbit/s)"})
 
     # --- the sender and receiver CPUs, against a measured cost per Gbit/s
     for role, report, cost, stated in (
@@ -854,8 +773,7 @@ def judge(args):
              args.receiver_cpu_per_gbps, args.receiver_cpus)):
         if not report:
             if cost is not None:
-                # A cost without a host to spend it on is not a verdict: the
-                # receiver's report was required and did not arrive.
+                # A cost with no fingerprint to spend it on is not a verdict.
                 unknown.append({
                     "side": role, "resource": "cpu",
                     "reason": f"a measured CPU per delivered Gbit/s for the "
@@ -875,6 +793,11 @@ def judge(args):
         needed = payload_bps / 1e9 * cost / 100.0
         details[f"{role}_cpu_needed_cores"] = round(needed, 2)
         if needed > permitted:
+            if role == "sender" and args.sender_under_test:
+                # Recorded, not judged: the sender's CPU need is what a
+                # capacity ladder measures.
+                details["sender_cpu_exceeds_permitted_cpus"] = True
+                continue
             limits.append({
                 "side": role, "resource": "cpu",
                 "measured": permitted, "required": round(needed, 2),
@@ -883,8 +806,7 @@ def judge(args):
                           f"core per Gbit/s needs {needed:.1f} cores and this "
                           f"host permits {permitted}"})
 
-    # --- memory: the receiver holds per-destination buffers, the sender holds
-    #     queues; only an explicit bound is checked, never a guess
+    # --- memory: only an explicit bound is checked, never a guess
     if args.required_memory_mb:
         for role, report in (("sender", sender),
                              ("receiver", receivers[0] if receivers else None)):
@@ -904,26 +826,25 @@ def judge(args):
                     "reason": f"{available / 1024:.0f} MiB available, "
                               f"{args.required_memory_mb} MiB requested"})
 
-    # --- the CPUs the run is pinned to: a foreign load there is the run's
-    #     limit, and it must be named before the rungs are believed
-    # Only an explicitly stated set is checked: without it the preflight
-    # would sample whatever CPUs the caller happened to allow, which on a
-    # desktop is every CPU and every CPU is a little busy.
+    # --- foreign load on the explicitly pinned CPUs (every desktop CPU is a
+    #     little busy, so only a stated set is checked)
     benchmark_cpus = parse_cpu_list(args.benchmark_cpus)
     if benchmark_cpus:
-        injected = None
         if args.benchmark_cpu_busy_json:
             injected = load(args.benchmark_cpu_busy_json) or {}
-        if injected is not None:
             busy = injected.get("busy") or {}
             consumers = injected.get("consumers") or []
         else:
-            # Two windows, and the second is the measurement: the first still
-            # carries this process's own start-up, which would otherwise be
-            # read as foreign work on whichever CPU the interpreter ran on.
+            # The first window still carries this interpreter's own start-up.
             per_cpu_busy(1.0)
             busy = per_cpu_busy(1.0)
             consumers = foreign_cpu_consumers()
+        unsampled = [f"cpu{cpu}" for cpu in sorted(benchmark_cpus)
+                     if busy.get(f"cpu{cpu}") is None]
+        if unsampled:
+            # A pinned CPU with no sample is unknown, not idle.
+            unknown.append({"side": "host", "resource": "cpu",
+                            "reason": f"no busy sample for pinned {', '.join(unsampled)}"})
         busy_names = [f"cpu{cpu}" for cpu in sorted(benchmark_cpus)
                       if busy.get(f"cpu{cpu}", 0.0) > args.max_foreign_cpu_busy]
         details["benchmark_cpus"] = sorted(benchmark_cpus)
@@ -1000,7 +921,6 @@ def main():
     h = sub.add_parser("host")
     h.add_argument("--role", default="sender", choices=("sender", "receiver"))
     h.add_argument("--binary")
-    h.add_argument("--pid", type=int)
     h.add_argument("--json", required=True)
 
     p = sub.add_parser("probe")
@@ -1011,8 +931,7 @@ def main():
     p.add_argument("--packet-bytes", type=int, default=DEFAULT_PACKET_BYTES)
     p.add_argument("--bind", default="0.0.0.0")
     p.add_argument("--threads", type=int, default=1,
-                   help="sockets and threads per side; one Python socket "
-                        "cannot drain a multi-Gbit/s path")
+                   help="sockets and threads per side")
     p.add_argument("--json", required=True)
 
     j = sub.add_parser("judge")
@@ -1021,35 +940,26 @@ def main():
     j.add_argument("--overhead-factor", type=float,
                    default=DEFAULT_OVERHEAD_FACTOR)
     j.add_argument("--max-probe-loss", type=float, default=0.01)
+    j.add_argument("--sender-under-test", action="store_true",
+                   help="record the sender's CPU need, never judge it a host limit")
     j.add_argument("--sender-cpu-per-gbps", type=float)
     j.add_argument("--receiver-cpu-per-gbps", type=float)
     j.add_argument("--sender-cpus",
-                   help="the CPUs the sender is actually pinned to; without "
-                        "it the fingerprint's own affinity is counted, which "
-                        "is the harness's, not nginx's")
+                   help="CPUs the sender is pinned to (default: the fingerprint's affinity)")
     j.add_argument("--receiver-cpus",
-                   help="the CPUs the receivers are actually pinned to")
+                   help="CPUs the receivers are pinned to")
     j.add_argument("--required-memory-mb", type=float)
     j.add_argument("--benchmark-cpus",
-                   help="the CPUs the run is pinned to (a list or a range "
-                        "expression, as taskset takes); a busy CPU in this set "
-                        "is a foreign load, not a capacity")
+                   help="CPUs the run is pinned to (taskset list); a busy one is a foreign load")
     j.add_argument("--benchmark-cpu-busy-json",
-                   help="read the per-CPU busy sample (and, if present, its "
-                        "\"consumers\") from this file instead of measuring "
-                        "the live host: the classification is testable, the "
-                        "sampling is not")
+                   help="read the per-CPU busy sample and \"consumers\" from this file "
+                        "instead of the live host (tests)")
     j.add_argument("--max-foreign-cpu-busy", type=float, default=0.5,
-                   help="fraction of one benchmark CPU that may be busy with "
-                        "foreign work before the verdict is "
-                        "infrastructure-limited (default 0.5: half a CPU's "
-                        "worth, which separates a competing job from a "
-                        "desktop's own spread)")
+                   help="busy fraction of one pinned CPU that counts as a foreign load")
     j.add_argument("--sender")
     j.add_argument("--network")
     j.add_argument("--probe-sender",
-                   help="the sender side of the path probe; its sent bytes "
-                        "say whether the requested load was ever offered")
+                   help="the probe's sender side: whether the load was ever offered")
     j.add_argument("--receiver", action="append")
     j.add_argument("--json")
     args = parser.parse_args()
@@ -1057,7 +967,7 @@ def main():
     if args.command == "host":
         if args.binary and not os.path.isfile(args.binary):
             parser.error("--binary must name the actual existing binary")
-        report = host_report(args.role, args.binary, args.pid)
+        report = host_report(args.role, args.binary)
         with open(args.json, "w", encoding="utf-8") as output:
             json.dump(report, output, indent=1, default=str)
         print(f"preflight_host_role={args.role}")

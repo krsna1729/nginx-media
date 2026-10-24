@@ -61,7 +61,7 @@ Every claim below is produced by a command in this repository.
 |---|---|
 | Core suites | 35 unit binaries, clean under ASan/UBSan in ordinary and poisoned-allocation modes; a separate ThreadSanitizer subset covers supported threaded lifetimes |
 | Integration | 24 targets: ingest, demux, selection, failover, HLS, recording, RTMP, SRT output, transport security, churn, soak, fault injection, and a network-namespace topology with `tc netem` |
-| Capacity | `fanout_delay` percentiles (p50/p95/p99/p99.9) with conditions, a receiver storm against a 700 ms failover SLA, `bench-burst-sizing`'s real-media TS sweep, and `bench-capacity-curve`'s offered-load/fairness curve |
+| Capacity | `fanout_delay` percentiles (p50/p95/p99/p99.9) with conditions, a receiver storm against a 700 ms failover SLA, `bench-burst-sizing`'s real-media TS sweep, and `bench-capacity-quality`'s receiver-verified delivery ladders |
 | HLS push interop | inbound and outbound HLS push follow YouTube's HLS ingest and DASH-IF Live Media Ingest Interface-2; what to send us, what we send (measured), and the per-destination settings: `docs/hls-push-interop.md` |
 | ffmpeg interop | ffmpeg on both sides of every protocol - SRT, RTMP, HLS push, HLS pull and file in; HLS, RTMP play, SRT, RTMP push and HLS push out - with H.264/HEVC and AAC, judged on what ffmpeg decodes: `make ffmpeg-interop`, `docs/development.md` |
 | Benchmarks in CI | `scripts/bench-ci.sh` at four tiers - every pull request, every merge to main, nightly and weekly (fixed vs adaptive SRT senders, libsrt vs robotweax/srt) - with results appended to a history on the `gh-pages` branch |
@@ -74,7 +74,6 @@ make bench-capacity-quality   # receiver-verified ladders, seven workloads
 scripts/bench-ci.sh pr        # the CI benchmark tier a pull request runs
 make bench-ingest-egress       # ingest versus egress, and the program spread
 make bench-ingest-egress-fanout # ingest and egress under fanout, and the price of routing
-make bench-capacity-curve     # offered-load capacity curve and fairness
 make bench-fanout-delay        # fanout_delay percentiles with conditions
 make bench-hls-fanout          # HLS serving: disk, sendfile, tmpfs, kTLS
 make bench-burst-sizing        # MPEG-TS burst capacity sweep

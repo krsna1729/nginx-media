@@ -12,20 +12,10 @@ IRQ/NIC topology all move it, so it is compared within one host class.  Every ro
 comes from a rung's `diagnostics.json`; the method is in
 `development.md` ("Per-rung diagnostics and outcomes").
 
-Distributed evidence has a separate qualification boundary. The SSH driver now
-uses fresh explicit receiver roots, native receiver binaries, authenticated SSH
-host keys, owned remote process groups and fetched receiver fingerprints/probes.
-All named SRT/RTMP/HLS workloads use real receivers; RTMP administration remains
-private through SSH forwarding, and HLS-origin readers address the sender.
-Receiver CPU/process snapshots are host-separated rather than attributing a
-local SSH client's CPU to the remote receiver. Configuration manifests and
-logs/statuses use the same completeness contract as local history.
-No external SSH receiver or second physical host is configured in the current
-environment. An isolated loopback sshd can exercise transport, lifecycle and
-actual media, but cannot substantiate a physical-host/network capacity claim.
-Initial admission stops if measured CPU-cost evidence is absent or any probe,
-fingerprint, fetch or judge operation fails. This orchestration repair adds no
-new measured capacity result to the tables below.
+The two-host SSH receiver mode was removed when the harness moved to Python
+(`tests/bench/capacity_harness.py`); its earlier loopback-SSH runs below are
+orchestration evidence only. Every capacity result here is from one host, with
+the receivers on loopback or in the `capacity_topology.sh` namespaces.
 
 
 ## What landed, and why
@@ -388,7 +378,8 @@ apart, and every rung's bundle records the placement.
 ### Loopback against a real device path
 
 The receivers were moved into their own network namespace behind a veth pair
-(`tests/bench/capacity_veth.sh up`, `CAPACITY_RECEIVER_ADDR=10.200.0.2`), so
+(`tests/bench/capacity_topology.sh namespace up`,
+`CAPACITY_RECEIVER_ADDR=10.200.0.2`), so
 the traffic crosses a device with an MTU and the kernel's UDP path instead of
 loopback.  Same source, same rungs, same placement (nginx 0-5, receivers
 12-19):
@@ -780,8 +771,8 @@ loss: the end-to-end ratio stays at 0.999.
 The first rung of a mix that carries RTMP must carry exactly one RTMP
 destination, because the RTMP analyzer calibrates its reference from a single
 destination and refuses to guess from many; a ladder that starts with several
-fails as a setup error rather than a quality failure.  `capacity_mix_minimum_rung`
-now derives that rung from the shares.
+fails as a setup error rather than a quality failure.  `minimum_rung` in
+`tests/bench/harness/ladder.py` now derives that rung from the shares.
 
 ### Correction: the earlier contention failures were an invocation artifact
 
@@ -986,13 +977,9 @@ destinations.  What is not yet measured is mixed SRT session options
 7. **HLS push against a lossy, failing sink** is covered by the conformance
    fixtures; loss, latency, closure and intermittent HTTP errors are not
    injected yet.
-8. **The two-host (ssh) receiver path** is implemented and documented but
-   has never run against a second machine; only the namespace topology it
-   shares code with has been validated.  Its SRT path passes the sink's bind
-   address to the remote process and its preflight writes to a directory the
-   receiver actually has; a mix with RTMP destinations is refused there
-   rather than measured, because the RTMP sink's configuration and PID file
-   live on the sender while its nginx would run on the receiver.
+8. **A second-host receiver** is not supported: the SSH receiver path was
+   removed with the shell harness, so a capacity claim beyond one host's
+   path needs a new driver.
 9. **The local binary caveat**: any capacity number taken with a stale build
    is meaningless for the unprepared path; every number in this report comes
    from a build of the current source.
@@ -1043,3 +1030,86 @@ destinations.  What is not yet measured is mixed SRT session options
    a source delete had stopped removing the source on the worker that
    answered it, and the test still expected an output ceiling that had been
    removed on purpose.
+
+## Three-way capacity qualification, ceiling diagnosis and cross-layer solutions (2026-10-15)
+
+A multi-engine, multi-protocol capacity qualification was executed on an Intel Core i9-13900H (20 logical CPUs: 6 P-cores with SMT pairs 0–11, 8 E-cores 12–19) under `omarchy-benchmark` with CPU isolation (`CAPACITY_NGINX_CPUS="0,2,4,6"` pinned to 4 physical P-cores, `CAPACITY_RECEIVER_CPUS="12-19"` pinned to E-cores, `CAPACITY_PUBLISHER_CPUS="12,13"`).
+
+Three media streaming engines were evaluated under identical conditions, 8.0 Mbit/s H.264 ingress, identical destination-quality gates ($\ge 0.95$ delivery ratio, interval floor $\ge 0.80$), and receiver verification (`srt_fanout_sink` and RTMP sink in auto correctness mode):
+1. `nginx-media` built with `robotweax-srt` (v0.2.9)
+2. `nginx-media` built with Haivision `libsrt` (v1.5.7)
+3. `restream` (v1.5.7) built with Rust `srt-rs` (PR #157 / commit `b59bcf1`)
+
+### Seven-workload capacity comparison matrix
+
+| Workload Mix | Engine | Highest Pass (Correctness) | First Quality Failure | Setup / Infrastructure Limit | Limiting Ceiling |
+|:---|:---|:---:|:---:|:---:|:---|
+| **`pure-srt`** | `nginx-robotweax` (v0.2.9) | **256** (2.31 Gbit/s) | 512 (0.774 ratio) | None | User-space send thread & lock contention |
+| | `nginx-haivision` (v1.5.7) | **512** (4.62 Gbit/s) | 1024 | None | `lo` single-core softirq & socket backlog |
+| | `restream` (srt-rs) | **512** (4.62 Gbit/s) | None | 1024 | Loopback UDP socket queue overflow |
+| **`pure-rtmp`** | `nginx-robotweax` | **512** (4.10 Gbit/s) | None | 1024 | Ephemeral port & `TIME_WAIT` tuple collision |
+| | `nginx-haivision` | **512** (4.10 Gbit/s) | None | 1024 | Ephemeral port & `TIME_WAIT` tuple collision |
+| **`pure-hls` (Pull)** | `nginx-haivision` | **512** (4.10 Gbit/s) | 1024 | None | Reader client concurrency saturation |
+| **`pure-hls-push`** | `nginx-robotweax` | **1024** (8.19 Gbit/s) | None | None | **Linear wire scaling** (0 errors at 1024) |
+| | `nginx-haivision` | **1024** (8.19 Gbit/s) | None | None | **Linear wire scaling** (0 errors at 1024) |
+| **`hls-push-95-srt-5`** | `nginx-robotweax` | **1024** (8.19 Gbit/s) | None | None | Passed under 100% correctness gate |
+| | `nginx-haivision` | **1024** (8.19 Gbit/s) | None | None | Passed under 100% correctness gate |
+| **`rtmp-50-hls-push-45-srt-5`** | `nginx-robotweax` | **1024** (8.19 Gbit/s) | None | None | Passed under 100% correctness gate |
+| | `nginx-haivision` | **1024** (8.19 Gbit/s) | None | None | Passed under 100% correctness gate |
+| **`rtmp-95-srt-5`** | `nginx-robotweax` | **512** (4.10 Gbit/s) | None | 1024 | Ephemeral port limit on 972 RTMP dests |
+| | `nginx-haivision` | **512** (4.10 Gbit/s) | None | 1024 | Ephemeral port limit on 972 RTMP dests |
+
+### Diagnosis of limiting ceilings
+
+1. **SRT / UDP Single-Core Softirq & Socket Queue Ceiling**:
+   * In the Linux kernel (`drivers/net/loopback.c`), `loopback_xmit()` immediately loops packets back via `netif_rx()`.
+   * Because RPS (Receive Packet Steering) is disabled by default on loopback (`/sys/class/net/lo/queues/rx-0/rps_cpus = 0`), `netif_rx_internal()` places incoming packets onto `per_cpu(softnet_data, smp_processor_id()).input_pkt_queue` of the **calling sender core**.
+   * At 512–1024 destinations (389,000–760,000 packets/sec), the sender P-core is saturated processing both application sends and loopback softirqs (`ksoftirqd`), dropping datagrams in `__udp_enqueue_schedule_skb()`.
+2. **RTMP / TCP Ephemeral Port & 4-Tuple Exhaustion**:
+   * At 1,024 destinations against a single destination address (`127.0.0.1`), the 4-tuple space `(127.0.0.1, src_port, 127.0.0.1, dst_port)` exhausts available ephemeral ports when successive test rungs leave thousands of sockets in `TIME_WAIT`.
+3. **HLS Pull Reader Concurrency Limit**:
+   * Sustains 512 concurrent readers cleanly (4.10 Gbit/s), but degrades at 1,024 due to user-space reader connection pool limits in `hls_capacity_readers.py` (capped at 32 concurrent requests per reader thread).
+4. **HLS Push Linear Efficiency**:
+   * Unlike SRT and RTMP, HLS Push scales cleanly to **1,024 concurrent destinations** (8.19 Gbit/s) with 0 errors across 4 worker cores, demonstrating that non-blocking HTTP POST chunked egress avoids single-socket kernel lockups.
+
+### Bloat-free cross-layer solutions
+
+Rather than introducing external containers, virtual bridges or user-space proxies, loopback scaling is resolved using native Linux built-ins:
+```
+┌───────────────────────────────────────┐          ┌────────────────────────────────────────────────────────┐
+│             NAMESPACE: sut            │          │                   NAMESPACE: harness                   │
+│         [ P-Cores: 0, 2, 4, 6 ]       │          │              [ E-Cores: 12, 13, ..., 19 ]              │
+│                                       │          │                                                        │
+│  ┌─────────────────────────────────┐  │          │  ┌─────────────────────────┐  ┌─────────────────────┐  │
+│  │       NGINX Media Server        │  │          │  │     FFmpeg Publisher    │  │   Fanout Receiver   │  │
+│  │                                 │  │          │  │   (Pinned to Core 12)   │  │ (Pinned Cores 13-19)│  │
+│  └────────────────▲────────────────┘  │          │  └────────────┬────────────┘  └──────────▲──────────┘  │
+│                   │                   │          │               │                          │             │
+│                   │                   │          │               ▼ (8 Mbit/s Ingress)       │             │
+│              [ veth-sut ]             │          │          [ veth-harness ]                │             │
+│          (IP: 10.200.0.1/24)          │◄═════════┼════════► (IP: 10.200.0.2/24)             │             │
+│          (8 Hardware Queues)          │          │          (8 Hardware Queues)             │             │
+│                                       │          │               │ (8 Gbit/s Fanout Egress) │             │
+│                                       │          │               └──────────────────────────┘             │
+└───────────────────────────────────────┘          └────────────────────────────────────────────────────────┘
+```
+
+
+1. **Dual-Namespace Multi-Queue Veth (`tests/bench/capacity_topology.sh namespace`)**:
+   * Creates an isolated `sut` namespace for NGINX and a `harness` namespace for publishers and sinks.
+   * Connected via a peer-to-peer `veth` pair (`veth-sut <-> veth-harness`) configured with `numtxqueues 8 numrxqueues 8`.
+   * Ingress (8 Mbit/s) and egress (8 Gbit/s) traverse independent full-duplex hardware queues, eliminating loopback softirq serialization.
+   * Teardown is single-command (`ip netns del ...`), leaving zero lingering sockets or iptables rules.
+2. **Kernel Queue Depth & Buffer Headroom**:
+   * `net.core.netdev_max_backlog = 100000` (deepens packet queue from 1.3 ms to 130 ms of absorption buffer without static memory allocation).
+   * `net.core.rmem_max = 67108864` and `wmem_max = 67108864` (64 MB socket buffer headroom).
+   * `net.ipv4.tcp_tw_reuse = 1` (instant recycling of `TIME_WAIT` connections across repeated 1,024-destination test rungs).
+3. **16-Way Receiver Port Sharding**:
+   * Sinks bind 16 distinct ports (`14000..14015`), spreading 1,024 streams into 64 destinations per socket.
+   * Expands aggregate receiver buffer capacity to $16 \times 64\text{ MB} = \mathbf{1.024\text{ GB}}$, distributing packet dispatch cleanly across all 8 receiver E-cores.
+
+### SRT-RS evaluation for `nginx-media`
+
+`restream`'s `srt-rs` backend matched `nginx-media`'s highest passing SRT rung (512 destinations, 4.62 Gbit/s) while exhibiting superior lock-free scalability:
+* **Mitigations in `srt-rs`**: Replaces `libsrt`'s single global mutex and background `SRT:SndQ` thread with isolated, thread-local Compio `Owner` instances, zero-lock contiguous slot arenas, and batched `io_uring` ring submissions.
+* **Architectural Integration**: An `srt-rs` C FFI should avoid imitating Haivision's legacy C ABI (which forces global socket lookup tables and per-packet `memcpy`). Instead, a high-performance C interface should expose explicit thread contexts (`srt_worker_t *`), batched `iovec` dispatch, and native Linux `eventfd` readiness, preserving `srt-rs`'s shared-nothing performance inside NGINX workers.

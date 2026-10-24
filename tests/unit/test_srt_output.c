@@ -404,7 +404,7 @@ test_shared_sender_pool(void)
     conf.send_timeout = 1000;
 
     /* the manager starts one fixed egress thread for each shard */
-    CHECK(ngx_media_srt_outputs_start(&outs, &conf, 1, 16, NULL) == NGX_OK,
+    CHECK(ngx_media_srt_outputs_start(&outs, &conf, 1, 16, 4, NULL) == NGX_OK,
           "outputs started");
 
     after_start = thread_count_settled(base + NGX_MEDIA_SRT_EGRESS_SHARDS);
@@ -620,7 +620,7 @@ test_lane_multiplexer_groups(void)
     conf.connect_timeout = 1000;
     conf.send_timeout = 1000;
 
-    CHECK(ngx_media_srt_outputs_start(&outs, NULL, 0, 64, NULL) == NGX_OK,
+    CHECK(ngx_media_srt_outputs_start(&outs, NULL, 0, 64, 16, NULL) == NGX_OK,
           "outputs started");
 
     for (i = 0; i < total; i++) {
@@ -663,6 +663,39 @@ test_lane_multiplexer_groups(void)
           "two destinations of one lane share a group");
     CHECK(plain_connects == 0, "no destination fell back to a private "
           "connect: %lu", (unsigned long) plain_connects);
+    /* decoupled mux groups: 4 mux groups distribute the 16 lanes */
+    CHECK(ngx_media_srt_outputs_start(&outs, NULL, 0, 64, 4, NULL) == NGX_OK,
+          "outputs started with 4 mux groups");
+    connected = 0;
+    for (i = 0; i < total; i++) {
+        recorded_group[i] = -1;
+        conf.streamid.len = (size_t) snprintf((char *) ids[i], sizeof(ids[i]),
+                                              "d%lu", (unsigned long) i);
+        conf.streamid.data = ids[i];
+        CHECK(ngx_media_srt_outputs_add(outs, &conf, NULL, NULL) == NGX_OK,
+              "destination %lu added for 4-group test", (unsigned long) i);
+    }
+    for (tries = 0; connected < total && tries < 500; tries++) {
+        n = ngx_media_srt_outputs_event_read(outs, events, 16);
+        for (i = 0; i < n; i++) {
+            if (events[i].type == NGX_MEDIA_SRT_OUT_EVENT_CONNECTED) {
+                connected++;
+            }
+        }
+        if (connected < total) {
+            struct timespec ts = { 0, 10 * 1000 * 1000 };
+            (void) nanosleep(&ts, NULL);
+        }
+    }
+    CHECK(connected == total, "every destination connected in 4 groups: %lu of %lu",
+          (unsigned long) connected, (unsigned long) total);
+    ngx_media_srt_outputs_stop(outs);
+    for (i = 0; i < total; i++) {
+        CHECK(recorded_group[i] == (ngx_int_t) ((i % NGX_MEDIA_SRT_EGRESS_SHARDS) % 4) + 1,
+              "destination %lu mapped to 4-group: %ld",
+              (unsigned long) i, (long) recorded_group[i]);
+    }
+
 
     /* a backend without groups is still connected to, privately */
     recording_ops.connect_shared = NULL;
@@ -766,7 +799,7 @@ test_connecting_removal_owns_strings_and_model(void)
     connect_entered = connect_continue = connect_strings_intact = 0;
     ops.connect_shared = held_connect;
     ngx_media_srt_set_backend(&ops);
-    TEST_ASSERT_EQ_INT(ngx_media_srt_outputs_start(&outs, NULL, 0, 16, NULL),
+    TEST_ASSERT_EQ_INT(ngx_media_srt_outputs_start(&outs, NULL, 0, 16, 4, NULL),
                        NGX_OK);
     TEST_ASSERT_EQ_INT(ngx_media_srt_outputs_add(outs, &conf, &index, NULL),
                        NGX_OK);

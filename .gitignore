@@ -10,3 +10,10 @@ objs/
 # unit test binaries
 tests/unit/build/
 __pycache__/
+
+# raw capacity run trees: media files, nginx temp directories and per-process
+# logs. The summaries and per-rung diagnostics beside them are the evidence.
+docs/capacity-evidence/three-way-comparison/
+
+# frozen copies of tests/bench taken by capacity_sweep.py
+tests/bench/.sweep-*

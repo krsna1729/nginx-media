@@ -1,44 +1,31 @@
 #!/usr/bin/env python3
 """Low-overhead per-thread CPU and host/network snapshots for benchmarks.
 
-Two subcommands:
+  sample   before snapshot, sleep, after snapshot; prints
+           "<window_s> <before_ms> <after_ms>".  Optional JSON documents hold
+           extended host/network captures outside the CPU window.
+  report   per (pid, role) CPU between two snapshots, in percent of one core.
+           The process counter is authoritative (it keeps exited threads'
+           CPU); what thread deltas cannot attribute is "(unattributed)".
 
-  sample   take a "before" snapshot, sleep, take an "after" snapshot.  Each
-           snapshot is a text file of thread rows. Optional JSON documents
-           retain the extended host/network captures outside the CPU window,
-           with their own actual capture brackets rather than CPU timestamps.
-           Prints "<window_s> <before_ms> <after_ms>" for the shell harness.
-
-  report   per (pid, role) CPU between two thread snapshots, as a percentage
-           of one core.  Threads that exist in only one snapshot, or whose TID
-           was reused (different start time), are accounted for explicitly
-           rather than silently producing negative or inflated numbers.
-
-The process's own counter (/proc/<pid>/stat) is the authoritative total: it
-keeps the CPU of threads that have exited, which no thread snapshot can see
-- a thread that ran after the first snapshot and was gone by the second, or
-one born and dead between them.  Thread deltas only attribute that total to
-roles; what they cannot attribute is reported as the role "(unattributed)"
-of its process, so per-process and per-kind sums are the process's real CPU.
-
-The thread snapshot format is one header line followed by rows:
+Snapshot format: one header line, then rows:
 
   # clk_tck=<ticks per second> monotonic_ns=<start> <end>
   P <pid> <utime+stime ticks of the whole process> <starttime ticks>
   <pid> <tid> <role> <utime+stime ticks> <starttime ticks>
-
-Percentages are always "percent of one core": 100 is one fully busy core and
-a multithreaded process may legitimately exceed 100.  Capacity-relative
-utilization is reported separately against the permitted CPU count.
 """
 
 import argparse
 import json
 import os
+from pathlib import Path
 import sys
 import time
 
 CLK_TCK = os.sysconf("SC_CLK_TCK")
+CPU_FIELDS = ("user", "nice", "system", "idle", "iowait", "irq", "softirq",
+              "steal", "guest", "guest_nice")
+SRT_ROLES = ("SRT:RcvQ", "SRT:SndQ", "SRT:TsbPd", "SRT:GC")
 
 
 def load_roles(path):
@@ -63,16 +50,9 @@ def role_for(tid, comm, roles):
         return comm
     if tid in roles:
         return roles[tid]
-    if comm.startswith("SRT:RcvQ"):
-        return "SRT:RcvQ"
-    if comm.startswith("SRT:SndQ"):
-        return "SRT:SndQ"
-    if comm.startswith("SRT:TsbPd"):
-        return "SRT:TsbPd"
-    if comm.startswith("SRT:GC"):
-        return "SRT:GC"
-    if comm.startswith("hls-push"):
-        return "hls-push"
+    for prefix in SRT_ROLES + ("hls-push",):
+        if comm.startswith(prefix):
+            return prefix
     if comm.startswith("nginx"):
         return "nginx-thread"
     return comm.replace(" ", "_").replace("\t", "_") or "unknown"
@@ -84,8 +64,7 @@ def parse_stat(stat):
     if comm_start < 0 or comm_end <= comm_start:
         return None
     fields = stat[comm_end + 2:].split()
-    # fields[0] is state (field 3); utime/stime are fields 14/15, starttime
-    # is field 22, processor is field 39.
+    # fields[0] is stat field 3; utime/stime 14/15, starttime 22, processor 39.
     if len(fields) <= 36:
         return None
     try:
@@ -284,43 +263,29 @@ def proc_stat_cpu():
         return None
     for line in text.splitlines():
         if line.startswith("cpu "):
-            names = ("user", "nice", "system", "idle", "iowait", "irq",
-                     "softirq", "steal", "guest", "guest_nice")
-            values = [int(v) for v in line.split()[1:]]
-            return dict(zip(names, values))
+            return dict(zip(CPU_FIELDS, (int(v) for v in line.split()[1:])))
     return None
 
 
 def proc_stat_per_cpu():
-    """Per-CPU counters from /proc/stat, keyed cpu0, cpu1, ...
-
-    The aggregate line cannot say whether the CPUs a benchmark was pinned to
-    were busy or idle, and that distinction decides what a short delivery
-    means: idle pinned cores with a short delivery is a bottleneck somewhere
-    else - a blocked sender, a full socket, a lock - while saturated ones are
-    simply not enough CPU."""
+    """Per-CPU counters from /proc/stat, keyed cpu0, cpu1, ..."""
     text = read_text("/proc/stat")
     if text is None:
         return {}
-    names = ("user", "nice", "system", "idle", "iowait", "irq", "softirq",
-             "steal", "guest", "guest_nice")
     per_cpu = {}
     for line in text.splitlines():
         parts = line.split()
         if len(parts) < 5 or not parts[0].startswith("cpu") or parts[0] == "cpu":
             continue
         try:
-            per_cpu[parts[0]] = dict(zip(names, (int(v) for v in parts[1:])))
+            per_cpu[parts[0]] = dict(zip(CPU_FIELDS, (int(v) for v in parts[1:])))
         except ValueError:
             continue
     return per_cpu
 
 
 def cpu_pressure():
-    """CPU pressure from /proc/pressure/cpu: the "some" total is the time
-    tasks were stalled waiting for a CPU, in microseconds.  Two snapshots give
-    the share of the window the run queue was not empty - the pressure the
-    brief asks for beside the busy percentage."""
+    """/proc/pressure/cpu totals (stall time in microseconds)."""
     text = read_text("/proc/pressure/cpu")
     if not text:
         return None
@@ -351,7 +316,6 @@ def procs_running():
 
 
 def snmp(path):
-
     text = read_text(path)
     result = {}
     if text is None:
@@ -524,7 +488,6 @@ def extended_snapshot(pids, affinity, thread_started_ns, thread_finished_ns):
 def boundary(args, phase):
     if not args.boundary_dir:
         return
-    from pathlib import Path
     directory = Path(args.boundary_dir)
     (directory / f"cpu.ready.{phase}").touch()
     deadline = time.monotonic() + 60
@@ -537,7 +500,6 @@ def boundary(args, phase):
 def captured(args, phase, started, finished):
     if not args.boundary_dir:
         return
-    from pathlib import Path
     path = Path(args.boundary_dir) / f"cpu.captured.{phase}.json"
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps({"capture_start_ns": started,
@@ -562,8 +524,7 @@ def sample(args):
     captured(args, "before", b_start, b_end)
     overhead_before = time.process_time_ns() - cpu0
 
-    # Both hosts wait at the closing barrier before capturing. SSH readiness,
-    # receiver signals and joining monitors never become part of a CPU sample.
+    # Both hosts wait at the closing barrier before capturing.
     time.sleep(max(0.0, (b_start + b_end) / 2e9 + args.sleep - time.monotonic()))
     boundary(args, "after")
     cpu1 = time.process_time_ns()
@@ -599,7 +560,7 @@ def report(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    sub = parser.add_subparsers(dest="command")
+    sub = parser.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("sample")
     s.add_argument("--sleep", type=float, required=True)
@@ -617,18 +578,11 @@ def main():
     r.add_argument("--window", type=float)
     r.add_argument("--accounting")
 
-    argv = sys.argv[1:]
-    # Backwards compatible: the original interface had no subcommand.
-    if argv and argv[0].startswith("--"):
-        argv = ["sample"] + argv
-    args = parser.parse_args(argv)
+    args = parser.parse_args()
     if args.command == "sample":
         sample(args)
-    elif args.command == "report":
-        report(args)
     else:
-        parser.print_help()
-        return 2
+        report(args)
     return 0
 
 

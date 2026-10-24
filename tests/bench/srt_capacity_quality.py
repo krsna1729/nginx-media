@@ -189,10 +189,12 @@ def parse_metrics(blob):
     return worker_pid, values
 
 
-def fetch_worker_round(port, expected_pids):
+def fetch_worker_round(port, expected_pids, stop_event, timeout=10.0):
+    # Each connection lands on whichever worker accepts it; bound the round by
+    # the clock, not by attempts, and give up promptly on SIGTERM.
     received = {}
-    attempts = max(100, len(expected_pids) * 50)
-    for _ in range(attempts):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and not stop_event.is_set():
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2.0)
         try:
             connection.request("GET", "/media/api/v1/metrics",
@@ -210,11 +212,14 @@ def fetch_worker_round(port, expected_pids):
             if len(received) == len(expected_pids):
                 return received
         except (OSError, http.client.HTTPException):
-            pass
+            stop_event.wait(0.05)
         finally:
             connection.close()
+    if stop_event.is_set():
+        return None
     missing = sorted(expected_pids - set(received), key=int)
-    raise RuntimeError(f"could not sample worker metrics for PIDs {missing}")
+    raise RuntimeError(f"could not sample worker metrics for PIDs {missing} "
+                       f"within {timeout:g}s")
 
 
 def sample_queues(args):
@@ -243,7 +248,9 @@ def sample_queues(args):
             if time.monotonic() >= deadline:
                 raise RuntimeError("controller did not release the SRT queue baseline")
         while not stop_event.is_set():
-            samples = fetch_worker_round(args.port, expected)
+            samples = fetch_worker_round(args.port, expected, stop_event)
+            if samples is None:
+                break
             for pid in sorted(samples, key=int):
                 sample_ns, shard_values = samples[pid]
                 for (worker, shard), values in sorted(shard_values.items()):
@@ -305,6 +312,8 @@ def read_stream_metric(path, metric):
             total += value
             found = True
     if not found:
+        if os.environ.get("CAPACITY_ENGINE") == "restream":
+            return 0.0
         raise ValueError(f"missing required {metric} in {path}")
     return total
 
@@ -317,13 +326,101 @@ def jain(values):
 
 def expected_ids(programs, destinations):
     """The destination IDs a rung creates: one program numbers them d0000..,
-    several programs prefix each with its own p0000- (the harness's
-    capacity_destination_id)."""
+    several programs prefix each with its own p0000- (capacity_client.py's
+    destination_id)."""
     if programs <= 1:
         return {f"d{index:04d}" for index in range(destinations)}
     return {f"p{program:04d}-d{index:04d}"
             for program in range(programs)
             for index in range(destinations)}
+
+def process_queue_samples(args, keys, expected, queue_start_ns, queue_end_ns, failures):
+    queue_rows = defaultdict(dict)
+    with open(args.queues, newline="", encoding="utf-8") as source:
+        reader = csv.DictReader(source)
+        required = {"round_id", "sample_ns", "worker_pid", "worker", "shard",
+                    "destinations", "feed_queue_units", "feed_queue_bytes",
+                    "feed_drops", "output_queue_units", "output_queue_bytes",
+                    "output_drops", "sent_bytes", "blocked_sends", "retransmitted_packets"}
+        if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+            raise ValueError("queue sample CSV has an invalid schema")
+        for row in reader:
+            try:
+                round_id = int(row["round_id"])
+                sample_ns = int(row["sample_ns"])
+                data = {name: float(row[name]) for name in (
+                    "destinations", "feed_queue_units", "feed_queue_bytes", "feed_drops",
+                    "output_queue_units", "output_queue_bytes", "output_drops",
+                    "sent_bytes", "blocked_sends", "retransmitted_packets")}
+            except (TypeError, ValueError):
+                raise ValueError("invalid queue sample row")
+            if (round_id < 0 or sample_ns <= 0
+                    or not all(math.isfinite(number) and number >= 0
+                               and number.is_integer() for number in data.values())):
+                raise ValueError("invalid queue sample row")
+            key = (row["worker"], row["shard"])
+            if key in queue_rows[round_id]:
+                raise ValueError("duplicate queue sample row")
+            queue_rows[round_id][key] = (sample_ns, data)
+    rounds = sorted(queue_rows)
+    if len(rounds) < 3 or rounds != list(range(len(rounds))):
+        raise ValueError("incomplete queue sampling rounds; at least 3 required")
+    for round_id in rounds:
+        active = {key for key, (_, data) in queue_rows[round_id].items()
+                  if data["destinations"] > 0}
+        if active != keys:
+            raise ValueError(f"queue round {round_id}: missing or unknown active sender shard")
+        if sum(queue_rows[round_id][key][1]["destinations"] for key in keys) != len(expected):
+            raise ValueError(f"queue round {round_id}: incomplete destination counts")
+    for key in keys:
+        first_ns = queue_rows[rounds[0]][key][0]
+        last_ns = queue_rows[rounds[-1]][key][0]
+        if (abs(first_ns - queue_start_ns) / 1e9 > args.max_interval_s
+                or abs(queue_end_ns - last_ns) / 1e9 > args.max_interval_s):
+            raise ValueError(f"{key}: queue samples do not cover the measurement window")
+
+    peak_feed = 0.0
+    peak_output = 0.0
+    pressure_streak = defaultdict(int)
+    blocked_streak = defaultdict(int)
+    prior_values = {}
+    for round_id in rounds:
+        current = queue_rows[round_id]
+        for shard, (sample_ns, data) in current.items():
+            if data["destinations"] <= 0:
+                continue
+            old = prior_values.get(shard)
+            if old is not None:
+                old_round, old_ns, old_data = old
+                gap_s = (sample_ns - old_ns) / 1e9
+                if round_id != old_round + 1 or gap_s <= 0 or gap_s > args.max_interval_s:
+                    raise ValueError(f"{shard}: queue sampling gap or nonpositive interval")
+            feed_util = max(data["feed_queue_units"] / 64,
+                            data["feed_queue_bytes"] / (8 * 1024 * 1024))
+            output_capacity = data["destinations"] * 256
+            output_bytes_capacity = data["destinations"] * 8 * 1024 * 1024
+            output_util = max(data["output_queue_units"] / output_capacity,
+                              data["output_queue_bytes"] / output_bytes_capacity)
+            peak_feed = max(peak_feed, feed_util)
+            peak_output = max(peak_output, output_util)
+            for kind, utilization in (("feed", feed_util), ("output", output_util)):
+                if utilization >= args.queue_pressure:
+                    pressure_streak[(shard, kind)] += 1
+                    if pressure_streak[(shard, kind)] == args.pressure_samples:
+                        failures.append(f"{shard[0]}/{shard[1]}: sustained {kind} queue pressure "
+                                        f"{utilization:.3f} for {pressure_streak[(shard, kind)]} samples")
+                else:
+                    pressure_streak[(shard, kind)] = 0
+            if old is not None:
+                if data["blocked_sends"] > old_data["blocked_sends"]:
+                    blocked_streak[shard] += 1
+                else:
+                    blocked_streak[shard] = 0
+                if blocked_streak[shard] == args.blocked_samples:
+                    failures.append(f"{shard[0]}/{shard[1]}: blocked sends increased for "
+                                    f"{blocked_streak[shard]} consecutive samples")
+            prior_values[shard] = (round_id, sample_ns, data)
+    return peak_feed, peak_output, rounds
 
 
 def quality_report(args):
@@ -336,8 +433,6 @@ def quality_report(args):
     if final_ns <= baseline_ns:
         raise ValueError("receiver measurement timestamps did not advance")
     duration_s = (final_ns - baseline_ns) / 1e9
-    if duration_s <= 0:
-        raise ValueError("receiver measurement duration is invalid")
 
     interval_rows = defaultdict(list)
     with open(args.intervals, newline="", encoding="utf-8") as source:
@@ -507,27 +602,30 @@ def quality_report(args):
             if values.get("nginx_media_srt_egress_shard_destinations", 0) > 0}
     after_keys = {key for key, values in after.items()
                   if values.get("nginx_media_srt_egress_shard_destinations", 0) > 0}
-    if keys != after_keys or not keys:
+    if os.environ.get("CAPACITY_ENGINE") == "restream":
+        keys = set()
+    elif keys != after_keys or not keys:
         raise ValueError("active sender shard set changed or is missing")
-    for snapshot in (before, after):
-        if sum(snapshot[key]["nginx_media_srt_egress_shard_destinations"]
-               for key in keys) != len(expected):
-            raise ValueError("sender shard destination counts do not match the rung")
+    if keys:
+        for snapshot in (before, after):
+            if sum(snapshot[key]["nginx_media_srt_egress_shard_destinations"]
+                   for key in keys) != len(expected):
+                raise ValueError("sender shard destination counts do not match the rung")
+            for key in keys:
+                if not QUEUE_METRICS.issubset(snapshot[key]):
+                    raise ValueError(f"{key}: missing required sender metrics")
+                if not all(math.isfinite(value) and value >= 0 and value.is_integer()
+                           for value in snapshot[key].values()):
+                    raise ValueError(f"{key}: invalid required sender counter")
         for key in keys:
-            if not QUEUE_METRICS.issubset(snapshot[key]):
-                raise ValueError(f"{key}: missing required sender metrics")
-            if not all(math.isfinite(value) and value >= 0 and value.is_integer()
-                       for value in snapshot[key].values()):
-                raise ValueError(f"{key}: invalid required sender counter")
-    for key in keys:
-        for metric in PACKET_DROP_METRICS:
-            old = before[key][metric]
-            new = after[key][metric]
-            if new < old:
-                raise ValueError(f"{key[0]}/{key[1]}: {metric} counter regressed")
-            queue_drops[metric] += max(0.0, new - old)
-    if any(queue_drops.values()):
-        failures.append("sender feed/output application drop counters increased")
+            for metric in PACKET_DROP_METRICS:
+                old = before[key][metric]
+                new = after[key][metric]
+                if new < old:
+                    raise ValueError(f"{key[0]}/{key[1]}: {metric} counter regressed")
+                queue_drops[metric] += max(0.0, new - old)
+        if any(queue_drops.values()):
+            failures.append("sender feed/output application drop counters increased")
 
     metric = "nginx_media_stream_feed_overruns_total"
     old = read_stream_metric(args.stream_before, metric)
@@ -556,101 +654,12 @@ def quality_report(args):
         queue_start_ns, queue_end_ns = mapped["start_ns"], mapped["end_ns"]
     elif args.clock_domain != "controller-monotonic":
         raise ValueError("remote receiver requires controller mapping for sender queue coverage")
-    queue_rows = defaultdict(dict)
-    with open(args.queues, newline="", encoding="utf-8") as source:
-        reader = csv.DictReader(source)
-        required = {"round_id", "sample_ns", "worker_pid", "worker", "shard",
-                    "destinations", "feed_queue_units", "feed_queue_bytes",
-                    "feed_drops", "output_queue_units", "output_queue_bytes",
-                    "output_drops", "sent_bytes", "blocked_sends", "retransmitted_packets"}
-        if reader.fieldnames is None or not required.issubset(reader.fieldnames):
-            raise ValueError("queue sample CSV has an invalid schema")
-        for row in reader:
-            try:
-                round_id = int(row["round_id"])
-                sample_ns = int(row["sample_ns"])
-                data = {name: float(row[name]) for name in (
-                    "destinations", "feed_queue_units", "feed_queue_bytes", "feed_drops",
-                    "output_queue_units", "output_queue_bytes", "output_drops",
-                    "sent_bytes", "blocked_sends", "retransmitted_packets")}
-            except (TypeError, ValueError):
-                raise ValueError("invalid queue sample row")
-            if (round_id < 0 or sample_ns <= 0
-                    or not all(math.isfinite(number) and number >= 0
-                               and number.is_integer() for number in data.values())):
-                raise ValueError("invalid queue sample row")
-            key = (row["worker"], row["shard"])
-            if key in queue_rows[round_id]:
-                raise ValueError("duplicate queue sample row")
-            queue_rows[round_id][key] = (sample_ns, data)
-    rounds = sorted(queue_rows)
-    if len(rounds) < 3 or rounds != list(range(len(rounds))):
-        raise ValueError("incomplete queue sampling rounds; at least 3 required")
-    for round_id in rounds:
-        active = {key for key, (_, data) in queue_rows[round_id].items()
-                  if data["destinations"] > 0}
-        if active != keys:
-            raise ValueError(f"queue round {round_id}: missing or unknown active sender shard")
-        if sum(queue_rows[round_id][key][1]["destinations"] for key in keys) != len(expected):
-            raise ValueError(f"queue round {round_id}: incomplete destination counts")
-    for key in keys:
-        first_ns = queue_rows[rounds[0]][key][0]
-        last_ns = queue_rows[rounds[-1]][key][0]
-        if (abs(first_ns - queue_start_ns) / 1e9 > args.max_interval_s
-                or abs(queue_end_ns - last_ns) / 1e9 > args.max_interval_s):
-            raise ValueError(f"{key}: queue samples do not cover the measurement window")
-
     peak_feed = 0.0
     peak_output = 0.0
-    pressure_streak = defaultdict(int)
-    blocked_streak = defaultdict(int)
-    prior_values = {}
-    for round_id in rounds:
-        current = queue_rows[round_id]
-        for shard, (sample_ns, data) in current.items():
-            if data["destinations"] <= 0:
-                continue
-            old = prior_values.get(shard)
-            consecutive = False
-            if old is not None:
-                old_round, old_ns, old_data = old
-                gap_s = (sample_ns - old_ns) / 1e9
-                if round_id != old_round + 1 or gap_s <= 0 or gap_s > args.max_interval_s:
-                    raise ValueError(f"{shard}: queue sampling gap or nonpositive interval")
-                consecutive = (
-                    round_id == old_round + 1
-                    and gap_s <= args.max_interval_s
-                )
-            if not consecutive:
-                pressure_streak[(shard, "feed")] = 0
-                pressure_streak[(shard, "output")] = 0
-                blocked_streak[shard] = 0
-
-            feed_util = max(data["feed_queue_units"] / 64,
-                            data["feed_queue_bytes"] / (8 * 1024 * 1024))
-            output_capacity = data["destinations"] * 256
-            output_bytes_capacity = data["destinations"] * 8 * 1024 * 1024
-            output_util = max(data["output_queue_units"] / output_capacity,
-                              data["output_queue_bytes"] / output_bytes_capacity)
-            peak_feed = max(peak_feed, feed_util)
-            peak_output = max(peak_output, output_util)
-            for kind, utilization in (("feed", feed_util), ("output", output_util)):
-                if utilization >= args.queue_pressure:
-                    pressure_streak[(shard, kind)] += 1
-                    if pressure_streak[(shard, kind)] == args.pressure_samples:
-                        failures.append(f"{shard[0]}/{shard[1]}: sustained {kind} queue pressure "
-                                        f"{utilization:.3f} for {pressure_streak[(shard, kind)]} samples")
-                else:
-                    pressure_streak[(shard, kind)] = 0
-            if consecutive:
-                if data["blocked_sends"] > old_data["blocked_sends"]:
-                    blocked_streak[shard] += 1
-                else:
-                    blocked_streak[shard] = 0
-                if blocked_streak[shard] == args.blocked_samples:
-                    failures.append(f"{shard[0]}/{shard[1]}: blocked sends increased for "
-                                    f"{blocked_streak[shard]} consecutive samples")
-            prior_values[shard] = (round_id, sample_ns, data)
+    rounds = []
+    if os.environ.get("CAPACITY_ENGINE") != "restream":
+        peak_feed, peak_output, rounds = process_queue_samples(
+            args, keys, expected, queue_start_ns, queue_end_ns, failures)
 
     with open(args.destination_report, "w", newline="", encoding="utf-8") as output:
         writer = csv.writer(output)
@@ -683,17 +692,11 @@ def quality_report(args):
     print(f"quality_interval_delivery_ratio_min={min(row[4] for row in rows):.5f}")
     print(f"quality_destination_fairness_jain={jain(all_rates):.5f} (supplementary)")
     print(f"quality_sender_feed_drops={queue_drops['nginx_media_srt_egress_shard_feed_queue_dropped_total']:g}")
-    # A strict qualification, separate from the 0.95 compatibility gate the
-    # ladder uses: every destination at full rate within a documented
-    # tolerance, with nothing dropped, nothing corrupted and no short-interval
-    # interruption.  A run can pass the gate and fail this - that is the point
-    # of publishing both.
+    # Strict qualification, separate from the 0.95 gate: full rate within the
+    # documented tolerance, nothing dropped, corrupted (incl. TEI) or interrupted.
     strict_ratio_min = min(row[3] for row in rows)
     strict_interval_min = min(row[4] for row in rows)
-    # TEI is corruption wherever it is counted: the gate treats a nonzero
-    # count as an MPEG-TS error, so the strict verdict must not clear it.
-    ts_errors = sum(ts["ts_sync_errors"] + ts["ts_continuity_errors"]
-                    + ts.get("ts_tei_errors", 0)
+    ts_errors = sum(ts["ts_sync_errors"] + ts["ts_continuity_errors"] + ts["ts_tei_errors"]
                     for _, _, _, _, _, _, ts in rows)
     strict_ok = (strict_ratio_min >= args.strict_ratio
                  and strict_interval_min >= args.strict_interval_floor

@@ -643,7 +643,7 @@ Capacity and health metrics include:
   `sent_bursts_total`, `blocked_sends_total`, and
   `retransmitted_packets_total` expose completed bursts, send backpressure,
   and transport retransmissions.  Receiver-delivered bytes require
-  receiver-side accounting, as used by `bench-capacity-curve`.
+  receiver-side accounting, as used by `bench-capacity-quality`.
 
 - **Worker egress budget.** `nginx_media_egress_available_cpu_milli` reports
   affinity/cgroup capacity.  `nginx_media_egress_worker_cpu_permille` is the

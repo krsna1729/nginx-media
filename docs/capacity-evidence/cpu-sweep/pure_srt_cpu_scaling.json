@@ -1,0 +1,612 @@
+[
+  {
+    "cpus": 1,
+    "affinity": "0",
+    "mix": "pure-srt",
+    "highest_passing": 256,
+    "first_quality_failure": 512,
+    "setup_limited": [],
+    "rungs": [
+      {
+        "destinations": 1,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1/diagnostics.json"
+      },
+      {
+        "destinations": 16,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1.00034,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-16/diagnostics.json"
+      },
+      {
+        "destinations": 32,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99525,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-32/diagnostics.json"
+      },
+      {
+        "destinations": 64,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99806,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-64/diagnostics.json"
+      },
+      {
+        "destinations": 128,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99859,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-128/diagnostics.json"
+      },
+      {
+        "destinations": 256,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1.04568,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-256/diagnostics.json"
+      },
+      {
+        "destinations": 512,
+        "outcome": "quality-failure",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.376,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-512/diagnostics.json"
+      }
+    ]
+  },
+  {
+    "cpus": 2,
+    "affinity": "0,2",
+    "mix": "pure-srt",
+    "highest_passing": 256,
+    "first_quality_failure": 512,
+    "setup_limited": [],
+    "rungs": [
+      {
+        "destinations": 1,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1/diagnostics.json"
+      },
+      {
+        "destinations": 16,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99593,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-16/diagnostics.json"
+      },
+      {
+        "destinations": 32,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99611,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-32/diagnostics.json"
+      },
+      {
+        "destinations": 64,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99803,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-64/diagnostics.json"
+      },
+      {
+        "destinations": 128,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99749,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-128/diagnostics.json"
+      },
+      {
+        "destinations": 256,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99669,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-256/diagnostics.json"
+      },
+      {
+        "destinations": 512,
+        "outcome": "quality-failure",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.74141,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-512/diagnostics.json"
+      }
+    ]
+  },
+  {
+    "cpus": 3,
+    "affinity": "0,2,4",
+    "mix": "pure-srt",
+    "highest_passing": 256,
+    "first_quality_failure": 512,
+    "setup_limited": [],
+    "rungs": [
+      {
+        "destinations": 1,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1/diagnostics.json"
+      },
+      {
+        "destinations": 16,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.9963,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-16/diagnostics.json"
+      },
+      {
+        "destinations": 32,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99984,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-32/diagnostics.json"
+      },
+      {
+        "destinations": 64,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99675,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-64/diagnostics.json"
+      },
+      {
+        "destinations": 128,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99716,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-128/diagnostics.json"
+      },
+      {
+        "destinations": 256,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99663,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-256/diagnostics.json"
+      },
+      {
+        "destinations": 512,
+        "outcome": "quality-failure",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.89325,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-512/diagnostics.json"
+      }
+    ]
+  },
+  {
+    "cpus": 4,
+    "affinity": "0,2,4,6",
+    "mix": "pure-srt",
+    "highest_passing": 512,
+    "first_quality_failure": 1024,
+    "setup_limited": [],
+    "rungs": [
+      {
+        "destinations": 1,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1/diagnostics.json"
+      },
+      {
+        "destinations": 16,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99738,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-16/diagnostics.json"
+      },
+      {
+        "destinations": 32,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.997,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-32/diagnostics.json"
+      },
+      {
+        "destinations": 64,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99824,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-64/diagnostics.json"
+      },
+      {
+        "destinations": 128,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99694,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-128/diagnostics.json"
+      },
+      {
+        "destinations": 256,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99958,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-256/diagnostics.json"
+      },
+      {
+        "destinations": 512,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99367,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-512/diagnostics.json"
+      },
+      {
+        "destinations": 1024,
+        "outcome": "quality-failure",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.26311,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1024/diagnostics.json"
+      }
+    ]
+  },
+  {
+    "cpus": 5,
+    "affinity": "0,2,4,6,8",
+    "mix": "pure-srt",
+    "highest_passing": 512,
+    "first_quality_failure": 1024,
+    "setup_limited": [],
+    "rungs": [
+      {
+        "destinations": 1,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1/diagnostics.json"
+      },
+      {
+        "destinations": 16,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99764,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-16/diagnostics.json"
+      },
+      {
+        "destinations": 32,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99601,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-32/diagnostics.json"
+      },
+      {
+        "destinations": 64,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99959,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-64/diagnostics.json"
+      },
+      {
+        "destinations": 128,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99553,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-128/diagnostics.json"
+      },
+      {
+        "destinations": 256,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99657,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-256/diagnostics.json"
+      },
+      {
+        "destinations": 512,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99177,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-512/diagnostics.json"
+      },
+      {
+        "destinations": 1024,
+        "outcome": "quality-failure",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.25851,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1024/diagnostics.json"
+      }
+    ]
+  },
+  {
+    "cpus": 6,
+    "affinity": "0,2,4,6,8,10",
+    "mix": "pure-srt",
+    "wall_s": 774.709659576416,
+    "matrix": {
+      "schema": "nginx-media.capacity-matrix/1",
+      "host": {
+        "online_cpus": 20,
+        "permitted_cpus": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19
+        ],
+        "cgroup_cpu_max": "max 100000"
+      },
+      "mixes": {
+        "pure-srt": {
+          "rungs": [
+            {
+              "destinations": 1,
+              "outcome": "pass",
+              "srt_senders": "adaptive",
+              "hls": "yes",
+              "observed_delivery_ratio": 1,
+              "delivery_ratio_threshold": null,
+              "delivery_ratio_basis": "observed",
+              "diagnostics": "capacity/quality-pure-srt-1/diagnostics.json"
+            },
+            {
+              "destinations": 16,
+              "outcome": "pass",
+              "srt_senders": "adaptive",
+              "hls": "yes",
+              "observed_delivery_ratio": 0.99637,
+              "delivery_ratio_threshold": null,
+              "delivery_ratio_basis": "observed",
+              "diagnostics": "capacity/quality-pure-srt-16/diagnostics.json"
+            },
+            {
+              "destinations": 32,
+              "outcome": "pass",
+              "srt_senders": "adaptive",
+              "hls": "yes",
+              "observed_delivery_ratio": 0.99457,
+              "delivery_ratio_threshold": null,
+              "delivery_ratio_basis": "observed",
+              "diagnostics": "capacity/quality-pure-srt-32/diagnostics.json"
+            },
+            {
+              "destinations": 64,
+              "outcome": "pass",
+              "srt_senders": "adaptive",
+              "hls": "yes",
+              "observed_delivery_ratio": 0.99554,
+              "delivery_ratio_threshold": null,
+              "delivery_ratio_basis": "observed",
+              "diagnostics": "capacity/quality-pure-srt-64/diagnostics.json"
+            },
+            {
+              "destinations": 128,
+              "outcome": "pass",
+              "srt_senders": "adaptive",
+              "hls": "yes",
+              "observed_delivery_ratio": 0.99623,
+              "delivery_ratio_threshold": null,
+              "delivery_ratio_basis": "observed",
+              "diagnostics": "capacity/quality-pure-srt-128/diagnostics.json"
+            },
+            {
+              "destinations": 256,
+              "outcome": "pass",
+              "srt_senders": "adaptive",
+              "hls": "yes",
+              "observed_delivery_ratio": 0.98977,
+              "delivery_ratio_threshold": null,
+              "delivery_ratio_basis": "observed",
+              "diagnostics": "capacity/quality-pure-srt-256/diagnostics.json"
+            },
+            {
+              "destinations": 512,
+              "outcome": "quality-failure",
+              "srt_senders": "adaptive",
+              "hls": "yes",
+              "observed_delivery_ratio": 0.80342,
+              "delivery_ratio_threshold": null,
+              "delivery_ratio_basis": "observed",
+              "diagnostics": "capacity/quality-pure-srt-512/diagnostics.json"
+            }
+          ],
+          "highest_passing": 256,
+          "first_quality_failure": 512,
+          "setup_limited": [],
+          "infrastructure_limited": []
+        }
+      }
+    },
+    "highest_passing": 256,
+    "first_quality_failure": 512,
+    "setup_limited": [],
+    "rungs": [
+      {
+        "destinations": 1,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 1,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-1/diagnostics.json"
+      },
+      {
+        "destinations": 16,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99637,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-16/diagnostics.json"
+      },
+      {
+        "destinations": 32,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99457,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-32/diagnostics.json"
+      },
+      {
+        "destinations": 64,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99554,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-64/diagnostics.json"
+      },
+      {
+        "destinations": 128,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.99623,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-128/diagnostics.json"
+      },
+      {
+        "destinations": 256,
+        "outcome": "pass",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.98977,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-256/diagnostics.json"
+      },
+      {
+        "destinations": 512,
+        "outcome": "quality-failure",
+        "srt_senders": "adaptive",
+        "hls": "yes",
+        "observed_delivery_ratio": 0.80342,
+        "delivery_ratio_threshold": null,
+        "delivery_ratio_basis": "observed",
+        "diagnostics": "capacity/quality-pure-srt-512/diagnostics.json"
+      }
+    ]
+  }
+]

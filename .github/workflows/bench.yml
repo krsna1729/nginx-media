@@ -132,7 +132,7 @@ jobs:
           {
             echo "### bench ${{ inputs.tier }} ${{ matrix.configs }}"
             echo '```'
-            grep -h -E '^   (quality_rung_result|matrix )' .build/bench-results/*.log || true
+            grep -h -E '^(quality_rung_result|matrix )' .build/bench-results/*.log || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

@@ -18,19 +18,24 @@ Run it with plain python3 - no pytest, no network, no nginx:
 """
 
 import argparse
+import contextlib
 import copy
 import csv
+import dataclasses
 import importlib.util
 import io
 import json
 import os
-import re
 import shutil
+import socket
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import types
+import urllib.error
+import urllib.request
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -40,6 +45,14 @@ READERS = os.path.join(HERE, "hls_capacity_readers.py")
 DIAGNOSTICS = os.path.join(HERE, "capacity_diagnostics.py")
 HISTORY = os.path.join(HERE, "bench_history.py")
 PREFLIGHT = os.path.join(HERE, "capacity_preflight.py")
+
+sys.path.insert(0, HERE)
+from harness import config as harness_config  # noqa: E402
+from harness import cpu as harness_cpu  # noqa: E402
+from harness import ladder as harness_ladder  # noqa: E402
+from harness import proc as harness_proc  # noqa: E402
+from harness import receivers as harness_receivers  # noqa: E402
+from harness import rung as harness_rung  # noqa: E402
 
 checks = 0
 failures = 0
@@ -240,6 +253,50 @@ def test_preflight_classifies_a_short_environment(work):
           f"the short side must be the receiver: {result.stdout}")
 
 
+
+def test_probe_overshoot_is_not_a_network_limit(work):
+    """Loss at a rate far above the rung's need is not a verdict on the rung.
+
+    The probe floods at whatever it can manage, which in the namespace
+    topology was 2.84 Gbit/s for a rung needing 1.02. It lost 11.66% of its
+    datagrams and the judge skipped the rung as a network limit - on a veth
+    that had already carried 4.7 Gbit/s, and for a rate the rung never asked
+    for. What arrived was 2.51 Gbit/s, well above the 1.02 requested.
+    """
+    case = os.path.join(work, "preflight-overshoot")
+    sender = os.path.join(case, "sender.json")
+    rx = os.path.join(case, "rx.json")
+    tx = os.path.join(case, "tx.json")
+    write_json(sender, {"role": "sender", "permitted_cpus": [0],
+                        "cpu_model": "test",
+                        "memory": {"MemAvailable": "8000000 kB"}})
+    # 2.84 Gbit/s offered and 11.66% of it lost, which still delivers
+    # 2.51 Gbit/s for a 128 x 8 Mbit/s request that needs about 1.23.
+    write_json(rx, {"side": "receiver", "received_bytes": 1_254_000_000,
+                    "received_packets": 883_400, "window_s": 4.0,
+                    "socket_drops": 0, "rate_gbps": 2.51})
+    write_json(tx, {"side": "sender", "sent_bytes": 1_420_000_000,
+                    "sent_packets": 1_000_000, "send_window_s": 4.0,
+                    "ping_loss": 0.0, "ping_loss_offered_gbps": None})
+
+    result = preflight("judge", "--destinations", "128", "--bitrate-bps",
+                       "8000000", "--sender", sender, "--network", rx,
+                       "--probe-sender", tx, "--sender-cpus", "0",
+                       "--sender-under-test", "--json",
+                       os.path.join(case, "judge.json"))
+    with open(os.path.join(case, "judge.json"), encoding="utf-8") as source:
+        judged = json.load(source)
+    loss_limits = [limit for limit in judged["limits"]
+                   if limit.get("resource") == "loss"]
+    check(not loss_limits,
+          f"loss while overshooting the request is not a limit: {loss_limits}")
+    check(result.returncode != 2,
+          f"the rung must still be measured: {result.stdout}")
+    check("sender_cpu_exceeds_permitted_cpus" in judged.get("details", {})
+          or not [limit for limit in judged["limits"]
+                  if limit.get("side") == "sender"],
+          "the sender's CPU need is recorded, not judged")
+
 def test_preflight_probe_is_measured_at_both_ends(work):
     """A path probe over loopback: the receiver's count is the measurement,
     the sender's count says the load was offered, and neither is inferred."""
@@ -398,19 +455,6 @@ def test_reader_reports_observed_not_threshold(work):
 
 def test_reader_delayed_start_preserves_in_window_segments(work):
     """Expire the ready tail, then hold a refresh across the start boundary."""
-    functions = [bash_function(name) for name in
-                 ("receiver_kill", "receiver_file_ready", "receiver_fetch",
-                  "capacity_capture_gate", "capacity_hls_reader_boundary")]
-    if any(function is None for function in functions):
-        return
-    boundary_script = "\n".join(functions) + r'''
-set -euo pipefail
-CAPACITY_RECEIVER_CONFIG=""
-CAPACITY_RECEIVER_KILL=""
-CAPACITY_RECEIVER_FILE_TEST=""
-CAPACITY_RECEIVER_FETCH=""
-capacity_hls_reader_boundary "$1" "$2" "$3"
-'''
     across_start = threading.Event()
     release = threading.Event()
     delivered = threading.Event()
@@ -456,18 +500,21 @@ capacity_hls_reader_boundary "$1" "$2" "$3"
     os.makedirs(work, exist_ok=True)
     report = os.path.join(work, "hls-readers.csv")
     ready = os.path.join(work, "hls.ready")
+    log = os.path.join(work, "hls-reader.log")
     server = ThreadingHTTPServer(("127.0.0.1", 0), DelayedPlaylistHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    process = subprocess.Popen(
+    readers = harness_receivers.HlsReaders(work, harness_proc.Proc(
+        "HLS readers",
         [sys.executable, READERS, "--url",
          f"http://127.0.0.1:{server.server_port}/media/playlist.m3u8",
          "--readers", "1", "--duration", "10", "--report", report,
          "--ready-file", ready, "--reference-bps", "1",
-         "--poll-interval", "0.05", "--clock-domain", "receiver-monotonic"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+         "--poll-interval", "0.05", "--clock-domain", harness_receivers.CLOCK],
+        log=log))
+    process = readers.proc
     try:
         deadline = time.monotonic() + 10
-        while not os.path.exists(ready) and process.poll() is None and time.monotonic() < deadline:
+        while not os.path.exists(ready) and process.alive() and time.monotonic() < deadline:
             time.sleep(0.01)
         check(os.path.exists(ready), "delayed-start HLS reader must finish warmup")
         refreshed = across_start.wait(5)
@@ -482,33 +529,33 @@ capacity_hls_reader_boundary "$1" "$2" "$3"
                 release.set()
                 check(delivered.wait(5), "HLS reader must deliver segments from the cross-start playlist")
             begin = time.monotonic_ns()
-            result = run(["bash", "-c", boundary_script, "hls-boundary",
-                          str(process.pid), report, phase], timeout=10)
-            end = time.monotonic_ns()
-            check(result.returncode == 0,
-                  f"nonconfig reader-clock {phase} boundary failed: {result.stderr}")
-            if result.returncode != 0:
+            try:
+                readers.boundary(phase)
+            except harness_proc.Failed as error:
+                check(False, f"reader {phase} boundary failed: {error}")
                 return
+            end = time.monotonic_ns()
             ack = read_json(report + "." + phase + ".json")
             bracket = read_json(report + "." + phase + ".json.request.json")
             check(begin <= bracket["request_ns"] <= ack["native_ns"]
                   <= bracket["reply_ns"] <= end,
                   f"{phase} must record its actual signal/acknowledgment bracket")
             boundaries[phase] = (ack, bracket)
-        check(process.poll() is None,
+        check(process.alive(),
               "sealed HLS reader must remain alive for the closing CPU capture")
-        process.terminate()
-        out, err = process.communicate(timeout=15)
-        check(process.returncode == 0, f"delayed-start HLS reader failed: {err}")
+        status = process.stop(15)
+        out = read_text(log)
+        check(status == 0, f"delayed-start HLS reader failed: {out}")
         window = read_json(os.path.join(work, "hls-readers.measurement.window"))
         check(window["clock_domain"] == "controller-monotonic",
-              "nonconfig reader-clock boundaries must map onto the controller clock")
+              "reader boundaries must be on the controller clock")
         for phase, (ack, bracket) in boundaries.items():
-            check(window[phase + "_ns"] == (bracket["request_ns"] + bracket["reply_ns"]) // 2
-                  and window[phase + "_uncertainty_ns"] ==
-                  (bracket["reply_ns"] - bracket["request_ns"]) // 2
-                  and window["native_" + phase + "_ns"] == ack["native_ns"],
-                  f"{phase} must preserve native time and map the actual request bracket")
+            check(window[phase + "_ns"] == ack["native_ns"]
+                  and window[phase + "_uncertainty_ns"] == 0
+                  and window["native_" + phase + "_ns"] == ack["native_ns"]
+                  and window[phase + "_request_ns"] == bracket["request_ns"]
+                  and window[phase + "_reply_ns"] == bracket["reply_ns"],
+                  f"{phase} must keep the reader's own stamp and its request bracket")
         values = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
         check(values.get("relative_quality_pass") == "yes",
               f"delayed-start HLS must pass without false sequence gaps: {out}")
@@ -523,9 +570,7 @@ capacity_hls_reader_boundary "$1" "$2" "$3"
               "raw throughput must count only actual in-window network receipts")
     finally:
         release.set()
-        if process.poll() is None:
-            process.kill()
-            process.communicate(timeout=10)
+        process.stop(5)
         server.shutdown()
         server.server_close()
 
@@ -1639,11 +1684,11 @@ def test_matrix_separates_observed_from_threshold(work):
 
 # --- benchmark reporting truth -----------------------------------------------
 
-HARNESS = os.path.join(HERE, "ingest_egress_fanout.sh")
 MIXES_CONF = os.path.join(HERE, "capacity-mixes.conf")
 SRT_JUDGE = os.path.join(HERE, "srt_capacity_quality.py")
 RTMP_JUDGE = os.path.join(HERE, "rtmp_capacity_quality.py")
 HLS_PUSH_JUDGE = os.path.join(HERE, "hls_push_capacity.py")
+CLIENT = os.path.join(HERE, "capacity_client.py")
 
 # the seven workloads bench-ci.sh used to promise, and the two contention
 # ladders the harness ran on top of them without the manifest saying so
@@ -2173,111 +2218,305 @@ def test_hls_push_judge_rejects_non_finite_inputs(work):
           f"a NaN first-segment latency must fail: {result.stdout}")
 
 
-def bash_function(name):
-    match = re.search(rf"^(?P<indent> *){name}\(\) \{{.*?^(?P=indent)\}}\n",
-                      read_text(HARNESS), re.M | re.S)
-    check(match is not None, f"the harness must define {name}")
-    return match.group(0) if match else None
+def test_restream_push_is_judged_by_sequence(work):
+    """restream names each output's segments `<token>-<seq>.ts`: complete
+    destinations pass by sequence, and one segment a destination missed fails it."""
+    p = hls_push_judge_rung(os.path.join(work, "push-restream"))
+    with open(p("sink.after.json"), encoding="utf-8") as source:
+        after = json.load(source)
+    template = after["destinations"]["d0000"]
+    for index, token in enumerate(("r00aa", "r00bb", "r00cc")):
+        renamed = {f"{token}-{name[3:]}": dict(entry, at=entry["at"] + 0.3 * index)
+                   for name, entry in template["segment_detail"].items()}
+        after["destinations"]["d%04d" % index] = dict(template, segment_detail=renamed)
+    write_json(p("sink.after.json"), after)
+
+    def judge(*extra):
+        produced = harness_rung._push_production(p("sink.after.json"), p("push-production.json"))
+        return run([sys.executable, HLS_PUSH_JUDGE, "report", "--stream", "live",
+                    "--destinations", "3", "--sink-before", p("sink.before.json"),
+                    "--sink-after", p("sink.after.json"), "--reference-bps", "800000",
+                    "--prepared-media", p("prepared-media.json"), "--produced-segments", produced,
+                    "--measurement-window", p("cpu.before"), p("cpu.after"),
+                    "--clock-domain", "controller-monotonic"] + list(extra))
+
+    result = judge("--segment-identity", "sequence")
+    check(judge_passed(result) and "quality_average_delivery_ratio_min=1.00000" in result.stdout
+          and "quality_dropped_units=n/a" in result.stdout,
+          f"complete restream push must pass by sequence, sender counters n/a: {result.stdout}")
+    del after["destinations"]["d0001"]["segment_detail"]["r00bb-2.ts"]
+    write_json(p("sink.after.json"), after)
+    result = judge("--segment-identity", "sequence")
+    check(not judge_passed(result) and "d0001: 1 window segments missing" in result.stdout,
+          f"a segment one destination missed must fail that destination: {result.stdout}")
+
+    readers = load_module(READERS, "hls_capacity_readers_fmp4")
+    box = lambda kind, payload=b"": (8 + len(payload)).to_bytes(4, "big") + kind + payload  # noqa: E731
+    fragment = box(b"styp") + box(b"moof", bytes(16)) + box(b"mdat", bytes(64))
+    check(readers.validate_segment("http://h/hls/p/seg3.m4s", fragment), "an fMP4 fragment is valid")
+    check(not readers.validate_segment("http://h/hls/p/seg3.m4s", fragment[:-1]),
+          "a truncated fMP4 fragment is not")
+    check(not readers.validate_segment("http://h/hls/p/seg3.m4s", box(b"moof", bytes(16))),
+          "an fMP4 fragment without media data is not")
+
+
+def test_topology_cells_and_steering_masks(work):
+    """A wrong RPS mask silently steers receive work to the wrong CPUs, and a
+    cell that shares its name across topologies silently overwrites a result."""
+    topology = os.path.join(HERE, "capacity_topology.sh")
+    for cpus, expected in (("12-19", "ff000"), ("0,2,4,6,8,10", "555"),
+                           ("3-4", "18"), ("0", "1"), ("63", "8000000000000000")):
+        result = run(["bash", topology, "mask", cpus])
+        check(result.returncode == 0 and result.stdout.strip() == expected,
+              f"mask for {cpus} must be {expected}: {result.stdout}{result.stderr}")
+    result = run(["bash", topology, "mask", "64"])
+    check(result.returncode != 0 and "outside 0-63" in result.stderr,
+          f"a CPU past the bitmap must be refused: {result.stdout}{result.stderr}")
+
+    sweep = load_module(os.path.join(HERE, "capacity_sweep.py"), "capacity_sweep_under_test")
+    check(set(sweep.TOPOLOGIES) == {"namespace", "loopback"},
+          "both topologies are first class, so both appear in a default run")
+    engine = next(e for e in sweep.ENGINES if e["id"] == "nginx-haivision")
+    names = {sweep.cell_id(engine, [0, 2], topology_name) for topology_name in sweep.TOPOLOGIES}
+    check(len(names) == len(sweep.TOPOLOGIES),
+          f"a cell name must say which topology measured it: {names}")
+    check(sweep.cell_id(engine, [0, 2], "namespace") == "nginx-haivision-2c",
+          "the namespace cell keeps the name earlier evidence used")
+
+    # A shell that has run `eval "$(capacity_topology.sh namespace up)"` exports
+    # the namespace environment.  A loopback cell must not inherit it, or it
+    # would measure through the namespaces while its name and record say
+    # loopback, and the two cells would be one measurement under two names.
+    preset = {"CAPACITY_SENDER_EXEC": "nsenter --net=/run/netns/nmsut",
+              "CAPACITY_RECEIVER_EXEC": "nsenter --net=/run/netns/nmrecv",
+              "CAPACITY_SENDER_ADDR": "10.200.0.1",
+              "CAPACITY_RECEIVER_ADDR": "10.200.0.2",
+              "CAPACITY_MEDIA_ADDR": "10.200.0.1"}
+    arguments = types.SimpleNamespace(
+        topology_env={"namespace": dict(preset), "loopback": {}},
+        seconds=60, steps="1 2", mixes="pure-srt", out=os.path.join(work, "cells"))
+    os.environ.update(preset)
+    try:
+        loopback = sweep.cell_environment(engine, [0], "loopback", HERE, HERE, "/run", arguments)
+        namespaced = sweep.cell_environment(engine, [0], "namespace", HERE, HERE, "/run", arguments)
+    finally:
+        for name in preset:
+            os.environ.pop(name, None)
+    inherited = sorted(name for name in preset if name in loopback)
+    check(not inherited, f"a loopback cell must not inherit {inherited}")
+    check(namespaced["CAPACITY_RECEIVER_ADDR"] == "10.200.0.2"
+          and "nsenter" in namespaced["CAPACITY_SENDER_EXEC"],
+          "a namespace cell still runs in the namespaces")
+    check(loopback["CAPACITY_NGINX_CPUS"] == "0" and "PHASES" in loopback,
+          "a loopback cell still carries its own settings")
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_destinations_spread_over_addresses(work):
+    """One destination address is one source-port budget, so a large rung must
+    spread; the listeners and the dialled URLs come from one list."""
+    from harness import config as harness_config  # noqa: F401 (loaded above)
+    addresses = harness_config.receiver_addresses("127.0.0.1", 16, 600)
+    check(addresses == ["127.0.0.1", "127.0.0.2", "127.0.0.3"],
+          f"600 destinations at 256 per address need three addresses: {addresses}")
+    check(harness_config.receiver_addresses("127.0.0.1", 16, 10) == ["127.0.0.1"],
+          "a small rung keeps one address")
+    check(harness_config.receiver_addresses("10.200.0.2", 16, 2048)
+          == ["10.200.0.%d" % n for n in range(2, 10)],
+          "2048 destinations span eight addresses from the base")
+    for bad in ("127.0.0.1/24", "127.0.0.999"):
+        try:
+            harness_config.receiver_addresses(bad, 16, 600)
+            check(False, f"{bad} must be refused")
+        except ValueError:
+            check(True, f"{bad} is refused")
+    try:
+        harness_config.receiver_addresses("10.200.0.250", 16, 2048)
+        check(False, "an address that would leave the subnet must be refused")
+    except ValueError:
+        check(True, "an address that would leave the subnet is refused")
+
+    client = load_module(CLIENT, "capacity_client_spread")
+    program = client.Program(0, 1, "live/a")
+    program.add(client.HLS_PUSH, 600, first=0)
+    plan = program.plan(9000, 4, 20000, 1, 24800, "127.0.0.1", "/hls",
+                        receiver_addresses=addresses)
+    check([entry[4] for entry in plan[:2]] == ["127.0.0.1", "127.0.0.1"],
+          "the first block of destinations dials the first address")
+    check(plan[256][4] == "127.0.0.2" and plan[512][4] == "127.0.0.3",
+          "each block of destinations dials its own address")
+    check(all(entry[2] == 24800 for entry in plan),
+          "the port is unchanged: the addresses are what spread the budget")
+
+    # One sink process serves every address and totals them in one snapshot,
+    # which is what makes the spread cost nothing at judging time.
+    port = free_port()
+    def push(address, name, body=b"\x47" + bytes(187)):
+        request = urllib.request.Request("http://%s:%d/%s" % (address, port, name),
+                                         data=body, method="PUT")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            return error.code
+        except urllib.error.URLError:
+            return 0  # not listening yet, which the caller retries
+    def snapshot():
+        with urllib.request.urlopen("http://%s:%d/__snapshot" % (addresses[0], port),
+                                    timeout=10) as response:
+            return json.loads(response.read())
+    sink = subprocess.Popen([sys.executable, HLS_PUSH_JUDGE, "serve", "--port", str(port),
+                             "--bind", "127.0.0.1", "--bind", "127.0.0.2"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for address, destination in (("127.0.0.1", "d0001"), ("127.0.0.2", "d0002")):
+            for _ in range(50):
+                code = push(address, "%s/seg0.ts" % destination)
+                if 200 <= code < 300:
+                    break
+                time.sleep(0.1)
+            check(200 <= code < 300, f"{address} must accept an upload: {code}")
+        seen = sorted(snapshot()["destinations"])
+        check(seen == ["d0001", "d0002"],
+              f"one snapshot must carry both addresses' destinations: {seen}")
+    finally:
+        sink.terminate()
+        sink.wait(timeout=10)
+
+
+def test_push_sink_keeps_the_senders_connection(work):
+    """nginx-media keeps one connection per destination (src/core/ngx_media_http.h),
+    so a sink that answers HTTP/1.0 makes every segment a new connection: a cost
+    the engine never asked for, and the source-port budget that large rungs ran
+    out of."""
+    port = free_port()
+    sink = subprocess.Popen([sys.executable, HLS_PUSH_JUDGE, "serve", "--port", str(port)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    try:
+        for _ in range(100):
+            try:
+                urllib.request.urlopen("http://127.0.0.1:%d/__health" % port, timeout=1).read()
+                break
+            except Exception:
+                time.sleep(0.05)
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+            stream = connection.makefile("rwb")
+            body = b"\x47" + bytes(187)
+            for index in range(3):
+                stream.write(b"PUT /d0000/seg%d.ts HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                             b"Connection: keep-alive\r\nContent-Length: %d\r\n\r\n"
+                             % (index, len(body)) + body)
+                stream.flush()
+                status = stream.readline()
+                check(status.startswith(b"HTTP/1.1 201"),
+                      f"upload {index} must be accepted on the kept connection: {status!r}")
+                while True:
+                    header = stream.readline()
+                    if header in (b"\r\n", b"\n", b""):
+                        break
+            # the same connection carried every segment: the sink did not close
+            stream.write(b"GET /__snapshot HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            stream.flush()
+            check(stream.readline().startswith(b"HTTP/1.1 200"),
+                  "the kept connection must still answer after three uploads")
+            length = 0
+            while True:
+                header = stream.readline()
+                if header.startswith(b"Content-Length:"):
+                    length = int(header.split(b":")[1])
+                if header in (b"\r\n", b"\n", b""):
+                    break
+            snapshot = json.loads(stream.read(length))
+            check(sorted(snapshot["destinations"]) == ["d0000"],
+                  f"all three uploads are one destination: {sorted(snapshot['destinations'])}")
+            check(snapshot["destinations"]["d0000"]["segments"] == 3,
+                  f"the sink counted three segments: {snapshot['destinations']['d0000']['segments']}")
+
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+            stream = connection.makefile("rwb")
+            stream.write(b"PUT /d0001/seg0.ts HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                         b"Connection: close\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+            stream.flush()
+            check(stream.readline().startswith(b"HTTP/1.1 201"), "a closing upload is accepted too")
+            while True:
+                if stream.readline() in (b"\r\n", b"\n", b""):
+                    break
+            check(stream.read(1) == b"", "Connection: close is honoured")
+    finally:
+        sink.terminate()
+        sink.wait(timeout=10)
+
+
+def harness_cfg(**overrides):
+    """The harness configuration, with this checkout's helpers."""
+    return dataclasses.replace(harness_config.load(), bench_dir=HERE, **overrides)
+
+
+@contextlib.contextmanager
+def local_namespaces():
+    """The fixtures run on this host, so every namespace prefix is empty."""
+    names = ("CAPACITY_SENDER_EXEC", "CAPACITY_RECEIVER_EXEC", "CAPACITY_HARNESS_EXEC")
+    saved = {name: os.environ.pop(name, None) for name in names}
+    try:
+        yield
+    finally:
+        os.environ.update({name: value for name, value in saved.items() if value is not None})
 
 
 def test_protocol_samplers_stop_independently(work):
+    """The window's monitors stop without the receivers they sample; one that
+    finished cleanly on its own is fine, one that was killed or fails when
+    stopped is named with its status, and the list is cleared either way."""
     helper = os.path.join(work, "sampler.py")
     write(helper, "import signal, sys\n"
           "signal.signal(signal.SIGTERM, lambda *_: sys.exit(int(sys.argv[2])))\n"
           "open(sys.argv[1], 'w').write('ready')\n"
           "signal.pause()\n")
-    functions = [bash_function(name) for name in
-                 ("receiver_kill", "receiver_wait", "capacity_quality_stop_monitors")]
-    if any(function is None for function in functions):
-        return
-    script = "\n".join(functions) + r'''
-set -euo pipefail
-QUALITY_MONITORS=()
-OWNED_MONITORS=()
-CAPACITY_RECEIVER_KILL=""
-trap 'kill -TERM "${OWNED_MONITORS[@]}" 2>/dev/null || true; wait || true' EXIT
-ready() {
-    for (( n=0; n<300; n++ )); do
-        [ -s "$1" ] && return 0
-        sleep 0.01
-    done
-    return 1
-}
-"$PYTHON" "$1" "$2/rtmp.ready" 0 &
-rtmp=$!
-QUALITY_MONITORS+=( "$rtmp" )
-OWNED_MONITORS+=( "$rtmp" )
-"$PYTHON" "$1" "$2/srt.ready" 0 &
-srt=$!
-QUALITY_MONITORS+=( "$srt" )
-OWNED_MONITORS+=( "$srt" )
-ready "$2/rtmp.ready"
-ready "$2/srt.ready"
-capacity_quality_stop_monitors "$rtmp"
-kill -0 "$srt"
-[ "${QUALITY_MONITORS[*]}" = "$srt" ]
-capacity_quality_stop_monitors
-[ "${#QUALITY_MONITORS[@]}" -eq 0 ]
-if kill -0 "$srt" 2>/dev/null; then exit 1; fi
-"$PYTHON" "$1" "$2/failed.ready" 7 &
-failed=$!
-QUALITY_MONITORS+=( "$failed" )
-OWNED_MONITORS+=( "$failed" )
-ready "$2/failed.ready"
-if capacity_quality_stop_monitors "$failed"; then exit 1; fi
-[ "${#QUALITY_MONITORS[@]}" -eq 0 ]
-'''
-    result = run(["timeout", "--kill-after=2", "10", "bash", "-c", script,
-                  "sampler-test", helper, work],
-                 env=dict(os.environ, PYTHON=sys.executable))
-    check(result.returncode == 0,
-          f"stopping RTMP must leave SRT alive and sampler errors must propagate: "
-          f"{result.stdout}{result.stderr}")
+
+    def stopped(scope):
+        try:
+            scope.stop_monitors(grace=5)
+        except harness_proc.Failed as error:
+            return str(error)
+        return None
+
+    with harness_proc.Scope() as scope:
+        def start(name, status, monitor=True):
+            ready = os.path.join(work, name.replace(" ", "-") + ".ready")
+            child = scope.spawn(name, [sys.executable, helper, ready, str(status)],
+                                monitor=monitor)
+            harness_proc.wait_until(f"{name} ready", lambda: os.path.exists(ready), 5,
+                                    interval=0.01, alive=[child])
+            return child
+        sink = start("SRT sink", 0, monitor=False)
+        rtmp = start("RTMP sampler", 0)
+        srt = start("SRT sampler", 0)
+        os.kill(srt.pid, signal.SIGTERM)  # finished on its own, status 0
+        srt.wait(5)
+        error = stopped(scope)
+        check(error is None and not rtmp.alive() and not scope.monitors,
+              f"samplers that exit cleanly stop cleanly and leave the list: {error}")
+        check(sink.alive(), "stopping the samplers must leave the receiver they sample running")
+        failing = start("failing sampler", 7)
+        dead = start("dead sampler", 0)
+        os.kill(dead.pid, signal.SIGKILL)
+        dead.wait(5)
+        error = stopped(scope)
+        check(error is not None and "failing sampler" in error and "exited 7" in error
+              and "dead sampler" in error and "exited -9" in error,
+              f"a sampler's failure and a sampler that was killed must both be named: {error}")
+        check(not scope.monitors and not failing.alive(),
+              "a failed stop still stops every monitor and clears the list")
+        check(sink.alive(), "a sampler failure must not stop the receiver it sampled")
 
 
 def test_cpu_window_prepares_every_capture_before_release(work):
     """Actual CPU/sink captures stay parked through preparation and aborts."""
-    functions = [bash_function(name) for name in (
-        "cpu_window", "capacity_capture_gate", "capacity_window_boundary",
-        "capacity_hls_push_snapshot", "capacity_sampler_ready",
-        "capacity_rtmp_sink_metrics")]
-    if any(function is None for function in functions):
-        return
-    local_gate = functions[1].replace("capacity_capture_gate", "local_capture_gate", 1)
-    script = "\n".join(functions + [local_gate]) + r'''
-set -euo pipefail
-case_dir="$1"
-mode="$2"
-ROOT="$3"
-RUN="$case_dir"
-CPU_SNAPSHOT_DIR="$case_dir"
-CPU_BOUNDARY_CALLBACK=capacity_window_boundary
-CAPACITY_RECEIVER_CONFIG=""
-CAPACITY_RECEIVER_ADDR=127.0.0.1
-srt_destinations=0
-rtmp_destinations=0
-hls_push_destinations=1
-hls_push_sink_port="$4"
-hls_push_sink_pid="$5"
-hls_pid=""
-quality_mode=no
-RTMP_SINK_WORKER_PID=""
-worker_pids() { printf '%s\n' "$hls_push_sink_pid"; }
-write_cpu_roles() { : >"$RUN/roles"; }
-capacity_capture_gate() {
-    local suffix=before
-    [[ "$CPU_CAPTURE_READY_DIR" != *.after ]] || suffix=after
-    if [[ "$CAPTURE_READY_FILE" == */hls_push.ready ]] \
-        && { [ "$mode" = success ] || [ "$mode" = "fail-$suffix" ]; }; then
-        printf '%s\n' "$BASHPID" >"$case_dir/preparation.pid.$suffix"
-        : >"$case_dir/preparing.$suffix"
-        until [ -f "$case_dir/preparation.release.$suffix" ]; do sleep 0.005; done
-        [ "$mode" != "fail-$suffix" ] || return 7
-    fi
-    local_capture_gate "$@"
-}
-cpu_window 0.25 "$hls_push_sink_pid"
-'''
     # Run the production sink in its own process, with an ephemeral port.
     launcher = (
         "import socket,sys\n"
@@ -2293,16 +2532,17 @@ cpu_window 0.25 "$hls_push_sink_pid"
     sink = subprocess.Popen([sys.executable, "-c", launcher, HERE, port_file],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
-    def wait_for(path, process):
+    def wait_for(path, alive):
         deadline = time.monotonic() + 10
-        while not os.path.exists(path) and process.poll() is None:
+        while not os.path.exists(path) and alive():
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.005)
         return os.path.exists(path)
 
     try:
-        check(wait_for(port_file, sink), "production HLS push sink must publish its port")
+        check(wait_for(port_file, lambda: sink.poll() is None),
+              "production HLS push sink must publish its port")
         if not os.path.exists(port_file):
             return
         port = read_text(port_file)
@@ -2317,22 +2557,53 @@ cpu_window 0.25 "$hls_push_sink_pid"
         for mode in ("success", "fail-before", "fail-after"):
             case = os.path.join(work, mode)
             os.makedirs(case, exist_ok=True)
-            process = subprocess.Popen(
-                ["bash", "-c", script, "capture-window", case, mode, ROOT,
-                 port, str(sink.pid)], stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, text=True,
-                env=dict(os.environ, PYTHON=sys.executable), start_new_session=True)
-            try:
+            cfg = harness_cfg(run=case, receiver_addr="127.0.0.1")
+            push = harness_receivers.HlsPushSink(cfg, case)
+            push.port = int(port)
+
+            def parked(suffix, gate):
+                # A capture's preparation, held until the test releases it and
+                # failing on request, before the capture reaches its gate.
+                def prepared():
+                    if mode in ("success", "fail-" + suffix):
+                        write(os.path.join(case, f"preparing.{suffix}"), "")
+                        release = os.path.join(case, f"preparation.release.{suffix}")
+                        harness_proc.wait_until("preparation release",
+                                                lambda: os.path.exists(release), 20,
+                                                interval=0.005)
+                        if mode == "fail-" + suffix:
+                            raise harness_proc.Failed(f"prepared capture failed {suffix}")
+                    gate()
+                return prepared
+
+            def boundary(action):
+                phase, suffix = ("start", "before") if action == "start" else ("end", "after")
+                return harness_rung.together(
+                    [lambda gate: push.snapshot(phase, parked(suffix, gate))],
+                    prepare=20, join=20)
+
+            outcome = {}
+
+            def window():
+                try:
+                    outcome["window"] = harness_cpu.cpu_window(
+                        cfg, case, 0.25, [sink.pid], {sink.pid: "hls-push"},
+                        boundary=boundary)
+                except Exception as error:  # noqa: BLE001 - asserted below
+                    outcome["error"] = error
+            thread = threading.Thread(target=window, daemon=True)
+            with local_namespaces():
+                thread.start()
                 released = {}
                 phases = ("before", "after") if mode == "success" else (mode[5:],)
                 for phase in phases:
                     preparing = os.path.join(case, f"preparing.{phase}")
-                    check(wait_for(preparing, process),
+                    check(wait_for(preparing, thread.is_alive),
                           f"{mode}: native preparation must be observed before release")
                     if not os.path.exists(preparing):
                         break
                     if mode != "success":
-                        check(wait_for(os.path.join(case, f"cpu.ready.{phase}"), process),
+                        check(os.path.exists(os.path.join(case, f"cpu.ready.{phase}")),
                               f"{mode}: the CPU sampler must already be parked")
                     time.sleep(0.1)
                     check(not os.path.exists(os.path.join(case, f"cpu.captured.{phase}.json"))
@@ -2341,38 +2612,29 @@ cpu_window 0.25 "$hls_push_sink_pid"
                           f"{mode}: neither CPU nor native counters may capture during preparation")
                     released[phase] = time.monotonic_ns()
                     write(os.path.join(case, f"preparation.release.{phase}"), "")
-                out, err = process.communicate(timeout=10)
-                check((process.returncode == 0) == (mode == "success"),
-                      f"{mode}: preparation failure must abort accounting: {out}{err}")
-                if mode == "success" and process.returncode == 0:
-                    window = read_json(os.path.join(case, "hls-push.measurement.window"))
-                    for phase, edge in (("before", "start"), ("after", "end")):
-                        cpu = read_json(os.path.join(case, f"cpu.captured.{phase}.json"))
-                        native = window[f"native_{edge}_ns"]
-                        check(native >= released[phase]
-                              and cpu["capture_start_ns"] >= released[phase],
-                              f"{edge}: CPU/native timestamps must follow actual preparation release")
-                    check(window["native_end_ns"] - window["native_start_ns"] >= 250_000_000,
-                          "native HLS push interval must retain the requested quarter-second")
-                elif mode != "success":
-                    phase = mode[5:]
-                    check(not os.path.exists(os.path.join(case, f"cpu.release.{phase}"))
-                          and not os.path.exists(os.path.join(
-                              case, f"capture.{phase}", "protocols.ready")),
-                          f"{mode}: a failed child must not open its accounting boundary")
-                    pid_file = os.path.join(case, f"preparation.pid.{phase}")
-                    if os.path.exists(pid_file):
-                        parked_pid = int(read_text(pid_file))
-                        try:
-                            os.kill(parked_pid, 0)
-                        except ProcessLookupError:
-                            pass
-                        else:
-                            check(False, f"{mode}: prepared native child was not reaped")
-            finally:
-                if process.poll() is None:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.communicate()
+                thread.join(30)
+            check(not thread.is_alive(), f"{mode}: the window must end, not stay parked")
+            if thread.is_alive():
+                return
+            error = outcome.get("error")
+            check((error is None) == (mode == "success"),
+                  f"{mode}: preparation failure must abort accounting: {error}")
+            if mode == "success" and error is None:
+                window_file = read_json(os.path.join(case, "hls-push.measurement.window"))
+                for phase, edge in (("before", "start"), ("after", "end")):
+                    cpu = read_json(os.path.join(case, f"cpu.captured.{phase}.json"))
+                    native = window_file[f"native_{edge}_ns"]
+                    check(native >= released[phase]
+                          and cpu["capture_start_ns"] >= released[phase],
+                          f"{edge}: CPU/native timestamps must follow actual preparation release")
+                check(window_file["native_end_ns"] - window_file["native_start_ns"] >= 250_000_000,
+                      "native HLS push interval must retain the requested quarter-second")
+            elif mode != "success":
+                phase = mode[5:]
+                check(not os.path.exists(os.path.join(case, f"cpu.release.{phase}")),
+                      f"{mode}: a failed capture must not open its accounting boundary")
+                check(f"prepared capture failed {phase}" in str(error),
+                      f"{mode}: the capture's own failure is what the window reports: {error}")
     finally:
         sink.terminate()
         try:
@@ -2386,83 +2648,82 @@ def test_calibration_is_stored_only_from_a_passing_positive_rung(work):
     """A calibration rung's rate is the yardstick for every rung above it.
     It used to be stored whether or not that rung passed, and a rate of 0.00
     matched the number pattern."""
-    functions = [bash_function("capacity_positive_rate"),
-                 bash_function("capacity_store_reference")]
-    if None in functions:
-        return
-    script = "\n".join(functions) + (
-        '\nREF=unset\ncapacity_store_reference REF tag Label "$1" "$2" '
-        '2>/dev/null\necho "rc=$? ref=$REF"\n')
-
     def store(quality_pass, rate):
-        result = run(["bash", "-c", script, "calibration", quality_pass, rate])
-        lines = result.stdout.strip().splitlines()
-        return lines[-1] if lines else ""
-    check(store("yes", "8000000.5") == "rc=0 ref=8000000.5",
+        refs = {}
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                stored = harness_rung.store_reference(refs, "srt", quality_pass, rate)
+        except harness_proc.Failed:
+            stored = "error"
+        return stored, refs
+    check(store("yes", "8000000.5") == (True, {"srt": "8000000.5"}),
           "a passing rung with a positive rate is stored")
-    check(store("no", "8000000.5") == "rc=0 ref=unset",
+    check(store("no", "8000000.5") == (False, {}),
           "a failed calibration rung's rate must not become the reference")
     for rate in ("0", "0.00", "nan", "inf", "-5", "1e6", ""):
+        check(not harness_rung.positive_rate(rate),
+              f"rate {rate!r} is not a finite positive decimal")
         for quality_pass in ("yes", "no"):
-            check(store(quality_pass, rate) == "rc=1 ref=unset",
-                  f"rate {rate!r} ({quality_pass}) is not a finite positive "
-                  f"number: {store(quality_pass, rate)}")
+            check(store(quality_pass, rate) == ("error", {}),
+                  f"rate {rate!r} ({quality_pass}) is an analyzer error and is not "
+                  f"stored: {store(quality_pass, rate)}")
 
 
 def test_harness_runs_the_mixes_of_the_one_list(work):
     """The harness's own mix selection, with the ladders stubbed: `all` must
     be the file's list, an explicit list must be honoured, and the harness
     must state what it ran in the form the history parser reads."""
-    function = bash_function("phase_capacity_quality_ladder")
     listed = read_mix_conf()
     check(len(listed) == 9 and set(CONTENTION_MIXES) <= set(listed),
           f"capacity-mixes.conf must hold all nine mixes: {listed}")
-    if function is None:
-        return
-    script = function + (
-        '\ncapacity_quality_ladder() { echo "ladder $1"; }\n'
-        "phase_capacity_quality_ladder\n")
-    env = dict(os.environ, ROOT=ROOT, RUN=os.path.join(work, "stub-run"),
-               CAPACITY_QUALITY_STEPS="1 16 32", CAPACITY_QUALITY_RATE="8M",
-               CAPACITY_QUALITY_SECONDS="15",
-               CAPACITY_QUALITY_STOP_AFTER_FAILURES="2",
-               CAPACITY_QUALITY_MIN_DELIVERY_RATIO="0.95",
-               CAPACITY_QUALITY_INTERVAL_FLOOR="0.80",
-               CAPACITY_QUALITY_MAX_LOW_SECONDS="2",
-               CAPACITY_FIXED_SRT_WORKERS="adaptive",
-               CAPACITY_FIXED_HLS_PUSH_WORKERS="adaptive",
-               CAPACITY_SRT_HLS="yes")
+    # The contention ladders cannot form every protocol below four
+    # destinations, so a ladder covering all nine starts there.
+    cfg = harness_cfg(run=os.path.join(work, "stub-run"),
+                      quality_steps=[4, 16, 32], quality_rate="8M",
+                      quality_seconds=15.0, quality_programs=1,
+                      stop_after_failures=2, min_delivery_ratio="0.95",
+                      interval_floor="0.80", max_low_seconds="2",
+                      srt_workers="adaptive", hls_push_workers="adaptive",
+                      srt_hls="yes", preflight="auto", sink_mode="auto", workers=4)
+    check([mix[0] for mix in harness_ladder.read_mixes(cfg)] == listed,
+          "the harness reads the same list")
 
     def select(mixes):
-        result = run(["bash", "-c", script],
-                     env=dict(env, CAPACITY_QUALITY_MIXES=mixes))
-        ladders = [line.split()[1] for line in result.stdout.splitlines()
-                   if line.startswith("ladder ")]
-        stated = [line for line in result.stdout.splitlines()
-                  if line.startswith("quality_mixes=")]
-        return result, ladders, stated
-    result, ladders, stated = select("all")
-    check(ladders == listed,
-          f"`all` must run exactly the listed mixes in order: {ladders}")
+        ladders, out, err = [], io.StringIO(), io.StringIO()
+        saved = harness_ladder.run_mix, harness_proc.run
+        harness_ladder.run_mix = lambda _cfg, mix, *_rest: ladders.append(mix) or True
+        harness_proc.run = lambda argv, **_kw: subprocess.CompletedProcess(argv, 0, "", "")
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                status = harness_ladder.run(dataclasses.replace(cfg, quality_mixes=mixes))
+        finally:
+            harness_ladder.run_mix, harness_proc.run = saved
+        lines = out.getvalue().splitlines()
+        stated = [line for line in lines if line.startswith("quality_mixes=")]
+        return status, ladders, stated, lines, err.getvalue()
+    status, ladders, stated, lines, err = select("all")
+    check(status == 0 and ladders == listed,
+          f"`all` must run exactly the listed mixes in order: {status} {ladders} {err}")
     check(stated == ["quality_mixes=" + " ".join(listed)],
           f"the harness must state the mixes it ran: {stated}")
     module = load_module(HISTORY, "bench_history_harness_contract")
-    recipe_lines = [line for line in result.stdout.splitlines()
-                    if line.startswith("quality_recipe ")]
+    recipe_lines = [line for line in lines if line.startswith("quality_recipe ")]
     parsed = (module.parse_recipe(recipe_lines[0].split()[1:])
               if recipe_lines else None)
     check(parsed is not None and parsed["seconds"] == 15
-          and parsed["steps"] == [1, 16, 32]
-          and parsed["stop_after_failures"] == 2,
+          and parsed["steps"] == [4, 16, 32]
+          and parsed["stop_after_failures"] == 2
+          and recipe_lines[0] == harness_ladder.recipe_line(cfg),
           f"the recipe line must parse back into the recipe: {recipe_lines}")
     chosen = ["pure-srt", "srt-50-rtmp-25-hls-push-25"]
-    result, ladders, stated = select(" ".join(chosen))
+    status, ladders, stated, _, _ = select(" ".join(chosen))
     check(ladders == chosen and stated == ["quality_mixes=" + " ".join(chosen)],
           f"an explicit list runs exactly itself: {ladders} {stated}")
-    result, ladders, stated = select("pure-srt no-such-mix")
-    check(result.returncode != 0 and not ladders
-          and "unknown capacity quality mix" in result.stderr,
-          f"an unknown mix is refused before anything runs: {result.stderr}")
+    status, ladders, stated, _, err = select("pure-srt no-such-mix")
+    check(status != 0 and not ladders and not stated
+          and "unknown capacity quality mix" in err,
+          f"an unknown mix is refused before anything runs: {err}")
 
 
 def test_bench_ci_manifest_is_the_harness_mix_list(work):
@@ -2472,12 +2733,11 @@ def test_bench_ci_manifest_is_the_harness_mix_list(work):
                      "tests/bench/capacity-mixes.conf"):
         os.makedirs(os.path.dirname(os.path.join(tree, relative)), exist_ok=True)
         shutil.copyfile(os.path.join(ROOT, relative), os.path.join(tree, relative))
-    stub = os.path.join(tree, "tests", "bench", "ingest_egress_fanout.sh")
-    write(stub, '#!/usr/bin/env bash\n'
-                'echo "quality_mixes=$CAPACITY_QUALITY_MIXES"\n'
-                'echo "duration=$CAPACITY_QUALITY_SECONDS"\n'
-                'echo "quality_ladders_with_failures=none"\n')
-    os.chmod(stub, 0o755)
+    stub = os.path.join(tree, "tests", "bench", "capacity_harness.py")
+    write(stub, 'import os\n'
+                'print("quality_mixes=" + os.environ.get("CAPACITY_QUALITY_MIXES", ""))\n'
+                'print("duration=" + os.environ.get("CAPACITY_QUALITY_SECONDS", ""))\n'
+                'print("quality_ladders_with_failures=none")\n')
     env = dict(os.environ)
     for key in ("BENCH_CONFIGS", "BENCH_STEPS", "BENCH_SECONDS", "BENCH_TREND"):
         env.pop(key, None)
@@ -2501,12 +2761,8 @@ def test_bench_ci_manifest_is_the_harness_mix_list(work):
             check(f"quality_mixes={' '.join(mixes)}\n" in log,
                   f"driver hands the harness its manifest: {log}")
             if name == "contention":
-                minimum = bash_function("capacity_mix_minimum_rung")
-                check(minimum is not None, "contention minimum implementation exists")
                 for share, push in ((50, 25), (25, 50)):
-                    result = run(["bash", "-c", minimum +
-                                  f"\ncapacity_mix_minimum_rung rtmp-hls-push {share} {push}\n"])
-                    check(result.returncode == 0 and int(result.stdout) == rungs[0],
+                    check(harness_ladder.minimum_rung("rtmp-hls-push", share, push) == rungs[0],
                           "weekly's calibration rung can form every contention protocol")
         check(observed == read_mix_conf(), "weekly keeps every established mix")
     out = drive("weekly-invalid", "weekly", BENCH_STEPS="1 32 16")
@@ -2819,8 +3075,8 @@ def test_summary_records_recipe_fingerprint_and_provenance(work):
 
     # the harness revision follows the harness files' content
     copied = os.path.join(work, "harness-copy")
-    os.makedirs(copied)
     for name in getattr(module, "HARNESS_FILES", ()):
+        os.makedirs(os.path.dirname(os.path.join(copied, name)), exist_ok=True)
         shutil.copyfile(os.path.join(HERE, name), os.path.join(copied, name))
     before = revision(copied)
     with open(os.path.join(copied, "capacity-mixes.conf"), "a",
@@ -3025,6 +3281,7 @@ def main():
         test_preflight_classifies_a_short_environment(work)
         test_preflight_names_a_foreign_load_on_the_pinned_cpus(work)
         test_preflight_probe_is_measured_at_both_ends(work)
+        test_probe_overshoot_is_not_a_network_limit(work)
         test_distributed_preflight_rejects_invalid_instrument_before_limits(work)
         test_reader_percentile_helpers()
         test_reader_reports_observed_not_threshold(os.path.join(work, "readers"))
@@ -3069,6 +3326,10 @@ def main():
         test_cpu_window_prepares_every_capture_before_release(
             os.path.join(work, "prepared-captures"))
         test_hls_push_judge_rejects_non_finite_inputs(work)
+        test_restream_push_is_judged_by_sequence(work)
+        test_topology_cells_and_steering_masks(work)
+        test_destinations_spread_over_addresses(work)
+        test_push_sink_keeps_the_senders_connection(work)
         test_calibration_is_stored_only_from_a_passing_positive_rung(work)
         test_harness_runs_the_mixes_of_the_one_list(work)
         test_bench_ci_manifest_is_the_harness_mix_list(work)

@@ -3,7 +3,7 @@ NGINX_VERSION ?= 1.30.5
 .PHONY: unit unit-native coverage msan tsan bench-reporting bench-veth-up bench-veth-down bench-preflight \
     nginx graph-conflict graph-bounds incarnation smoke routing-bounds routed-sources routed-admission route-lifecycle routed-reload deployment-surface model-churn bench-worker-scaling \
     bench-worker-topology bench-ingest-egress bench-ingest-egress-fanout \
-    bench-capacity-curve bench-capacity-quality bench-burst-sizing bench-core-critical-paths test-image test-in-container \
+    bench-capacity-quality bench-burst-sizing bench-core-critical-paths test-image test-in-container \
     test-integration \
     srt-ingest srt-ingest-nginx srt-admission ts-fixture source-switch api-switch api-graph \
     failover hls hls-push hls-push-faults hls-push-profiles hls-push-conformance ffmpeg-interop hls-pull hls-ingest hls-profile \
@@ -29,19 +29,19 @@ msan:
 # Reporting and provenance: Python3/Node and isolated native fixtures, no nginx.
 bench-reporting:
 	python3 tests/bench/test_reporting.py
+	python3 tests/bench/test_capacity_client.py
 	python3 tests/bench/test_commit_selection.py
-	python3 tests/bench/test_capacity_receiver.py
 	python3 tests/bench/test_receiver_control.py
 	python3 tests/bench/test_transport_provenance.py
 	python3 tests/bench/test_publication.py
 
-# The receiver topologies for capacity runs, and the two-host orchestrator.
-# veth-up/veth-down need root (sudo -n is used for the ip commands only).
-bench-veth-up:
-	tests/bench/capacity_veth.sh up
+# The receiver topology for capacity runs, in either mode.  The script needs
+# root (sudo -n covers the ip and sysfs writes); the sweep sets up its own.
+bench-topology-up:
+	tests/bench/capacity_topology.sh namespace up
 
-bench-veth-down:
-	tests/bench/capacity_veth.sh down
+bench-topology-down:
+	tests/bench/capacity_topology.sh namespace down
 
 bench-preflight:
 	python3 tests/bench/capacity_preflight.py host --role sender \
@@ -305,7 +305,7 @@ bench-worker-scaling:
 # Deterministic four-worker owner/topology matrix with per-program pressure and
 # route outcome counters, not arbitrary names whose hash distribution is luck.
 bench-worker-topology:
-	PHASES=topology tests/bench/ingest_egress_fanout.sh
+	PHASES=topology python3 tests/bench/capacity_harness.py
 
 # Ingest and egress scale differently: one program has one owner worker, so
 # its fanout is bound by that worker, while more programs spread across more
@@ -320,13 +320,7 @@ bench-ingest-egress:
 # the owner, and the same publisher placed on its owner and routed from
 # another worker so the escape hatch has a price.
 bench-ingest-egress-fanout:
-	tests/bench/ingest_egress_fanout.sh
-
-# Fixed-worker capacity curve through 1000 SRT/RTMP destinations, with delivered
-# bytes, shard/resource metrics, slow-reader isolation, saturated fanout, and
-# sustained multi-program fairness.
-bench-capacity-curve:
-	PHASES=capacity tests/bench/ingest_egress_fanout.sh
+	python3 tests/bench/capacity_harness.py
 
 # Set CAPACITY_FIXED_SRT_WORKERS and CAPACITY_FIXED_HLS_PUSH_WORKERS to pin
 # either pool (1-16 SRT senders, 1-4 HLS uploaders); default is adaptive.
@@ -334,7 +328,7 @@ bench-capacity-curve:
 # pure HLS push, two 95/5 pairwise mixes, and a 50/45/5 RTMP/HLS-push/SRT mix.
 # Set CAPACITY_QUALITY_MIXES to a subset; default `all` runs every mix.
 bench-capacity-quality:
-	PHASES=capacity-quality-ladder tests/bench/ingest_egress_fanout.sh
+	PHASES=capacity-quality-ladder python3 tests/bench/capacity_harness.py
 
 # Ingest keys: one source and several on one program, rotation, refusal by
 # fingerprint, and the same scheme over RTMP.

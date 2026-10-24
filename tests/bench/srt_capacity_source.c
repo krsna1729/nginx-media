@@ -15,7 +15,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define MAX_PEERS 1000
+#define MAX_PEERS 2048
 #define LANES 16
 #define PAYLOAD 1316
 #define TS_PACKET 188
