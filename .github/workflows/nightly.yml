@@ -27,7 +27,7 @@ jobs:
       actions: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Take ownership of the apt archive dir
         run: sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives

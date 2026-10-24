@@ -71,7 +71,7 @@ jobs:
       DOCKER_CACHE_ARGS: ${{ github.ref == 'refs/heads/main' && '--cache-from type=gha --cache-to type=gha,mode=max' || '--cache-from type=gha' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build the image
         run: |
