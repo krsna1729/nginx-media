@@ -138,7 +138,7 @@ jobs:
 
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-${{ inputs.tier }}-attempt-${{ github.run_attempt }}-${{ strategy.job-index }}
           include-hidden-files: true
@@ -151,7 +151,7 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-logs-${{ inputs.tier }}-attempt-${{ github.run_attempt }}-${{ strategy.job-index }}
           include-hidden-files: true
@@ -192,7 +192,7 @@ jobs:
 
       - name: Upload same-runner trend samples
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-trend-${{ inputs.tier }}-attempt-${{ github.run_attempt }}
           include-hidden-files: true

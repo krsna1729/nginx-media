@@ -57,7 +57,7 @@ jobs:
         run: python3 scripts/hardening-evidence.py --compiler gcc
       - name: Preserve compiler evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compiler-evidence-gcc-16.2.0
           include-hidden-files: true
@@ -117,7 +117,7 @@ jobs:
         run: python3 scripts/msan-isolated.py --compiler clang-21
       - name: Preserve compiler evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: compiler-evidence-clang-21
           include-hidden-files: true
