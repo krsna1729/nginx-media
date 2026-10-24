@@ -70,7 +70,7 @@ jobs:
 
       - name: Collect every job's results
         if: ${{ steps.artifacts.outputs.artifact_ids != '' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           artifact-ids: ${{ steps.artifacts.outputs.artifact_ids }}
@@ -79,7 +79,7 @@ jobs:
 
       - name: Collect same-runner trend samples
         if: ${{ steps.artifacts.outputs.trend_artifact_id != '' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           artifact-ids: ${{ steps.artifacts.outputs.trend_artifact_id }}
