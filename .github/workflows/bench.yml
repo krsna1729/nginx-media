@@ -61,7 +61,7 @@ jobs:
         run: sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
 
       - name: Cache apt archives
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /var/cache/apt/archives
           key: apt-bench-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
@@ -77,7 +77,7 @@ jobs:
             ffmpeg libsrt-openssl-dev iproute2
 
       - name: Cache the pinned nginx source
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .build/nginx-1.30.5
           key: nginx-${{ runner.os }}-1.30.5
@@ -89,7 +89,7 @@ jobs:
       # about one library at one commit rather than whatever the runner
       # ships.  make srt-pinned is the same target a local capacity run uses.
       - name: Cache the pinned SRT libraries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             .build/srt-haivision

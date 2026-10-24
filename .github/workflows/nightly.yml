@@ -33,7 +33,7 @@ jobs:
         run: sudo chown -R "$(id -u):$(id -g)" /var/cache/apt/archives
 
       - name: Cache apt archives
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /var/cache/apt/archives
           key: apt-${{ runner.os }}-${{ hashFiles('.github/workflows/*.yml') }}
@@ -49,7 +49,7 @@ jobs:
             ffmpeg libsrt-openssl-dev
 
       - name: Cache the pinned nginx source
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .build/nginx-1.30.5
           key: nginx-${{ runner.os }}-1.30.5
