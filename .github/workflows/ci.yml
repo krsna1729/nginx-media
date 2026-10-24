@@ -33,7 +33,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Reusable workflow permissions
         run: python3 scripts/check-workflow-permissions.py
 
@@ -47,7 +47,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
@@ -76,7 +76,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Onboarding, end to end
         run: make onboarding
 
@@ -90,7 +90,7 @@ jobs:
       actions: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Take ownership of the apt archive dir
         # actions/cache restores as the runner user, and the archive dir is
@@ -207,7 +207,7 @@ jobs:
       DOCKER_CACHE_ARGS: ${{ github.ref == 'refs/heads/main' && '--cache-from type=gha --cache-to type=gha,mode=max' || '--cache-from type=gha' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build the test image
         run: make test-image
@@ -240,7 +240,7 @@ jobs:
       DOCKER_CACHE_ARGS: ${{ github.ref == 'refs/heads/main' && '--cache-from type=gha --cache-to type=gha,mode=max' || '--cache-from type=gha' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build the test image on sid
         run: make test-image TEST_IMAGE=nginx-media:test-sid DOCKER="docker" BASE=debian:sid
